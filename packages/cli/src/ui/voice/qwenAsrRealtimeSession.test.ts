@@ -323,6 +323,42 @@ describe('qwenAsrRealtimeSession', () => {
     await expect(session.finish()).rejects.toThrow('server failed');
   });
 
+  it('notifies transcription failures that arrive while recording', async () => {
+    const socket = new FakeSocket();
+    const onError = vi.fn();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      { onError },
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.failed',
+        error: { message: 'server failed while recording' },
+      }),
+      false,
+    );
+
+    expect(onError).toHaveBeenCalledWith(
+      new Error('server failed while recording'),
+    );
+    expect(socket.readyState).toBe(3);
+    await expect(session.finish()).rejects.toThrow(
+      'server failed while recording',
+    );
+  });
+
   it('rejects finish when the realtime socket closed before finish', async () => {
     const socket = new FakeSocket();
     const sessionPromise = openQwenAsrRealtimeStream(

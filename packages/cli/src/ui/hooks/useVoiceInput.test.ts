@@ -184,6 +184,70 @@ describe('useVoiceInput', () => {
     expect(result.current.status).toBe('recording');
   });
 
+  it('hold mode: finalizes after key repeat stops', async () => {
+    vi.useFakeTimers();
+    try {
+      buffer = createBuffer();
+      const recorder = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn().mockResolvedValue({
+          data: new Uint8Array([1, 2, 3]),
+          mimeType: 'audio/wav',
+        }),
+      };
+      const transcribe = vi.fn().mockResolvedValue('hold text');
+      const onSubmit = vi.fn();
+
+      const { result } = renderHook(() =>
+        useVoiceInput({
+          enabled: true,
+          mode: 'hold',
+          voiceModel: 'qwen3-asr-flash',
+          buffer,
+          createRecorder: () => recorder,
+          transcribe,
+          onSubmit,
+        }),
+      );
+
+      await act(async () => {
+        expect(result.current.handleKeypress(voiceKey)).toBe(true);
+      });
+      expect(result.current.status).toBe('recording');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+        expect(result.current.handleKeypress(voiceKey)).toBe(true);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(249);
+      });
+      expect(recorder.stop).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(recorder.stop).toHaveBeenCalledTimes(1);
+      expect(transcribe).toHaveBeenCalledWith(
+        {
+          data: new Uint8Array([1, 2, 3]),
+          mimeType: 'audio/wav',
+        },
+        { voiceModel: 'qwen3-asr-flash' },
+      );
+      expect(buffer.insert).toHaveBeenCalledWith('hold text');
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(result.current.status).toBe('idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('surfaces recorder errors without inserting text', async () => {
     buffer = createBuffer();
     const addItem = vi.fn();

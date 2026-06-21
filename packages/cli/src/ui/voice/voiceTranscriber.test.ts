@@ -342,6 +342,35 @@ describe('voiceTranscriber', () => {
     ).toThrow(/must use an https baseUrl/);
   });
 
+  it('rejects private-network voice URLs', () => {
+    for (const baseUrl of [
+      'https://10.0.0.5/v1',
+      'https://172.16.0.5/v1',
+      'https://192.168.1.5/v1',
+      'https://169.254.169.254/v1',
+      'https://0.0.0.0/v1',
+      'https://[fe80::1]/v1',
+      'https://[::ffff:169.254.169.254]/v1',
+    ]) {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Private ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        },
+      ]);
+
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings(),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow(/private-network baseUrl/);
+    }
+  });
+
   it('allows localhost voice URLs for development', () => {
     const config = createConfig([
       {

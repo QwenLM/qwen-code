@@ -125,13 +125,18 @@ function formatUnavailableVoiceModelMessage(
   );
   const availableModelsLine =
     availableModelIds.length === 0
-      ? 'No models are configured.'
-      : `Configured models: ${availableModelIds.join(', ')}.`;
+      ? t('No models are configured.')
+      : t('Configured models: {{models}}.', {
+          models: availableModelIds.join(', '),
+        });
 
   return (
-    `Voice model '${modelName}' is not configured.\n` +
+    t("Voice model '{{modelName}}' is not configured.", { modelName }) +
+    '\n' +
     `${availableModelsLine}\n` +
-    'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.'
+    t(
+      'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.',
+    )
   );
 }
 

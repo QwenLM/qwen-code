@@ -5,6 +5,7 @@
  */
 
 import { AuthType, type AvailableModel } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 
 export function isTranscribableVoiceModel(model: AvailableModel): boolean {
   return (
@@ -17,7 +18,12 @@ export function isTranscribableVoiceModel(model: AvailableModel): boolean {
 
 export function formatUnsupportedVoiceModelMessage(modelName: string): string {
   return (
-    `Voice model '${modelName}' cannot be used for transcription. ` +
-    'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.'
+    t("Voice model '{{modelName}}' cannot be used for transcription.", {
+      modelName,
+    }) +
+    ' ' +
+    t(
+      'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.',
+    )
   );
 }

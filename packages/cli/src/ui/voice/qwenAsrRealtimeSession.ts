@@ -120,6 +120,7 @@ export function openQwenAsrRealtimeStream(
         return;
       }
       terminalError = normalized;
+      callbacks.onError?.(normalized);
     };
 
     connectTimer = setTimeout(() => {
@@ -156,7 +157,11 @@ export function openQwenAsrRealtimeStream(
       };
       try {
         msg = JSON.parse(String(data));
-      } catch {
+      } catch (error) {
+        debugLogger.warn(
+          '[voice] failed to parse Qwen ASR realtime message:',
+          error,
+        );
         return;
       }
 

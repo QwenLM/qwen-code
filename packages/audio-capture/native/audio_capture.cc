@@ -257,7 +257,7 @@ napi_value StartRecording(napi_env env, napi_callback_info info) {
     gRecorder.level = 0.0;
     gRecorder.silenceDetected.store(false);
     gRecorder.pcm.clear();
-    gRecorder.pcm.reserve(static_cast<size_t>(sampleRate) * channels * 60);
+    gRecorder.pcm.reserve(kMaxPcmSamples);
   }
 
   ma_result result = ma_device_init(nullptr, &config, &gRecorder.device);
@@ -329,9 +329,12 @@ napi_value SilenceDetected(napi_env env, napi_callback_info info) {
 napi_value DrainAudio(napi_env env, napi_callback_info info) {
   (void)info;
   std::vector<int16_t> pcm;
+  std::vector<int16_t> next;
+  next.reserve(kMaxPcmSamples);
   {
     std::lock_guard<std::mutex> lock(gRecorder.mutex);
     pcm.swap(gRecorder.pcm);
+    gRecorder.pcm.swap(next);
   }
   napi_value buffer;
   const size_t bytes = pcm.size() * sizeof(int16_t);

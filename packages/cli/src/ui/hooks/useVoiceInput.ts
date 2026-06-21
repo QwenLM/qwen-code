@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { Command, keyMatchers } from '../keyMatchers.js';
 import type { HistoryItemWithoutId } from '../types.js';
@@ -58,6 +59,7 @@ const PREVIOUS_STOP_WAIT_TIMEOUT_MS = 5000;
 // (key released) the timer fires and we finalize. Requires terminal key repeat.
 const HOLD_FIRST_PRESS_RELEASE_MS = 600;
 const HOLD_REPEAT_RELEASE_MS = 250;
+const debugLogger = createDebugLogger('VOICE_INPUT');
 
 interface UseVoiceInputArgs {
   enabled: boolean;
@@ -76,6 +78,7 @@ interface UseVoiceInputArgs {
   /** Open a streaming session; the hook pumps drained PCM into it while recording. */
   openStream?: (callbacks: {
     onInterim: (text: string) => void;
+    onError?: (error: Error) => void;
   }) => Promise<VoiceStreamSession>;
 }
 
@@ -122,6 +125,10 @@ function insertTranscript(
 
 function isCancelKey(key: Key): boolean {
   return key.name === 'escape' || (key.ctrl && key.name === 'c');
+}
+
+function logRecorderStopError(error: unknown): void {
+  debugLogger.warn('[voice] recorder stop failed:', error);
 }
 
 export function useVoiceInput({
@@ -199,6 +206,41 @@ export function useVoiceInput({
     [addItem],
   );
 
+  const stopRecorderQuietly = useCallback(async (recorder: VoiceRecorder) => {
+    try {
+      await recorder.stop();
+    } catch (error) {
+      logRecorderStopError(error);
+    }
+  }, []);
+
+  const handleStreamError = useCallback(
+    (recorder: VoiceRecorder, error: Error) => {
+      if (recorderRef.current !== recorder) {
+        return;
+      }
+      clearReleaseTimer();
+      clearPump();
+      streamSessionRef.current?.abort();
+      streamSessionRef.current = null;
+      streamSessionPromiseRef.current = null;
+      recorderRef.current = null;
+      startPromiseRef.current = null;
+      void stopRecorderQuietly(recorder);
+      setVoiceStatus('idle');
+      resetStreamUi();
+      reportError(error);
+    },
+    [
+      clearPump,
+      clearReleaseTimer,
+      reportError,
+      resetStreamUi,
+      setVoiceStatus,
+      stopRecorderQuietly,
+    ],
+  );
+
   const startRecording = useCallback(
     (silenceDetection: boolean) => {
       const recorder = createRecorder();
@@ -232,11 +274,13 @@ export function useVoiceInput({
             onInterim: (text) => {
               if (mountedRef.current) setInterimText(text);
             },
+            onError: (error) => handleStreamError(recorder, error),
           });
           streamSessionPromiseRef.current = streamPromise;
           const session = await streamPromise;
           if (recorderRef.current !== recorder) {
             session.abort();
+            void stopRecorderQuietly(recorder);
             return;
           }
           streamSessionRef.current = session;
@@ -268,9 +312,9 @@ export function useVoiceInput({
               const active = recorderRef.current;
               recorderRef.current = null;
               startPromiseRef.current = null;
-              void Promise.resolve()
-                .then(() => active?.stop())
-                .catch(() => undefined);
+              if (active) {
+                void stopRecorderQuietly(active);
+              }
               setVoiceStatus('idle');
               resetStreamUi();
               reportError(error);
@@ -287,9 +331,7 @@ export function useVoiceInput({
           startPromiseRef.current = null;
           clearReleaseTimer();
           clearPump();
-          void Promise.resolve()
-            .then(() => recorder.stop())
-            .catch(() => undefined);
+          void stopRecorderQuietly(recorder);
           streamSessionRef.current?.abort();
           streamSessionRef.current = null;
           void streamSessionPromiseRef.current
@@ -308,11 +350,13 @@ export function useVoiceInput({
       clearPump,
       clearReleaseTimer,
       createRecorder,
+      handleStreamError,
       isStreaming,
       openStream,
       reportError,
       resetStreamUi,
       setVoiceStatus,
+      stopRecorderQuietly,
     ],
   );
 
@@ -339,7 +383,7 @@ export function useVoiceInput({
             // stream and await the final transcript.
             const pcm = recorder.drain?.();
             if (pcm && pcm.length > 0) session.pushAudio(pcm);
-            await recorder.stop().catch(() => undefined);
+            await stopRecorderQuietly(recorder);
             return session.finish();
           }
           const audio = await recorder.stop();
@@ -359,9 +403,7 @@ export function useVoiceInput({
             return;
           }
           if (wasStreaming) {
-            void Promise.resolve()
-              .then(() => recorder.stop())
-              .catch(() => undefined);
+            void stopRecorderQuietly(recorder);
           }
           // A too-short/empty capture (quick tap, or cold-start race) isn't a
           // real failure — silently return to idle instead of a scary error.
@@ -385,6 +427,7 @@ export function useVoiceInput({
       buffer,
       clearPump,
       clearReleaseTimer,
+      stopRecorderQuietly,
       isStreaming,
       onSubmit,
       reportError,
@@ -420,7 +463,7 @@ export function useVoiceInput({
       .then(async () => {
         await recorder.stop();
       })
-      .catch(() => undefined)
+      .catch(logRecorderStopError)
       .finally(() => {
         if (recorderRef.current === null) {
           setVoiceStatus('idle');

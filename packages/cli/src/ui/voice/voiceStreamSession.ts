@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import WebSocket from 'ws';
 
 // Streaming ASR over the DashScope realtime "task" WebSocket protocol
@@ -27,6 +28,8 @@ export interface VoiceStreamConfig {
 export interface VoiceStreamCallbacks {
   /** The full running transcript (committed sentences + current partial). */
   onInterim?: (text: string) => void;
+  /** Terminal stream errors that arrive while recording, before finish(). */
+  onError?: (error: Error) => void;
 }
 
 export interface VoiceStreamSession {
@@ -55,6 +58,7 @@ export interface VoiceStreamDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
+const debugLogger = createDebugLogger('VOICE_STREAM_SESSION');
 
 export function deriveWebSocketBase(baseUrl: string): string {
   const url = new URL(baseUrl);
@@ -136,6 +140,8 @@ export function openVoiceStream(
         terminalError = normalized;
         if (!started) {
           reject(normalized);
+        } else {
+          callbacks.onError?.(normalized);
         }
       }
     };
@@ -186,7 +192,8 @@ export function openVoiceStream(
       };
       try {
         msg = JSON.parse(String(data));
-      } catch {
+      } catch (error) {
+        debugLogger.warn('[voice] failed to parse stream message:', error);
         return;
       }
       const event = msg.header?.event;

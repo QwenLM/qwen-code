@@ -5,6 +5,7 @@
  */
 
 import process from 'node:process';
+import { isIP } from 'node:net';
 import type { AvailableModel, Config } from '@qwen-code/qwen-code-core';
 import { getGitBranch } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -103,6 +104,50 @@ function normalizeBaseUrl(baseUrl: string, modelName: string): string {
   return trimTrailingSlashes(url.toString());
 }
 
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, '');
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function isPrivateNetworkIp(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  if (isLoopbackHost(host)) {
+    return false;
+  }
+  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4Mapped) {
+    return isPrivateNetworkIp(ipv4Mapped[1]!);
+  }
+  if (host.startsWith('::ffff:')) {
+    return true;
+  }
+  if (isIP(host) === 4) {
+    const [first = 0, second = 0] = host.split('.').map(Number);
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 100 && second >= 64 && second <= 127)
+    );
+  }
+  if (isIP(host) === 6) {
+    return (
+      host === '::' ||
+      host.startsWith('fe80:') ||
+      host.startsWith('fc') ||
+      host.startsWith('fd')
+    );
+  }
+  return false;
+}
+
 function readApiKey(
   settings: LoadedSettings,
   model: AvailableModel,
@@ -159,13 +204,15 @@ export function resolveVoiceTranscriptionConfig({
   }
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl, voiceModel);
   const parsedBaseUrl = new URL(normalizedBaseUrl);
-  const isLocalhost =
-    parsedBaseUrl.hostname === 'localhost' ||
-    parsedBaseUrl.hostname === '127.0.0.1' ||
-    parsedBaseUrl.hostname === '[::1]';
+  const isLocalhost = isLoopbackHost(parsedBaseUrl.hostname);
   if (parsedBaseUrl.protocol !== 'https:' && !isLocalhost) {
     throw new Error(
       `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext.`,
+    );
+  }
+  if (isPrivateNetworkIp(parsedBaseUrl.hostname)) {
+    throw new Error(
+      `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
     );
   }
 
