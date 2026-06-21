@@ -57,7 +57,9 @@ const PREVIOUS_STOP_WAIT_TIMEOUT_MS = 5000;
 // between auto-repeat keypresses: arm a longer timer on first press (covers the
 // OS initial-repeat delay), then a short timer on each repeat. When repeats stop
 // (key released) the timer fires and we finalize. Requires terminal key repeat.
-const HOLD_FIRST_PRESS_RELEASE_MS = 600;
+// Kept above typical OS initial key-repeat delays so a held key isn't cut off
+// before its first auto-repeat arrives (which would truncate the utterance).
+const HOLD_FIRST_PRESS_RELEASE_MS = 800;
 const HOLD_REPEAT_RELEASE_MS = 250;
 const debugLogger = createDebugLogger('VOICE_INPUT');
 
@@ -378,7 +380,11 @@ export function useVoiceInput({
   const finalize = useCallback(
     (submit: boolean) => {
       const recorder = recorderRef.current;
-      if (!recorder || !voiceModel) {
+      // Single-shot guard: a tap-stop and the native silence auto-stop can both
+      // fire. setVoiceStatus below flips statusRef synchronously, so the second
+      // concurrent call sees a non-'recording' status here and bails — avoiding
+      // a double recorder.stop() and the spurious "transcription failed" error.
+      if (!recorder || !voiceModel || statusRef.current !== 'recording') {
         return;
       }
       const sessionId = sessionIdRef.current;
@@ -520,13 +526,16 @@ export function useVoiceInput({
     cancelRecording();
   }, [cancelRecording, enabled, voiceModel]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Reset on (re)mount so StrictMode's mount→unmount→remount (active when
+    // DEBUG is set) doesn't leave mountedRef stuck false, which would no-op
+    // every gated setState and freeze the voice UI.
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
       cancelRecordingRef.current();
-    },
-    [],
-  );
+    };
+  }, []);
 
   const handleKeypress = useCallback(
     (key: Key): boolean => {

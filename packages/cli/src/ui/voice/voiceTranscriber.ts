@@ -15,6 +15,7 @@ import type { VoiceStreamConfig } from './voiceStreamSession.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isTranscribableVoiceModel,
+  resolveVoiceTransport,
 } from './voiceModel.js';
 
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
@@ -22,11 +23,8 @@ const INFERENCE_TIMEOUT_MS = 60_000;
 const MIN_KEYTERM_ECHO_TOKENS = 8;
 const MIN_HAN_KEYTERM_ECHO_TOKENS = 4;
 
-export type VoiceTransport =
-  | 'qwen-asr-chat'
-  | 'qwen-asr-realtime'
-  | 'dashscope-task-realtime'
-  | 'unsupported';
+export { resolveVoiceTransport };
+export type { VoiceTransport } from './voiceModel.js';
 
 export type VoiceStreamingTransport =
   | 'qwen-asr-realtime'
@@ -230,20 +228,6 @@ export function resolveVoiceTranscriptionConfig({
     baseUrl: normalizedBaseUrl,
     ...(apiKey ? { apiKey } : {}),
   };
-}
-
-export function resolveVoiceTransport(model: string): VoiceTransport {
-  const id = model.toLowerCase();
-  if (/^qwen3-asr-flash-realtime(?:-|$)/.test(id)) {
-    return 'qwen-asr-realtime';
-  }
-  if (/^qwen3-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(id)) {
-    return 'qwen-asr-chat';
-  }
-  if (/^(fun-asr|paraformer).*realtime(?:-|$)/.test(id)) {
-    return 'dashscope-task-realtime';
-  }
-  return 'unsupported';
 }
 
 export function isStreamingVoiceModel(model: string): boolean {

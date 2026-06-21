@@ -382,4 +382,36 @@ describe('qwenAsrRealtimeSession', () => {
       'Qwen ASR realtime connection closed unexpectedly.',
     );
   });
+
+  it('salvages the committed transcript when the socket closes after finish', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'hello world',
+      }),
+      false,
+    );
+
+    const transcriptPromise = session.finish();
+    socket.emit('close');
+
+    await expect(transcriptPromise).resolves.toBe('hello world');
+  });
 });

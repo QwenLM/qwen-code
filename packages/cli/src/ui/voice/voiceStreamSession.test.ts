@@ -82,6 +82,27 @@ describe('voiceStreamSession', () => {
     );
   });
 
+  it('salvages the committed transcript when the stream closes after finish', async () => {
+    const socket = new FakeSocket();
+    const session = await startSession(socket);
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: { event: 'result-generated' },
+        payload: {
+          output: { sentence: { text: 'hello world', sentence_end: true } },
+        },
+      }),
+      false,
+    );
+
+    const transcriptPromise = session.finish();
+    socket.emit('close');
+
+    await expect(transcriptPromise).resolves.toBe('hello world');
+  });
+
   it('resolves finish when task-finished arrives before finish is called', async () => {
     const socket = new FakeSocket();
     const session = await startSession(socket);

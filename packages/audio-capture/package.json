@@ -18,10 +18,11 @@
     "native/audio_capture.cc",
     "native/mac_permission.mm",
     "native/miniaudio.h",
-    "binding.gyp"
+    "binding.gyp",
+    "install.js"
   ],
   "scripts": {
-    "install": "node-gyp-build",
+    "install": "node install.js",
     "prebuildify": "prebuildify --napi --strip",
     "build": "node-gyp rebuild && tsc --build",
     "build:ts": "tsc --build",

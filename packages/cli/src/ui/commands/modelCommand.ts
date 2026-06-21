@@ -23,7 +23,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
-  isTranscribableVoiceModel,
+  isSelectableVoiceModel,
 } from '../voice/voiceModel.js';
 
 const MAIN_MODEL_CONFIGURATION_HINT =
@@ -261,7 +261,7 @@ export const modelCommand: SlashCommand = {
           ),
         };
       }
-      if (!isTranscribableVoiceModel(matches[0]!)) {
+      if (!isSelectableVoiceModel(matches[0]!)) {
         return {
           type: 'message',
           messageType: 'error',

@@ -393,16 +393,16 @@ jobs:
           npm run bundle
           npm run prepare:package
 
-      - name: 'Build Standalone Archives'
-        env:
-          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
-        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
-
       - name: 'Download audio capture prebuilds'
         uses: 'actions/download-artifact@v4'
         with:
           name: 'audio-capture-prebuilds'
           path: 'packages/audio-capture/prebuilds'
+
+      - name: 'Build Standalone Archives'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
       - name: 'Publish @qwen-code/audio-capture'
         working-directory: 'packages/audio-capture'

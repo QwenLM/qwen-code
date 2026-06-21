@@ -314,11 +314,19 @@ export function openVoiceStream(
       if (settled) return;
       if (started && finishReject) {
         settled = true;
-        finishReject?.(
-          new Error(
-            'Voice stream connection closed unexpectedly. Transcript may be incomplete.',
-          ),
-        );
+        // A close right after finish() (no trailing task-finished) shouldn't
+        // discard a transcript we already committed — salvage it if present.
+        const salvaged = committed.trim();
+        if (salvaged) {
+          finishedTranscript = salvaged;
+          finishResolve?.(finishedTranscript);
+        } else {
+          finishReject?.(
+            new Error(
+              'Voice stream connection closed unexpectedly. Transcript may be incomplete.',
+            ),
+          );
+        }
         finishResolve = null;
         finishReject = null;
       } else if (!started) {

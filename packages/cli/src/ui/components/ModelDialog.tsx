@@ -28,7 +28,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 import { t } from '../../i18n/index.js';
 import {
   formatUnsupportedVoiceModelMessage,
-  isTranscribableVoiceModel,
+  isSelectableVoiceModel,
 } from '../voice/voiceModel.js';
 
 function formatModalities(modalities?: InputModalities): string {
@@ -469,7 +469,7 @@ export function ModelDialog({
         }
 
         const voiceModel = selectedEntry.model.id;
-        if (!isTranscribableVoiceModel(selectedEntry.model)) {
+        if (!isSelectableVoiceModel(selectedEntry.model)) {
           setErrorMessage(formatUnsupportedVoiceModelMessage(voiceModel));
           return;
         }

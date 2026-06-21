@@ -337,13 +337,30 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     void Promise.resolve(recorder.warmup?.()).catch(() => {});
     void Promise.resolve(recorder.microphoneStatus?.())
       .then((status) => {
-        if (status === 'denied' && !voiceMicWarnedRef.current) {
+        if (voiceMicWarnedRef.current) {
+          return;
+        }
+        if (status === 'denied') {
           voiceMicWarnedRef.current = true;
           uiState.historyManager?.addItem(
             {
               type: 'error',
               text: t(
                 'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+              ),
+            },
+            Date.now(),
+          );
+        } else if (status === 'prompt') {
+          // notDetermined: macOS raises the permission dialog on first capture,
+          // so that first recording can come back empty. Tell the user once
+          // instead of letting it look like a silent no-op.
+          voiceMicWarnedRef.current = true;
+          uiState.historyManager?.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
               ),
             },
             Date.now(),
