@@ -1371,14 +1371,17 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'qwen-oauth:coder-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'qwen3.7-max',
-              name: 'qwen3.7-max',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1392,20 +1395,23 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'qwen3.7-max',
-              name: 'qwen3.7-max',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-            {
-              id: 'fast-model',
-              name: 'fast-model',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+              {
+                id: 'fast-model',
+                name: 'fast-model',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1503,14 +1509,17 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'missing-fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'claude-opus-4-7',
-              name: 'claude-opus-4-7',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
-            },
-          ],
+          [AuthType.USE_ANTHROPIC]: {
+            protocol: Protocol.ANTHROPIC,
+            models: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
         },
       });
 
