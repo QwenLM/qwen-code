@@ -108,19 +108,18 @@ describe('<CompactToolGroupDisplay /> — shell timeout plumbing', () => {
 });
 
 describe('<CompactToolGroupDisplay /> — summary label', () => {
-  it('renders default header (active tool name + count) when no compactLabel is provided', () => {
+  it('renders semantic summary when no compactLabel is provided', () => {
     const tools = [
-      toolCall({ callId: 'c1', name: 'read_file' }),
-      toolCall({ callId: 'c2', name: 'read_file' }),
-      toolCall({ callId: 'c3', name: 'grep' }),
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+      toolCall({ callId: 'c3', name: 'Grep', description: 'search pattern' }),
     ];
     const { lastFrame } = render(
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
     const frame = lastFrame()!;
-    // Active tool = last in array when none are executing/confirming.
-    expect(frame).toContain('grep');
-    expect(frame).toContain('× 3');
+    expect(frame).toContain('Read 2 files');
+    expect(frame).toContain('searched search pattern');
   });
 
   it('replaces header with compactLabel when provided', () => {
@@ -164,18 +163,17 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     expect(lastFrame()).toBe('');
   });
 
-  it('preserves default rendering for shell commands without label', () => {
+  it('renders semantic summary for shell commands without label', () => {
     const tools = [
       toolCall({
         callId: 'c1',
-        name: 'Bash',
+        name: 'Shell',
         description: 'ls -la',
       }),
     ];
     const { lastFrame } = render(
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
-    expect(lastFrame()).toContain('Bash');
-    expect(lastFrame()).toContain('ls -la');
+    expect(lastFrame()).toContain('Ran ls -la');
   });
 });

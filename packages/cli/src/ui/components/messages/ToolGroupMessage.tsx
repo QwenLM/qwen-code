@@ -324,7 +324,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   //     gate either).
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const showCompact =
-    compactMode &&
+    (compactMode || allComplete) &&
     !hasConfirmingTool &&
     !hasSubagentPendingConfirmation &&
     !hasErrorTool &&

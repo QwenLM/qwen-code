@@ -137,7 +137,9 @@ const renderWithContext = (
 };
 
 describe('<ToolMessage />', () => {
-  const mockConfig = {} as Config;
+  const mockConfig = {
+    getShouldUseNodePtyShell: () => false,
+  } as unknown as Config;
 
   const baseProps: ToolMessageProps = {
     callId: 'tool-123',
@@ -151,7 +153,7 @@ describe('<ToolMessage />', () => {
     config: mockConfig,
   };
 
-  it('renders basic tool information', () => {
+  it('renders basic tool information and collapses result for Success', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
       StreamingState.Idle,
@@ -160,12 +162,12 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓'); // Success indicator
     expect(output).toContain('test-tool');
     expect(output).toContain('A tool for testing');
-    expect(output).toContain('MockMarkdown:Test result');
+    expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
   });
 
-  it('renders tool results directly below the header row', () => {
+  it('renders tool results directly below the header row when forced', () => {
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} contentWidth={100} />,
+      <ToolMessage {...baseProps} contentWidth={100} forceShowResult />,
       StreamingState.Idle,
     );
     const lines = (lastFrame() ?? '').split('\n');
@@ -178,11 +180,10 @@ describe('<ToolMessage />', () => {
     expect(resultLine).toBe(headerLine + 1);
   });
 
-  it('hides result output in compact mode (compactMode=true)', () => {
+  it('hides result output for completed tools', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
       StreamingState.Idle,
-      true, // compact mode
     );
     const output = lastFrame();
     expect(output).toContain('✓'); // status indicator still visible
@@ -217,11 +218,10 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
-  it('shows result when forceShowResult overrides compact collapse', () => {
+  it('shows result when forceShowResult overrides collapse', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} forceShowResult />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
@@ -305,7 +305,7 @@ describe('<ToolMessage />', () => {
       newContent: 'new',
     };
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
+      <ToolMessage {...baseProps} resultDisplay={diffResult} forceShowResult />,
       StreamingState.Idle,
     );
     // Check that the output contains the MockDiff content as part of the whole message
@@ -323,7 +323,7 @@ describe('<ToolMessage />', () => {
       fileDiffTruncated: true,
     };
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
+      <ToolMessage {...baseProps} resultDisplay={diffResult} forceShowResult />,
       StreamingState.Idle,
     );
 
@@ -556,7 +556,11 @@ describe('<ToolMessage />', () => {
     ];
     const ansiOutputDisplay: AnsiOutputDisplay = { ansiOutput: ansiResult };
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} resultDisplay={ansiOutputDisplay} />,
+      <ToolMessage
+        {...baseProps}
+        resultDisplay={ansiOutputDisplay}
+        forceShowResult
+      />,
       StreamingState.Idle,
     );
     expect(lastFrame()).toContain('MockAnsiOutput:hello');
@@ -585,6 +589,7 @@ describe('<ToolMessage />', () => {
       <ToolMessage
         {...baseProps}
         name="Shell"
+        status={ToolCallStatus.Executing}
         resultDisplay={ansiOutputDisplay}
         availableTerminalHeight={100}
       />,
@@ -619,6 +624,7 @@ describe('<ToolMessage />', () => {
         name="some-other-tool"
         resultDisplay={ansiOutputDisplay}
         availableTerminalHeight={100}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -688,6 +694,7 @@ describe('<ToolMessage />', () => {
             <ToolMessage
               {...baseProps}
               name="Shell"
+              status={ToolCallStatus.Executing}
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -727,6 +734,7 @@ describe('<ToolMessage />', () => {
             <ToolMessage
               {...baseProps}
               name="Shell"
+              status={ToolCallStatus.Executing}
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -752,7 +760,7 @@ describe('<ToolMessage />', () => {
         {...baseProps}
         name="Shell"
         resultDisplay={longString}
-        status={ToolCallStatus.Success}
+        status={ToolCallStatus.Executing}
         availableTerminalHeight={100}
       />,
       StreamingState.Idle,
@@ -782,6 +790,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={longString}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -808,6 +817,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={longSingleLine}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -830,6 +840,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={exactFitString}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -872,6 +883,7 @@ describe('<ToolMessage />', () => {
             <ToolMessage
               {...baseProps}
               name="Shell"
+              status={ToolCallStatus.Executing}
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -906,6 +918,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={longString}
         status={ToolCallStatus.Success}
         availableTerminalHeight={100}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -955,6 +968,7 @@ describe('<ToolMessage />', () => {
         description="Plan:"
         status={ToolCallStatus.Success}
         resultDisplay={planResultDisplay}
+        forceShowResult
       />,
       StreamingState.Idle,
     );

@@ -20,9 +20,9 @@ MockTool[tool-2]: o pending-tool - This tool is pending (medium)
 MockTool[tool-3]: x error-tool - This tool failed (medium)"
 `;
 
-exports[`<ToolGroupMessage /> > Golden Snapshots > renders shell command 1`] = `"MockTool[shell-1]: ✓ run_shell_command - Execute shell command (medium)"`;
+exports[`<ToolGroupMessage /> > Golden Snapshots > renders shell command 1`] = `" ✓  Used Execute shell command"`;
 
-exports[`<ToolGroupMessage /> > Golden Snapshots > renders single successful tool call 1`] = `"MockTool[tool-123]: ✓ test-tool - A tool for testing (medium)"`;
+exports[`<ToolGroupMessage /> > Golden Snapshots > renders single successful tool call 1`] = `" ✓  Used A tool for testing"`;
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders tool call awaiting confirmation 1`] = `
 "MockTool[tool-confirm]: ? confirmation-tool - This tool needs confirmation
@@ -30,22 +30,10 @@ exports[`<ToolGroupMessage /> > Golden Snapshots > renders tool call awaiting co
 MockConfirmation: Are you sure you want to proceed?"
 `;
 
-exports[`<ToolGroupMessage /> > Golden Snapshots > renders when not focused 1`] = `"MockTool[tool-123]: ✓ test-tool - A tool for testing (medium)"`;
+exports[`<ToolGroupMessage /> > Golden Snapshots > renders when not focused 1`] = `" ✓  Used A tool for testing"`;
 
-exports[`<ToolGroupMessage /> > Golden Snapshots > renders with limited terminal height 1`] = `
-"MockTool[tool-1]: ✓ tool-with-result - Tool with output (medium)
-MockTool[tool-2]: ✓ another-tool - Another tool (medium)"
-`;
+exports[`<ToolGroupMessage /> > Golden Snapshots > renders with limited terminal height 1`] = `" ✓  Used 2 tools"`;
 
-exports[`<ToolGroupMessage /> > Golden Snapshots > renders with narrow terminal width 1`] = `
-"MockTool[tool-123]: ✓
-very-long-tool-name-that-might-wrap -
-This is a very long description that
-might cause wrapping issues (medium)"
-`;
+exports[`<ToolGroupMessage /> > Golden Snapshots > renders with narrow terminal width 1`] = `" ✓  Used This is a very long descripti…"`;
 
-exports[`<ToolGroupMessage /> > Height Calculation > calculates available height correctly with multiple tools with results 1`] = `
-"MockTool[tool-1]: ✓ test-tool - A tool for testing (medium)
-MockTool[tool-2]: ✓ test-tool - A tool for testing (medium)
-MockTool[tool-3]: ✓ test-tool - A tool for testing (medium)"
-`;
+exports[`<ToolGroupMessage /> > Height Calculation > calculates available height correctly with multiple tools with results 1`] = `" ✓  Used 3 tools"`;

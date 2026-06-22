@@ -155,7 +155,7 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
-    it('renders expanded tool entries without blank separator rows', () => {
+    it('renders completed tool group as compact overview', () => {
       const toolCalls = [
         createToolCall({ callId: 'tool-1', name: 'first-tool' }),
         createToolCall({ callId: 'tool-2', name: 'second-tool' }),
@@ -167,12 +167,9 @@ describe('<ToolGroupMessage />', () => {
           toolCalls={toolCalls}
         />,
       );
-      const lines = (lastFrame() ?? '').split('\n');
-      const firstLine = lines.findIndex((line) => line.includes('tool-1'));
-      const secondLine = lines.findIndex((line) => line.includes('tool-2'));
-
-      expect(firstLine).toBeGreaterThanOrEqual(0);
-      expect(secondLine).toBe(firstLine + 1);
+      const frame = lastFrame() ?? '';
+      // All-complete groups now show CompactToolGroupDisplay summary
+      expect(frame).toContain('Used 2 tools');
     });
 
     it('renders tool call awaiting confirmation', () => {
@@ -854,13 +851,10 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // Sibling is the only inline survivor → wins active-tool, count
-      // collapses to 1 (no `× N` suffix).
-      expect(frame).toContain('read_file');
-      expect(frame).not.toMatch(/× 2/);
-      // Sibling description should appear; subagent description
-      // should not.
+      // Sibling is the only inline survivor → compact overview shows
+      // its description, not the subagent's.
       expect(frame).toContain('read config.yaml');
+      expect(frame).not.toMatch(/× 2/);
       expect(frame).not.toContain('Delegate task to subagent');
     });
   });

@@ -33,7 +33,7 @@ import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
-import { useCompactMode } from '../../contexts/CompactModeContext.js';
+
 import {
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
@@ -781,7 +781,6 @@ const ToolInfo: React.FC<ToolInfo> = ({
   status,
   emphasis,
 }) => {
-  const { compactMode } = useCompactMode();
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
       case 'high':
@@ -796,7 +795,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
       }
     }
   }, [emphasis]);
-  const isDim = compactMode && status === ToolCallStatus.Success;
+  const isDim = status === ToolCallStatus.Success;
   return (
     <Box flexGrow={1}>
       <Text
