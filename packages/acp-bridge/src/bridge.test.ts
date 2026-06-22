@@ -5150,6 +5150,12 @@ describe('createAcpSessionBridge', () => {
         sessionId: session.sessionId,
         modelId: 'qwen3-coder',
       });
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.data).toEqual({
+        key: 'model.name',
+        value: 'qwen3-coder',
+      });
       abort.abort();
       await bridge.shutdown();
     });
@@ -5172,6 +5178,9 @@ describe('createAcpSessionBridge', () => {
       const next = await it.next();
       expect(next.value?.type).toBe('model_switched');
       expect(next.value?.originatorClientId).toBe(session.clientId);
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.originatorClientId).toBe(session.clientId);
       abort.abort();
       await bridge.shutdown();
     });

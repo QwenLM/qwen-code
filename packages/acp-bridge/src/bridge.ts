@@ -3984,6 +3984,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       // model_switched is published inside the work callback above (while the
       // suppress flag is still set), mirroring applyModelServiceId.
+      broadcastWorkspaceEvent({
+        type: 'settings_changed',
+        data: {
+          key: 'model.name',
+          value: req.modelId,
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
       return response;
     },
 

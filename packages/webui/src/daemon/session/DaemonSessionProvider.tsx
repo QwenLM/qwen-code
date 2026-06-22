@@ -43,6 +43,7 @@ import {
   getReplayTokenUsage,
   getTokenCountFromUsage,
   mapProviderStatus,
+  mapSessionContextModels,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -477,8 +478,24 @@ export function DaemonSessionProvider({
               ? loadWarningsRef.current?.context
               : undefined,
           ].filter((warning): warning is string => Boolean(warning));
-          const { models, currentModel, contextWindow } =
-            mapProviderStatus(providers);
+          const providerModelStatus = mapProviderStatus(providers);
+          const contextModelStatus = mapSessionContextModels(context);
+          const sessionModels =
+            contextModelStatus && contextModelStatus.models.length > 0
+              ? contextModelStatus.models
+              : providerModelStatus.models;
+          const sessionCurrentModel =
+            contextModelStatus?.currentModel ??
+            providerModelStatus.currentModel;
+          const providerContextWindow =
+            sessionCurrentModel === providerModelStatus.currentModel
+              ? providerModelStatus.contextWindow
+              : undefined;
+          const sessionContextWindow =
+            contextModelStatus?.contextWindow ??
+            sessionModels.find((model) => model.id === sessionCurrentModel)
+              ?.contextWindow ??
+            providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
           const currentMode = getCurrentMode(context);
 
@@ -493,8 +510,8 @@ export function DaemonSessionProvider({
             workspaceCwd: activeSession.workspaceCwd,
             commands,
             skills,
-            models,
-            currentModel,
+            models: sessionModels,
+            currentModel: sessionCurrentModel,
             currentMode,
             displayName:
               getSessionDisplayName(activeSession.state) ??
@@ -520,7 +537,7 @@ export function DaemonSessionProvider({
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
-            contextWindow,
+            contextWindow: sessionContextWindow,
             providers,
             supportedCommands,
             context,

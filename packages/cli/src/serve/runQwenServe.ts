@@ -50,6 +50,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspaceProvidersStatus.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { resolveWebShellDir } from './webShellStatic.js';
 import { parseAllowOriginPatterns } from './auth.js';
@@ -905,6 +906,8 @@ export async function runQwenServe(
   // service so both answer env/preflight cells from the same daemon-local
   // implementation.
   const statusProvider = createDaemonStatusProvider();
+  const workspaceProvidersStatusProvider =
+    createWorkspaceProvidersStatusProvider();
 
   const bridge =
     deps.bridge ??
@@ -987,6 +990,7 @@ export async function runQwenServe(
     contextFilename: contextFilenameForInit ?? 'QWEN.md',
     // Daemon-host status provider for env + preflight cells.
     statusProvider,
+    workspaceProvidersStatusProvider,
     // Channel liveness check — proxied through the bridge's live-channel
     // probe (not session count: a channel can be live with zero attached
     // sessions during the cold-spawn window).

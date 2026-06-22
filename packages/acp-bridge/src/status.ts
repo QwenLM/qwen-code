@@ -379,6 +379,7 @@ export interface ServeWorkspaceProvidersStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];

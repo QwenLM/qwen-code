@@ -97,6 +97,7 @@ import type {
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemonLogger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
+import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -114,6 +115,14 @@ function fakeDaemonLog(): DaemonLogger {
     getDaemonId: () => 'test-daemon',
     flush: vi.fn(async () => {}),
   };
+}
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
 }
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -2166,7 +2175,16 @@ describe('createServeApp', () => {
       expect(res.body.servers[2].disabledReason).toBe('budget');
     });
 
-    it('returns workspace skills and providers status from the bridge', async () => {
+    it('returns workspace skills from the bridge and providers from daemon-local settings', async () => {
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-providers-'),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      const previousSystemSettings =
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      const previousSystemDefaults =
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
       const skills: ServeWorkspaceSkillsStatus = {
         v: 1,
         workspaceCwd: WS_BOUND,
@@ -2182,54 +2200,55 @@ describe('createServeApp', () => {
           },
         ],
       };
-      const providers: ServeWorkspaceProvidersStatus = {
-        v: 1,
-        workspaceCwd: WS_BOUND,
-        initialized: true,
-        current: { authType: 'qwen', modelId: 'qwen3(qwen)' },
-        providers: [
-          {
-            kind: 'model_provider',
-            status: 'ok',
-            authType: 'qwen',
-            current: true,
-            models: [
-              {
-                modelId: 'qwen3(qwen)',
-                baseModelId: 'qwen3',
-                name: 'Qwen 3',
-                description: null,
-                contextLimit: 4096,
-                isCurrent: true,
-                isRuntime: false,
-              },
-            ],
-          },
-        ],
-      };
-      const bridge = fakeBridge({
-        workspaceSkillsImpl: async () => skills,
-        workspaceProvidersImpl: async () => providers,
-      });
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      try {
+        process.env['QWEN_HOME'] = path.join(tempHome, 'home');
+        process.env['QWEN_RUNTIME_DIR'] = path.join(tempHome, 'runtime');
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+          tempHome,
+          'system-settings.json',
+        );
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+          tempHome,
+          'system-defaults.json',
+        );
+        resetHomeEnvBootstrapForTesting();
 
-      const skillsRes = await request(app)
-        .get('/workspace/skills')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      const providersRes = await request(app)
-        .get('/workspace/providers')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const bridge = fakeBridge({
+          workspaceSkillsImpl: async () => skills,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      expect(skillsRes.status).toBe(200);
-      expect(skillsRes.body).toEqual(skills);
-      expect(providersRes.status).toBe(200);
-      expect(providersRes.body).toEqual(providers);
-      expect(bridge.workspaceSkillsCalls).toBe(1);
-      expect(bridge.workspaceProvidersCalls).toBe(1);
+        const skillsRes = await request(app)
+          .get('/workspace/skills')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const providersRes = await request(app)
+          .get('/workspace/providers')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(skillsRes.status).toBe(200);
+        expect(skillsRes.body).toEqual(skills);
+        expect(providersRes.status).toBe(200);
+        expect(providersRes.body).toMatchObject({
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          acpChannelLive: false,
+        });
+        expect(providersRes.body.providers.length).toBeGreaterThan(0);
+        expect(bridge.workspaceSkillsCalls).toBe(1);
+        expect(bridge.workspaceProvidersCalls).toBe(0);
+      } finally {
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('QWEN_RUNTIME_DIR', previousRuntimeDir);
+        restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', previousSystemSettings);
+        restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', previousSystemDefaults);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+      }
     });
 
     it('returns workspace tools status from the bridge', async () => {

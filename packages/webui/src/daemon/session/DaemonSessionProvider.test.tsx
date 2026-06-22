@@ -175,6 +175,7 @@ const sdkMocks = vi.hoisted(() => {
     capabilities,
     MockDaemonClient,
     MockDaemonSessionClient,
+    workspaceProviders,
     workspaceMcpTools,
     reset() {
       sessions.length = 0;
@@ -372,6 +373,216 @@ describe('DaemonSessionProvider', () => {
 
     expect(connection?.status).toBe('connected');
     expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses session context models over workspace provider defaults', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      current: {
+        authType: 'USE_OPENAI',
+        modelId: 'workspace-default(USE_OPENAI)',
+      },
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'USE_OPENAI',
+          current: true,
+          models: [
+            {
+              modelId: 'workspace-default(USE_OPENAI)',
+              baseModelId: 'workspace-default',
+              name: 'Workspace Default',
+              contextLimit: 10_000,
+              isCurrent: true,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            models: {
+              currentModelId: 'session-current(USE_OPENAI)',
+              availableModels: [
+                {
+                  modelId: 'session-current(USE_OPENAI)',
+                  name: 'Session Current',
+                  description: 'Session-scoped model',
+                  _meta: { contextLimit: 20_000 },
+                },
+              ],
+            },
+          },
+        })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.currentModel).toBe('session-current(USE_OPENAI)');
+    expect(connection?.contextWindow).toBe(20_000);
+    expect(connection?.models).toEqual([
+      expect.objectContaining({
+        id: 'session-current(USE_OPENAI)',
+        label: 'Session Current',
+        contextWindow: 20_000,
+      }),
+    ]);
+  });
+
+  it('falls back to provider models when session context only has current model', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      current: {
+        authType: 'USE_OPENAI',
+        modelId: 'workspace-default(USE_OPENAI)',
+      },
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'USE_OPENAI',
+          current: true,
+          models: [
+            {
+              modelId: 'workspace-default(USE_OPENAI)',
+              baseModelId: 'workspace-default',
+              name: 'Workspace Default',
+              contextLimit: 10_000,
+              isCurrent: true,
+              isRuntime: false,
+            },
+            {
+              modelId: 'session-current(USE_OPENAI)',
+              baseModelId: 'session-current',
+              name: 'Session Current',
+              contextLimit: 20_000,
+              isCurrent: false,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            models: {
+              currentModelId: 'session-current(USE_OPENAI)',
+            },
+          },
+        })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.currentModel).toBe('session-current(USE_OPENAI)');
+    expect(connection?.contextWindow).toBe(20_000);
+    expect(connection?.models?.map((model) => model.id)).toEqual([
+      'workspace-default(USE_OPENAI)',
+      'session-current(USE_OPENAI)',
+    ]);
+  });
+
+  it('does not use provider context window for an unmatched session model', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      current: {
+        authType: 'USE_OPENAI',
+        modelId: 'workspace-default(USE_OPENAI)',
+      },
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'USE_OPENAI',
+          current: true,
+          models: [
+            {
+              modelId: 'workspace-default(USE_OPENAI)',
+              baseModelId: 'workspace-default',
+              name: 'Workspace Default',
+              contextLimit: 10_000,
+              isCurrent: true,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            models: {
+              currentModelId: 'runtime-only(USE_OPENAI)',
+            },
+          },
+        })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.currentModel).toBe('runtime-only(USE_OPENAI)');
+    expect(connection?.contextWindow).toBeUndefined();
   });
 
   it('adds daemon goal status metadata to the transcript', async () => {

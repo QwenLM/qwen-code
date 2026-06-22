@@ -60,6 +60,7 @@ import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspaceProvidersStatus.js';
 import { isServeDebugMode } from './debugMode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
@@ -1204,6 +1205,8 @@ export function createServeApp(
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider: createDaemonStatusProvider(),
+      workspaceProvidersStatusProvider:
+        createWorkspaceProvidersStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
