@@ -469,6 +469,88 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('falls back to provider context window for session context models', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      current: {
+        authType: 'USE_OPENAI',
+        modelId: 'workspace-default(USE_OPENAI)',
+      },
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'USE_OPENAI',
+          current: true,
+          models: [
+            {
+              modelId: 'workspace-default(USE_OPENAI)',
+              baseModelId: 'workspace-default',
+              name: 'Workspace Default',
+              contextLimit: 10_000,
+              isCurrent: true,
+              isRuntime: false,
+            },
+            {
+              modelId: 'session-current(USE_OPENAI)',
+              baseModelId: 'session-current',
+              name: 'Session Current',
+              contextLimit: 20_000,
+              isCurrent: false,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            models: {
+              currentModelId: 'session-current(USE_OPENAI)',
+              availableModels: [
+                {
+                  modelId: 'session-current(USE_OPENAI)',
+                  name: 'Session Current',
+                },
+              ],
+            },
+          },
+        })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.currentModel).toBe('session-current(USE_OPENAI)');
+    expect(connection?.contextWindow).toBe(20_000);
+    expect(connection?.models).toEqual([
+      expect.objectContaining({
+        id: 'session-current(USE_OPENAI)',
+        label: 'Session Current',
+      }),
+    ]);
+    expect(connection?.models?.[0]?.contextWindow).toBeUndefined();
+  });
+
   it('falls back to provider models when session context only has current model', async () => {
     sdkMocks.workspaceProviders.mockResolvedValue({
       v: 1,

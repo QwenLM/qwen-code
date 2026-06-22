@@ -132,6 +132,38 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('sanitizes credentials from provider warning URLs', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'shared-model',
+        baseUrl: 'https://user:sec)ret@stale.example/v1',
+      },
+      modelProviders: {
+        openai: {
+          protocol: 'openai',
+          models: [
+            {
+              id: 'shared-model',
+              name: 'Shared Current',
+              baseUrl: 'https://user:current)secret@current.example/v1',
+            },
+          ],
+        },
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const warning = result.errors?.[0]?.error;
+
+    expect(warning).toContain('Persisted model.baseUrl');
+    expect(warning).toContain('https://stale.example/v1');
+    expect(warning).toContain('https://current.example/v1');
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(JSON.stringify(result)).not.toContain('sec)ret');
+  });
+
   it('does not mark baseUrl variants current when no baseUrl is resolved', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -156,9 +188,9 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     const models = result.providers.flatMap((p) => p.models);
 
     expect(result.current?.modelId).toBe('shared-model(openai)');
-    expect(
-      models.find((m) => m.name === 'Shared Default')?.isCurrent,
-    ).toBe(true);
+    expect(models.find((m) => m.name === 'Shared Default')?.isCurrent).toBe(
+      true,
+    );
     expect(
       models.find((m) => m.baseUrl === 'https://proxy.example/v1')?.isCurrent,
     ).toBe(false);

@@ -496,7 +496,9 @@ export function DaemonSessionProvider({
           const providerContextWindow =
             sessionCurrentModel === providerModelStatus.currentModel
               ? providerModelStatus.contextWindow
-              : undefined;
+              : providerModelStatus.models.find(
+                  (model) => model.id === sessionCurrentModel,
+                )?.contextWindow;
           const sessionContextWindow =
             contextModelStatus?.contextWindow ??
             sessionModels.find((model) => model.id === sessionCurrentModel)

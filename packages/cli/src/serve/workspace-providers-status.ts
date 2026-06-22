@@ -172,7 +172,7 @@ function buildWorkspaceProvidersStatus(
             errors: resolvedCliConfig.warnings.map((warning) => ({
               kind: 'providers',
               status: 'warning' as const,
-              error: warning,
+              error: sanitizeProviderWarning(warning),
             })),
           }
         : {}),
@@ -271,6 +271,14 @@ function modelBaseUrlKey(
   baseUrl: string,
 ): string {
   return `${authType}\0${modelId}\0${baseUrl}`;
+}
+
+const URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s'"`<>]+/g;
+
+function sanitizeProviderWarning(warning: string): string {
+  return warning.replace(URL_LIKE_PATTERN, (url) =>
+    sanitizeProviderBaseUrl(url),
+  );
 }
 
 function buildCurrent(
