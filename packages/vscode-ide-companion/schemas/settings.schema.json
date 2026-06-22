@@ -182,6 +182,11 @@
             "json"
           ],
           "default": "text"
+        },
+        "showTimestamps": {
+          "description": "Show [HH:MM:SS] timestamp before each assistant response.",
+          "type": "boolean",
+          "default": false
         }
       }
     },

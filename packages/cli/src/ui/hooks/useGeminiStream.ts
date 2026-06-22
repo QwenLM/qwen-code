@@ -64,6 +64,7 @@ import type {
   HistoryItemGoalStatus,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
+  HistoryItemGemini,
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
@@ -399,6 +400,20 @@ export const useGeminiStream = (
   // alongside lastTurnUserItemRef.
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
+
+  // Wrapper around addItem that attaches timestamp to gemini items for display.
+  // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
+  // (same turn, performance-split continuation) does not.
+  const commitItem = useCallback(
+    (item: HistoryItemWithoutId, userMessageTimestamp: number): number => {
+      if (item.type === 'gemini' && !(item as HistoryItemGemini).timestamp) {
+        (item as HistoryItemGemini).timestamp = Date.now();
+      }
+      return addItem(item, userMessageTimestamp);
+    },
+    [addItem],
+  );
+
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
@@ -691,7 +706,7 @@ export const useGeminiStream = (
     // events that arrived inside the throttle window
     // (STREAM_UPDATE_THROTTLE_MS), making AppContainer's auto-restore
     // wrongly conclude the model produced nothing — and the subsequent
-    // addItem(pendingHistoryItemRef.current) below would commit content
+    // commitItem(pendingHistoryItemRef.current) below would commit content
     // that auto-restore then truncates away.
     for (const flushBufferedStreamEvents of flushBufferedStreamEventsRef.current) {
       flushBufferedStreamEvents();
@@ -728,7 +743,7 @@ export const useGeminiStream = (
     logApiCancel(config, cancellationEvent);
 
     if (pendingHistoryItemRef.current) {
-      addItem(pendingHistoryItemRef.current, Date.now());
+      commitItem(pendingHistoryItemRef.current, Date.now());
     }
     addItem(
       {
@@ -766,6 +781,7 @@ export const useGeminiStream = (
   }, [
     streamingState,
     addItem,
+    commitItem,
     setPendingHistoryItem,
     onCancelSubmit,
     pendingHistoryItemRef,
@@ -975,9 +991,13 @@ export const useGeminiStream = (
           return newGeminiMessageBuffer;
         }
         if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
-        setPendingHistoryItem({ type: 'gemini', text: '' });
+        setPendingHistoryItem({
+          type: 'gemini',
+          text: '',
+          timestamp: Date.now(),
+        });
         newGeminiMessageBuffer = stripLeadingBlankLines(newGeminiMessageBuffer);
       }
       // Split large messages for better rendering performance. Ideally,
@@ -1005,7 +1025,7 @@ export const useGeminiStream = (
         // broken up so that there are more "statically" rendered.
         const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
         const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
-        addItem(
+        commitItem(
           {
             type: nextPendingType,
             text: beforeText,
@@ -1016,13 +1036,21 @@ export const useGeminiStream = (
         newGeminiMessageBuffer = afterText;
       }
       // Update the existing message with accumulated content.
-      setPendingHistoryItem({
-        type: nextPendingType,
-        text: newGeminiMessageBuffer,
+      setPendingHistoryItem((item) => {
+        const base: HistoryItemWithoutId = {
+          type: nextPendingType,
+          text: newGeminiMessageBuffer,
+        };
+        if (item && 'timestamp' in item) {
+          (base as HistoryItemGemini).timestamp = (
+            item as HistoryItemGemini
+          ).timestamp;
+        }
+        return base;
       });
       return newGeminiMessageBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [commitItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const mergeThought = useCallback(
@@ -1200,7 +1228,7 @@ export const useGeminiStream = (
           };
           addItem(pendingItem, userMessageTimestamp);
         } else {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
         setPendingHistoryItem(null);
       }
@@ -1215,6 +1243,7 @@ export const useGeminiStream = (
     [
       addItem,
       commitPendingThought,
+      commitItem,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setThought,
@@ -1228,7 +1257,7 @@ export const useGeminiStream = (
       // Persist any streamed reasoning (collapsed) above the error.
       commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       // Only show Ctrl+Y hint if not already showing an auto-retry countdown
@@ -1268,8 +1297,8 @@ export const useGeminiStream = (
         });
     },
     [
-      addItem,
       commitPendingThought,
+      commitItem,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setPendingRetryErrorItem,
@@ -1286,12 +1315,18 @@ export const useGeminiStream = (
       }
 
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       addItem({ type: MessageType.INFO, text }, userMessageTimestamp);
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, settings],
+    [
+      addItem,
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      settings,
+    ],
   );
 
   const handleFinishedEvent = useCallback(
@@ -1354,7 +1389,7 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
     ) => {
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       const reasonClause =
@@ -1373,7 +1408,7 @@ export const useGeminiStream = (
         Date.now(),
       );
     },
-    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, commitItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleMaxSessionTurnsEvent = useCallback(
@@ -1446,7 +1481,7 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
     ) => {
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       addItem(
@@ -1458,7 +1493,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, commitItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleStopHookLoopEvent = useCallback(
@@ -1471,7 +1506,7 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
     ) => {
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       // When the active loop is driven by `/goal`, replace the generic
@@ -1502,7 +1537,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, commitItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleActiveGoalEvent = useCallback(
@@ -1712,7 +1747,7 @@ export const useGeminiStream = (
               // as "t" → "te" → "tes" cumulative rendering even though each
               // turn is persisted as a clean, separate assistant message.
               if (pendingHistoryItemRef.current) {
-                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+                commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
                 setPendingHistoryItem(null);
               }
               geminiMessageBuffer = '';
@@ -1768,7 +1803,7 @@ export const useGeminiStream = (
               // Display system message from Stop hooks with "Stop says:" prefix
               // First commit any pending AI response to ensure correct ordering
               if (pendingHistoryItemRef.current) {
-                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+                commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
                 setPendingHistoryItem(null);
               }
               addItem(
@@ -1887,6 +1922,7 @@ export const useGeminiStream = (
       handleStopHookLoopEvent,
       handleActiveGoalEvent,
       addItem,
+      commitItem,
       dualOutput,
     ],
   );
@@ -2112,7 +2148,7 @@ export const useGeminiStream = (
           }
 
           if (pendingHistoryItemRef.current) {
-            addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+            commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
           }
 
@@ -2204,6 +2240,7 @@ export const useGeminiStream = (
       processGeminiStreamEvents,
       pendingHistoryItemRef,
       addItem,
+      commitItem,
       setPendingHistoryItem,
       setInitError,
       geminiClient,

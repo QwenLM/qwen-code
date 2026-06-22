@@ -614,6 +614,16 @@ const SETTINGS_SCHEMA = {
           { value: 'json', label: 'JSON' },
         ],
       },
+      showTimestamps: {
+        type: 'boolean',
+        label: 'Show Timestamps',
+        category: 'General',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show [HH:MM:SS] timestamp before each assistant response.',
+        showInDialog: true,
+      },
     },
   },
 
