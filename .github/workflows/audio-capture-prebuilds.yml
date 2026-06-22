@@ -33,6 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Keep in sync with build-linux.matrix and the collect verification list.
         include:
           - os: 'macos-14'
             runner: 'macos-14'
@@ -80,19 +81,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Keep in sync with build.matrix and the collect verification list.
         include:
           - os: 'linux-glibc'
             runner: 'ubuntu-latest'
             arch: 'x64'
-            container: 'node:22-bullseye'
+            container: 'node:22-bullseye@sha256:55e1d290257108ca0bbd3b206d5ac2e8754b70e4ecbad2d9306fde8821cc30a3'
           - os: 'linux-glibc'
             runner: 'ubuntu-24.04-arm'
             arch: 'arm64'
-            container: 'node:22-bullseye'
+            container: 'node:22-bullseye@sha256:55e1d290257108ca0bbd3b206d5ac2e8754b70e4ecbad2d9306fde8821cc30a3'
           - os: 'linux-musl'
             runner: 'ubuntu-latest'
             arch: 'x64'
-            container: 'node:22-alpine'
+            container: 'node:22-alpine@sha256:ab07539e0988b63558ff621f5fbe1077054c39d9809112974fb79993949d41cd'
     steps:
       # Install git + C toolchain BEFORE checkout: the Alpine image ships
       # neither and actions/checkout needs git. working-directory is overridden
@@ -100,11 +102,11 @@ jobs:
       # (musl/glibc) Node is used — setup-node would pull glibc Node that can't
       # run on musl.
       - name: 'Install Alpine build toolchain'
-        if: "${{ matrix.container == 'node:22-alpine' }}"
+        if: "${{ startsWith(matrix.container, 'node:22-alpine') }}"
         working-directory: '/'
         run: 'apk add --no-cache build-base python3 git'
       - name: 'Install Debian build toolchain'
-        if: "${{ matrix.container == 'node:22-bullseye' }}"
+        if: "${{ startsWith(matrix.container, 'node:22-bullseye') }}"
         working-directory: '/'
         run: 'apt-get update && apt-get install -y --no-install-recommends python3 make g++ git'
       - uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -131,17 +133,18 @@ jobs:
           merge-multiple: true
           path: 'packages/audio-capture/prebuilds'
       - name: 'List collected prebuilds'
-        run: 'find prebuilds -type f'
+        run: 'find packages/audio-capture/prebuilds -type f'
       - name: 'Verify all prebuilds are present'
         run: |
+          # Keep in sync with the build and build-linux matrices above.
           for file in \
-            prebuilds/darwin-arm64/@qwen-code+audio-capture.node \
-            prebuilds/darwin-x64/@qwen-code+audio-capture.node \
-            prebuilds/win32-x64/@qwen-code+audio-capture.node \
-            prebuilds/win32-arm64/@qwen-code+audio-capture.node \
-            prebuilds/linux-x64/@qwen-code+audio-capture.glibc.node \
-            prebuilds/linux-x64/@qwen-code+audio-capture.musl.node \
-            prebuilds/linux-arm64/@qwen-code+audio-capture.glibc.node
+            packages/audio-capture/prebuilds/darwin-arm64/node.napi.node \
+            packages/audio-capture/prebuilds/darwin-x64/node.napi.node \
+            packages/audio-capture/prebuilds/win32-x64/node.napi.node \
+            packages/audio-capture/prebuilds/win32-arm64/node.napi.node \
+            packages/audio-capture/prebuilds/linux-x64/node.napi.glibc.node \
+            packages/audio-capture/prebuilds/linux-x64/node.napi.musl.node \
+            packages/audio-capture/prebuilds/linux-arm64/node.napi.glibc.node
           do
             test -f "$file" || (echo "::error::Missing: $file" && exit 1)
           done
