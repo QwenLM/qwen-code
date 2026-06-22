@@ -169,11 +169,21 @@ export type WorkflowRunRegisterCallback = (entry: WorkflowTask) => void;
  */
 export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
 
+/**
+ * P-notif: fires once when a run reaches a terminal state worth surfacing to
+ * the user — `completed` / `failed`, but NOT a user-initiated `cancel` (the
+ * user already knows). The CLI wires this to the terminal-bell notification
+ * service. A separate slot from `statusChangeCallback` (which the dialog's
+ * `useBackgroundTaskView` owns), so the two never clobber each other.
+ */
+export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
+
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
+  private notificationCallback: WorkflowRunNotificationCallback | undefined;
   /**
    * P5 T7: one-time usage-warning latch. The first `Workflow` tool
    * invocation per session checks `shouldShowUsageWarning()`; if true,
@@ -206,6 +216,22 @@ export class WorkflowRunRegistry {
     cb: WorkflowRunStatusChangeCallback | undefined,
   ): void {
     this.statusChangeCallback = cb;
+  }
+
+  setNotificationCallback(
+    cb: WorkflowRunNotificationCallback | undefined,
+  ): void {
+    this.notificationCallback = cb;
+  }
+
+  /** Fire the terminal-completion notification (best-effort). */
+  private emitNotification(entry: WorkflowTask): void {
+    if (!this.notificationCallback) return;
+    try {
+      this.notificationCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit workflow notification:', error);
+    }
   }
 
   /**
@@ -357,6 +383,7 @@ export class WorkflowRunRegistry {
     entry.result = result;
     entry.notified = true;
     this.emitStatusChange(entry);
+    this.emitNotification(entry);
     this.evictTerminal();
   }
 
@@ -368,6 +395,7 @@ export class WorkflowRunRegistry {
     entry.error = message;
     entry.notified = true;
     this.emitStatusChange(entry);
+    this.emitNotification(entry);
     this.evictTerminal();
   }
 

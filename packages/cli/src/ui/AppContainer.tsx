@@ -172,6 +172,7 @@ import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
 import { useCommandMigration } from './hooks/useCommandMigration.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
+import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -2946,6 +2947,29 @@ export const AppContainer = (props: AppContainerProps) => {
     terminal,
     pendingToolCalls,
   });
+
+  // P-notif: terminal-bell when a workflow run finishes (completed / failed),
+  // so a long run ending is noticed without watching the /workflows dialog.
+  // User-initiated cancels are intentionally not notified (the registry omits
+  // them). Separate from the dialog's status-change subscription.
+  const workflowBellEnabled =
+    (settings.merged.general?.terminalBell as boolean) ?? true;
+  useEffect(() => {
+    const registry = config.getWorkflowRunRegistry?.();
+    // Optional call: production always has `setNotificationCallback`, but
+    // partial registry mocks in CLI tests may omit it — no-op rather than throw.
+    if (!registry?.setNotificationCallback) return;
+    registry.setNotificationCallback((entry) => {
+      const name = entry.meta?.name ?? entry.runId;
+      const verb = entry.status === 'failed' ? 'failed' : 'completed';
+      sendNotification(
+        { message: `Workflow '${name}' ${verb}`, title: 'Qwen Code' },
+        terminal,
+        workflowBellEnabled,
+      );
+    });
+    return () => registry.setNotificationCallback(undefined);
+  }, [config, terminal, workflowBellEnabled]);
 
   // Dialog close functionality
   const { closeAnyOpenDialog } = useDialogClose({
