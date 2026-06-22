@@ -458,6 +458,16 @@ describe('OpenAILogger', () => {
       expect(limitedFiles.length).toBe(3);
     });
 
+    it('should respect a zero limit', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+
+      await logger.logInteraction({ test: 'request' }, { test: 'response' });
+
+      const files = await logger.getLogFiles(0);
+      expect(files).toEqual([]);
+    });
+
     it('should return files sorted by most recent first', async () => {
       const logger = new OpenAILogger(testTempDir);
       await logger.initialize();
