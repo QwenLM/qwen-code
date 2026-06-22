@@ -7,7 +7,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
-import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
+import {
+  CompactToolGroupDisplay,
+  buildToolSummary,
+} from './CompactToolGroupDisplay.js';
 import { ToolCallStatus } from '../../types.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 
@@ -175,5 +178,87 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
     expect(lastFrame()).toContain('Ran ls -la');
+  });
+});
+
+describe('buildToolSummary', () => {
+  const make = (
+    overrides: Partial<IndividualToolCallDisplay>,
+  ): IndividualToolCallDisplay => ({
+    callId: 'c1',
+    name: 'ReadFile',
+    description: 'a.ts',
+    status: ToolCallStatus.Success,
+    resultDisplay: '',
+    confirmationDetails: undefined,
+    ...overrides,
+  });
+
+  it('returns empty string for empty array', () => {
+    expect(buildToolSummary([], false)).toBe('');
+  });
+
+  it('single tool uses description directly', () => {
+    expect(buildToolSummary([make({})], false)).toBe('Read a.ts');
+  });
+
+  it('single tool without description falls back to count', () => {
+    expect(buildToolSummary([make({ description: '' })], false)).toBe(
+      'Read 1 file',
+    );
+  });
+
+  it('single tool uses progressive verb when active', () => {
+    expect(buildToolSummary([make({})], true)).toBe('Reading a.ts');
+  });
+
+  it('multiple same-type tools use count', () => {
+    const tools = [
+      make({ callId: 'c1', description: 'a.ts' }),
+      make({ callId: 'c2', description: 'b.ts' }),
+      make({ callId: 'c3', description: 'c.ts' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 3 files');
+  });
+
+  it('mixed types joined with comma and lowercase verbs', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'Edit', description: 'b.ts' }),
+      make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe(
+      'Ran npm test, read a.ts, edited b.ts',
+    );
+  });
+
+  it('respects CATEGORY_ORDER (command first)', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'Shell', description: 'ls' }),
+    ];
+    const result = buildToolSummary(tools, false);
+    expect(result.startsWith('Ran')).toBe(true);
+  });
+
+  it('unknown tool names fall to other category', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'UnknownTool', description: 'something' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Used something');
+  });
+
+  it('multi-line description uses only first line', () => {
+    const tools = [make({ description: 'first line\nsecond line' })];
+    expect(buildToolSummary(tools, false)).toBe('Read first line');
+  });
+
+  it('single category with exactly 1 tool keeps description in mixed group', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+      make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Ran npm test, read 2 files');
   });
 });

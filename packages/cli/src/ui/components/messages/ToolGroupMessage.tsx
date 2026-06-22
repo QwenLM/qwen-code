@@ -453,12 +453,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   tool.status === ToolCallStatus.Error ||
                   isAgentWithPendingConfirmation(tool.resultDisplay) ||
                   // Terminal subagents need their result block to render
-                  // even in compact mode — that's where
+                  // even when collapsed — that's where
                   // `SubagentScrollbackSummary` lands. ToolMessage's
-                  // compact-mode gate
-                  // (`!compactMode || forceShowResult ? renderer : 'none'`)
-                  // would otherwise drop the result block, leaving the
-                  // committed audit trail empty for compact-mode users.
+                  // collapse gate (`isCompleted && !forceShowResult`)
+                  // would otherwise drop the result block.
                   isTerminalSubagentTool(tool)
                 }
                 isFocused={isSubagentFocused}
