@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
@@ -19,40 +19,74 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderTable(language: WebShellLanguage = 'en'): HTMLElement {
+function renderTableContent(
+  children: ReactNode,
+  language: WebShellLanguage = 'en',
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language={language}>
-        <EnhancedMarkdownTable>
-          <thead>
-            <tr>
-              <th>Team</th>
-              <th>Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Alpha</td>
-              <td>10</td>
-            </tr>
-            <tr>
-              <td>Beta</td>
-              <td>2</td>
-            </tr>
-            <tr>
-              <td>Gamma</td>
-              <td>30</td>
-            </tr>
-          </tbody>
-        </EnhancedMarkdownTable>
+        <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
       </I18nProvider>,
     );
   });
   mounted.push({ root, container });
   return container;
+}
+
+function renderTable(language: WebShellLanguage = 'en'): HTMLElement {
+  return renderTableContent(
+    [
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Score</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>10</td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>Gamma</td>
+          <td>30</td>
+        </tr>
+      </tbody>,
+    ],
+    language,
+  );
+}
+
+function renderWideTable(): HTMLElement {
+  return renderTableContent([
+    <thead key="head">
+      <tr>
+        <th>Team</th>
+        <th>Region</th>
+        <th>Score</th>
+      </tr>
+    </thead>,
+    <tbody key="body">
+      <tr>
+        <td>Alpha</td>
+        <td>US</td>
+        <td>10</td>
+      </tr>
+      <tr>
+        <td>Beta</td>
+        <td>EMEA</td>
+        <td>2</td>
+      </tr>
+    </tbody>,
+  ]);
 }
 
 function click(el: Element): void {
@@ -106,6 +140,41 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
   );
   expect(el).not.toBeNull();
   return el!;
+}
+
+function dataRows(container: HTMLElement): HTMLTableRowElement[] {
+  return [...container.querySelectorAll<HTMLTableRowElement>('tbody tr')].filter(
+    (row) => row.querySelectorAll('td').length > 1,
+  );
+}
+
+function dataCell(
+  container: HTMLElement,
+  rowIndex: number,
+  visibleColumnIndex: number,
+): HTMLTableCellElement {
+  const row = dataRows(container)[rowIndex];
+  expect(row).toBeDefined();
+  const cell = [...row!.querySelectorAll<HTMLTableCellElement>('td')].slice(1)[
+    visibleColumnIndex
+  ];
+  expect(cell).toBeDefined();
+  return cell!;
+}
+
+function dragCells(from: Element, to: Element): void {
+  act(() => {
+    from.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+    );
+    from.dispatchEvent(
+      new MouseEvent('mouseout', { bubbles: true, relatedTarget: to }),
+    );
+    to.dispatchEvent(
+      new MouseEvent('mouseover', { bubbles: true, relatedTarget: from }),
+    );
+    window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
 }
 
 describe('EnhancedMarkdownTable', () => {
@@ -198,6 +267,34 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('selection copy skips hidden columns between selected cells', () => {
+    const writeText = mockClipboard();
+    const container = renderWideTable();
+
+    click(button(container, 'Filter Region'));
+    click(textButton(container, 'Hide column'));
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith(
+      ['Alpha\t10', 'Beta\t2'].join('\n'),
+    );
+  });
+
+  it('does not offer hiding the last visible column', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Hide column'));
+    click(button(container, 'Filter Score'));
+
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (el) => el.textContent === 'Hide column',
+      ),
+    ).toBe(false);
+  });
+
   it('shows row details for visible columns', () => {
     const container = renderTable();
 
@@ -213,6 +310,23 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).not.toContain('Beta');
     expect(container.textContent).toContain('Score');
     expect(container.textContent).toContain('2');
+  });
+
+  it('closes row details when the row is filtered out', () => {
+    const container = renderTable();
+
+    click(button(container, 'View details for row 2'));
+    click(button(container, 'Filter Team'));
+    const beta = container.querySelector<HTMLInputElement>(
+      'input[name="markdown-table-filter-option-0-1"]',
+    );
+    expect(beta).not.toBeNull();
+    click(beta!);
+    click(textButton(container, 'Confirm'));
+
+    expect(rowTexts(container)).toEqual(['Alpha|10', 'Gamma|30']);
+    expect(container.textContent).not.toContain('Row details');
+    expect(container.textContent).not.toContain('Beta');
   });
 
   it('localizes the new controls', () => {
