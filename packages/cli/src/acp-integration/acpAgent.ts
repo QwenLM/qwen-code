@@ -132,7 +132,6 @@ import {
 } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
-import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -2714,7 +2713,7 @@ class QwenAgent implements Agent {
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
-    const method = z.nativeEnum(AuthType).parse(methodId);
+    const method = methodId as AuthType;
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {

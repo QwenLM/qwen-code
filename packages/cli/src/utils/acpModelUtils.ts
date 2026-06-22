@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@qwen-code/qwen-code-core';
-import { z } from 'zod';
+import type { AuthType } from '@qwen-code/qwen-code-core';
 
 /**
  * ACP model IDs are represented as `${modelId}(${authType})` in the ACP protocol.
@@ -58,9 +57,8 @@ export function parseAcpModelOption(input: string): {
   if (openIdx >= 0 && closeIdx === trimmed.length - 1 && openIdx < closeIdx) {
     const maybeModelId = trimmed.slice(0, openIdx);
     const maybeAuthType = trimmed.slice(openIdx + 1, closeIdx);
-    const parsedAuthType = z.nativeEnum(AuthType).safeParse(maybeAuthType);
-    if (parsedAuthType.success) {
-      return { modelId: maybeModelId, authType: parsedAuthType.data };
+    if (maybeAuthType) {
+      return { modelId: maybeModelId, authType: maybeAuthType as AuthType };
     }
   }
   return { modelId: trimmed };
