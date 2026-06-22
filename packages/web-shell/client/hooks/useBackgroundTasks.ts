@@ -15,6 +15,7 @@ function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
 export function useBackgroundTasks(
   taskActivityKey: string,
   connected: boolean,
+  refreshTrigger = 0,
 ): DaemonSessionTaskStatus[] {
   const actions = useActions();
   const [tasks, setTasks] = useState<DaemonSessionTaskStatus[]>([]);
@@ -37,6 +38,12 @@ export function useBackgroundTasks(
     emptyPollsRef.current = 0;
     setPollingActive(true);
   }, [connected, taskActivityKey]);
+
+  useEffect(() => {
+    if (!connected || refreshTrigger === 0) return;
+    emptyPollsRef.current = 0;
+    setPollingActive(true);
+  }, [connected, refreshTrigger]);
 
   useEffect(() => {
     if (tasksPanelActive) return;

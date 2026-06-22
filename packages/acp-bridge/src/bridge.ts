@@ -3394,14 +3394,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         let restored;
         try {
-          restored = await restoreSession('resume', {
+          restored = await restoreSession('load', {
             sessionId: result.newSessionId,
             workspaceCwd: boundWorkspace,
             clientId: context?.clientId,
           });
         } catch (restoreErr) {
           writeStderrLine(
-            `qwen serve: branchSession resume failed for ${result.newSessionId}, attempting cleanup...`,
+            `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
           );
           try {
             await ci.connection.extMethod(
@@ -3429,8 +3429,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           data: eventData,
           ...(originatorClientId ? { originatorClientId } : {}),
         };
-        entry.events.publish(branchEnvelope);
-        broadcastWorkspaceEvent(branchEnvelope, sessionId);
+        // The branch announcement belongs to the new session only. Publishing
+        // it on the source session would persist in that session's replay ring.
+        newEntry?.events.publish(branchEnvelope);
 
         return {
           ...restored,
@@ -4348,6 +4349,81 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId: entry.sessionId,
         answer: response.answer ?? null,
       };
+    },
+
+    async launchSessionForkAgent(sessionId, directive, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+
+      const trimmed = directive.trim();
+      if (!trimmed) {
+        throw new Error('Fork directive is required');
+      }
+      if (entry.pendingPromptCount > 0 || entry.promptActive) {
+        throw new SessionBusyError(
+          sessionId,
+          'Cannot fork while a response or tool call is in progress',
+        );
+      }
+      return entry.promptQueue.then(async () => {
+        if (entry.pendingPromptCount > 0 || entry.promptActive) {
+          throw new SessionBusyError(
+            sessionId,
+            'Cannot fork while a response or tool call is in progress',
+          );
+        }
+
+        opts.onDiagnosticLine?.(
+          `qwen serve: launchSessionForkAgent requested for session=${sessionId}`,
+          'info',
+        );
+
+        let response: {
+          description?: string;
+          launched?: boolean;
+        };
+        try {
+          response = (await Promise.race([
+            withTimeout(
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+                {
+                  sessionId,
+                  directive: trimmed,
+                },
+              ),
+              initTimeoutMs,
+              SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+            ),
+            getTransportClosedReject(entry),
+          ])) as {
+            description?: string;
+            launched?: boolean;
+          };
+        } catch (error) {
+          opts.onDiagnosticLine?.(
+            `qwen serve: launchSessionForkAgent failed for session=${sessionId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            'warn',
+          );
+          throw error;
+        }
+
+        const result = {
+          sessionId: entry.sessionId,
+          description: response.description ?? trimmed.slice(0, 60),
+          launched: response.launched === true,
+        };
+        opts.onDiagnosticLine?.(
+          `qwen serve: launchSessionForkAgent completed for session=${sessionId} launched=${result.launched}`,
+          'info',
+        );
+        return result;
+      });
     },
 
     async executeShellCommand(

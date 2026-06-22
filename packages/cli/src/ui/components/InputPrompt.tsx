@@ -184,6 +184,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setLivePanelSelectedIndex,
     enterDetailFromPanel: enterBgDetailFromPanel,
     setSelectedIndex: setBgSelectedIndex,
+    setPillFocused: setBgPillFocused,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
   const getVisibleBgAgents = useCallback(
@@ -657,19 +658,30 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   // Down from an empty composer (bottom edge, history exhausted), in visual
   // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
-  // Arena) → stay put. Always consumes the key.
+  // Arena) → background-tasks pill (if bg entries) → stay put. Always
+  // consumes the key. When both an Arena tab bar and the pill are shown,
+  // ↓ stops at the tab bar; AgentTabBar's own ↓ then descends into the pill.
   const descendFromComposer = useCallback((): boolean => {
     if (getVisibleBgAgents().length > 0) {
       setLivePanelFocused(true);
     } else if (hasAgents) {
       setAgentTabBarFocused(true);
+    } else if (bgEntries.length > 0) {
+      // No live-agent panel and no Arena tab bar to descend into, but the
+      // background-tasks pill IS shown (e.g. a workflow run with no live
+      // sub-agents) — focus it so ↓ still reaches the dialog. Without this
+      // branch a workflow-only session can never open the BackgroundTasksDialog
+      // (and thus never reach the per-run detail view or the save action).
+      setBgPillFocused(true);
     }
     return true;
   }, [
     getVisibleBgAgents,
     hasAgents,
+    bgEntries,
     setLivePanelFocused,
     setAgentTabBarFocused,
+    setBgPillFocused,
   ]);
 
   // Single source of truth for "is there a suggestion the user can accept right
