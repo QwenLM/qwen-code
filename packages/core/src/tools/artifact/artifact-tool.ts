@@ -100,7 +100,9 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     );
     const backendLabel =
       this.publisher.kind === 'host' ? 'custom upload' : this.publisher.kind;
-    const openSuffix = this.shouldAutoOpen ? ' and open it in your browser' : '';
+    const openSuffix = this.shouldAutoOpen
+      ? ' and open it in your browser'
+      : '';
     const remoteOpenSuffix = this.shouldAutoOpen
       ? ' and opens the shareable link in your browser'
       : '';
@@ -193,7 +195,6 @@ class ArtifactToolInvocation extends BaseToolInvocation<
         return {
           llmContent: message,
           returnDisplay: message,
-          error: { message, type: ToolErrorType.EXECUTION_FAILED },
         };
       }
       const message = `Failed to publish artifact: ${getErrorMessage(err)}`;

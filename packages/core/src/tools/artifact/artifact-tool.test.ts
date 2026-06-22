@@ -292,7 +292,7 @@ describe('ArtifactTool', () => {
       openSpy as unknown as UrlOpener,
     );
     const res = await cancelTool.build({ file_path: file }).execute(signal);
-    expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(res.error).toBeUndefined();
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();
   });
@@ -313,7 +313,7 @@ describe('ArtifactTool', () => {
       openSpy as unknown as UrlOpener,
     );
     const res = await cancelTool.build({ file_path: file }).execute(signal);
-    expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(res.error).toBeUndefined();
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();
   });
@@ -335,7 +335,7 @@ describe('ArtifactTool', () => {
     const res = await cancelTool
       .build({ file_path: file })
       .execute(controller.signal);
-    expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(res.error).toBeUndefined();
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();
   });
