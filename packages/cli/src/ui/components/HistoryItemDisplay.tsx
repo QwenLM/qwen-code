@@ -122,6 +122,10 @@ const ClickableThinkMessage: React.FC<{
   const ref = useRef<DOMElement>(null);
   const { openThinkingViewer } = useThinkingViewer();
   const isActive = !isPending && !expanded;
+  const sanitizedViewerText = useMemo(
+    () => escapeAnsiCtrlCodes(viewerText),
+    [viewerText],
+  );
 
   useMouseEvents(
     useCallback(
@@ -136,10 +140,10 @@ const ClickableThinkMessage: React.FC<{
           row >= metrics.y &&
           row < metrics.y + metrics.height
         ) {
-          openThinkingViewer({ text: viewerText, durationMs });
+          openThinkingViewer({ text: sanitizedViewerText, durationMs });
         }
       },
-      [openThinkingViewer, viewerText, durationMs],
+      [openThinkingViewer, sanitizedViewerText, durationMs],
     ),
     { isActive },
   );
