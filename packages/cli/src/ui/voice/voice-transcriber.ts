@@ -10,14 +10,14 @@ import { isIP } from 'node:net';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { AvailableModel, Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { RecordedVoiceAudio } from '../hooks/useVoiceInput.js';
-import { buildVoiceKeyterms } from './voiceKeyterms.js';
-import type { VoiceStreamConfig } from './voiceStreamSession.js';
+import type { RecordedVoiceAudio } from '../hooks/use-voice-input.js';
+import { buildVoiceKeyterms } from './voice-keyterms.js';
+import type { VoiceStreamConfig } from './voice-stream-session.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isTranscribableVoiceModel,
   resolveVoiceTransport,
-} from './voiceModel.js';
+} from './voice-model.js';
 
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
@@ -26,7 +26,7 @@ const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
 const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
 
 export { resolveVoiceTransport };
-export type { VoiceTransport } from './voiceModel.js';
+export type { VoiceTransport } from './voice-model.js';
 
 export type VoiceStreamingTransport =
   | 'qwen-asr-realtime'

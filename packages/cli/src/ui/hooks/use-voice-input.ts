@@ -10,7 +10,7 @@ import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { Command, keyMatchers } from '../keyMatchers.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
-import type { VoiceStreamSession } from '../voice/voiceStreamSession.js';
+import type { VoiceStreamSession } from '../voice/voice-stream-session.js';
 import type { Key } from './useKeypress.js';
 
 export interface RecordedVoiceAudio {

@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { createNativeAudioRecorder } from './nativeAudioRecorder.js';
+import { createNativeAudioRecorder } from './native-audio-recorder.js';
 
 describe('createNativeAudioRecorder', () => {
   it('records mono 16k audio through the native capture backend', async () => {

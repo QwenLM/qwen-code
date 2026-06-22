@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { voiceCommand } from './voiceCommand.js';
+import { voiceCommand } from './voice-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import type { CommandContext } from './types.js';
@@ -24,7 +24,7 @@ function createSettings(
   } as unknown as LoadedSettings;
 }
 
-describe('voiceCommand', () => {
+describe('voice-command', () => {
   it('has the expected metadata', () => {
     expect(voiceCommand.name).toBe('voice');
     expect(voiceCommand.argumentHint).toBe('[hold|tap|off|status]');

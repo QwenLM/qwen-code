@@ -5,7 +5,7 @@
  */
 
 import { Box, Text } from 'ink';
-import type { VoiceInputStatus } from '../hooks/useVoiceInput.js';
+import type { VoiceInputStatus } from '../hooks/use-voice-input.js';
 import { t } from '../../i18n/index.js';
 import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 

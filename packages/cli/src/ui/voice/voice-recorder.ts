@@ -10,10 +10,10 @@ import type {
   RecordedVoiceAudio,
   VoiceRecorder,
   VoiceRecorderStartOptions,
-} from '../hooks/useVoiceInput.js';
-import { createArecordRecorder } from './arecordRecorder.js';
-import { createNativeAudioRecorder } from './nativeAudioRecorder.js';
-import { createSoxRecorder } from './soxRecorder.js';
+} from '../hooks/use-voice-input.js';
+import { createArecordRecorder } from './arecord-recorder.js';
+import { createNativeAudioRecorder } from './native-audio-recorder.js';
+import { createSoxRecorder } from './sox-recorder.js';
 
 const debugLogger = createDebugLogger('VOICE_RECORDER');
 

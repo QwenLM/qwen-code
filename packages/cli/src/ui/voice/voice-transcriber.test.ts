@@ -14,7 +14,7 @@ import {
   resolveVoiceTranscriptionConfig,
   resolveVoiceTransport,
   transcribeVoiceAudio,
-} from './voiceTranscriber.js';
+} from './voice-transcriber.js';
 
 function createConfig(models: ReturnType<Config['getAllConfiguredModels']>) {
   return {
@@ -35,7 +35,7 @@ async function lookupPublicHost(): Promise<{ address: string }> {
   return { address: '8.8.8.8' };
 }
 
-describe('voiceTranscriber', () => {
+describe('voice-transcriber', () => {
   beforeEach(() => {
     vi.stubEnv('OPENAI_API_KEY', '');
   });

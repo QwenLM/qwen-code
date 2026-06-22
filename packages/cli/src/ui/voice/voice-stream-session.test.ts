@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { deriveStreamUrl, openVoiceStream } from './voiceStreamSession.js';
+import { deriveStreamUrl, openVoiceStream } from './voice-stream-session.js';
 
 class FakeSocket {
   readonly OPEN = 1;
@@ -59,7 +59,7 @@ function startSession(
   return sessionPromise;
 }
 
-describe('voiceStreamSession', () => {
+describe('voice-stream-session', () => {
   afterEach(() => {
     vi.useRealTimers();
   });

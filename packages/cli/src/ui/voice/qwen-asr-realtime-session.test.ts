@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deriveQwenRealtimeUrl,
   openQwenAsrRealtimeStream,
-} from './qwenAsrRealtimeSession.js';
+} from './qwen-asr-realtime-session.js';
 
 class FakeSocket {
   readonly OPEN = 1;
@@ -45,7 +45,7 @@ function parseSent(socket: FakeSocket, index: number): Record<string, unknown> {
   return JSON.parse(String(socket.sent[index]));
 }
 
-describe('qwenAsrRealtimeSession', () => {
+describe('qwen-asr-realtime-session', () => {
   afterEach(() => {
     vi.useRealTimers();
   });

@@ -12,8 +12,8 @@ import type {
   VoiceStreamCallbacks,
   VoiceStreamConfig,
   VoiceStreamSession,
-} from './voiceStreamSession.js';
-import { deriveWebSocketBase } from './voiceStreamSession.js';
+} from './voice-stream-session.js';
+import { deriveWebSocketBase } from './voice-stream-session.js';
 import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 export interface QwenRealtimeDeps {

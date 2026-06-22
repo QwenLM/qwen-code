@@ -6,7 +6,7 @@
 
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import { useVoiceInput } from './useVoiceInput.js';
+import { useVoiceInput } from './use-voice-input.js';
 import type { Key } from './useKeypress.js';
 
 function deferred<T>() {
@@ -49,7 +49,7 @@ function createBuffer(text = '') {
 
 let buffer = createBuffer();
 
-describe('useVoiceInput', () => {
+describe('use-voice-input', () => {
   it('warms up the backend when voice is enabled', () => {
     buffer = createBuffer();
     const warmup = vi.fn();

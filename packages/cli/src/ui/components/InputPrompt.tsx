@@ -65,18 +65,18 @@ import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
 import {
   useVoiceInput,
   type VoiceTranscriber,
-} from '../hooks/useVoiceInput.js';
-import { createVoiceRecorder } from '../voice/voiceRecorder.js';
+} from '../hooks/use-voice-input.js';
+import { createVoiceRecorder } from '../voice/voice-recorder.js';
 import {
   assertVoiceBaseUrlNetworkAllowed,
   isKeytermEcho,
   isStreamingVoiceModel,
   resolveVoiceStreamConfig,
   transcribeVoiceAudio,
-} from '../voice/voiceTranscriber.js';
-import { openQwenAsrRealtimeStream } from '../voice/qwenAsrRealtimeSession.js';
-import { openVoiceStream } from '../voice/voiceStreamSession.js';
-import { openVoiceStreamWithRetry } from '../voice/voiceStreamRetry.js';
+} from '../voice/voice-transcriber.js';
+import { openQwenAsrRealtimeStream } from '../voice/qwen-asr-realtime-session.js';
+import { openVoiceStream } from '../voice/voice-stream-session.js';
+import { openVoiceStreamWithRetry } from '../voice/voice-stream-retry.js';
 import { VoiceIndicator } from './VoiceIndicator.js';
 
 /**

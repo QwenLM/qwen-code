@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { openVoiceStreamWithRetry } from './voiceStreamRetry.js';
-import type { VoiceStreamSession } from './voiceStreamSession.js';
+import { openVoiceStreamWithRetry } from './voice-stream-retry.js';
+import type { VoiceStreamSession } from './voice-stream-session.js';
 
 function session(): VoiceStreamSession {
   return {

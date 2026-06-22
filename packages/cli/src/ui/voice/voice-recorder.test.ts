@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { VoiceRecorder } from '../hooks/useVoiceInput.js';
-import { createVoiceRecorder } from './voiceRecorder.js';
+import type { VoiceRecorder } from '../hooks/use-voice-input.js';
+import { createVoiceRecorder } from './voice-recorder.js';
 
 const debugLogger = vi.hoisted(() => ({
   warn: vi.fn(),

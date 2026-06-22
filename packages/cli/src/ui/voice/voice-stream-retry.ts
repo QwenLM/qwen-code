@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { VoiceStreamSession } from './voiceStreamSession.js';
+import type { VoiceStreamSession } from './voice-stream-session.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const RETRY_DELAY_MS = 200;

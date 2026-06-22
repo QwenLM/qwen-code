@@ -29,7 +29,7 @@ import { t } from '../../i18n/index.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
-} from '../voice/voiceModel.js';
+} from '../voice/voice-model.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');

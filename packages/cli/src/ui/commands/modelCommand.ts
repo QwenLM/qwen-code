@@ -24,7 +24,7 @@ import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
-} from '../voice/voiceModel.js';
+} from '../voice/voice-model.js';
 
 const MAIN_MODEL_CONFIGURATION_HINT =
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.';

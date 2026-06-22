@@ -7,7 +7,7 @@
 import { SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { CommandKind, type SlashCommand } from './types.js';
-import { getVoiceUnavailableReason } from '../voice/voiceAvailability.js';
+import { getVoiceUnavailableReason } from '../voice/voice-availability.js';
 
 type VoiceMode = 'hold' | 'tap';
 

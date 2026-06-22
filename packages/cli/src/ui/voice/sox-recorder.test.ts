@@ -31,7 +31,7 @@ vi.mock('node:fs/promises', () => ({
   rm: mocks.rm,
 }));
 
-import { createSoxRecorder } from './soxRecorder.js';
+import { createSoxRecorder } from './sox-recorder.js';
 
 class FakeChildProcess extends EventEmitter {
   stderr = new EventEmitter();

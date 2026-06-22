@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { getVoiceUnavailableReason } from './voiceAvailability.js';
+import { getVoiceUnavailableReason } from './voice-availability.js';
 
 describe('getVoiceUnavailableReason', () => {
   it('is available on supported desktop platforms', () => {

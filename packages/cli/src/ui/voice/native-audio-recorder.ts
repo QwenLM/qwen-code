@@ -10,7 +10,7 @@ import type {
   RecordedVoiceAudio,
   VoiceRecorder,
   VoiceRecorderStartOptions,
-} from '../hooks/useVoiceInput.js';
+} from '../hooks/use-voice-input.js';
 
 // Native silence detection sets a flag we poll for; older addons lack it.
 const SILENCE_POLL_INTERVAL_MS = 200;

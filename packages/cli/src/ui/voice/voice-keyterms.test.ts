@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildVoiceKeyterms } from './voiceKeyterms.js';
+import { buildVoiceKeyterms } from './voice-keyterms.js';
 
 describe('buildVoiceKeyterms', () => {
   it('returns the static global vocabulary', () => {

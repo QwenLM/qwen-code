@@ -9,7 +9,7 @@ import { AuthType, type AvailableModel } from '@qwen-code/qwen-code-core';
 import {
   isSelectableVoiceModel,
   isTranscribableVoiceModel,
-} from './voiceModel.js';
+} from './voice-model.js';
 
 function model(overrides: Partial<AvailableModel>): AvailableModel {
   return {
