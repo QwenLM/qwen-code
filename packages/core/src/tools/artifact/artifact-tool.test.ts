@@ -122,7 +122,7 @@ describe('ArtifactTool', () => {
     const failingTool = new ArtifactTool(
       makeConfig(),
       {
-        kind: 'fail',
+        kind: 'oss',
         publish: async () => {
           throw new Error('network timeout');
         },
@@ -180,6 +180,21 @@ describe('ArtifactTool', () => {
       /remote host \(oss\)/i,
     );
 
+    const hostTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'host',
+        publish: async () => ({ id: 'x', url: 'https://h/x' }),
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const host = await hostTool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+    expect((host as { prompt: string }).prompt).toMatch(
+      /remote host \(custom upload\)/i,
+    );
+
     const local = await tool
       .build({ file_path: file })
       .getConfirmationDetails(signal);
@@ -190,6 +205,27 @@ describe('ArtifactTool', () => {
     const file = await writeFragment('page.html', '<p>x</p>');
     const abortErr = Object.assign(new Error('aborted'), {
       name: 'AbortError',
+    });
+    const cancelTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'oss',
+        publish: async () => {
+          throw abortErr;
+        },
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const res = await cancelTool.build({ file_path: file }).execute(signal);
+    expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(res.llmContent).toMatch(/cancelled/i);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports a cancellation for a Node abort error', async () => {
+    const file = await writeFragment('page.html', '<p>x</p>');
+    const abortErr = Object.assign(new Error('aborted'), {
+      code: 'ABORT_ERR',
     });
     const cancelTool = new ArtifactTool(
       makeConfig(),

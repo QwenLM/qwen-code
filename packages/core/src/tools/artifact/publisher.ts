@@ -14,9 +14,11 @@ import path from 'node:path';
  * link. The {@link ArtifactTool} depends only on this interface so backends are
  * swappable without touching the tool.
  */
+export type ArtifactPublisherKind = 'local' | 'host' | 'oss';
+
 export interface ArtifactPublisher {
   /** Backend identifier, e.g. 'local'. */
-  readonly kind: string;
+  readonly kind: ArtifactPublisherKind;
   /**
    * Publishes (or redeploys) the document. Implementations MUST be idempotent
    * for a given {@link PublishArtifactInput.id}: the same id redeploys to the
