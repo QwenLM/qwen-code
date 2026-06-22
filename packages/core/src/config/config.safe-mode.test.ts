@@ -284,6 +284,17 @@ describe('Config safe mode', () => {
     });
   });
 
+  describe('safe mode blocks MCP servers', () => {
+    it('should return empty MCP servers in safe mode', () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        mcpServers: { test: { command: 'test', args: [] } },
+      });
+      expect(config.getMcpServers()).toEqual({});
+    });
+  });
+
   describe('safe mode skips context file loading', () => {
     it('sets empty user memory after refreshHierarchicalMemory', async () => {
       const config = new Config({ ...baseParams, safeMode: true });

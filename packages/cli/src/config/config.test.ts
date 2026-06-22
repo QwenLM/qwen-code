@@ -2677,11 +2677,11 @@ describe('loadCliConfig safe mode', () => {
   it('should ignore settings-sourced approvalMode in safe mode', async () => {
     process.argv = ['node', 'script.js', '--safe-mode'];
     const argv = await parseArguments();
-    const settings: Settings = {
+    const settings = {
       tools: {
         approvalMode: 'yolo',
       },
-    };
+    } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);

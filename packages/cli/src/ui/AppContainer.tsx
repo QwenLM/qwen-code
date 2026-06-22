@@ -1413,7 +1413,7 @@ export const AppContainer = (props: AppContainerProps) => {
       config.setUserMemory('');
       config.setGeminiMdFileCount(0);
       config.setConditionalRulesRegistry(
-        new ConditionalRulesRegistry([], process.cwd()),
+        new ConditionalRulesRegistry([], config.getWorkingDir()),
       );
       setGeminiMdFileCount(0);
       historyManager.addItem(

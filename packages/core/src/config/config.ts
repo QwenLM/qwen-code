@@ -176,6 +176,7 @@ import {
 } from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { isSafeModeEnv } from '../utils/safeMode.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
@@ -1309,7 +1310,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
-  private readonly safeMode!: boolean;
+  private readonly safeMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
@@ -1507,10 +1508,7 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
-    this.safeMode =
-      params.safeMode ??
-      (process.env['QWEN_CODE_SAFE_MODE'] === 'true' ||
-        process.env['QWEN_CODE_SAFE_MODE'] === '1');
+    this.safeMode = params.safeMode ?? isSafeModeEnv();
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -1630,7 +1628,7 @@ export class Config {
     const explicitExtensionNames = this.getExplicitExtensionNames();
     if (!this.isSafeMode() && !this.getBareMode()) {
       await this.extensionManager.refreshCache();
-    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
+    } else if (!this.getBareMode() && explicitExtensionNames.length > 0) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
       });
@@ -3266,6 +3264,7 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    if (this.isSafeMode()) return {};
     let mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
     for (const extension of extensions) {
@@ -4197,7 +4196,7 @@ export class Config {
   }
 
   getPreventSystemSleepEnabled(): boolean {
-    return this.preventSystemSleep;
+    return this.preventSystemSleep && !this.getBareMode() && !this.isSafeMode();
   }
 
   /**

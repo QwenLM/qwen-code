@@ -30,6 +30,7 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isSafeModeEnv,
   isToolEnabled,
   SchemaValidator,
   type ConfigParameters,
@@ -1402,11 +1403,7 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
-  const safeMode =
-    argv.safeMode !== undefined
-      ? argv.safeMode
-      : process.env['QWEN_CODE_SAFE_MODE'] === 'true' ||
-        process.env['QWEN_CODE_SAFE_MODE'] === '1';
+  const safeMode = argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
 
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
@@ -1561,6 +1558,11 @@ export async function loadCliConfig(
   // mergedAllow — they have whitelist semantics (only listed tools are registered),
   // not auto-approve semantics. They are passed via the `coreTools` Config param
   // and handled by PermissionManager.coreToolsAllowList.
+  if (safeMode && argv.coreTools && argv.coreTools.length > 0) {
+    writeStderrLine(
+      '⚠ Safe mode: --core-tools flag is ignored (settings-sourced core tools are also disabled).\n',
+    );
+  }
   const resolvedCoreTools: string[] = [
     ...(bareMode || safeMode ? [] : (argv.coreTools ?? [])),
     ...(bareMode || safeMode ? [] : (settings.tools?.core ?? [])),
@@ -1874,7 +1876,8 @@ export async function loadCliConfig(
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
-    disabledSkillNamesProvider,
+    disabledSkillNamesProvider:
+      bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
