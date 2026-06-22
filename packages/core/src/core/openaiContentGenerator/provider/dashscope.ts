@@ -213,6 +213,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
+      // Default-on for supported reasoning models; user extra_body wins.
+      /* @ts-expect-error dashscope exclusive */
+      preserve_thinking: true,
       ...(extraBody ? extraBody : {}),
     } as OpenAI.Chat.ChatCompletionCreateParams;
   }
