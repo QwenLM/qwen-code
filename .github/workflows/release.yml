@@ -553,22 +553,65 @@ jobs:
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          PREPARE_RESULT: '${{ needs.prepare.result }}'
+          QUALITY_RESULT: '${{ needs.quality.result }}'
+          INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
+          INTEGRATION_DOCKER_RESULT: '${{ needs.integration_docker.result }}'
+          PUBLISH_RESULT: '${{ needs.publish.result }}'
         run: |-
+          failed_jobs="$(
+            for job in \
+              "prepare:${PREPARE_RESULT}" \
+              "quality:${QUALITY_RESULT}" \
+              "integration_none:${INTEGRATION_NONE_RESULT}" \
+              "integration_docker:${INTEGRATION_DOCKER_RESULT}" \
+              "publish:${PUBLISH_RESULT}"; do
+              name="${job%%:*}"
+              result="${job#*:}"
+              if [[ "${result}" == "failure" ]]; then
+                printf -- '- %s\n' "${name}"
+              fi
+            done
+          )"
+          if [[ -z "${failed_jobs}" ]]; then
+            failed_jobs='- unknown'
+          fi
+
+          body_file="$(mktemp)"
+          cat > "${body_file}" <<BODY
+          The release workflow failed.
+
+          Release tag: ${RELEASE_TAG}
+          Run: ${DETAILS_URL}
+
+          Failed job(s):
+          ${failed_jobs}
+          BODY
+
           existing_issue="$(
             gh issue list --repo "${GH_REPO}" \
               --state open \
               --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
               --limit 1 \
-              --json number,url \
-              --jq '.[0] | select(.) | "\(.number) \(.url)"'
+              --json number,url,labels \
+              --jq '.[0] // empty'
           )"
           if [[ -n "${existing_issue}" ]]; then
-            issue_number="${existing_issue%% *}"
-            issue_url="${existing_issue#* }"
+            issue_number="$(jq -r '.number' <<<"${existing_issue}")"
+            issue_url="$(jq -r '.url' <<<"${existing_issue}")"
+            if jq -e \
+              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
+              <<<"${existing_issue}" > /dev/null; then
+              echo "Existing ${issue_url} has an autofix exclusion label; skipping dispatch."
+              exit 0
+            else
+              gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
+                || echo "::warning::Failed to comment on existing issue #${issue_number}; proceeding with dispatch."
+            fi
           else
             issue_url="$(gh issue create --repo "${GH_REPO}" \
               --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
-              --body "The release workflow failed. See the full run for details: ${DETAILS_URL}" \
+              --body-file "${body_file}" \
               --label "${BUG_LABEL}" \
               --label "${READY_FOR_AGENT_LABEL}")"
             issue_number="${issue_url##*/}"

@@ -166,9 +166,18 @@ jobs:
 
           if [[ -n "${FORCED_ISSUE}" ]]; then
             echo "🎯 Forced issue #${FORCED_ISSUE}"
+            forced_issue_json="${WORKDIR}/forced-issue.json"
             gh issue view "${FORCED_ISSUE}" --repo "${REPO}" \
               --json number,title,body,labels,createdAt,url \
-              | jq -c '[.]' > "${WORKDIR}/candidates.json"
+              > "${forced_issue_json}"
+            if jq -e \
+              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
+              "${forced_issue_json}" > /dev/null; then
+              echo "⏭️ Forced issue #${FORCED_ISSUE} has an autofix exclusion label; skipping."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            else
+              jq -c '[.]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"
+            fi
           else
             MIN_CREATED="$(date -u -d '2 days ago' +%Y-%m-%d)"
             filter_unattended_candidates() {
