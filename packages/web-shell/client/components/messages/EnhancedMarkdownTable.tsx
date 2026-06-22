@@ -444,6 +444,281 @@ function normalizeFilter(
   return isFilterActive(next) ? next : undefined;
 }
 
+function SortMenuSection({
+  columnIndex,
+  sortedThisColumn,
+  onSort,
+}: {
+  columnIndex: number;
+  sortedThisColumn: SortState | null;
+  onSort: (
+    columnIndex: number,
+    direction: SortState['direction'] | null,
+  ) => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className={styles.filterMenuSection}>
+      <button
+        className={`${styles.filterMenuAction} ${
+          sortedThisColumn?.direction === 'asc' ? styles.activeAction : ''
+        }`}
+        type="button"
+        onClick={() => onSort(columnIndex, 'asc')}
+      >
+        {t('markdownTable.sort.asc')}
+      </button>
+      <button
+        className={`${styles.filterMenuAction} ${
+          sortedThisColumn?.direction === 'desc' ? styles.activeAction : ''
+        }`}
+        type="button"
+        onClick={() => onSort(columnIndex, 'desc')}
+      >
+        {t('markdownTable.sort.desc')}
+      </button>
+      <button
+        className={styles.filterMenuAction}
+        type="button"
+        onClick={() => onSort(columnIndex, null)}
+      >
+        {t('markdownTable.sort.clear')}
+      </button>
+    </div>
+  );
+}
+
+function ValueFilterSection({
+  columnIndex,
+  columnName,
+  search,
+  filteredOptions,
+  visibleOptions,
+  selectedValues,
+  allFilteredSelected,
+  onSearchChange,
+  onFilteredSelectionChange,
+  onToggleValue,
+}: {
+  columnIndex: number;
+  columnName: string;
+  search: string;
+  filteredOptions: FilterOption[];
+  visibleOptions: FilterOption[];
+  selectedValues: Set<string>;
+  allFilteredSelected: boolean;
+  onSearchChange: (value: string) => void;
+  onFilteredSelectionChange: (selected: boolean) => void;
+  onToggleValue: (value: string) => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className={styles.filterMenuSection}>
+      <input
+        className={styles.filterSearch}
+        value={search}
+        onChange={(event) => onSearchChange(event.currentTarget.value)}
+        placeholder={t('markdownTable.filter.searchPlaceholder')}
+        name={`markdown-table-option-search-${columnIndex}`}
+        aria-label={t('markdownTable.filter.searchAria', {
+          column: columnName,
+        })}
+      />
+      <label className={styles.filterOption}>
+        <input
+          type="checkbox"
+          name={`markdown-table-filter-all-${columnIndex}`}
+          checked={allFilteredSelected}
+          onChange={(event) =>
+            onFilteredSelectionChange(event.currentTarget.checked)
+          }
+        />
+        <span>{t('markdownTable.filter.selectVisible')}</span>
+        <span className={styles.optionCount}>{filteredOptions.length}</span>
+      </label>
+      <div className={styles.filterOptionList}>
+        {visibleOptions.map((option, optionIndex) => (
+          <label key={option.value} className={styles.filterOption}>
+            <input
+              type="checkbox"
+              name={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
+              checked={selectedValues.has(option.value)}
+              onChange={() => onToggleValue(option.value)}
+            />
+            <span className={styles.optionLabel}>{option.label}</span>
+            <span className={styles.optionCount}>{option.count}</span>
+          </label>
+        ))}
+        {filteredOptions.length > visibleOptions.length && (
+          <div className={styles.optionLimitHint}>
+            {t('markdownTable.filter.optionLimit', {
+              count: visibleOptions.length,
+            })}
+          </div>
+        )}
+        {filteredOptions.length === 0 && (
+          <div className={styles.optionLimitHint}>
+            {t('markdownTable.filter.noOptions')}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CustomFilterSection({
+  columnIndex,
+  columnName,
+  isNumeric,
+  textOperator,
+  textValue,
+  numberOperator,
+  numberValue,
+  numberValueTo,
+  onTextOperatorChange,
+  onTextValueChange,
+  onNumberOperatorChange,
+  onNumberValueChange,
+  onNumberValueToChange,
+}: {
+  columnIndex: number;
+  columnName: string;
+  isNumeric: boolean;
+  textOperator: TextFilterOperator;
+  textValue: string;
+  numberOperator: NumberFilterOperator;
+  numberValue: string;
+  numberValueTo: string;
+  onTextOperatorChange: (value: TextFilterOperator) => void;
+  onTextValueChange: (value: string) => void;
+  onNumberOperatorChange: (value: NumberFilterOperator) => void;
+  onNumberValueChange: (value: string) => void;
+  onNumberValueToChange: (value: string) => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className={styles.filterMenuSection}>
+      <div className={styles.conditionTitle}>
+        {t('markdownTable.filter.custom')}
+      </div>
+      {isNumeric ? (
+        <>
+          <select
+            className={styles.conditionSelect}
+            value={numberOperator}
+            name={`markdown-table-number-operator-${columnIndex}`}
+            onChange={(event) =>
+              onNumberOperatorChange(
+                event.currentTarget.value as NumberFilterOperator,
+              )
+            }
+            aria-label={t('markdownTable.filter.numberAria', {
+              column: columnName,
+            })}
+          >
+            {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
+              ([value, labelKey]) => (
+                <option key={value} value={value}>
+                  {t(labelKey)}
+                </option>
+              ),
+            )}
+          </select>
+          <div className={styles.conditionInputs}>
+            <input
+              className={styles.conditionInput}
+              value={numberValue}
+              onChange={(event) =>
+                onNumberValueChange(event.currentTarget.value)
+              }
+              placeholder={t('markdownTable.filter.numberPlaceholder')}
+              name={`markdown-table-number-filter-${columnIndex}`}
+            />
+            {numberOperator === 'between' && (
+              <input
+                className={styles.conditionInput}
+                value={numberValueTo}
+                onChange={(event) =>
+                  onNumberValueToChange(event.currentTarget.value)
+                }
+                placeholder={t('markdownTable.filter.toPlaceholder')}
+                name={`markdown-table-number-filter-to-${columnIndex}`}
+              />
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <select
+            className={styles.conditionSelect}
+            value={textOperator}
+            name={`markdown-table-text-operator-${columnIndex}`}
+            onChange={(event) =>
+              onTextOperatorChange(
+                event.currentTarget.value as TextFilterOperator,
+              )
+            }
+            aria-label={t('markdownTable.filter.textAria', {
+              column: columnName,
+            })}
+          >
+            {Object.entries(TEXT_FILTER_LABEL_KEYS).map(([value, labelKey]) => (
+              <option key={value} value={value}>
+                {t(labelKey)}
+              </option>
+            ))}
+          </select>
+          <input
+            className={styles.conditionInput}
+            value={textValue}
+            onChange={(event) => onTextValueChange(event.currentTarget.value)}
+            placeholder={t('markdownTable.filter.textPlaceholder')}
+            name={`markdown-table-text-filter-${columnIndex}`}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function FilterMenuFooter({
+  onClear,
+  onClose,
+  onApply,
+}: {
+  onClear: () => void;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className={styles.filterFooter}>
+      <button
+        className={styles.secondaryButton}
+        type="button"
+        onClick={onClear}
+      >
+        {t('markdownTable.filter.reset')}
+      </button>
+      <span className={styles.footerSpacer} />
+      <button
+        className={styles.secondaryButton}
+        type="button"
+        onClick={onClose}
+      >
+        {t('markdownTable.filter.cancel')}
+      </button>
+      <button className={styles.primaryButton} type="button" onClick={onApply}>
+        {t('markdownTable.filter.confirm')}
+      </button>
+    </div>
+  );
+}
+
 function ColumnFilterMenu({
   columnName,
   columnIndex,
@@ -470,7 +745,6 @@ function ColumnFilterMenu({
     direction: SortState['direction'] | null,
   ) => void;
 }) {
-  const { t } = useI18n();
   const allOptionValues = useMemo(
     () => options.map((option) => option.value),
     [options],
@@ -566,189 +840,43 @@ function ColumnFilterMenu({
       aria-label={columnName}
     >
       <div className={styles.filterMenuTitle}>{columnName}</div>
-      <div className={styles.filterMenuSection}>
-        <button
-          className={`${styles.filterMenuAction} ${
-            sortedThisColumn?.direction === 'asc' ? styles.activeAction : ''
-          }`}
-          type="button"
-          onClick={() => onSort(columnIndex, 'asc')}
-        >
-          {t('markdownTable.sort.asc')}
-        </button>
-        <button
-          className={`${styles.filterMenuAction} ${
-            sortedThisColumn?.direction === 'desc' ? styles.activeAction : ''
-          }`}
-          type="button"
-          onClick={() => onSort(columnIndex, 'desc')}
-        >
-          {t('markdownTable.sort.desc')}
-        </button>
-        <button
-          className={styles.filterMenuAction}
-          type="button"
-          onClick={() => onSort(columnIndex, null)}
-        >
-          {t('markdownTable.sort.clear')}
-        </button>
-      </div>
-
-      <div className={styles.filterMenuSection}>
-        <input
-          className={styles.filterSearch}
-          value={search}
-          onChange={(event) => setSearch(event.currentTarget.value)}
-          placeholder={t('markdownTable.filter.searchPlaceholder')}
-          name={`markdown-table-option-search-${columnIndex}`}
-          aria-label={t('markdownTable.filter.searchAria', {
-            column: columnName,
-          })}
-        />
-        <label className={styles.filterOption}>
-          <input
-            type="checkbox"
-            name={`markdown-table-filter-all-${columnIndex}`}
-            checked={allFilteredSelected}
-            onChange={(event) =>
-              setFilteredSelection(event.currentTarget.checked)
-            }
-          />
-          <span>{t('markdownTable.filter.selectVisible')}</span>
-          <span className={styles.optionCount}>{filteredOptions.length}</span>
-        </label>
-        <div className={styles.filterOptionList}>
-          {visibleOptions.map((option, optionIndex) => (
-            <label key={option.value} className={styles.filterOption}>
-              <input
-                type="checkbox"
-                name={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
-                checked={selectedValues.has(option.value)}
-                onChange={() => toggleValue(option.value)}
-              />
-              <span className={styles.optionLabel}>{option.label}</span>
-              <span className={styles.optionCount}>{option.count}</span>
-            </label>
-          ))}
-          {filteredOptions.length > visibleOptions.length && (
-            <div className={styles.optionLimitHint}>
-              {t('markdownTable.filter.optionLimit', {
-                count: visibleOptions.length,
-              })}
-            </div>
-          )}
-          {filteredOptions.length === 0 && (
-            <div className={styles.optionLimitHint}>
-              {t('markdownTable.filter.noOptions')}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className={styles.filterMenuSection}>
-        <div className={styles.conditionTitle}>
-          {t('markdownTable.filter.custom')}
-        </div>
-        {isNumeric ? (
-          <>
-            <select
-              className={styles.conditionSelect}
-              value={numberOperator}
-              name={`markdown-table-number-operator-${columnIndex}`}
-              onChange={(event) =>
-                setNumberOperator(
-                  event.currentTarget.value as NumberFilterOperator,
-                )
-              }
-              aria-label={t('markdownTable.filter.numberAria', {
-                column: columnName,
-              })}
-            >
-              {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
-                ([value, labelKey]) => (
-                  <option key={value} value={value}>
-                    {t(labelKey)}
-                  </option>
-                ),
-              )}
-            </select>
-            <div className={styles.conditionInputs}>
-              <input
-                className={styles.conditionInput}
-                value={numberValue}
-                onChange={(event) => setNumberValue(event.currentTarget.value)}
-                placeholder={t('markdownTable.filter.numberPlaceholder')}
-                name={`markdown-table-number-filter-${columnIndex}`}
-              />
-              {numberOperator === 'between' && (
-                <input
-                  className={styles.conditionInput}
-                  value={numberValueTo}
-                  onChange={(event) =>
-                    setNumberValueTo(event.currentTarget.value)
-                  }
-                  placeholder={t('markdownTable.filter.toPlaceholder')}
-                  name={`markdown-table-number-filter-to-${columnIndex}`}
-                />
-              )}
-            </div>
-          </>
-        ) : (
-          <>
-            <select
-              className={styles.conditionSelect}
-              value={textOperator}
-              name={`markdown-table-text-operator-${columnIndex}`}
-              onChange={(event) =>
-                setTextOperator(event.currentTarget.value as TextFilterOperator)
-              }
-              aria-label={t('markdownTable.filter.textAria', {
-                column: columnName,
-              })}
-            >
-              {Object.entries(TEXT_FILTER_LABEL_KEYS).map(
-                ([value, labelKey]) => (
-                  <option key={value} value={value}>
-                    {t(labelKey)}
-                  </option>
-                ),
-              )}
-            </select>
-            <input
-              className={styles.conditionInput}
-              value={textValue}
-              onChange={(event) => setTextValue(event.currentTarget.value)}
-              placeholder={t('markdownTable.filter.textPlaceholder')}
-              name={`markdown-table-text-filter-${columnIndex}`}
-            />
-          </>
-        )}
-      </div>
-
-      <div className={styles.filterFooter}>
-        <button
-          className={styles.secondaryButton}
-          type="button"
-          onClick={clearFilter}
-        >
-          {t('markdownTable.filter.reset')}
-        </button>
-        <span className={styles.footerSpacer} />
-        <button
-          className={styles.secondaryButton}
-          type="button"
-          onClick={onClose}
-        >
-          {t('markdownTable.filter.cancel')}
-        </button>
-        <button
-          className={styles.primaryButton}
-          type="button"
-          onClick={applyDraft}
-        >
-          {t('markdownTable.filter.confirm')}
-        </button>
-      </div>
+      <SortMenuSection
+        columnIndex={columnIndex}
+        sortedThisColumn={sortedThisColumn}
+        onSort={onSort}
+      />
+      <ValueFilterSection
+        columnIndex={columnIndex}
+        columnName={columnName}
+        search={search}
+        filteredOptions={filteredOptions}
+        visibleOptions={visibleOptions}
+        selectedValues={selectedValues}
+        allFilteredSelected={allFilteredSelected}
+        onSearchChange={setSearch}
+        onFilteredSelectionChange={setFilteredSelection}
+        onToggleValue={toggleValue}
+      />
+      <CustomFilterSection
+        columnIndex={columnIndex}
+        columnName={columnName}
+        isNumeric={isNumeric}
+        textOperator={textOperator}
+        textValue={textValue}
+        numberOperator={numberOperator}
+        numberValue={numberValue}
+        numberValueTo={numberValueTo}
+        onTextOperatorChange={setTextOperator}
+        onTextValueChange={setTextValue}
+        onNumberOperatorChange={setNumberOperator}
+        onNumberValueChange={setNumberValue}
+        onNumberValueToChange={setNumberValueTo}
+      />
+      <FilterMenuFooter
+        onClear={clearFilter}
+        onClose={onClose}
+        onApply={applyDraft}
+      />
     </div>
   );
 }
