@@ -41,6 +41,8 @@ export const mcpCommand: SlashCommand = {
       };
     }
 
+    // desc, nodesc, and schema open this same MCP dialog. Their display state
+    // is owned outside this command, including Ctrl+T's slash-command path.
     return {
       type: 'dialog',
       dialog: 'mcp',

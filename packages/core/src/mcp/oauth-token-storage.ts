@@ -30,10 +30,11 @@ function warnPlaintextTokenStorage(tokenFile: string): void {
     return;
   }
   didWarnPlaintextTokenStorage = true;
-  debugLogger.warn(
+  const message =
     `MCP OAuth tokens are stored unencrypted at ${tokenFile}. ` +
-      `Set ${FORCE_ENCRYPTED_FILE_ENV_VAR}=true to require encrypted file storage.`,
-  );
+    `Set ${FORCE_ENCRYPTED_FILE_ENV_VAR}=true to require encrypted file storage.`;
+  debugLogger.warn(message);
+  process.stderr.write(`Warning: ${message}\n`);
 }
 
 /**
@@ -194,6 +195,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
           // Remove file if no tokens left
           await fs.unlink(tokenFile);
         } else {
+          warnPlaintextTokenStorage(tokenFile);
           await atomicWriteFile(
             tokenFile,
             JSON.stringify(tokenArray, null, 2),

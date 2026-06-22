@@ -190,6 +190,43 @@ describe('mcp-client', () => {
       );
     });
 
+    it('logs unusable SSE OAuth tokens when stored credentials disappear', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce(null);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'sse-server'.",
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'sse-server'.",
+      );
+    });
+
     it('reports missing OAuth configuration for SSE servers without stored credentials', async () => {
       vi.mocked(ClientLib.Client).mockReturnValue({
         connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),

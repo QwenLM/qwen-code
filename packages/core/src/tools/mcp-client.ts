@@ -1319,6 +1319,10 @@ export async function connectToMcpServer(
     unlistenDirectories = undefined;
   };
 
+  // Snapshot credentials before createTransport. Its internal getValidToken
+  // call may refresh or purge stored tokens, so the later 401 handler needs
+  // this pre-check to distinguish "had credentials, now unusable" from
+  // "never had OAuth configuration."
   let hadStoredSseOAuthCredentials = false;
 
   try {
@@ -1377,8 +1381,8 @@ export async function connectToMcpServer(
           }))
             ? 'accepted-token-rejected'
             : 'unusable';
-          debugLogger.warn(getSseOAuth401Message(mcpServerName, tokenState));
         }
+        debugLogger.warn(getSseOAuth401Message(mcpServerName, tokenState));
         throw new Error(getSseOAuth401Message(mcpServerName, tokenState));
       }
 
