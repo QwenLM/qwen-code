@@ -829,6 +829,7 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   artifactEnabled?: boolean;
+  artifactAutoOpen?: boolean;
   artifactPublisher?: 'local' | 'host' | 'oss';
   artifactHost?: ArtifactHostConfig;
   artifactOss?: ArtifactOssConfig;
@@ -1280,6 +1281,7 @@ export class Config {
   private readonly cronEnabled: boolean = true;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = false;
+  private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
@@ -1488,6 +1490,7 @@ export class Config {
     this.cronEnabled = params.cronEnabled ?? true;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? false;
+    this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
@@ -3996,6 +3999,11 @@ export class Config {
 
   getArtifactOssConfig(): ArtifactOssConfig | undefined {
     return this.artifactOss;
+  }
+
+  shouldAutoOpenArtifact(): boolean {
+    if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] === '1') return false;
+    return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
   }
 
   isWorkflowsEnabled(): boolean {

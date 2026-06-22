@@ -34,6 +34,7 @@ import {
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SessionBusyError,
   SessionNotFoundError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
@@ -2946,6 +2947,70 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('publishes session_branched only on the new session stream', async () => {
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== 'qwen/control/session/branch') return {};
+            return { newSessionId: 'branch-1', title: 'Branch 1' };
+          },
+          resumeSessionImpl: () => ({}),
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sourceAbort = new AbortController();
+      const sourceIter = bridge
+        .subscribeEvents(session.sessionId, { signal: sourceAbort.signal })
+        [Symbol.asyncIterator]();
+
+      const branch = await bridge.branchSession(session.sessionId, {
+        name: 'Branch 1',
+      });
+
+      const sourceEvent = await Promise.race([
+        sourceIter.next(),
+        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
+      ]);
+      expect(sourceEvent).toBe('timeout');
+      sourceAbort.abort();
+
+      const sourceReplayAbort = new AbortController();
+      const sourceReplayIter = bridge
+        .subscribeEvents(session.sessionId, {
+          lastEventId: 0,
+          signal: sourceReplayAbort.signal,
+        })
+        [Symbol.asyncIterator]();
+      const sourceReplayEvent = await Promise.race([
+        sourceReplayIter.next(),
+        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
+      ]);
+      expect(sourceReplayEvent).toMatchObject({
+        value: { type: 'replay_complete' },
+      });
+      const sourceReplayNext = await Promise.race([
+        sourceReplayIter.next(),
+        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
+      ]);
+      expect(sourceReplayNext).toBe('timeout');
+      sourceReplayAbort.abort();
+
+      const branchedIter = bridge
+        .subscribeEvents(branch.sessionId, { lastEventId: 0 })
+        [Symbol.asyncIterator]();
+      const replayed = await branchedIter.next();
+      expect(replayed.value).toMatchObject({
+        type: 'session_branched',
+        data: {
+          sourceSessionId: session.sessionId,
+          newSessionId: branch.sessionId,
+          displayName: 'Branch 1',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
     it('a failed prompt does not poison the queue for subsequent prompts', async () => {
       let promptCount = 0;
       const handles: ChannelHandle[] = [];
@@ -2982,6 +3047,37 @@ describe('createAcpSessionBridge', () => {
       });
       expect(ok).toEqual({ stopReason: 'end_turn' });
 
+      await bridge.shutdown();
+    });
+
+    it('rejects launchSessionForkAgent while a prompt is active', async () => {
+      let releasePrompt: (() => void) | undefined;
+      const handle = makeChannel({
+        promptImpl: async () =>
+          new Promise<PromptResponse>((resolve) => {
+            releasePrompt = () => resolve({ stopReason: 'end_turn' });
+          }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const active = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'active' }],
+      });
+      await vi.waitFor(() => expect(releasePrompt).toBeDefined());
+
+      await expect(
+        bridge.launchSessionForkAgent(session.sessionId, 'review this'),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+      expect(
+        handle.agent.extMethodCalls.some(
+          (call) => call.method === 'qwen/control/session/fork_agent',
+        ),
+      ).toBe(false);
+
+      releasePrompt!();
+      await expect(active).resolves.toEqual({ stopReason: 'end_turn' });
       await bridge.shutdown();
     });
 

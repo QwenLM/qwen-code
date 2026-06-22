@@ -747,6 +747,16 @@ const SETTINGS_SCHEMA = {
         description: 'Hide the window title bar',
         showInDialog: false,
       },
+      disableWorkflowKeywordTrigger: {
+        type: 'boolean',
+        label: 'Disable Workflow Keyword Trigger',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+        showInDialog: true,
+      },
       showStatusInTitle: {
         type: 'boolean',
         label: 'Show Status in Title',
@@ -2804,6 +2814,16 @@ const SETTINGS_SCHEMA = {
       'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
     showInDialog: false,
     properties: {
+      autoOpen: {
+        type: 'boolean',
+        label: 'Auto-open Artifacts',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.',
+        showInDialog: false,
+      },
       publisher: {
         type: 'enum',
         label: 'Artifact Publisher',

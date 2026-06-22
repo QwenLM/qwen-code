@@ -138,6 +138,7 @@ export function formatCommandSourceLabel(
     'skill-dir-command': 'Custom',
     'plugin-command': 'Plugin',
     'mcp-prompt': 'MCP',
+    'workflow-command': 'Workflow',
   };
 
   return command.source ? fallbackLabels[command.source] : 'Unknown';
