@@ -1723,6 +1723,52 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('requires a native audio prebuild file when release packaging opts in', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      'linux-x64',
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'linux-x64',
+            '--node-archive',
+            createFakeNodeArchive(tmpDir),
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          {
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1',
+            },
+            stdio: 'pipe',
+          },
+        ),
+      ).toThrow(/audio-capture prebuild.*linux-x64/);
+    } finally {
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
+      }
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
   itOnUnix('does not package audio-capture test artifacts', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -1732,7 +1778,11 @@ describe('standalone release packaging', () => {
       'prebuilds',
       'linux-x64',
     );
-    const prebuildFile = path.join(prebuildDir, 'node.napi.node');
+    const prebuildFile = path.join(
+      prebuildDir,
+      '@qwen-code+audio-capture.node',
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
     const createdPrebuild = !existsSync(prebuildFile);
 
     try {
@@ -1768,6 +1818,9 @@ describe('standalone release packaging', () => {
     } finally {
       if (createdPrebuild) {
         rmSync(prebuildFile, { force: true });
+      }
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
       }
       restoreMinimalDist(createdDist);
       rmSync(tmpDir, { recursive: true, force: true });

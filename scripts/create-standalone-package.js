@@ -301,7 +301,7 @@ function copyNativeAddon(packageRoot, target) {
   const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
   const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
   const prebuildSrc = path.join(addonSrc, 'prebuilds', prebuildDirName);
-  if (!fs.existsSync(prebuildSrc)) {
+  if (!hasNativePrebuild(prebuildSrc)) {
     if (process.env.QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1') {
       fail(
         `Required audio-capture prebuild is missing for ${prebuildDirName}: ${prebuildSrc}`,
@@ -358,6 +358,13 @@ function copyNativeAddon(packageRoot, target) {
   fs.cpSync(nodeGypBuildSrc, path.join(modulesDir, 'node-gyp-build'), copyOpts);
 
   assertNoSymlinks(modulesDir, 'Bundled native addon still contains symlinks.');
+}
+
+function hasNativePrebuild(prebuildDir) {
+  return (
+    fs.existsSync(prebuildDir) &&
+    fs.readdirSync(prebuildDir).some((entry) => entry.endsWith('.node'))
+  );
 }
 
 function topLevelDistEntryForPath(candidatePath) {
