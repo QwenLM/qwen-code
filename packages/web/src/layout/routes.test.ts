@@ -25,6 +25,7 @@ describe('web routes', () => {
 
   it('parses primary workspace views', () => {
     expect(route('/sessions')).toEqual({ view: 'sessions' });
+    expect(route('/tasks')).toEqual({ view: 'tasks' });
     expect(route('/files')).toEqual({ view: 'files', path: undefined });
     expect(route('/artifacts')).toEqual({ view: 'artifacts', path: undefined });
     expect(route('/mcp')).toEqual({ view: 'mcp' });
@@ -55,6 +56,7 @@ describe('web routes', () => {
       '/session/abc-123',
     );
     expect(buildWebRouteUrl({ view: 'sessions' })).toBe('/sessions');
+    expect(buildWebRouteUrl({ view: 'tasks' })).toBe('/tasks');
     expect(buildWebRouteUrl({ view: 'files' })).toBe('/files');
     expect(buildWebRouteUrl({ view: 'files', path: '.' })).toBe('/files');
     expect(
@@ -74,6 +76,7 @@ describe('web routes', () => {
       view: 'chat',
       sessionId: 'session-id',
     });
+    expect(routeForView('tasks')).toEqual({ view: 'tasks' });
     expect(routeForView('tools')).toEqual({ view: 'tools' });
   });
 });

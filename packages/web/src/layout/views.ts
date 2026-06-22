@@ -1,6 +1,7 @@
 export type WebViewId =
   | 'chat'
   | 'sessions'
+  | 'tasks'
   | 'files'
   | 'artifacts'
   | 'mcp'
@@ -25,6 +26,11 @@ export const WEB_VIEWS: WebViewDefinition[] = [
     id: 'sessions',
     label: '会话',
     description: '历史对话',
+  },
+  {
+    id: 'tasks',
+    label: '任务',
+    description: '流程时间线',
   },
   {
     id: 'files',

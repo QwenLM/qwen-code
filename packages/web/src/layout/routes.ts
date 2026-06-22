@@ -6,6 +6,7 @@ export type WebRoute =
 
 const VIEW_PATHS: Record<Exclude<WebViewId, 'chat'>, string> = {
   sessions: '/sessions',
+  tasks: '/tasks',
   files: '/files',
   artifacts: '/artifacts',
   mcp: '/mcp',

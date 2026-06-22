@@ -6,6 +6,7 @@ describe('WEB_VIEWS', () => {
     expect(WEB_VIEWS.map((view) => view.id)).toEqual([
       'chat',
       'sessions',
+      'tasks',
       'files',
       'artifacts',
       'mcp',

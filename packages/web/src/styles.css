@@ -1121,6 +1121,144 @@ pre {
   }
 }
 
+.task-summary-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.task-summary-card {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--web-border);
+  border-radius: 16px;
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+}
+
+.task-summary-card span {
+  color: var(--web-muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.task-summary-card strong {
+  color: var(--web-text);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.task-summary-card small {
+  color: var(--web-muted);
+  font-size: 11px;
+}
+
+.task-timeline-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task-timeline-item {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  position: relative;
+}
+
+.task-timeline-item::before {
+  background: var(--web-border);
+  bottom: -10px;
+  content: '';
+  left: 8px;
+  position: absolute;
+  top: 18px;
+  width: 1px;
+}
+
+.task-timeline-item:last-child::before {
+  display: none;
+}
+
+.task-timeline-marker {
+  background: var(--web-muted);
+  border: 3px solid rgba(255, 255, 255, 0.92);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--web-border);
+  height: 12px;
+  margin-top: 14px;
+  width: 12px;
+  z-index: 1;
+}
+
+.task-timeline-card {
+  min-width: 0;
+}
+
+.task-timeline-title-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-timeline-title-row h3,
+.task-timeline-card .web-card-main p {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.task-status-badge {
+  border: 1px solid var(--web-border);
+  border-radius: 999px;
+  color: var(--web-muted);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 3px 7px;
+}
+
+.task-status-running .task-timeline-marker,
+.task-status-running .task-status-badge,
+.task-status-pending .task-timeline-marker,
+.task-status-pending .task-status-badge {
+  background: rgba(69, 113, 181, 0.12);
+  border-color: rgba(69, 113, 181, 0.24);
+  color: #355f9b;
+}
+
+.task-status-completed .task-timeline-marker,
+.task-status-completed .task-status-badge {
+  background: rgba(78, 141, 108, 0.12);
+  border-color: rgba(78, 141, 108, 0.24);
+  color: #2f684d;
+}
+
+.task-status-failed .task-timeline-marker,
+.task-status-failed .task-status-badge,
+.task-status-cancelled .task-timeline-marker,
+.task-status-cancelled .task-status-badge {
+  background: rgba(180, 72, 72, 0.12);
+  border-color: rgba(180, 72, 72, 0.24);
+  color: #9a3d3d;
+}
+
+.task-status-blocked .task-timeline-marker,
+.task-status-blocked .task-status-badge {
+  background: rgba(177, 111, 46, 0.14);
+  border-color: rgba(177, 111, 46, 0.28);
+  color: #8f5b28;
+}
+
+@media (max-width: 900px) {
+  .task-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .memory-append-box {
   border-top: 1px solid var(--web-border);
   display: grid;

@@ -8,6 +8,7 @@ import { McpPanel } from './features/mcp/McpPanel';
 import { MemoryPanel } from './features/memory/MemoryPanel';
 import { SessionsPanel } from './features/sessions/SessionsPanel';
 import { SettingsPanel } from './features/settings/SettingsPanel';
+import { TaskTimelinePanel } from './features/task-timeline/TaskTimelinePanel';
 import { SkillsPanel } from './features/skills/SkillsPanel';
 import { ToolsPanel } from './features/tools/ToolsPanel';
 import { WebAppShell } from './layout/WebAppShell';
@@ -128,6 +129,7 @@ export function App({ config }: AppProps) {
       {activeView === 'sessions' ? (
         <SessionsPanel onOpenChat={openChat} />
       ) : null}
+      {activeView === 'tasks' ? <TaskTimelinePanel /> : null}
       {activeView === 'files' ? (
         <FilesPanel
           initialPath={route.view === 'files' ? route.path : undefined}

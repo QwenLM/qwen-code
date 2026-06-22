@@ -16,6 +16,7 @@ import type {
   DaemonTranscriptBlock,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useWebArtifacts } from '../artifacts/useWebArtifacts';
+import { useTaskTimeline } from '../task-timeline/useTaskTimeline';
 
 const MAX_RECENT_ITEMS = 5;
 const MAX_NOTICE_ITEMS = 2;
@@ -36,6 +37,7 @@ export function TaskRail({ onAddToChat, onOpenFile }: TaskRailProps) {
   const activeTodoList = useActiveTodoList();
   const { notices } = useSessionNotices();
   const { artifacts } = useWebArtifacts();
+  const { summary: timelineSummary } = useTaskTimeline();
 
   const currentTool = getCurrentTool(transcriptState, blocks);
   const recentTools = getRecentToolBlocks(blocks);
@@ -101,6 +103,22 @@ export function TaskRail({ onAddToChat, onOpenFile }: TaskRailProps) {
             <span>{activityLabel(promptStatus, streamingState)}</span>
           </div>
         )}
+      </section>
+
+      <section className="web-task-section">
+        <h3>流程摘要</h3>
+        <div className="web-task-list">
+          <TaskRow label="Events" value={`${timelineSummary.total}`} />
+          <TaskRow label="Running" value={`${timelineSummary.running}`} />
+          <TaskRow label="Completed" value={`${timelineSummary.completed}`} />
+          <TaskRow
+            label="Attention"
+            value={`${timelineSummary.blocked + timelineSummary.failed}`}
+          />
+          {timelineSummary.activeTitle ? (
+            <p className="web-task-muted">{timelineSummary.activeTitle}</p>
+          ) : null}
+        </div>
       </section>
 
       <section className="web-task-section">
