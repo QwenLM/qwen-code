@@ -4,12 +4,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+
+const coreMock = vi.hoisted(() => ({
+  throwModelsConfigError: false,
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  class TestModelsConfig extends actual.ModelsConfig {
+    constructor(options: ConstructorParameters<typeof actual.ModelsConfig>[0]) {
+      if (coreMock.throwModelsConfigError) {
+        throw new Error(
+          'Failed loading provider https://user:secret@broken.example/v1',
+        );
+      }
+      super(options);
+    }
+  }
+  return {
+    ...actual,
+    ModelsConfig: TestModelsConfig,
+  };
+});
 
 describe('createWorkspaceProvidersStatusProvider', () => {
   let tmpDir: string;
@@ -36,6 +59,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       tmpDir,
       'system-defaults.json',
     );
+    coreMock.throwModelsConfigError = false;
     resetHomeEnvBootstrapForTesting();
   });
 
@@ -261,6 +285,23 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         },
       ],
     });
+  });
+
+  it('sanitizes credentials from provider construction errors', async () => {
+    coreMock.throwModelsConfigError = true;
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(JSON.stringify(result)).toContain('https://broken.example/v1');
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(result.initialized).toBe(false);
   });
 
   async function writeUserSettings(settings: Record<string, unknown>) {

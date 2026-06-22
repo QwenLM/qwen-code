@@ -188,7 +188,9 @@ function buildWorkspaceProvidersStatus(
         {
           kind: 'providers',
           status: 'error',
-          error: error instanceof Error ? error.message : String(error),
+          error: sanitizeProviderWarning(
+            error instanceof Error ? error.message : String(error),
+          ),
         },
       ],
     };
