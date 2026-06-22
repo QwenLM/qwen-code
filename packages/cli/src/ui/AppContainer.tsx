@@ -1178,6 +1178,26 @@ export const AppContainer = (props: AppContainerProps) => {
     setIsDiffDialogOpen(false);
   }, []);
 
+  // Skill-review dialog: shown to confirm auto-generated skills before they
+  // enter the skill library. State is populated by Task 11 (subscription);
+  // the dialog component is Task 9. Only the plumbing lives here.
+  const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
+  const [skillReviewPending, setSkillReviewPending] =
+    useState<UIState['skillReviewPending']>(null);
+  const openSkillReviewDialog = useCallback(() => {
+    setIsSkillReviewDialogOpen(true);
+  }, []);
+  const closeSkillReviewDialog = useCallback(() => {
+    setIsSkillReviewDialogOpen(false);
+    setSkillReviewPending(null);
+  }, []);
+  const acceptPendingSkill = useCallback((_skillName: string) => {
+    // Placeholder — real implementation lands in Task 11.
+  }, []);
+  const rejectPendingSkill = useCallback((_skillName: string) => {
+    // Placeholder — real implementation lands in Task 11.
+  }, []);
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -3392,6 +3412,8 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isTrustDialogOpen,
@@ -3526,6 +3548,8 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isTrustDialogOpen,
@@ -3654,6 +3678,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      openSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -3740,6 +3768,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      openSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,

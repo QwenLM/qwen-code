@@ -41,6 +41,11 @@ import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 
+export interface PendingSkillView {
+  name: string;
+  description: string;
+}
+
 export interface UIState {
   history: HistoryItem[];
   historyManager: UseHistoryManagerReturn;
@@ -57,6 +62,9 @@ export interface UIState {
   statusLineSettingsVersion?: number;
   statusLineConfigOverride?: StatusLinePresetConfig;
   isMemoryDialogOpen: boolean;
+  isSkillReviewDialogOpen: boolean;
+  /** Pending auto-skills awaiting confirmation, plus their owning task id. */
+  skillReviewPending: { taskId: string; skills: PendingSkillView[] } | null;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
   isTrustDialogOpen: boolean;
