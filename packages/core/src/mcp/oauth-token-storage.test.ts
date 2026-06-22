@@ -144,6 +144,20 @@ describe('MCPOAuthTokenStorage', () => {
     });
 
     describe('saveToken', () => {
+      it('should warn once when writing plaintext tokens', async () => {
+        vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
+        vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+
+        await tokenStorage.saveToken('server1', mockToken);
+        await tokenStorage.saveToken('server2', mockToken);
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(FORCE_ENCRYPTED_FILE_ENV_VAR),
+        );
+      });
+
       it('should save token with restricted permissions', async () => {
         vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
         vi.mocked(fs.mkdir).mockResolvedValue(undefined);

@@ -88,15 +88,30 @@ export function getMcpOAuthDialogInstruction(
   ].join(' ');
 }
 
+type SseOAuth401TokenState = 'accepted-token-rejected' | 'unusable' | 'missing';
+
 function getSseOAuth401Message(
   mcpServerName: string,
-  hasStoredTokens: boolean,
+  tokenState: SseOAuth401TokenState,
 ): string {
-  return hasStoredTokens
-    ? `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-        getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
-    : `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-        getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+  if (tokenState === 'accepted-token-rejected') {
+    return (
+      `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
+      getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
+    );
+  }
+
+  if (tokenState === 'unusable') {
+    return (
+      `Stored OAuth tokens for SSE server '${mcpServerName}' are expired or could not be refreshed. ` +
+      getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
+    );
+  }
+
+  return (
+    `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
+    getMcpOAuthDialogInstruction('authenticate', mcpServerName)
+  );
 }
 
 async function readResponseBodyExcerpt(
@@ -1304,7 +1319,20 @@ export async function connectToMcpServer(
     unlistenDirectories = undefined;
   };
 
+  let hadStoredSseOAuthCredentials = false;
+
   try {
+    if (
+      mcpServerConfig.url &&
+      !mcpServerConfig.httpUrl &&
+      !mcpServerConfig.oauth?.enabled
+    ) {
+      const tokenStorage = new MCPOAuthTokenStorage();
+      hadStoredSseOAuthCredentials = Boolean(
+        await tokenStorage.getCredentials(mcpServerName),
+      );
+    }
+
     const transport = await createTransport(
       mcpServerName,
       mcpServerConfig,
@@ -1335,23 +1363,23 @@ export async function connectToMcpServer(
         mcpServerConfig.httpUrl || mcpServerConfig.oauth?.enabled;
 
       if (!shouldTriggerOAuth) {
-        // For SSE servers without explicit OAuth config, if a token was found but rejected, report it accurately.
+        // For SSE servers without explicit OAuth config, report whether
+        // the 401 came after trying stored credentials or without any OAuth setup.
         const tokenStorage = new MCPOAuthTokenStorage();
         const credentials = await tokenStorage.getCredentials(mcpServerName);
-        let hasStoredTokens = false;
+        let tokenState: SseOAuth401TokenState =
+          credentials || hadStoredSseOAuthCredentials ? 'unusable' : 'missing';
         if (credentials) {
           const authProvider = new MCPOAuthProvider(tokenStorage);
-          hasStoredTokens = Boolean(
-            await authProvider.getValidToken(mcpServerName, {
-              // Pass client ID if available
-              clientId: credentials.clientId,
-            }),
-          );
-          debugLogger.warn(
-            getSseOAuth401Message(mcpServerName, hasStoredTokens),
-          );
+          tokenState = (await authProvider.getValidToken(mcpServerName, {
+            // Pass client ID if available
+            clientId: credentials.clientId,
+          }))
+            ? 'accepted-token-rejected'
+            : 'unusable';
+          debugLogger.warn(getSseOAuth401Message(mcpServerName, tokenState));
         }
-        throw new Error(getSseOAuth401Message(mcpServerName, hasStoredTokens));
+        throw new Error(getSseOAuth401Message(mcpServerName, tokenState));
       }
 
       // Try to extract www-authenticate header from the error

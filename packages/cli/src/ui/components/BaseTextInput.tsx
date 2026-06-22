@@ -20,7 +20,7 @@
  */
 
 import type { ReactNode } from 'react';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useInsertionEffect, useRef } from 'react';
 import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
 import { addLayoutListener } from 'ink/dom';
 import chalk from 'chalk';
@@ -350,13 +350,12 @@ export const BaseTextInput = ({
     });
   }, [getCurrentCursorPosition, setCursorPosition]);
 
-  useEffect(() => () => setCursorPosition(undefined), [setCursorPosition]);
-
   const cursorPosition = hasMeasured ? getCurrentCursorPosition() : undefined;
 
-  // useCursor propagates its latest value during Ink's insertion effect, so the
-  // position must be set during render rather than in a normal effect.
-  setCursorPosition(cursorPosition);
+  useInsertionEffect(() => {
+    setCursorPosition(cursorPosition);
+    return () => setCursorPosition(undefined);
+  }, [cursorPosition, setCursorPosition]);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (

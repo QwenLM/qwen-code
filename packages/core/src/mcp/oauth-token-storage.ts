@@ -23,6 +23,19 @@ import {
 
 const debugLogger = createDebugLogger('MCP_OAUTH');
 
+let didWarnPlaintextTokenStorage = false;
+
+function warnPlaintextTokenStorage(tokenFile: string): void {
+  if (didWarnPlaintextTokenStorage) {
+    return;
+  }
+  didWarnPlaintextTokenStorage = true;
+  debugLogger.warn(
+    `MCP OAuth tokens are stored unencrypted at ${tokenFile}. ` +
+      `Set ${FORCE_ENCRYPTED_FILE_ENV_VAR}=true to require encrypted file storage.`,
+  );
+}
+
 /**
  * Class for managing MCP OAuth token storage and retrieval.
  */
@@ -100,6 +113,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
     const tokenFile = this.getTokenFilePath();
 
     try {
+      warnPlaintextTokenStorage(tokenFile);
       await atomicWriteFile(tokenFile, JSON.stringify(tokenArray, null, 2), {
         mode: 0o600,
         forceMode: true,

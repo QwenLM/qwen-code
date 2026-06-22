@@ -147,6 +147,16 @@ describe('BaseTextInput', () => {
     expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
   });
 
+  it('hides the physical cursor when showCursor is false', () => {
+    const buffer = createBuffer();
+
+    render(
+      <BaseTextInput buffer={buffer} onSubmit={vi.fn()} showCursor={false} />,
+    );
+
+    expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
+  });
+
   it('updates the physical cursor position on root layout commits', () => {
     const buffer = createBuffer();
     let layoutListener: (() => void) | undefined;
