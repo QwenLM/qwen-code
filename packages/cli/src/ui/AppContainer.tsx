@@ -3116,12 +3116,14 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
-      // ThinkingViewer owns all input while open; only ESC passes through
+      // ThinkingViewer owns all input while open.
+      // Ctrl+C / Ctrl+D close the viewer and fall through to quit/exit.
       if (thinkingViewerData) {
-        if (keyMatchers[Command.ESCAPE](key)) {
+        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
           closeThinkingViewer();
+        } else {
+          return;
         }
-        return;
       }
 
       if (keyMatchers[Command.QUIT](key)) {

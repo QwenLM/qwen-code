@@ -97,6 +97,67 @@ interface HistoryItemDisplayProps {
   thinkingFullText?: string;
 }
 
+/**
+ * Wraps ThinkMessage with mouse click-to-open handling.
+ * Extracted so that non-thought HistoryItemDisplay instances
+ * don't pay the useMouseEvents/useRef/useCallback hook cost.
+ */
+const ClickableThinkMessage: React.FC<{
+  text: string;
+  viewerText: string;
+  isPending: boolean;
+  expanded: boolean;
+  availableTerminalHeight?: number;
+  contentWidth: number;
+  durationMs?: number;
+}> = ({
+  text,
+  viewerText,
+  isPending,
+  expanded,
+  availableTerminalHeight,
+  contentWidth,
+  durationMs,
+}) => {
+  const ref = useRef<DOMElement>(null);
+  const { openThinkingViewer } = useThinkingViewer();
+  const isActive = !isPending && !expanded;
+
+  useMouseEvents(
+    useCallback(
+      (event: MouseEvent) => {
+        if (event.name !== 'left-press' || !ref.current) return;
+        const metrics = measureElementPosition(ref.current);
+        const col = event.col - 1;
+        const row = event.row - 1;
+        if (
+          col >= metrics.x &&
+          col < metrics.x + metrics.width &&
+          row >= metrics.y &&
+          row < metrics.y + metrics.height
+        ) {
+          openThinkingViewer({ text: viewerText, durationMs });
+        }
+      },
+      [openThinkingViewer, viewerText, durationMs],
+    ),
+    { isActive },
+  );
+
+  return (
+    <Box ref={isActive ? ref : undefined}>
+      <ThinkMessage
+        text={text}
+        isPending={isPending}
+        expanded={expanded}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+        durationMs={durationMs}
+      />
+    </Box>
+  );
+};
+
 function getHistoryItemMarginTop(item: HistoryItem): number {
   switch (item.type) {
     case 'gemini':
@@ -151,47 +212,10 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const { compactMode } = useCompactMode();
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
-  const { openThinkingViewer } = useThinkingViewer();
 
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
-
-  const thoughtRef = useRef<DOMElement>(null);
-  const isClickableThought =
-    !isPending && !thoughtExpanded && itemForDisplay.type === 'gemini_thought';
-
-  const thoughtText = isClickableThought
-    ? thinkingFullText || itemForDisplay.text
-    : '';
-  const thoughtDurationMs = isClickableThought
-    ? itemForDisplay.durationMs
-    : undefined;
-
-  useMouseEvents(
-    useCallback(
-      (event: MouseEvent) => {
-        if (event.name !== 'left-press' || !thoughtRef.current) return;
-        const metrics = measureElementPosition(thoughtRef.current);
-        // SGR mouse coordinates are 1-based; yoga layout is 0-based
-        const col = event.col - 1;
-        const row = event.row - 1;
-        if (
-          col >= metrics.x &&
-          col < metrics.x + metrics.width &&
-          row >= metrics.y &&
-          row < metrics.y + metrics.height
-        ) {
-          openThinkingViewer({
-            text: thoughtText,
-            durationMs: thoughtDurationMs,
-          });
-        }
-      },
-      [openThinkingViewer, thoughtText, thoughtDurationMs],
-    ),
-    { isActive: isClickableThought },
-  );
 
   return (
     <Box
@@ -245,18 +269,17 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'gemini_thought' && (
-        <Box ref={isClickableThought ? thoughtRef : undefined}>
-          <ThinkMessage
-            text={itemForDisplay.text.trimEnd()}
-            isPending={isPending}
-            expanded={thoughtExpanded}
-            availableTerminalHeight={
-              availableTerminalHeightGemini ?? availableTerminalHeight
-            }
-            contentWidth={contentWidth}
-            durationMs={itemForDisplay.durationMs}
-          />
-        </Box>
+        <ClickableThinkMessage
+          text={itemForDisplay.text.trimEnd()}
+          viewerText={(thinkingFullText || itemForDisplay.text).trimEnd()}
+          isPending={isPending}
+          expanded={thoughtExpanded}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          contentWidth={contentWidth}
+          durationMs={itemForDisplay.durationMs}
+        />
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
