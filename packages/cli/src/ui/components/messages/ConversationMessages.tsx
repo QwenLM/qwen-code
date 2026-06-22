@@ -24,6 +24,12 @@ import {
 import { t } from '../../../i18n/index.js';
 import { getCachedStringWidth } from '../../utils/textUtils.js';
 
+// Prefer emoji lightbulb; fall back to ⟡ in CI or non-UTF-8 locales.
+const supportsEmoji =
+  !process.env['CI'] &&
+  /utf-?8/i.test(process.env['LANG'] || process.env['LC_ALL'] || '');
+export const THINKING_ICON = supportsEmoji ? '💡' : '⟡';
+
 interface UserMessageProps {
   text: string;
   width?: number;
@@ -388,7 +394,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
         : t('Thinking');
     return (
       <Text dimColor italic>
-        {label} {t('(click to view)')}
+        {THINKING_ICON} {label} {t('(click to view)')}
       </Text>
     );
   }
@@ -409,7 +415,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Box flexDirection="column">
         <Text dimColor italic>
-          ⟡ {t('Thinking')}…{durationSuffix}
+          {THINKING_ICON} {t('Thinking')}…{durationSuffix}
         </Text>
         <Box paddingLeft={2}>
           <Text dimColor wrap="truncate">
@@ -427,7 +433,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {expandedLabel}
+        {THINKING_ICON} {expandedLabel}
       </Text>
       <Box paddingLeft={2} flexDirection="column">
         <MarkdownDisplay

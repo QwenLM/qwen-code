@@ -16,6 +16,7 @@ import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import { AlternateScreen } from './AlternateScreen.js';
 import type { ThinkingViewerData } from '../contexts/ThinkingViewerContext.js';
+import { THINKING_ICON } from './messages/ConversationMessages.js';
 
 interface ThinkingViewerProps {
   data: ThinkingViewerData;
@@ -118,8 +119,7 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
       >
         <Box>
           <Text color={theme.text.accent} bold>
-            {'⟡ '}
-            {title}
+            {THINKING_ICON} {title}
           </Text>
           <Text dimColor>{scrollIndicator}</Text>
         </Box>
