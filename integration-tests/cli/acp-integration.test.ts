@@ -508,17 +508,17 @@ function setupAcpTest(
       expect(modelOption).toBeDefined();
       expect(modelOption!.currentValue).toBeTruthy();
 
-      const modelId = modelOption!.currentValue;
-      expect(
-        newSession.models.availableModels.some(
-          (model) => model.modelId === modelId,
-        ),
-      ).toBe(true);
+      // Test: Set model using set_config_option
+      // Use openai model to avoid auth issues
+      const openaiModel = newSession.models.availableModels.find((model) =>
+        model.modelId.includes('openai'),
+      );
+      expect(openaiModel).toBeDefined();
 
       const setModelResult = (await sendRequest('session/set_config_option', {
         sessionId: newSession.sessionId,
         configId: 'model',
-        value: modelId,
+        value: openaiModel!.modelId,
       })) as {
         configOptions: Array<{
           id: string;
@@ -535,7 +535,7 @@ function setupAcpTest(
         (opt) => opt.id === 'model',
       );
       expect(updatedModelOption).toBeDefined();
-      expect(updatedModelOption!.currentValue).toBe(modelId);
+      expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));
