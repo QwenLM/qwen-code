@@ -25,12 +25,12 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useAgentViewActions } from '../../contexts/AgentViewContext.js';
 import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
-import type { HistoryItem } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { theme } from '../../semantic-colors.js';
 import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
 import { AgentHeader } from './AgentHeader.js';
+import { buildThinkingFullTextMap } from '../../utils/historyUtils.js';
 
 export interface AgentChatContentProps {
   /** The agent's AgentCore — the source of truth for transcript state. */
@@ -199,25 +199,10 @@ export const AgentChatContent = ({
   const committedItems = allItems.slice(0, splitIndex);
   const pendingItems = allItems.slice(splitIndex);
 
-  const thinkingFullTextByItem = useMemo(() => {
-    const map = new Map<HistoryItem, string>();
-    for (let i = 0; i < allItems.length; i++) {
-      const item = allItems[i]!;
-      if (item.type !== 'gemini_thought') continue;
-      let fullText = item.text;
-      let hasContinuation = false;
-      for (let j = i + 1; j < allItems.length; j++) {
-        const next = allItems[j]!;
-        if (next.type !== 'gemini_thought_content') break;
-        fullText += '\n' + next.text;
-        hasContinuation = true;
-      }
-      if (hasContinuation) {
-        map.set(item, fullText);
-      }
-    }
-    return map;
-  }, [allItems]);
+  const thinkingFullTextByItem = useMemo(
+    () => buildThinkingFullTextMap(allItems),
+    [allItems],
+  );
 
   const agentWorkingDir = core.runtimeContext.getTargetDir() ?? '';
   // Cache the branch — it won't change during the agent's lifetime and

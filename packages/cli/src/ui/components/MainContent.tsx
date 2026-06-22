@@ -25,6 +25,7 @@ import {
   isForceExpandGroup,
   mergeCompactToolGroups,
 } from '../utils/mergeCompactToolGroups.js';
+import { buildThinkingFullTextMap } from '../utils/historyUtils.js';
 import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
@@ -487,27 +488,10 @@ export const MainContent = () => {
     return map;
   }, [historyItemsWithSourceCopyOffsets]);
 
-  // Aggregate continuation text for each gemini_thought item so the
-  // thinking viewer can show the full reasoning (header + continuations).
-  const thinkingFullTextByItem = useMemo(() => {
-    const map = new Map<HistoryItem, string>();
-    for (let i = 0; i < mergedHistory.length; i++) {
-      const item = mergedHistory[i]!;
-      if (item.type !== 'gemini_thought') continue;
-      let fullText = item.text;
-      let hasContinuation = false;
-      for (let j = i + 1; j < mergedHistory.length; j++) {
-        const next = mergedHistory[j]!;
-        if (next.type !== 'gemini_thought_content') break;
-        fullText += '\n' + next.text;
-        hasContinuation = true;
-      }
-      if (hasContinuation) {
-        map.set(item, fullText);
-      }
-    }
-    return map;
-  }, [mergedHistory]);
+  const thinkingFullTextByItem = useMemo(
+    () => buildThinkingFullTextMap(mergedHistory),
+    [mergedHistory],
+  );
   const thinkingFullTextByItemRef = useRef(thinkingFullTextByItem);
   thinkingFullTextByItemRef.current = thinkingFullTextByItem;
 

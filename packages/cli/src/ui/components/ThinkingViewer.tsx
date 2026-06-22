@@ -134,7 +134,7 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
         <Box justifyContent="center">
           <Text dimColor italic>
             ESC {t('to close')} {'  '}↑↓ {t('to scroll')} {'  '}PgUp/PgDn{' '}
-            Home/End
+            Ctrl+Home/End
           </Text>
         </Box>
       </Box>
