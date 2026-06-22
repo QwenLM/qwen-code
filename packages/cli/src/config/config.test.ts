@@ -2525,6 +2525,27 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getAutoSkillEnabled()).toBe(true);
   });
 
+  it('autoSkillConfirm: defaults to true when unset', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+  });
+
+  it('autoSkillConfirm: passes memory.autoSkillConfirm: false through to config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      memory: {
+        autoSkillConfirm: false,
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();

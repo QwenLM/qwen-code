@@ -2,6 +2,7 @@ export interface QwenMemorySettings {
   enableManagedAutoMemory: boolean;
   enableManagedAutoDream: boolean;
   enableAutoSkill: boolean;
+  autoSkillConfirm: boolean;
 }
 
 export interface QwenMemoryPaths {
@@ -16,6 +17,7 @@ export const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: false,
   enableAutoSkill: false,
+  autoSkillConfirm: true,
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -41,5 +43,9 @@ export function normalizeQwenMemorySettings(
       typeof memoryRecord.enableAutoSkill === 'boolean'
         ? memoryRecord.enableAutoSkill
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableAutoSkill,
+    autoSkillConfirm:
+      typeof memoryRecord.autoSkillConfirm === 'boolean'
+        ? memoryRecord.autoSkillConfirm
+        : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
   };
 }
