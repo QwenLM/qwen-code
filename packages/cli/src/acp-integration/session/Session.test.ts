@@ -274,6 +274,24 @@ describe('computeMaxModelFacingUserTurnCountFromHistory', () => {
       ),
     ).toBe(5);
   });
+
+  it('ignores pre-PR rewind records without a model-facing peak', () => {
+    expect(
+      computeMaxModelFacingUserTurnCountFromHistory(
+        [
+          chatRecord({
+            uuid: 'legacy-rewind',
+            type: 'system',
+            subtype: 'rewind',
+            systemPayload: {
+              truncatedCount: 3,
+            },
+          }),
+        ],
+        'test-session-id',
+      ),
+    ).toBe(0);
+  });
 });
 
 // Helper to create empty async generator (avoids memory leak from inline generators)
@@ -1307,6 +1325,51 @@ describe('Session', () => {
       expect(getSessionModelFacingUserTurnCount(session)).toBe(2);
     });
 
+    it('rewinds correctly after restoring legacy history arrays', () => {
+      setSessionTurnCounters(session, { modelFacingUserTurnCount: 99 });
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+        { role: 'user', parts: [{ text: 'third' }] },
+        { role: 'model', parts: [{ text: 'third reply' }] },
+      ];
+
+      session.restoreHistory(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(getSessionModelFacingUserTurnCount(session)).toBe(1);
+    });
+
+    it('does not count background notifications when restoring legacy history arrays', () => {
+      setSessionTurnCounters(session, { modelFacingUserTurnCount: 99 });
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<task-notification><status>completed</status></task-notification>',
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'noted' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ];
+
+      session.restoreHistory(history);
+
+      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      expect(getSessionModelFacingUserTurnCount(session)).toBe(2);
+    });
+
     it('does not count compression summaries when restoring legacy history arrays', () => {
       setSessionTurnCounters(session, { modelFacingUserTurnCount: 99 });
       const history: Content[] = [
@@ -2095,6 +2158,100 @@ describe('Session', () => {
           source: 'background_notification',
         },
       );
+      expect(getSessionModelFacingUserTurnCount(session)).toBe(1);
+    });
+
+    it('does not advance prompt count when a compressed notification is stopped before streaming', async () => {
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat
+        .mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        })
+        .mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 101,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+      callback(
+        'Background agent "worker" completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(getSessionModelFacingUserTurnCount(session)).toBe(1);
+    });
+
+    it('does not advance prompt count when a dispatched notification stream throws', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockImplementationOnce(
+          async (_model: string, request: { message: Part[] }) => {
+            mockChat.addHistory({ role: 'user', parts: request.message });
+            return createFailingDispatchedStream('notification stream failed');
+          },
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+      callback(
+        'Background agent "worker" completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              type: 'text',
+              text: '[notification error] notification stream failed',
+            }),
+          }),
+        });
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(getSessionModelFacingUserTurnCount(session)).toBe(1);
     });
 
     it('cancels an in-flight background notification prompt', async () => {
@@ -3186,7 +3343,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
-      it('keeps model-facing turn count when compressed send is stopped before streaming', async () => {
+      it('rolls back model-facing turn count when a compressed send is stopped before streaming', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
           originalTokenCount: 1200,
@@ -3207,7 +3364,7 @@ describe('Session', () => {
         expect(mockGeminiClient.tryCompressChat).toHaveBeenCalled();
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(mockChat.addHistory).not.toHaveBeenCalled();
-        expect(getSessionModelFacingUserTurnCount(session)).toBe(1);
+        expect(getSessionModelFacingUserTurnCount(session)).toBe(0);
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -4945,7 +5102,7 @@ describe('Session', () => {
           expect.any(AbortSignal),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-        expect(getSessionModelFacingUserTurnCount(session)).toBe(2);
+        expect(getSessionModelFacingUserTurnCount(session)).toBe(1);
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -5199,7 +5356,7 @@ describe('Session', () => {
           expect.any(AbortSignal),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-        expect(getSessionModelFacingUserTurnCount(session)).toBe(2);
+        expect(getSessionModelFacingUserTurnCount(session)).toBe(1);
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -5308,6 +5465,46 @@ describe('Session', () => {
           });
         });
         expect(getSessionModelFacingUserTurnCount(session)).toBe(2);
+      });
+
+      it('rolls back cron prompt count when a non-compressed send is stopped before streaming', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            callback({ prompt: 'scheduled prompt' });
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce({
+            originalTokenCount: 50,
+            newTokenCount: 50,
+            compressionStatus: core.CompressionStatus.NOOP,
+          })
+          .mockResolvedValueOnce({
+            originalTokenCount: 101,
+            newTokenCount: 101,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(getSessionModelFacingUserTurnCount(session)).toBe(0);
       });
 
       it('does not auto-compress slash commands handled without a model send', async () => {

@@ -195,6 +195,26 @@ export interface HistorySnapshot {
   modelFacingUserTurnCount: number;
 }
 
+export function isHistorySnapshot(value: unknown): value is HistorySnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const snapshot = value as {
+    history?: unknown;
+    modelFacingUserTurnCount?: unknown;
+  };
+  const count = snapshot.modelFacingUserTurnCount;
+  return (
+    Array.isArray(snapshot.history) &&
+    snapshot.history.length > 0 &&
+    typeof count === 'number' &&
+    Number.isInteger(count) &&
+    Number.isFinite(count) &&
+    count >= 0 &&
+    count <= Number.MAX_SAFE_INTEGER
+  );
+}
+
 function computeVisibleModelFacingUserTurnCount(apiHistory: Content[]): number {
   const startIndex = getStartupContextLength(apiHistory);
   if (hasCompressionSummaryPair(apiHistory, startIndex)) {
@@ -1676,7 +1696,6 @@ export class Session implements SessionContext {
                   null;
                 const streamStartTime = Date.now();
                 let recordedModelFacingTurn = false;
-                let sendHistoryCompressed = false;
                 let sendDispatched = false;
 
                 try {
@@ -1688,12 +1707,8 @@ export class Session implements SessionContext {
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
                     );
-                  sendHistoryCompressed = !!sendResult.historyCompressed;
                   if (!sendResult.responseStream) {
-                    if (
-                      sendResult.stopReason !== 'cancelled' &&
-                      !sendHistoryCompressed
-                    ) {
+                    if (sendResult.stopReason !== 'cancelled') {
                       this.#rollbackModelFacingUserTurn(
                         recordedModelFacingTurn,
                       );
@@ -1747,7 +1762,7 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
-                  if (!sendDispatched && !sendHistoryCompressed) {
+                  if (!sendDispatched) {
                     this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
                   }
                   // Only explicit user cancellation maps to a normal
@@ -1987,7 +2002,6 @@ export class Session implements SessionContext {
           let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
           const streamStartTime = Date.now();
           let recordedModelFacingTurn = false;
-          let sendHistoryCompressed = false;
           let sendDispatched = false;
 
           try {
@@ -2000,12 +2014,8 @@ export class Session implements SessionContext {
                 pendingSend.signal,
                 { skipCompression: stopHookIterationCount > 1 },
               );
-            sendHistoryCompressed = !!continueSendResult.historyCompressed;
             if (!continueSendResult.responseStream) {
-              if (
-                continueSendResult.stopReason !== 'cancelled' &&
-                !continueSendResult.historyCompressed
-              ) {
+              if (continueSendResult.stopReason !== 'cancelled') {
                 this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
               }
               this.#preserveUnsentMessageHistory(
@@ -2054,7 +2064,7 @@ export class Session implements SessionContext {
               }
             }
           } catch (error) {
-            if (!sendDispatched && !sendHistoryCompressed) {
+            if (!sendDispatched) {
               this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
             }
 
@@ -2774,7 +2784,6 @@ export class Session implements SessionContext {
                   null;
                 const streamStartTime = Date.now();
                 let recordedModelFacingTurn = false;
-                let sendHistoryCompressed = false;
                 let sendDispatched = false;
 
                 try {
@@ -2786,12 +2795,8 @@ export class Session implements SessionContext {
                       nextMessage.parts ?? [],
                       ac.signal,
                     );
-                  sendHistoryCompressed = !!sendResult.historyCompressed;
                   if (!sendResult.responseStream) {
-                    if (
-                      sendResult.stopReason !== 'cancelled' &&
-                      !sendHistoryCompressed
-                    ) {
+                    if (sendResult.stopReason !== 'cancelled') {
                       this.#rollbackModelFacingUserTurn(
                         recordedModelFacingTurn,
                       );
@@ -2856,7 +2861,7 @@ export class Session implements SessionContext {
                     );
                   }
                 } catch (error) {
-                  if (!sendDispatched && !sendHistoryCompressed) {
+                  if (!sendDispatched) {
                     this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
                   }
                   throw error;
@@ -3097,25 +3102,18 @@ export class Session implements SessionContext {
               null;
             let responseText = '';
             const streamStartTime = Date.now();
-            let recordedModelFacingTurn = false;
-            let sendHistoryCompressed = false;
+            const recordedModelFacingTurn = false;
             let sendDispatched = false;
 
             try {
-              recordedModelFacingTurn =
-                this.#recordModelFacingUserTurn(nextMessage);
               const sendResult =
                 await this.#sendMessageStreamWithAutoCompression(
                   promptId,
                   nextMessage.parts ?? [],
                   ac.signal,
                 );
-              sendHistoryCompressed = !!sendResult.historyCompressed;
               if (!sendResult.responseStream) {
-                if (
-                  sendResult.stopReason !== 'cancelled' &&
-                  !sendHistoryCompressed
-                ) {
+                if (sendResult.stopReason !== 'cancelled') {
                   this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
                 }
                 this.#preserveUnsentMessageHistory(
@@ -3172,7 +3170,7 @@ export class Session implements SessionContext {
                 }
               }
             } catch (error) {
-              if (!sendDispatched && !sendHistoryCompressed) {
+              if (!sendDispatched) {
                 this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
               }
               throw error;

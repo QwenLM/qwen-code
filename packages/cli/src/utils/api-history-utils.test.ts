@@ -10,6 +10,7 @@ import {
   COMPRESSION_CONTINUATION_BRIDGE,
   COMPRESSION_CONTINUATION_BRIDGE_MARKER,
   COMPRESSION_SUMMARY_MODEL_ACK,
+  POST_COMPACT_ATTACHMENT_TEXT_PREFIXES,
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
 } from '@qwen-code/qwen-code-core';
@@ -144,6 +145,26 @@ describe('isApiUserTextContent', () => {
     };
     expect(isApiUserTextContent(content)).toBe(false);
   });
+
+  it('returns false for question-prefixed side queries', () => {
+    expect(isApiUserTextContent(userTextContent('?help'))).toBe(false);
+    expect(
+      isApiUserTextContent({
+        role: 'user',
+        parts: [{ text: '?' } as Part, { text: 'status' } as Part],
+      }),
+    ).toBe(false);
+  });
+
+  it('returns false for background task notifications', () => {
+    expect(
+      isApiUserTextContent(
+        userTextContent(
+          '<task-notification><status>completed</status></task-notification>',
+        ),
+      ),
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -189,21 +210,16 @@ describe('hasCompressionSummaryPair', () => {
 // ---------------------------------------------------------------------------
 
 describe('post-compact tail detection', () => {
-  it('detects post-compact attachment content by known synthetic prefixes', () => {
-    expect(
-      isPostCompactAttachmentContent(
-        userTextContent(
-          'Recently accessed file (full current content embedded):\n\n## a.ts',
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      isPostCompactAttachmentContent(
-        userTextContent(
-          'Recent visual snapshots preserved from before context was compacted',
-        ),
-      ),
-    ).toBe(true);
+  it.each(POST_COMPACT_ATTACHMENT_TEXT_PREFIXES)(
+    'detects post-compact attachment content for %s',
+    (prefix) => {
+      expect(
+        isPostCompactAttachmentContent(userTextContent(`${prefix}\nbody`)),
+      ).toBe(true);
+    },
+  );
+
+  it('does not classify real prompts as post-compact attachment content', () => {
     expect(isPostCompactAttachmentContent(userTextContent('real prompt'))).toBe(
       false,
     );

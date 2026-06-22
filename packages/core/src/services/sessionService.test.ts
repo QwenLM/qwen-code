@@ -1422,6 +1422,44 @@ describe('SessionService', () => {
       ]);
     });
 
+    it('keeps notification records in resume API history', () => {
+      const notification: ChatRecord = {
+        ...recordA1,
+        uuid: 'notification',
+        subtype: 'notification',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: '<task-notification><status>completed</status></task-notification>',
+            },
+          ],
+        },
+      };
+      const assistantReply: ChatRecord = {
+        ...recordB2,
+        sessionId: sessionIdA,
+        parentUuid: notification.uuid,
+        message: { role: 'model', parts: [{ text: 'noted' }] },
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [recordA1, notification, assistantReply],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([
+        recordA1.message,
+        notification.message,
+        assistantReply.message,
+      ]);
+    });
+
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
       const largePayload = {
         output: 'x'.repeat(128 * 1024),

@@ -1401,15 +1401,15 @@ function isResumeSlashCommand(query: string): boolean {
   return true;
 }
 
-function isModelFacingUserRecordForApiHistory(record: ChatRecord): boolean {
+function shouldIncludeUserRecordInApiHistory(record: ChatRecord): boolean {
   if (record.type !== 'user') {
     return false;
   }
-  if (
-    record.subtype === 'notification' ||
-    record.subtype === 'mid_turn_user_message'
-  ) {
-    return false;
+  if (record.subtype === 'notification') {
+    return true;
+  }
+  if (record.subtype === 'mid_turn_user_message') {
+    return true;
   }
   if (
     record.message?.parts?.some(
@@ -1431,11 +1431,7 @@ function isModelFacingUserRecordForApiHistory(record: ChatRecord): boolean {
 function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
   if (!record.message) return;
 
-  if (
-    record.type === 'user' &&
-    record.subtype !== 'mid_turn_user_message' &&
-    !isModelFacingUserRecordForApiHistory(record)
-  ) {
+  if (record.type === 'user' && !shouldIncludeUserRecordInApiHistory(record)) {
     return;
   }
 

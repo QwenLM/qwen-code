@@ -451,6 +451,25 @@ vi.mock('../ui/commands/contextCommand.js', () => ({
 }));
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),
+  isHistorySnapshot: (value: unknown) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+    const snapshot = value as {
+      history?: unknown;
+      modelFacingUserTurnCount?: unknown;
+    };
+    const count = snapshot.modelFacingUserTurnCount;
+    return (
+      Array.isArray(snapshot.history) &&
+      snapshot.history.length > 0 &&
+      typeof count === 'number' &&
+      Number.isInteger(count) &&
+      Number.isFinite(count) &&
+      count >= 0 &&
+      count <= Number.MAX_SAFE_INTEGER
+    );
+  },
   buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
     availableCommands: [],
     availableSkills: [],

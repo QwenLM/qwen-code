@@ -140,6 +140,7 @@ import {
 import {
   Session,
   buildAvailableCommandsSnapshot,
+  isHistorySnapshot,
   type HistorySnapshot,
 } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
@@ -6294,25 +6295,7 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        const isHistorySnapshot =
-          !!history &&
-          typeof history === 'object' &&
-          !Array.isArray(history) &&
-          Array.isArray((history as { history?: unknown }).history) &&
-          ((history as { history?: unknown[] }).history?.length ?? 0) > 0 &&
-          Number.isInteger(
-            (history as { modelFacingUserTurnCount?: unknown })
-              .modelFacingUserTurnCount,
-          ) &&
-          Number.isFinite(
-            (history as { modelFacingUserTurnCount?: unknown })
-              .modelFacingUserTurnCount as number,
-          ) &&
-          ((history as { modelFacingUserTurnCount?: unknown })
-            .modelFacingUserTurnCount as number) >= 0 &&
-          ((history as { modelFacingUserTurnCount?: unknown })
-            .modelFacingUserTurnCount as number) <= Number.MAX_SAFE_INTEGER;
-        if (!Array.isArray(history) && !isHistorySnapshot) {
+        if (!Array.isArray(history) && !isHistorySnapshot(history)) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing history',

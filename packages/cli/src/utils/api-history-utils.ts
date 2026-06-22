@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import {
   COMPRESSION_CONTINUATION_BRIDGE_MARKER,
   COMPRESSION_SUMMARY_MODEL_ACK,
+  POST_COMPACT_ATTACHMENT_TEXT_PREFIXES,
   createDebugLogger,
   getStartupContextLength,
   isSystemReminderContent,
@@ -16,13 +17,7 @@ import {
 const debugLogger = createDebugLogger('API_HISTORY_UTILS');
 const LEGACY_COMPRESSION_CONTINUATION_BRIDGE_PROMPT =
   'Continue with the prior task using the context above.';
-const POST_COMPACT_ATTACHMENT_TEXT_PREFIXES = [
-  'The following files were recently accessed before context was compacted.',
-  'Recently accessed file (full current content embedded):',
-  'Recent visual snapshots preserved from before context was compacted',
-  '<plan-mode-active>',
-  '<background-tasks>',
-] as const;
+const BACKGROUND_NOTIFICATION_PREFIX = '<task-notification';
 
 /**
  * Checks whether a Content entry is the synthetic continuation bridge
@@ -104,9 +99,20 @@ export function isApiUserTextContent(content: Content): boolean {
   if (hasFunctionResponse) return false;
   if (isSystemReminderContent(content)) return false;
 
-  return content.parts.some(
-    (part) =>
-      'text' in part && typeof part.text === 'string' && part.text.length > 0,
+  const textParts = content.parts
+    .filter(
+      (part): part is { text: string } & Part =>
+        'text' in part &&
+        typeof part.text === 'string' &&
+        part.text.trim().length > 0,
+    )
+    .map((part) => part.text.trim());
+  if (textParts.length === 0) return false;
+
+  const fullText = textParts.join(' ');
+  return (
+    !fullText.startsWith('?') &&
+    !fullText.startsWith(BACKGROUND_NOTIFICATION_PREFIX)
   );
 }
 

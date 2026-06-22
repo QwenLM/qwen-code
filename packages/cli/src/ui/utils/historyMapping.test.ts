@@ -337,6 +337,22 @@ describe('computeApiTruncationIndex', () => {
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
     });
 
+    it('keeps all UI turns unreachable when compression absorbed the full tail', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of all prior turns'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    });
+
     it('does not treat post-compact attachment restoration as a tail turn', () => {
       const ui: HistoryItem[] = [
         userItem(1),
