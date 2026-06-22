@@ -242,4 +242,26 @@ describe('ArtifactTool', () => {
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();
   });
+
+  it('reports a cancellation when the signal is aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const file = await writeFragment('page.html', '<p>x</p>');
+    const cancelTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'oss',
+        publish: async () => {
+          throw new Error('network failure');
+        },
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const res = await cancelTool
+      .build({ file_path: file })
+      .execute(controller.signal);
+    expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(res.llmContent).toMatch(/cancelled/i);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
 });
