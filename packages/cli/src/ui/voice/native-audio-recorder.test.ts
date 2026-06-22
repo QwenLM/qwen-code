@@ -157,4 +157,29 @@ describe('createNativeAudioRecorder', () => {
     expect(loadBackend).toHaveBeenCalledTimes(2);
     expect(backend.startRecording).toHaveBeenCalledTimes(1);
   });
+
+  it('allows retry after native stop throws', async () => {
+    const backend = {
+      startRecording: vi.fn(),
+      stopRecording: vi
+        .fn()
+        .mockImplementationOnce(() => {
+          throw new Error('Native audio capture produced empty audio.');
+        })
+        .mockReturnValueOnce(new Uint8Array([1])),
+      isRecording: vi.fn(() => false),
+      microphoneAuthorizationStatus: vi.fn(() => 'unknown' as const),
+    };
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => backend,
+    });
+
+    await recorder.start();
+    await expect(recorder.stop()).rejects.toThrow(/empty audio/);
+    await recorder.start();
+    await recorder.stop();
+
+    expect(backend.startRecording).toHaveBeenCalledTimes(2);
+    expect(backend.stopRecording).toHaveBeenCalledTimes(2);
+  });
 });
