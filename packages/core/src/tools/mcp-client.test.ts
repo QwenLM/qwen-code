@@ -27,6 +27,7 @@ import {
   discoverPrompts,
   discoverResources,
   getAllMCPServerStatuses,
+  getMcpOAuthDialogInstruction,
   getMCPServerStatus,
   hasNetworkTransport,
   isEnabled,
@@ -86,6 +87,20 @@ describe('mcp-client', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.env = ORIGINAL_ENV;
+  });
+
+  describe('getMcpOAuthDialogInstruction', () => {
+    it('builds an authenticate instruction for the named MCP server', () => {
+      expect(getMcpOAuthDialogInstruction('authenticate', 'foo')).toBe(
+        "Open the /mcp dialog in Qwen Code to authenticate with MCP server 'foo'.",
+      );
+    });
+
+    it('builds a re-authenticate instruction for the named MCP server', () => {
+      expect(getMcpOAuthDialogInstruction('re-authenticate', 'foo')).toBe(
+        "Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'foo'.",
+      );
+    });
   });
 
   describe('McpClient', () => {

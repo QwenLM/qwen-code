@@ -6,7 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
-import { BaseTextInput } from './BaseTextInput.js';
+import type { DOMElement } from 'ink';
+import { BaseTextInput, getAbsolutePosition } from './BaseTextInput.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
@@ -45,6 +46,19 @@ function createBuffer() {
     backspace: vi.fn(),
     handleInput: vi.fn(),
   } as unknown as TextBuffer;
+}
+
+function createElement(
+  top: number,
+  left: number,
+  parentNode?: DOMElement,
+): DOMElement {
+  return {
+    yogaNode: {
+      getComputedLayout: () => ({ top, left }),
+    },
+    parentNode,
+  } as unknown as DOMElement;
 }
 
 function captureKeypressHandler(): (key: Key) => void {
@@ -93,5 +107,19 @@ describe('BaseTextInput', () => {
     handler(typedKey);
 
     expect(buffer.handleInput).toHaveBeenCalledWith(typedKey);
+  });
+});
+
+describe('getAbsolutePosition', () => {
+  it('returns undefined for a missing node', () => {
+    expect(getAbsolutePosition(null)).toBeUndefined();
+  });
+
+  it('sums computed layout offsets across parent nodes', () => {
+    const root = createElement(2, 3);
+    const parent = createElement(5, 7, root);
+    const child = createElement(11, 13, parent);
+
+    expect(getAbsolutePosition(child)).toEqual({ top: 18, left: 23 });
   });
 });
