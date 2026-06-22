@@ -56,6 +56,7 @@ describe('MemoryDialog', () => {
           enableManagedAutoMemory: false,
           enableManagedAutoDream: false,
           enableAutoSkill: false,
+          autoSkillConfirm: true,
         },
       },
     } as never);
@@ -109,7 +110,7 @@ describe('MemoryDialog', () => {
     expect(lastFrame()).toContain('Auto-skill: off');
   });
 
-  it('chains focus list ↑ autoSkill ↑ autoDream ↑ autoMemory and back down', () => {
+  it('chains focus list ↑ autoSkillConfirm ↑ autoSkill ↑ autoDream ↑ autoMemory and back down', () => {
     const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
 
     expect(lastFrame()).toContain('› 1. User memory');
@@ -124,7 +125,11 @@ describe('MemoryDialog', () => {
       });
     };
 
-    // list (index 0) ↑ → autoSkill
+    // list (index 0) ↑ → autoSkillConfirm
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Confirm auto-skills before saving: on');
+
+    // autoSkillConfirm ↑ → autoSkill
     pressKey({ name: 'up' });
     expect(lastFrame()).toContain('› Auto-skill: off');
 
@@ -136,7 +141,11 @@ describe('MemoryDialog', () => {
     pressKey({ name: 'down' });
     expect(lastFrame()).toContain('› Auto-skill: off');
 
-    // autoSkill ↓ → list (index 0)
+    // autoSkill ↓ → autoSkillConfirm
+    pressKey({ name: 'down' });
+    expect(lastFrame()).toContain('› Confirm auto-skills before saving: on');
+
+    // autoSkillConfirm ↓ → list (index 0)
     pressKey({ name: 'down' });
     expect(lastFrame()).toContain('› 1. User memory');
   });
@@ -145,7 +154,7 @@ describe('MemoryDialog', () => {
     const setValue = vi.fn();
     mockedUseSettings.mockReturnValue({
       setValue,
-      merged: { memory: { enableAutoSkill: false } },
+      merged: { memory: { enableAutoSkill: false, autoSkillConfirm: true } },
     } as never);
 
     const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
@@ -162,7 +171,10 @@ describe('MemoryDialog', () => {
 
     expect(lastFrame()).toContain('Auto-skill: off');
 
-    // navigate to the autoSkill row
+    // navigate to the autoSkillConfirm row first, then up to autoSkill
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Confirm auto-skills before saving: on');
+
     pressKey({ name: 'up' });
     expect(lastFrame()).toContain('› Auto-skill: off');
 
@@ -177,6 +189,42 @@ describe('MemoryDialog', () => {
     expect(lastFrame()).toContain('› Auto-skill: on');
   });
 
+  it('toggles autoSkillConfirm on Enter and persists to workspace settings', () => {
+    const setValue = vi.fn();
+    mockedUseSettings.mockReturnValue({
+      setValue,
+      merged: { memory: { enableAutoSkill: false, autoSkillConfirm: true } },
+    } as never);
+
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+
+    const pressKey = (key: { name: string }) => {
+      const keypressHandler =
+        mockedUseKeypress.mock.calls[
+          mockedUseKeypress.mock.calls.length - 1
+        ]![0];
+      act(() => {
+        keypressHandler(key as never);
+      });
+    };
+
+    expect(lastFrame()).toContain('Confirm auto-skills before saving: on');
+
+    // navigate to the autoSkillConfirm row
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Confirm auto-skills before saving: on');
+
+    // Enter toggles
+    pressKey({ name: 'return' });
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'memory.autoSkillConfirm',
+      false,
+    );
+    expect(lastFrame()).toContain('› Confirm auto-skills before saving: off');
+  });
+
   it('reflects the persisted value when the dialog is reopened (remounted)', () => {
     // Emulate LoadedSettings: setValue writes through to the merged view,
     // exactly like the real saveSettings + recomputeMerged path.
@@ -185,6 +233,7 @@ describe('MemoryDialog', () => {
         enableManagedAutoMemory: false,
         enableManagedAutoDream: false,
         enableAutoSkill: false,
+        autoSkillConfirm: true,
       },
     };
     const setValue = vi.fn((_scope: unknown, key: string, value: boolean) => {
@@ -207,6 +256,7 @@ describe('MemoryDialog', () => {
     // First open: toggle Auto-skill on, then close the dialog.
     const first = render(<MemoryDialog onClose={vi.fn()} />);
     expect(first.lastFrame()).toContain('Auto-skill: off');
+    pressKey({ name: 'up' }); // focus autoSkillConfirm
     pressKey({ name: 'up' }); // focus the Auto-skill row
     pressKey({ name: 'return' }); // toggle on
     expect(first.lastFrame()).toContain('› Auto-skill: on');
