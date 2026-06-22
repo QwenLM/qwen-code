@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { WsStream } from './wsStream.js';
+import { WsStream } from './ws-stream.js';
 
 // Minimal WebSocket mock that implements the surface WsStream uses.
 class MockWebSocket extends EventEmitter {

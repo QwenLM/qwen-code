@@ -36,7 +36,7 @@ import {
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import type { DaemonLogger } from './daemonLogger.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -65,11 +65,11 @@ import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
-import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import {
   buildDaemonStatusResponse,
   parseDaemonStatusDetail,
-} from './daemonStatus.js';
+} from './daemon-status.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -99,7 +99,7 @@ import {
   WorkspaceMismatchError,
   type BridgeSessionSummary,
   type AcpSessionBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import {
   getAdvertisedServeFeatures,
   getServeProtocolVersions,
@@ -118,7 +118,7 @@ import { getDemoHtml } from './demo.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
-} from './webShellStatic.js';
+} from './web-shell-static.js';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 import {
@@ -133,7 +133,7 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
-import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
+import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
   createRateLimiter,
   setRateLimiter,

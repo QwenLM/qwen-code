@@ -6,8 +6,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { logSafe } from './jsonRpc.js';
-import type { TransportStream } from './transportStream.js';
+import { logSafe } from './json-rpc.js';
+import type { TransportStream } from './transport-stream.js';
 
 /**
  * Per-stream cap on frames buffered before the client attaches its SSE
