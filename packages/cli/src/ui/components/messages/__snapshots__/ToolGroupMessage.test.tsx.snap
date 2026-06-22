@@ -1,14 +1,5 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`<ToolGroupMessage /> > Border Color Logic > uses gray border when all tools are successful and no shell commands 1`] = `
-"MockTool[tool-123]: ✓ test-tool - A tool for testing (medium)
-MockTool[tool-2]: ✓ another-tool - A tool for testing (medium)"
-`;
-
-exports[`<ToolGroupMessage /> > Border Color Logic > uses yellow border for shell commands even when successful 1`] = `"MockTool[tool-123]: ✓ run_shell_command - A tool for testing (medium)"`;
-
-exports[`<ToolGroupMessage /> > Border Color Logic > uses yellow border when tools are pending 1`] = `"MockTool[tool-123]: o test-tool - A tool for testing (medium)"`;
-
 exports[`<ToolGroupMessage /> > Confirmation Handling > shows confirmation dialog for first confirming tool only 1`] = `
 "MockTool[tool-1]: ? first-confirm - A tool for testing (high)
 MockConfirmation: Confirm first tool
@@ -29,7 +20,7 @@ MockTool[tool-2]: o pending-tool - This tool is pending (medium)
 MockTool[tool-3]: x error-tool - This tool failed (medium)"
 `;
 
-exports[`<ToolGroupMessage /> > Golden Snapshots > renders shell command with yellow border 1`] = `"MockTool[shell-1]: ✓ run_shell_command - Execute shell command (medium)"`;
+exports[`<ToolGroupMessage /> > Golden Snapshots > renders shell command 1`] = `"MockTool[shell-1]: ✓ run_shell_command - Execute shell command (medium)"`;
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders single successful tool call 1`] = `"MockTool[tool-123]: ✓ test-tool - A tool for testing (medium)"`;
 

@@ -154,7 +154,7 @@ interface ToolGroupMessageProps {
   compactLabel?: string;
 }
 
-// Main component renders the border and maps the tools using ToolMessage
+// Main component maps the tools using ToolMessage
 export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   toolCalls,
   availableTerminalHeight,
@@ -290,15 +290,15 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Hide the entire group when the live-phase filter leaves nothing
   // inline to render — i.e. a pure-running-subagent batch with no
   // pending approval. LiveAgentPanel below the composer is the
-  // single source of truth for those rows; an empty bordered
-  // container floating above the panel would just be a duplicate
-  // chrome line. Terminal subagents (completed / failed / cancelled)
+  // single source of truth for those rows; an empty
+  // container floating above the panel would just be noise.
+  // Terminal subagents (completed / failed / cancelled)
   // pass through `inlineToolCalls` because `unregisterForeground`'s
   // post-delete emit already dropped them from the panel snapshot,
   // and the inline path must render `SubagentScrollbackSummary`
   // immediately so the user keeps a record of the run.
   // (Gate on `isPending` so a degenerate empty `toolCalls=[]` in the
-  // committed phase still falls through to the legacy empty-border
+  // committed phase still falls through to the legacy empty-container
   // snapshot — the suppression is specifically about live-phase
   // panel ownership, not about hiding empty inputs in general.)
   if (isPending && inlineToolCalls.length === 0) {

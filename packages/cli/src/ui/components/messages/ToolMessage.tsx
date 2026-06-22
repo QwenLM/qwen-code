@@ -782,6 +782,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
   status,
   emphasis,
 }) => {
+  const { compactMode } = useCompactMode();
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
       case 'high':
@@ -796,7 +797,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
       }
     }
   }, [emphasis]);
-  const isDim = status === ToolCallStatus.Success;
+  const isDim = compactMode && status === ToolCallStatus.Success;
   return (
     <Box flexGrow={1}>
       <Text

@@ -136,7 +136,7 @@ export const CompactToolGroupDisplay: React.FC<
     : '';
 
   return (
-    <Box flexDirection="column" width={contentWidth} gap={0}>
+    <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
       {/* Status line: icon + (summary | tool name + description) + count + elapsed */}
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
