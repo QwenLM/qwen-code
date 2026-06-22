@@ -16,6 +16,7 @@ import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
   openBrowserSecurely,
+  parsePositiveIntegerEnv,
   shouldLaunchBrowser,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
@@ -426,8 +427,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     let rateLimitWindowMs: number | undefined;
     if (rateLimit) {
       const envInt = (key: string): number | undefined => {
-        const v = process.env[key];
-        return v ? Number(v) : undefined;
+        const raw = process.env[key];
+        if (raw === undefined || raw === '') return undefined;
+        return parsePositiveIntegerEnv(raw, Number.NaN);
       };
       rateLimitPrompt =
         argv['rate-limit-prompt'] ?? envInt('QWEN_SERVE_RATE_LIMIT_PROMPT');
