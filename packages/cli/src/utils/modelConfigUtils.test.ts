@@ -481,7 +481,10 @@ describe('modelConfigUtils', () => {
             baseUrl: 'https://idealab.example.com/v1',
           },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -504,7 +507,10 @@ describe('modelConfigUtils', () => {
         const settings = makeMockSettings({
           model: { name: 'qwen3.7-max' },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -527,7 +533,10 @@ describe('modelConfigUtils', () => {
             baseUrl: 'https://removed.example.com/v1',
           },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -556,7 +565,10 @@ describe('modelConfigUtils', () => {
         const settings = makeMockSettings({
           model: { name: 'qwen3.7-max', baseUrl: '' },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -579,7 +591,10 @@ describe('modelConfigUtils', () => {
             baseUrl: 'https://idealab.example.com/v1',
           },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 

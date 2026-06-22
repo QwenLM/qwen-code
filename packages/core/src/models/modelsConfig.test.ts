@@ -1484,20 +1484,23 @@ describe('ModelsConfig', () => {
 
   it('should use explicit provider baseUrl when syncing after provider install', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'shared-model',
-          name: 'Shared Model (old)',
-          baseUrl: 'https://old.example.com/v1',
-          envKey: 'OLD_API_KEY',
-        },
-        {
-          id: 'shared-model',
-          name: 'Shared Model (new)',
-          baseUrl: 'https://new.example.com/v1',
-          envKey: 'NEW_API_KEY',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'shared-model',
+            name: 'Shared Model (old)',
+            baseUrl: 'https://old.example.com/v1',
+            envKey: 'OLD_API_KEY',
+          },
+          {
+            id: 'shared-model',
+            name: 'Shared Model (new)',
+            baseUrl: 'https://new.example.com/v1',
+            envKey: 'NEW_API_KEY',
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({

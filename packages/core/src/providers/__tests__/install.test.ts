@@ -286,30 +286,33 @@ describe('applyProviderInstallPlan', () => {
   it('preserves existing custom provider models and selects the installed endpoint', async () => {
     const baseUrl = 'http://new.example/v1';
     const otherBaseUrl = 'http://192.168.100.100:8000/v1';
-    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
-    const otherEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, otherBaseUrl);
+    const envKey = generateCustomEnvKey(Protocol.OPENAI, baseUrl);
+    const otherEnvKey = generateCustomEnvKey(Protocol.OPENAI, otherBaseUrl);
     const syncAuthState = vi.fn();
     const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: [
-        // Same model id, different baseUrl: keep both and select the one just
-        // installed.
-        {
-          id: 'model-b',
-          name: 'model-b',
-          baseUrl: otherBaseUrl,
-          envKey: otherEnvKey,
-        },
-        { id: 'model-a', name: 'model-a', baseUrl, envKey },
-        {
-          id: 'shared-model',
-          name: 'shared-model',
-          baseUrl: otherBaseUrl,
-          envKey: otherEnvKey,
-        },
-      ],
+      [AuthType.USE_OPENAI]: {
+        protocol: Protocol.OPENAI,
+        models: [
+          // Same model id, different baseUrl: keep both and select the one just
+          // installed.
+          {
+            id: 'model-b',
+            name: 'model-b',
+            baseUrl: otherBaseUrl,
+            envKey: otherEnvKey,
+          },
+          { id: 'model-a', name: 'model-a', baseUrl, envKey },
+          {
+            id: 'shared-model',
+            name: 'shared-model',
+            baseUrl: otherBaseUrl,
+            envKey: otherEnvKey,
+          },
+        ],
+      },
     });
     const plan = buildInstallPlan(customProvider, {
-      protocol: AuthType.USE_OPENAI,
+      protocol: Protocol.OPENAI,
       baseUrl,
       apiKey: 'sk-new',
       modelIds: ['model-b'],

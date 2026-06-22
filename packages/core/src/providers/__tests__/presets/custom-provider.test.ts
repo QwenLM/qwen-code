@@ -124,7 +124,7 @@ describe('customProvider', () => {
     expect(customProvider.mergeModelsByIdentity).toBe(true);
 
     const plan = buildInstallPlan(customProvider, {
-      protocol: AuthType.USE_OPENAI,
+      protocol: Protocol.OPENAI,
       baseUrl: 'https://my-proxy.com/v1',
       apiKey: 'sk-my-key',
       modelIds: ['model-a'],
