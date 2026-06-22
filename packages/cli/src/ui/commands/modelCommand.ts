@@ -388,8 +388,9 @@ export const modelCommand: SlashCommand = {
       }
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
-      const availableModels =
-        config.getAvailableModelsForAuthType(targetAuthType);
+      const availableModels = config
+        .getAvailableModelsForAuthType(targetAuthType)
+        .filter((m) => !m.fastOnly);
       if (!availableModels.some((model) => model.id === parsed.modelId)) {
         return {
           type: 'message',

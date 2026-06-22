@@ -61,6 +61,8 @@ export interface ModelConfig {
   capabilities?: ModelCapabilities;
   /** Generation configuration (sampling parameters) */
   generationConfig?: ModelGenerationConfig;
+  /** When true, this model only appears in the fast model selector, not the main model list */
+  fastOnly?: boolean;
 }
 
 /**
@@ -116,6 +118,9 @@ export interface AvailableModel {
   modalities?: InputModalities;
   baseUrl?: string;
   envKey?: string;
+
+  /** When true, this model only appears in the fast model selector */
+  fastOnly?: boolean;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;

@@ -151,6 +151,7 @@ export class ModelRegistry {
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
       envKey: model.envKey,
+      fastOnly: model.fastOnly,
     }));
   }
 
@@ -252,6 +253,7 @@ export class ModelRegistry {
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
       generationConfig,
       capabilities: config.capabilities || {},
+      fastOnly: config.fastOnly,
     };
   }
 
