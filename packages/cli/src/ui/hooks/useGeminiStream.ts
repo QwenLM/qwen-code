@@ -1807,7 +1807,18 @@ export const useGeminiStream = (
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
       dualOutput?.finalizeAssistantMessage();
-      if (toolCallRequests.length > 0 && !signal.aborted) {
+      // When a loop was detected, halt without scheduling the calls collected
+      // before the guard fired. The core splice/clear only touches
+      // turn.pendingToolCalls, which the TUI does not execute from — without
+      // this gate the pre-detection (and, for the always-on consecutive guard,
+      // potentially repeated) calls would still run before the halt dialog
+      // appears. Mirrors the non-interactive runner, which returns on
+      // LoopDetected before scheduling.
+      if (
+        toolCallRequests.length > 0 &&
+        !signal.aborted &&
+        !loopDetectedRef.current
+      ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
         const duplicateResponseParts: Part[] = [];
         let duplicatePromptId: string | undefined;

@@ -1817,6 +1817,79 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('does not schedule tool calls collected before a LoopDetected halt', async () => {
+    mockUseReactToolScheduler.mockImplementation(() => [
+      [],
+      mockScheduleToolCalls,
+      mockMarkToolsAsSubmitted,
+    ]);
+
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        // Two identical calls stream before the always-on consecutive guard
+        // halts the turn. The TUI must NOT execute them — it should halt
+        // cleanly like the non-interactive runner.
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'rep-1',
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-loop-halt',
+          },
+        };
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'rep-2',
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-loop-halt',
+          },
+        };
+        yield { type: ServerGeminiEventType.LoopDetected };
+      })(),
+    );
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('repeat a tool');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    // The calls streamed before the halt must not be scheduled for execution.
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+  });
+
   it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
