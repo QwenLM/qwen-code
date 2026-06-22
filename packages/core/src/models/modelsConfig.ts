@@ -7,12 +7,16 @@
 import process from 'node:process';
 
 import { AuthType } from '../core/contentGenerator.js';
-import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  Protocol,
+} from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
+import { authTypeToProtocol } from '../providers/install.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -257,7 +261,9 @@ export class ModelsConfig {
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
     const inputAuthTypes =
-      authTypes && authTypes.length > 0 ? authTypes : Object.values(AuthType);
+      authTypes && authTypes.length > 0
+        ? authTypes
+        : this.modelRegistry.getAuthTypes();
 
     // De-duplicate while preserving the original order.
     const seen = new Set<AuthType>();
@@ -568,7 +574,22 @@ export class ModelsConfig {
    * Get generation config for ContentGenerator creation
    */
   getGenerationConfig(): Partial<ContentGeneratorConfig> {
-    return this._generationConfig;
+    if (!this.currentAuthType) return this._generationConfig;
+    return {
+      ...this._generationConfig,
+      protocol: this.getProtocol(this.currentAuthType),
+    };
+  }
+
+  /**
+   * Resolve the Protocol for a given authType.
+   * Two-tier lookup: ModelRegistry first, static fallback second.
+   */
+  getProtocol(authType: string): Protocol {
+    return (
+      this.modelRegistry.getProtocolForAuthType(authType as AuthType) ??
+      authTypeToProtocol(authType as AuthType)
+    );
   }
 
   /**

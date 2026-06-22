@@ -163,9 +163,7 @@ export function extensionConsentString(
   }
   const mcpServerEntries = Object.entries(extensionConfig.mcpServers || {});
   const displayLabel = extensionConfig.displayName ?? extensionConfig.name;
-  output.push(
-    t('Installing extension "{{name}}".', { name: displayLabel }),
-  );
+  output.push(t('Installing extension "{{name}}".', { name: displayLabel }));
   if (
     typeof extensionConfig.description === 'string' &&
     extensionConfig.description

@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AuthType,
+  Protocol,
   resolveModelConfig,
   type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
@@ -387,7 +388,10 @@ describe('modelConfigUtils', () => {
       };
       const settings = makeMockSettings({
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -427,7 +431,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: 'settings-model' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -485,7 +492,10 @@ describe('modelConfigUtils', () => {
             baseUrl: 'https://idealab.example.com/v1',
           },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -508,7 +518,10 @@ describe('modelConfigUtils', () => {
         const settings = makeMockSettings({
           model: { name: 'qwen3.7-max' },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -531,7 +544,10 @@ describe('modelConfigUtils', () => {
             baseUrl: 'https://removed.example.com/v1',
           },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -560,7 +576,10 @@ describe('modelConfigUtils', () => {
         const settings = makeMockSettings({
           model: { name: 'qwen3.7-max', baseUrl: '' },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -583,7 +602,10 @@ describe('modelConfigUtils', () => {
             baseUrl: 'https://idealab.example.com/v1',
           },
           modelProviders: {
-            [AuthType.USE_OPENAI]: [tokenPlan, ideaLab],
+            [AuthType.USE_OPENAI]: {
+              protocol: Protocol.OPENAI,
+              models: [tokenPlan, ideaLab],
+            },
           },
         });
 
@@ -608,7 +630,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: '$runtime|openai|gpt-4o' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
 
@@ -642,7 +667,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: '$runtime|openai|$runtime|openai|gpt-4o' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
 
@@ -670,7 +698,10 @@ describe('modelConfigUtils', () => {
       const argv = { model: 'test-model' };
       const settings = makeMockSettings({
         modelProviders: {
-          [AuthType.USE_OPENAI]: [{ id: 'test-model', name: 'Test Model' }],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'test-model', name: 'Test Model' }],
+          },
         },
       });
       const selectedAuthType = undefined;
@@ -698,11 +729,14 @@ describe('modelConfigUtils', () => {
       );
     });
 
-    it('should not find modelProvider when modelProviders is not an array', () => {
+    it('should not find modelProvider when modelProviders is not an object', () => {
       const argv = { model: 'test-model' };
       const settings = makeMockSettings({
         modelProviders: {
-          [AuthType.USE_OPENAI]: null as unknown as ProviderModelConfig[],
+          [AuthType.USE_OPENAI]: null as unknown as {
+            protocol: Protocol;
+            models: ProviderModelConfig[];
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -773,7 +807,10 @@ describe('modelConfigUtils', () => {
           } as Record<string, unknown>,
         },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -817,7 +854,10 @@ describe('modelConfigUtils', () => {
           } as Record<string, unknown>,
         },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [{ id: 'other-model', name: 'Other Model' }],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'other-model', name: 'Other Model' }],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -859,7 +899,10 @@ describe('modelConfigUtils', () => {
           } as Record<string, unknown>,
         },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -898,7 +941,10 @@ describe('modelConfigUtils', () => {
           } as Record<string, unknown>,
         },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -936,7 +982,10 @@ describe('modelConfigUtils', () => {
           } as Record<string, unknown>,
         },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [modelProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -1181,7 +1230,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: 'settings-model' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [settingsProvider, envProvider],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [settingsProvider, envProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -1218,10 +1270,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: undefined as unknown as Settings['model'],
         modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            { id: 'other-model', name: 'Other Model' },
-            envProvider,
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'other-model', name: 'Other Model' }, envProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -1257,11 +1309,14 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: 'settings-model' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            { id: 'settings-model', name: 'Settings Model' },
-            { id: 'env-model', name: 'Env Model' },
-            cliProvider,
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              { id: 'settings-model', name: 'Settings Model' },
+              { id: 'env-model', name: 'Env Model' },
+              cliProvider,
+            ],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -1296,10 +1351,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: undefined as unknown as Settings['model'],
         modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            { id: 'other-model', name: 'Other Model' },
-            qwenProvider,
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'other-model', name: 'Other Model' }, qwenProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -1338,11 +1393,14 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: undefined as unknown as Settings['model'],
         modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            { id: 'other-model', name: 'Other Model' },
-            openAIProvider,
-            qwenProvider,
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              { id: 'other-model', name: 'Other Model' },
+              openAIProvider,
+              qwenProvider,
+            ],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -1380,7 +1438,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: 'settings-model' },
         modelProviders: {
-          [AuthType.USE_ANTHROPIC]: [settingsProvider],
+          [AuthType.USE_ANTHROPIC]: {
+            protocol: Protocol.ANTHROPIC,
+            models: [settingsProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_ANTHROPIC;
@@ -1415,10 +1476,10 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: 'non-existent-model' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            { id: 'other-model', name: 'Other Model' },
-            envProvider,
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'other-model', name: 'Other Model' }, envProvider],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -1450,13 +1511,16 @@ describe('modelConfigUtils', () => {
       const settings = makeMockSettings({
         model: { name: 'custom-model' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'gpt-4',
-              name: 'GPT-4',
-              generationConfig: { samplingParams: { temperature: 0.5 } },
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                generationConfig: { samplingParams: { temperature: 0.5 } },
+              },
+            ],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;

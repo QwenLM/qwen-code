@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { AuthType } from '../core/contentGenerator.js';
+import { Protocol } from '../core/contentGenerator.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -297,15 +297,15 @@ export function computeModelListVersion(models: ProviderModelConfig[]): string {
  * (useProviderSetupFlow) and the VS Code flow (AuthMessageHandler) agree on
  * the same value — if Anthropic ships a new endpoint we only update it here.
  */
-const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
-  [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
-  [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
-  [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
+const DEFAULT_BASE_URLS: Partial<Record<Protocol, string>> = {
+  [Protocol.OPENAI]: 'https://api.openai.com/v1',
+  [Protocol.ANTHROPIC]: 'https://api.anthropic.com/v1',
+  [Protocol.GEMINI]: 'https://generativelanguage.googleapis.com',
 };
 
 /** Resolve the placeholder/default base URL for a chosen protocol. */
 export function getDefaultBaseUrlForProtocol(
-  protocol: AuthType | undefined,
+  protocol: Protocol | undefined,
 ): string {
   if (protocol === undefined) return '';
   return DEFAULT_BASE_URLS[protocol] ?? '';

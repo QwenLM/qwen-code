@@ -298,7 +298,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {} as ModelProvidersConfig,
     description:
-      'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
+      'Model providers configuration grouped by authType. Each authType maps to a ProviderConfig object with protocol and models fields.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },

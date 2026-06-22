@@ -42,8 +42,10 @@ import {
   DEFAULT_MODELS,
   QWEN_OAUTH_ALLOWED_MODELS,
   MODEL_GENERATION_CONFIG_FIELDS,
+  type AuthEnvMapping,
 } from './constants.js';
 import type { ModelConfig as ModelProviderConfig } from './types.js';
+import { authTypeToProtocol } from '../providers/install.js';
 export {
   validateModelConfig,
   type ModelConfigValidationResult,
@@ -158,9 +160,12 @@ export function resolveModelConfig(
 
   // Get auth-specific env var mappings.
   // If authType is not provided, do not read any auth env vars.
-  const envMapping = authType
-    ? AUTH_ENV_MAPPINGS[authType]
-    : { model: [], apiKey: [], baseUrl: [] };
+  const envMapping =
+    authType && Object.hasOwn(AUTH_ENV_MAPPINGS, authType)
+      ? (AUTH_ENV_MAPPINGS as unknown as Record<string, AuthEnvMapping>)[
+          authType
+        ]
+      : { model: [], apiKey: [], baseUrl: [] };
 
   // Build layers for each field in priority order
   // Priority: modelProvider > cli > env > settings > default
@@ -286,6 +291,7 @@ export function resolveModelConfig(
     baseUrl: baseUrlResult?.value,
     proxy,
     ...generationConfig,
+    protocol: authType ? authTypeToProtocol(authType) : undefined,
   };
 
   // Add proxy source
@@ -364,6 +370,7 @@ function resolveQwenOAuthConfig(
     apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
     proxy,
     ...generationConfig,
+    protocol: authTypeToProtocol(AuthType.QWEN_OAUTH),
   };
 
   return { config, sources, warnings };

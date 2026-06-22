@@ -468,6 +468,9 @@ describe('Settings Loading and Merging', () => {
         },
         allowMCPServers: ['legacy-server-1'],
         someUnrecognizedSetting: 'should-be-preserved',
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
+        },
       };
 
       (fs.readFileSync as Mock).mockImplementation(
@@ -510,6 +513,12 @@ describe('Settings Loading and Merging', () => {
           allowed: ['legacy-server-1'],
         },
         someUnrecognizedSetting: 'should-be-preserved',
+        modelProviders: {
+          openai: {
+            protocol: 'openai',
+            models: [{ id: 'gpt-4o' }],
+          },
+        },
       });
     });
 
@@ -709,6 +718,9 @@ describe('Settings Loading and Merging', () => {
       const legacySettingsContent = {
         theme: 'dark',
         model: 'qwen-coder',
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
+        },
       };
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -814,6 +826,9 @@ describe('Settings Loading and Merging', () => {
           name: 'qwen-coder',
         },
         autoAccept: false, // V1 key
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
+        },
       };
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -925,6 +940,9 @@ describe('Settings Loading and Merging', () => {
         $version: 2,
         general: {
           enableAutoUpdate: true,
+        },
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
         },
       };
       (fs.readFileSync as Mock).mockImplementation(
@@ -4352,6 +4370,9 @@ describe('Settings Loading and Merging', () => {
         const settingsWithOldVersion = {
           [SETTINGS_VERSION_KEY]: SETTINGS_VERSION - 1,
           theme: 'dark',
+          modelProviders: {
+            openai: [{ id: 'gpt-4o' }],
+          },
         };
         expect(needsMigration(settingsWithOldVersion)).toBe(true);
       });
