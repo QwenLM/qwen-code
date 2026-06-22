@@ -143,11 +143,20 @@ export function FilesPanel({
         });
         return;
       }
+      const text = decodeBase64(bytes.contentBase64);
+      if (text === null) {
+        setPreview({
+          kind: 'error',
+          path,
+          message: 'Failed to decode file content: invalid base64 data.',
+        });
+        return;
+      }
       setPreview({
         kind: 'text',
         path,
         mimeType,
-        content: decodeBase64(bytes.contentBase64),
+        content: text,
         truncated: bytes.truncated,
       });
     } catch (error) {
@@ -552,13 +561,17 @@ function detectMimeType(path: string): string {
   return 'text/plain;charset=utf-8';
 }
 
-function decodeBase64(input: string): string {
-  const binary = atob(input);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
+function decodeBase64(input: string): string | null {
+  try {
+    const binary = atob(input);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
   }
-  return new TextDecoder().decode(bytes);
 }
 
 function formatBytes(bytes: number): string {

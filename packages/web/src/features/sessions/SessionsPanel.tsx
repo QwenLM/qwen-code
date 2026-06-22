@@ -20,7 +20,7 @@ export function SessionsPanel({ onOpenChat }: SessionsPanelProps) {
   const [actionError, setActionError] = useState<string>();
   const [pendingAction, setPendingAction] = useState<PendingAction>();
 
-  function openSession(session: DaemonSessionSummary) {
+  async function openSession(session: DaemonSessionSummary) {
     if (session.sessionId === connection.sessionId) {
       onOpenChat();
       return;
@@ -30,16 +30,16 @@ export function SessionsPanel({ onOpenChat }: SessionsPanelProps) {
     try {
       const shouldResume =
         session.hasActivePrompt || (session.clientCount ?? 0) > 0;
-      const switchSession = shouldResume
+      const switchPromise = shouldResume
         ? sessions.resumeSession?.(session.sessionId)
         : sessions.loadSession?.(session.sessionId);
-      if (!switchSession) throw new Error('Session switching is unavailable.');
-      void switchSession.catch((error: unknown) => {
-        if (!isSessionSwitchCleanup(error)) setActionError(errorMessage(error));
-      });
+      if (!switchPromise) throw new Error('Session switching is unavailable.');
+      await switchPromise;
       onOpenChat();
     } catch (error) {
-      setActionError(errorMessage(error));
+      if (!isSessionSwitchCleanup(error)) {
+        setActionError(errorMessage(error));
+      }
     } finally {
       setPendingAction(undefined);
     }
@@ -96,7 +96,10 @@ export function SessionsPanel({ onOpenChat }: SessionsPanelProps) {
     setActionError(undefined);
     setPendingAction({ action: 'new' });
     try {
-      await sessions.newSession?.();
+      if (!sessions.newSession) {
+        throw new Error('New session is not available yet.');
+      }
+      await sessions.newSession();
       onOpenChat();
     } catch (error) {
       setActionError(errorMessage(error));
