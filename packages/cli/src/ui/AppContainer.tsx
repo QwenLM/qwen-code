@@ -134,6 +134,7 @@ import {
   useVimModeActions,
 } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
+import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -487,6 +488,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const closeThinkingViewer = useCallback(() => {
     setThinkingViewerData(null);
   }, []);
+
+  // Alt+T inline expansion toggle for thinking blocks
+  const [thoughtExpanded, setThoughtExpanded] = useState(false);
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -3126,6 +3130,13 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
 
+      // Alt+T: toggle inline expansion of thinking blocks.
+      if (keyMatchers[Command.OPEN_THINKING_VIEWER](key)) {
+        setThoughtExpanded((prev) => !prev);
+        refreshStatic();
+        return;
+      }
+
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -3388,6 +3399,7 @@ export const AppContainer = (props: AppContainerProps) => {
       vimMode,
       thinkingViewerData,
       closeThinkingViewer,
+      setThoughtExpanded,
     ],
   );
 
@@ -3943,22 +3955,24 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <RenderModeProvider value={renderModeValue}>
-                <TerminalOutputProvider value={writeRaw}>
-                  <ThinkingViewerProvider value={thinkingViewerValue}>
-                    <ShellFocusContext.Provider value={isFocused}>
-                      {thinkingViewerData ? (
-                        <ThinkingViewer
-                          data={thinkingViewerData}
-                          onClose={closeThinkingViewer}
-                        />
-                      ) : (
-                        <App />
-                      )}
-                    </ShellFocusContext.Provider>
-                  </ThinkingViewerProvider>
-                </TerminalOutputProvider>
-              </RenderModeProvider>
+              <ThoughtExpandedProvider value={thoughtExpanded}>
+                <RenderModeProvider value={renderModeValue}>
+                  <TerminalOutputProvider value={writeRaw}>
+                    <ThinkingViewerProvider value={thinkingViewerValue}>
+                      <ShellFocusContext.Provider value={isFocused}>
+                        {thinkingViewerData ? (
+                          <ThinkingViewer
+                            data={thinkingViewerData}
+                            onClose={closeThinkingViewer}
+                          />
+                        ) : (
+                          <App />
+                        )}
+                      </ShellFocusContext.Provider>
+                    </ThinkingViewerProvider>
+                  </TerminalOutputProvider>
+                </RenderModeProvider>
+              </ThoughtExpandedProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

@@ -119,7 +119,8 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
       >
         <Box>
           <Text color={theme.text.accent} bold>
-            {THINKING_ICON} {title}
+            {THINKING_ICON}
+            {title}
           </Text>
           <Text dimColor>{scrollIndicator}</Text>
         </Box>

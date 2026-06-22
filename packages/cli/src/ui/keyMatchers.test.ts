@@ -92,6 +92,7 @@ describe('keyMatchers', () => {
     [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
+    [Command.OPEN_THINKING_VIEWER]: (key: Key) => key.meta && key.name === 't',
   };
 
   // Test data for each command with positive and negative test cases
@@ -410,6 +411,11 @@ describe('keyMatchers', () => {
       command: Command.SCROLL_END,
       positive: [createKey('end', { ctrl: true })],
       negative: [createKey('end'), createKey('end', { shift: true })],
+    },
+    {
+      command: Command.OPEN_THINKING_VIEWER,
+      positive: [createKey('t', { meta: true })],
+      negative: [createKey('t'), createKey('t', { ctrl: true })],
     },
   ];
 

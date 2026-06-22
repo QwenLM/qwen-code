@@ -357,7 +357,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('click to view');
+    expect(output).toContain('alt+t to expand');
     expect(output).not.toContain('Inspecting the repository');
   });
 
@@ -393,7 +393,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('click to view');
+    expect(output).toContain('alt+t to expand');
     expect(output).not.toContain('Inspecting the repository');
   });
 

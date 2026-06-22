@@ -59,6 +59,7 @@ import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useThinkingViewer } from '../contexts/ThinkingViewerContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -165,9 +166,9 @@ const ClickableThinkMessage: React.FC<{
 function getHistoryItemMarginTop(item: HistoryItem): number {
   switch (item.type) {
     case 'gemini':
+    case 'gemini_thought':
       return 1;
     case 'gemini_content':
-    case 'gemini_thought':
     case 'gemini_thought_content':
     case 'info':
     case 'success':
@@ -208,12 +209,14 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   compactLabel,
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
-  thoughtExpanded = false,
+  thoughtExpanded,
   thinkingFullText,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
   const { compactMode } = useCompactMode();
+  const contextThoughtExpanded = useThoughtExpanded();
+  const resolvedThoughtExpanded = thoughtExpanded ?? contextThoughtExpanded;
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -277,7 +280,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           text={itemForDisplay.text.trimEnd()}
           viewerText={(thinkingFullText || itemForDisplay.text).trimEnd()}
           isPending={isPending}
-          expanded={thoughtExpanded}
+          expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
@@ -289,7 +292,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <ThinkMessageContent
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
-          expanded={thoughtExpanded}
+          expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
