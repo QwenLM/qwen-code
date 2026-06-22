@@ -1210,8 +1210,54 @@ export default {
     '生成摘要失敗 - 未從 LLM 響應中接收到文本內容',
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
+  'Toggle voice dictation input': '切換語音聽寫輸入',
+  'Set the model for voice transcription': '設定語音轉寫模型',
+  'Select Fast Model': '選擇快速模型',
+  'Select Voice Model': '選擇語音模型',
+  'Voice Model': '語音模型',
+  'Selected voice model is unavailable.': '所選語音模型不可用。',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "語音模型 '{{model}}' 被配置了多次。請先移除重複的模型 ID，再將其選為語音轉寫模型。",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    '語音聽寫：{{status}}（模式：{{mode}}，{{modelText}}）。',
+  'model: {{voiceModel}}': '模型：{{voiceModel}}',
+  'no voice model selected': '未選擇語音模型',
+  'Voice dictation disabled.': '語音聽寫已停用。',
+  'Usage: /voice [hold|tap|off|status]': '用法：/voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    '未選擇語音模型。請先執行 /model --voice 選擇模型，再啟用語音聽寫。',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    '語音聽寫已啟用（點按模式）。在空輸入框中點按 Space 開始，再點按一次或停頓後停止並提交，使用 {{voiceModel}}。',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    '語音聽寫已啟用（按住模式）。在空輸入框中按住 Space，使用 {{voiceModel}} 聽寫。',
+  'No models are configured.': '未設定模型。',
+  'Configured models: {{models}}.': '已設定模型：{{models}}。',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    '請在 settings.modelProviders 中設定唯一的模型 ID，或執行 /model --voice 選擇可用模型。',
+  "Voice model '{{modelName}}' is not configured.":
+    "語音模型 '{{modelName}}' 未設定。",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "語音模型 '{{modelName}}' 不能用於轉寫。",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "語音模型 '{{modelName}}' 不能用於轉寫。請在 settings.modelProviders 中設定帶 baseUrl 的 OpenAI 相容模型。",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    '請在 settings.modelProviders 中設定帶 baseUrl 的 OpenAI 相容模型。',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    '麥克風存取被拒絕。請在系統設定 → 隱私權與安全性 → 麥克風中允許目前終端機存取，然後重新啟動語音聽寫。',
+  'Voice dictation is not supported on {{platform}}.':
+    '語音聽寫不支援 {{platform}}。',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    '語音聽寫需要麥克風存取，但目前 WSL 會話不可用。請使用 WSLg/PulseAudio，或在具備麥克風的主機上執行 Qwen Code。',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    '語音聽寫需要麥克風存取。macOS 會在你首次錄音時彈出授權請求——請同意後重新開始。彈窗開啟期間的首次錄音可能為空。',
+  'Voice: recording': '語音：錄音中',
+  'Voice: transcribing': '語音：轉寫中',
+  'listening…': '聆聽中…',
+  'transcribing…': '轉寫中…',
   'Content generator configuration not available.': '內容生成器配置不可用',
   'Authentication type not available.': '認證類型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1371,6 +1417,10 @@ export default {
   audio: '音頻',
   video: '視頻',
   'not set': '未設置',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
   none: '無',
   unknown: '未知',
   'Manage folder trust settings': '管理檔案夾信任設置',

@@ -365,6 +365,50 @@ const SETTINGS_SCHEMA = {
         description: 'Enable Vim keybindings',
         showInDialog: true,
       },
+      voice: {
+        type: 'object',
+        label: 'Voice Dictation',
+        category: 'General',
+        requiresRestart: false,
+        default: {},
+        description: 'Voice dictation settings.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Voice Dictation',
+            category: 'General',
+            requiresRestart: false,
+            default: false,
+            description: 'Enable voice dictation in the prompt input.',
+            showInDialog: false,
+          },
+          mode: {
+            type: 'enum',
+            label: 'Voice Dictation Mode',
+            category: 'General',
+            requiresRestart: false,
+            default: 'hold',
+            description:
+              'How push-to-talk behaves: "hold" to talk while held, or "tap" to start and tap (or pause) to stop and submit.',
+            showInDialog: false,
+            options: [
+              { value: 'hold', label: 'Hold to talk' },
+              { value: 'tap', label: 'Tap to toggle' },
+            ],
+          },
+          language: {
+            type: 'string',
+            label: 'Voice Dictation Language',
+            category: 'General',
+            requiresRestart: false,
+            default: '',
+            description:
+              'Preferred spoken language for voice transcription (e.g. "english", "chinese"). Leave empty to auto-detect.',
+            showInDialog: false,
+          },
+        },
+      },
       enableAutoUpdate: {
         type: 'boolean',
         label: 'Enable Auto Update',
@@ -1132,6 +1176,17 @@ const SETTINGS_SCHEMA = {
     description:
       'Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.',
     showInDialog: true,
+  },
+
+  voiceModel: {
+    type: 'string',
+    label: 'Voice Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.',
+    showInDialog: false,
   },
 
   model: {
