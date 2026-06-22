@@ -24,8 +24,8 @@ import {
   InvalidClientIdError,
   type AcpSessionBridge,
 } from './acpSessionBridge.js';
-import type { BridgeEvent } from './eventBus.js';
-import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
+import type { BridgeEvent } from './event-bus.js';
+import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 

@@ -29,7 +29,7 @@ import {
   type DeviceFlowPollResult,
   type DeviceFlowProvider,
   type DeviceFlowProviderId,
-} from './deviceFlow.js';
+} from './device-flow.js';
 
 interface FakeClock {
   now: number;
@@ -630,8 +630,8 @@ describe('DeviceFlowRegistry — polling state machine', () => {
     // here loudly.
     const dir = path.dirname(fileURLToPath(import.meta.url));
     const sources = [
-      fs.readFileSync(path.join(dir, 'deviceFlow.ts'), 'utf8'),
-      fs.readFileSync(path.join(dir, 'qwenDeviceFlowProvider.ts'), 'utf8'),
+      fs.readFileSync(path.join(dir, 'device-flow.ts'), 'utf8'),
+      fs.readFileSync(path.join(dir, 'qwen-device-flow-provider.ts'), 'utf8'),
     ];
     const forbiddenPatterns = [
       // Static imports

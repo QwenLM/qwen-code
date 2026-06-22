@@ -10,7 +10,7 @@
  * `httpAcpBridge.ts` (which gates stderr-side debug log output).
  *
  * Extracted into its own module in fold-in 2i so route files
- * (`workspaceMemory.ts`, `workspaceAgents.ts`, future Wave 4 mutation
+ * (`workspace-memory.ts`, `workspace-agents.ts`, future Wave 4 mutation
  * routes) can share one canonical predicate when deciding whether to
  * include `errorMessage` / `filePath` in their response bodies.
  * Without the toggle, error responses carry only structured fields

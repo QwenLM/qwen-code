@@ -11,7 +11,7 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { isServeDebugMode } from './debugMode.js';
+import { isServeDebugMode } from './debug-mode.js';
 
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
