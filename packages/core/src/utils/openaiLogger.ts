@@ -217,7 +217,7 @@ export class OpenAILogger {
         .sort()
         .reverse();
 
-      return limit ? logFiles.slice(0, limit) : logFiles;
+      return limit === undefined ? logFiles : logFiles.slice(0, limit);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];

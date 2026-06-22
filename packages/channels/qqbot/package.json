@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-qqbot",
-  "version": "0.18.4",
+  "version": "0.18.5",
   "description": "QQ Bot (QQ机器人) channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

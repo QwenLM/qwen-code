@@ -1962,6 +1962,25 @@ describe('standalone release packaging', () => {
     );
   });
 
+  it('automatically publishes the VSCode companion after stable CLI releases', () => {
+    const workflow = readScript(
+      '.github/workflows/release-vscode-companion.yml',
+    );
+
+    expect(workflow).toContain("release:\n    types: ['published']");
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toContain("github.event_name != 'release'");
+    expect(workflow).toContain(
+      "startsWith(github.event.release.tag_name, 'v')",
+    );
+    expect(workflow).toContain('github.event.release.prerelease == false');
+    expect(
+      workflow.match(
+        /github\.event\.release\.tag_name \|\| github\.event\.inputs\.ref \|\| github\.sha/g,
+      ) || [],
+    ).toHaveLength(3);
+  });
+
   it('does not whitelist internal planning documents in gitignore', () => {
     const gitignore = readScript('.gitignore');
 
