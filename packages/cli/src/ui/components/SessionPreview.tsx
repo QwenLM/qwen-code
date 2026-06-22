@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text } from 'ink';
+import { Box, Static, Text } from 'ink';
 import { useEffect, useMemo, useState } from 'react';
 import type {
   ResumedSessionData,
@@ -126,56 +126,86 @@ export function SessionPreview(props: SessionPreviewProps) {
   }
   const metaLine = metaParts.join(' · ');
 
+  const header = (
+    <Box key="header" paddingX={1}>
+      <Text bold color={theme.text.primary}>
+        {sessionTitle ?? t('Session Preview')}
+      </Text>
+    </Box>
+  );
+  const topSeparator = (
+    <Box key="top-separator">
+      <Text color={theme.border.default}>{'─'.repeat(separatorWidth)}</Text>
+    </Box>
+  );
+  const footerSeparator = (
+    <Box key="footer-separator">
+      <Text color={theme.border.default}>{'─'.repeat(separatorWidth)}</Text>
+    </Box>
+  );
+  const meta = metaLine ? (
+    <Box key="meta" paddingX={1}>
+      <Text color={theme.text.secondary}>{metaLine}</Text>
+    </Box>
+  ) : null;
+  const footer = (
+    <Box key="footer" paddingX={1}>
+      <Text color={theme.text.secondary}>
+        {t('Enter to resume · Esc to back')}
+      </Text>
+    </Box>
+  );
+
+  if (data && !error) {
+    return (
+      <Box flexDirection="column" width={boxWidth}>
+        <Static
+          key={sessionId}
+          items={[
+            header,
+            topSeparator,
+            ...items.map((item) => (
+              <HistoryItemDisplay
+                key={item.id}
+                item={item}
+                terminalWidth={boxWidth}
+                isPending={false}
+              />
+            )),
+            footerSeparator,
+            ...(meta ? [meta] : []),
+            footer,
+          ]}
+        >
+          {(item) => item}
+        </Static>
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" width={boxWidth}>
       {/* Header */}
-      <Box paddingX={1}>
-        <Text bold color={theme.text.primary}>
-          {sessionTitle ?? t('Session Preview')}
-        </Text>
-      </Box>
-      <Box>
-        <Text color={theme.border.default}>{'─'.repeat(separatorWidth)}</Text>
-      </Box>
+      {header}
+      {topSeparator}
 
-      {/* Body: render all items, let the terminal's scrollback own overflow. */}
+      {/* Body */}
       {error ? (
         <Box paddingY={1} justifyContent="center">
           <Text color={theme.status.error}>{error}</Text>
         </Box>
-      ) : !data ? (
+      ) : (
         <Box paddingY={1} justifyContent="center">
           <Text color={theme.text.secondary}>
             {t('Loading session preview...')}
           </Text>
         </Box>
-      ) : (
-        <Box flexDirection="column">
-          {items.map((item) => (
-            <HistoryItemDisplay
-              key={item.id}
-              item={item}
-              terminalWidth={boxWidth}
-              isPending={false}
-            />
-          ))}
-        </Box>
       )}
 
       {/* Footer */}
-      <Box>
-        <Text color={theme.border.default}>{'─'.repeat(separatorWidth)}</Text>
-      </Box>
-      {metaLine && (
-        <Box paddingX={1}>
-          <Text color={theme.text.secondary}>{metaLine}</Text>
-        </Box>
-      )}
-      <Box paddingX={1}>
-        <Text color={theme.text.secondary}>
-          {t('Enter to resume · Esc to back')}
-        </Text>
-      </Box>
+      {footerSeparator}
+      {meta}
+      {footer}
     </Box>
   );
 }
