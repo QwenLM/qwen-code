@@ -91,6 +91,8 @@ interface HistoryItemDisplayProps {
    */
   summaryAbsorbed?: boolean;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  /** Force thinking blocks expanded (e.g. in SessionPreview). */
+  thoughtExpanded?: boolean;
 }
 
 function getHistoryItemMarginTop(item: HistoryItem): number {
@@ -139,6 +141,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   compactLabel,
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
+  thoughtExpanded = false,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
@@ -185,7 +188,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       },
       [openThinkingViewer, thoughtText, thoughtDurationMs],
     ),
-    { isActive: isCommittedThought },
+    { isActive: isCommittedThought && !thoughtExpanded },
   );
 
   return (
@@ -244,7 +247,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           <ThinkMessage
             text={itemForDisplay.text.trimEnd()}
             isPending={isPending}
-            expanded={false}
+            expanded={thoughtExpanded}
             availableTerminalHeight={
               availableTerminalHeightGemini ?? availableTerminalHeight
             }
@@ -258,7 +261,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           <ThinkMessageContent
             text={itemForDisplay.text.trimEnd()}
             isPending={isPending}
-            expanded={false}
+            expanded={thoughtExpanded}
             availableTerminalHeight={
               availableTerminalHeightGemini ?? availableTerminalHeight
             }
