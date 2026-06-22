@@ -183,18 +183,8 @@ OAuth will not work in:
 
 #### Managing OAuth Authentication
 
-Use the `/mcp auth` command to manage OAuth authentication:
-
-```bash
-# List servers requiring authentication
-/mcp auth
-
-# Authenticate with a specific server
-/mcp auth serverName
-
-# Re-authenticate if tokens expire
-/mcp auth serverName
-```
+Use the `/mcp` dialog inside an interactive Qwen Code session to inspect MCP
+servers and manage OAuth authentication.
 
 #### OAuth Configuration Properties
 
@@ -212,7 +202,7 @@ Use the `/mcp auth` command to manage OAuth authentication:
 
 OAuth tokens are automatically:
 
-- **Stored securely** in `~/.qwen/mcp-oauth-tokens-v2.json` (AES-256-GCM encrypted), with keychain storage preferred when available
+- **Stored** in `~/.qwen/mcp-oauth-tokens.json` by default. If `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` is set, Qwen Code uses encrypted file storage/keychain-backed storage where available.
 - **Refreshed** when expired (if refresh tokens are available)
 - **Validated** before each connection attempt
 - **Cleaned up** when invalid or expired
@@ -859,9 +849,10 @@ qwen mcp add --transport sse oauth-server https://api.example.com/sse/ \
   --oauth-token-url https://provider.example.com/token
 ```
 
-### Managing Servers (`qwen mcp`)
+### Managing Servers (`/mcp`)
 
-To view and manage all MCP servers currently configured, use the `manage` command or simply `qwen mcp`. This opens an interactive TUI dialog where you can:
+To view and manage all MCP servers currently configured, open the `/mcp`
+dialog inside an interactive Qwen Code session. This dialog lets you:
 
 - View all MCP servers with their connection status
 - Enable/disable servers
@@ -872,9 +863,13 @@ To view and manage all MCP servers currently configured, use the `manage` comman
 **Command:**
 
 ```bash
-qwen mcp
-# or
-qwen mcp manage
+qwen
+```
+
+Then enter:
+
+```text
+/mcp
 ```
 
 The management dialog provides a visual interface showing each server's name, configuration details, connection status, and available tools/prompts.

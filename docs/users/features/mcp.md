@@ -20,7 +20,7 @@ With MCP servers connected, you can ask Qwen Code to:
 Qwen Code loads MCP servers from `mcpServers` in your `settings.json`. You can configure servers either:
 
 - By editing `settings.json` directly
-- By using `qwen mcp` commands (see [CLI reference](#qwen-mcp-cli))
+- By using `qwen mcp` commands (see [CLI reference](#manage-mcp-servers-with-qwen-mcp))
 
 ### Add your first server
 
@@ -30,13 +30,21 @@ Qwen Code loads MCP servers from `mcpServers` in your `settings.json`. You can c
 qwen mcp add --transport http my-server http://localhost:3000/mcp
 ```
 
-2. Open MCP management dialog to view and manage servers:
+2. Start Qwen Code and open the MCP management dialog to view and manage
+   servers:
 
 ```bash
-qwen mcp
+qwen
 ```
 
-3. Restart Qwen Code in the same project (or start it if it wasn’t running yet), then ask the model to use tools from that server.
+Then enter:
+
+```text
+/mcp
+```
+
+3. If Qwen Code was already running before you added the server, restart it in
+   the same project. Then ask the model to use tools from that server.
 
 ## Where configuration is stored (scopes)
 
@@ -281,11 +289,12 @@ OAuth configuration properties:
 
 OAuth tokens are automatically:
 
-- **Stored securely** in `~/.qwen/mcp-oauth-tokens-v2.json` (AES-256-GCM encrypted), with keychain storage preferred when available
+- **Stored** in `~/.qwen/mcp-oauth-tokens.json` by default. If `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` is set, Qwen Code uses encrypted file storage/keychain-backed storage where available.
 - **Refreshed** when expired (if refresh tokens are available)
 - **Validated** before each connection attempt
 
-Use the `/mcp auth` command within Qwen Code to manage OAuth authentication interactively.
+Use the `/mcp` dialog within Qwen Code to inspect MCP servers and manage
+authentication interactively.
 
 ### Tool filtering (allow/deny tools per server)
 

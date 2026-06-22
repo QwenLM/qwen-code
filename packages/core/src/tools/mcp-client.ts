@@ -75,6 +75,18 @@ const debugLogger = createDebugLogger('MCP');
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
 
+function getMcpOAuthDialogInstruction(
+  action: 'authenticate' | 're-authenticate',
+  mcpServerName?: string,
+): string {
+  return mcpServerName
+    ? [
+        `Open the /mcp dialog in Qwen Code to ${action}`,
+        `MCP server '${mcpServerName}'.`,
+      ].join(' ')
+    : `Open the /mcp dialog in Qwen Code to ${action} the MCP server.`;
+}
+
 async function readResponseBodyExcerpt(
   response: Response,
 ): Promise<string | undefined> {
@@ -608,7 +620,8 @@ async function handleAutomaticOAuth(
 
     if (!oauthConfig) {
       debugLogger.error(
-        `Could not configure OAuth for '${mcpServerName}' - please authenticate manually with /mcp auth ${mcpServerName}`,
+        `Could not configure OAuth for '${mcpServerName}'. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
       return false;
     }
@@ -1187,18 +1200,18 @@ export async function connectToMcpServer(
           if (hasStoredTokens) {
             debugLogger.warn(
               `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-                `Please re-authenticate using: /mcp auth ${mcpServerName}`,
+                getMcpOAuthDialogInstruction('re-authenticate', mcpServerName),
             );
           } else {
             debugLogger.warn(
               `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-                `Please authenticate using: /mcp auth ${mcpServerName}`,
+                getMcpOAuthDialogInstruction('authenticate', mcpServerName),
             );
           }
         }
         throw new Error(
           `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-            `Please authenticate using: /mcp auth ${mcpServerName}`,
+            getMcpOAuthDialogInstruction('authenticate', mcpServerName),
         );
       }
 
@@ -1347,18 +1360,21 @@ export async function connectToMcpServer(
             if (hasStoredTokens) {
               debugLogger.warn(
                 `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-                  `Please re-authenticate using: /mcp auth ${mcpServerName}`,
+                  getMcpOAuthDialogInstruction(
+                    're-authenticate',
+                    mcpServerName,
+                  ),
               );
             } else {
               debugLogger.warn(
                 `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-                  `Please authenticate using: /mcp auth ${mcpServerName}`,
+                  getMcpOAuthDialogInstruction('authenticate', mcpServerName),
               );
             }
           }
           throw new Error(
             `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-              `Please authenticate using: /mcp auth ${mcpServerName}`,
+              getMcpOAuthDialogInstruction('authenticate', mcpServerName),
           );
         }
 
@@ -1467,15 +1483,18 @@ export async function connectToMcpServer(
               }
             } else {
               debugLogger.error(
-                `Could not configure OAuth for '${mcpServerName}' - please authenticate manually with /mcp auth ${mcpServerName}`,
+                `Could not configure OAuth for '${mcpServerName}'. ` +
+                  getMcpOAuthDialogInstruction('authenticate', mcpServerName),
               );
               throw new Error(
-                `OAuth configuration failed for '${mcpServerName}'. Please authenticate manually with /mcp auth ${mcpServerName}`,
+                `OAuth configuration failed for '${mcpServerName}'. ` +
+                  getMcpOAuthDialogInstruction('authenticate', mcpServerName),
               );
             }
           } catch (discoveryError) {
             debugLogger.error(
-              `OAuth discovery failed for '${mcpServerName}' - please authenticate manually with /mcp auth ${mcpServerName}`,
+              `OAuth discovery failed for '${mcpServerName}'. ` +
+                getMcpOAuthDialogInstruction('authenticate', mcpServerName),
             );
             throw discoveryError;
           }
@@ -1602,11 +1621,11 @@ export async function createTransport(
     if (!accessToken) {
       debugLogger.error(
         `MCP server '${mcpServerName}' requires OAuth authentication. ` +
-          `Please authenticate using the /mcp auth command.`,
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
       throw new Error(
         `MCP server '${mcpServerName}' requires OAuth authentication. ` +
-          `Please authenticate using the /mcp auth command.`,
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
     }
   } else {
