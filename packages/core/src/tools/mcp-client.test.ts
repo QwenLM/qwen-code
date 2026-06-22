@@ -17,11 +17,13 @@ import {
 } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
+import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   addMCPStatusChangeListener,
+  connectToMcpServer,
   createStreamableHttpCompatibilityFetch,
   createTransport,
   discoverPrompts,
@@ -99,6 +101,89 @@ describe('mcp-client', () => {
     it('builds a re-authenticate instruction for the named MCP server', () => {
       expect(getMcpOAuthDialogInstruction('re-authenticate', 'foo')).toBe(
         "Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'foo'.",
+      );
+    });
+  });
+
+  describe('connectToMcpServer', () => {
+    afterEach(() => {
+      vi.mocked(MCPOAuthProvider).mockReset();
+      vi.mocked(MCPOAuthTokenStorage).mockReset();
+    });
+
+    it('reports rejected stored OAuth tokens for SSE servers', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue({
+              clientId: 'client-id',
+            }),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken: vi.fn().mockResolvedValue('stored-token'),
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth token for SSE server 'sse-server' was rejected. Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'sse-server'.",
+      );
+    });
+
+    it('reports missing OAuth configuration for SSE servers without valid stored tokens', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue({
+              clientId: 'client-id',
+            }),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "401 error received for SSE server 'sse-server' without OAuth configuration. Open the /mcp dialog in Qwen Code to authenticate with MCP server 'sse-server'.",
       );
     });
   });
