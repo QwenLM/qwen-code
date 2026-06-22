@@ -227,6 +227,7 @@ import {
 import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 import {
   findLastUserItemIndex,
+  getLatestToolUseSummary,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
 } from './utils/historyUtils.js';
@@ -2945,6 +2946,22 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingResponseLengthRef.current,
   );
 
+  // Surface the latest fast-model tool-use summary in the loading indicator
+  // instead of a generic witty phrase. Falls back to the phrase cycler when
+  // no summary is available (no fast-model configured, or a fresh user turn).
+  const latestToolUseSummary = useMemo(
+    () =>
+      getLatestToolUseSummary([
+        ...historyManager.history,
+        ...pendingHistoryItems,
+      ]),
+    [historyManager.history, pendingHistoryItems],
+  );
+  const loadingPhrase =
+    streamingState === StreamingState.Responding && latestToolUseSummary
+      ? latestToolUseSummary
+      : currentLoadingPhrase;
+
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -3509,7 +3526,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      currentLoadingPhrase: loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
@@ -3645,7 +3662,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,

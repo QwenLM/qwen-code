@@ -9,6 +9,7 @@ import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
   findLastUserItemIndex,
+  getLatestToolUseSummary,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
 } from './historyUtils.js';
@@ -136,5 +137,51 @@ describe('findLastUserItemIndex', () => {
       mk({ type: 'info', text: 'Request cancelled.' }, 4),
     ];
     expect(findLastUserItemIndex(h)).toBe(2);
+  });
+});
+
+describe('getLatestToolUseSummary', () => {
+  const summary = (text: string, id: number): HistoryItem =>
+    mk({ type: 'tool_use_summary', summary: text } as never, id);
+
+  it('returns the summary when it is the last item', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'fix the bug' }, 1),
+      mk({ type: 'tool_group', tools: [] } as never, 2),
+      summary('Fixed NPE in UserService', 3),
+    ];
+    expect(getLatestToolUseSummary(h)).toBe('Fixed NPE in UserService');
+  });
+
+  it('returns the latest summary when multiple exist in one turn', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'refactor' }, 1),
+      summary('Searched in auth/', 2),
+      mk({ type: 'gemini_content', text: '...' }, 3),
+      summary('Fixed NPE in UserService', 4),
+    ];
+    expect(getLatestToolUseSummary(h)).toBe('Fixed NPE in UserService');
+  });
+
+  it('returns undefined when a user message follows (new turn)', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'first' }, 1),
+      summary('Searched in auth/', 2),
+      mk({ type: 'user', text: 'second' }, 3),
+      mk({ type: 'gemini_content', text: 'streaming...' }, 4),
+    ];
+    expect(getLatestToolUseSummary(h)).toBeUndefined();
+  });
+
+  it('returns undefined when no summary exists', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'hello' }, 1),
+      mk({ type: 'gemini_content', text: 'hi' }, 2),
+    ];
+    expect(getLatestToolUseSummary(h)).toBeUndefined();
+  });
+
+  it('returns undefined on empty history', () => {
+    expect(getLatestToolUseSummary([])).toBeUndefined();
   });
 });

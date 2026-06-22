@@ -124,3 +124,26 @@ export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   }
   return -1;
 }
+
+/**
+ * Returns the summary text of the most recent `tool_use_summary` in the
+ * current turn (after the last user message), or `undefined` when none
+ * exists. Used by the loading indicator to show a contextual summary
+ * instead of a generic witty phrase when a fast-model summary is available.
+ */
+export function getLatestToolUseSummary(
+  history: ReadonlyArray<HistoryItem | HistoryItemWithoutId>,
+): string | undefined {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const item = history[i];
+    if (item.type === 'tool_use_summary') {
+      return item.summary;
+    }
+    // A user message marks the start of a new turn — any summary before
+    // it belongs to a previous turn and is stale.
+    if (item.type === 'user') {
+      return undefined;
+    }
+  }
+  return undefined;
+}

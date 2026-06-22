@@ -75,7 +75,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('✦ Hello');
   });
 
-  it('renders tool summaries without a leading spacer row', () => {
+  it('renders nothing for tool_use_summary (moved to loading indicator)', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'tool_use_summary',
@@ -87,8 +87,8 @@ describe('<HistoryItemDisplay />', () => {
     );
 
     const output = lastFrame() ?? '';
-    expect(output.startsWith('\n')).toBe(false);
-    expect(output).toContain('Read txt files');
+    expect(output).not.toContain('Read txt files');
+    expect(output).not.toContain('●');
   });
 
   it('renders StatsDisplay for "stats" type', () => {
@@ -318,7 +318,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('renders tool_use_summary as a dim badge line in full mode', () => {
+  it('renders nothing for tool_use_summary in full mode (moved to loading indicator)', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'tool_use_summary',
@@ -333,8 +333,9 @@ describe('<HistoryItemDisplay />', () => {
         terminalWidth={80}
       />,
     );
-    expect(lastFrame()).toContain('Read txt files');
-    expect(lastFrame()).toContain('●');
+    const output = lastFrame() ?? '';
+    expect(output).not.toContain('Read txt files');
+    expect(output).not.toContain('●');
   });
 
   it('renders committed thinking text in full transcript mode', () => {

@@ -692,9 +692,9 @@ describe('<MainContent />', () => {
       historyItemDisplayPropsSpy.mockClear();
 
       // History with a tool_group followed by its tool_use_summary, then another tool_group.
-      // When merge is skipped (Static mode), absorbedCallIds returns EMPTY_ABSORBED_CALL_IDS
-      // so isSummaryAbsorbed returns false — the summary MUST pass through as a standalone
-      // item and render as `● <label>` line in HistoryItemDisplay.
+      // The tool_use_summary item is still passed through to HistoryItemDisplay (it
+      // feeds the compact-mode label and the loading-indicator summary), but
+      // HistoryItemDisplay no longer renders a standalone `● <label>` line.
       const history = [
         {
           id: 1,
