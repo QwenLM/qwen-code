@@ -202,7 +202,7 @@ servers and manage OAuth authentication.
 
 OAuth tokens are automatically:
 
-- **Stored** in `~/.qwen/mcp-oauth-tokens.json` by default. If `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` is set, Qwen Code uses encrypted file storage/keychain-backed storage where available.
+- **Stored** in `~/.qwen/mcp-oauth-tokens.json` (plaintext, mode 0600) by default. If `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` is set, Qwen Code uses keychain-backed storage where available, or `~/.qwen/mcp-oauth-tokens-v2.json` with AES-256-GCM encryption.
 - **Refreshed** when expired (if refresh tokens are available)
 - **Validated** before each connection attempt
 - **Cleaned up** when invalid or expired

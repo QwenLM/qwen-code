@@ -85,7 +85,7 @@ function getMcpOAuthDialogInstruction(
   return mcpServerName
     ? [
         `Open the /mcp dialog in Qwen Code to ${action}`,
-        `MCP server '${mcpServerName}'.`,
+        `with MCP server '${mcpServerName}'.`,
       ].join(' ')
     : `Open the /mcp dialog in Qwen Code to ${action} the MCP server.`;
 }

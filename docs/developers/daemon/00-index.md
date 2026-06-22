@@ -9,7 +9,7 @@ It complements, rather than replaces, these existing docs:
 | [`../../users/qwen-serve.md`](../../users/qwen-serve.md)                             | Operators             | User quickstart, flags, threat model                     |
 | [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)                             | Protocol implementers | HTTP route catalog, request/response shapes, error codes |
 | [`../examples/daemon-client-quickstart.md`](../examples/daemon-client-quickstart.md) | SDK users             | End-to-end TypeScript walkthrough                        |
-| [`../daemon-client-adapters/tui.md`](../daemon-client-adapters/tui.md)               | Adapter authors       | Client adapter design notes                              |
+| [`14-cli-tui-adapter.md`](./14-cli-tui-adapter.md)                                   | Adapter authors       | Client adapter design notes                              |
 | [`../../design/f2-mcp-transport-pool.md`](../../design/f2-mcp-transport-pool.md)     | F2 maintainers        | Workspace MCP transport pool design v2.2                 |
 
 If you want to **start a daemon and use it**, read `qwen-serve.md` first. If you want to **build a client against the wire format**, read `qwen-serve-protocol.md`. If you want to **understand, extend, or debug the daemon internals**, read this set.
