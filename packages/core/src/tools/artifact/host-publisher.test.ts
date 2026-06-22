@@ -113,16 +113,18 @@ describe('HostPublisher', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('does not substitute file paths into the returned url', async () => {
+  it('rejects urlTemplate with the file placeholder', async () => {
     const run = vi.fn<RunCommand>(async () => {});
-    const res = await new HostPublisher(
-      {
-        uploadCommand: 'up {file} {key}',
-        urlTemplate: 'https://h/{key}?src={file}',
-      },
-      run,
-    ).publish(input);
-    expect(res.url).toBe('https://h/artifacts/deadbeef/index.html?src={file}');
+    await expect(
+      new HostPublisher(
+        {
+          uploadCommand: 'up {file} {key}',
+          urlTemplate: 'https://h/{key}?src={file}',
+        },
+        run,
+      ).publish(input),
+    ).rejects.toThrow(/\{file\}/i);
+    expect(run).not.toHaveBeenCalled();
   });
 
   it('honors a custom keyPrefix and strips surrounding slashes', async () => {
@@ -168,6 +170,14 @@ describe('HostPublisher', () => {
         uploadCommand: 'up {file} {key}',
         urlTemplate: 'https://h/{key}',
         keyPrefix: '/',
+      },
+      /keyPrefix/i,
+    ],
+    [
+      {
+        uploadCommand: 'up {file} {key}',
+        urlTemplate: 'https://h/{key}',
+        keyPrefix: 'bad prefix',
       },
       /keyPrefix/i,
     ],

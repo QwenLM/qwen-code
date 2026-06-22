@@ -130,6 +130,7 @@ describe('artifact html helpers', () => {
       expect(html).toContain("form-action 'none'");
       expect(html).toContain("base-uri 'none'");
       expect(html).toContain("frame-ancestors 'none'");
+      expect(html).toContain('sandbox allow-scripts');
     });
 
     it('escapes the title', () => {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import type {
   ArtifactOssConfig,
   ArtifactPublisher,
@@ -75,6 +75,7 @@ export function signOssPut(params: {
   credentials: OssCredentials;
   bucket: string;
   key: string;
+  contentMd5: string;
   contentType: string;
   date: string;
   acl?: string;
@@ -90,8 +91,8 @@ export function signOssPut(params: {
     .map((k) => `${k}:${ossHeaders[k]}\n`)
     .join('');
   const canonicalizedResource = `/${params.bucket}/${params.key}`;
-  // PUT \n Content-MD5(empty) \n Content-Type \n Date \n CanonHeaders + CanonResource
-  const stringToSign = `PUT\n\n${params.contentType}\n${params.date}\n${canonicalizedHeaders}${canonicalizedResource}`;
+  // PUT \n Content-MD5 \n Content-Type \n Date \n CanonHeaders + CanonResource
+  const stringToSign = `PUT\n${params.contentMd5}\n${params.contentType}\n${params.date}\n${canonicalizedHeaders}${canonicalizedResource}`;
   const signature = createHmac('sha1', params.credentials.accessKeySecret)
     .update(stringToSign, 'utf8')
     .digest('base64');
@@ -129,6 +130,17 @@ function normalizeKeyPrefix(raw: string | undefined): string {
     );
   }
   return prefix;
+}
+
+function normalizePublicBaseUrl(raw: string | undefined): string | undefined {
+  const base = raw?.trim().replace(/\/+$/, '');
+  if (!base) return undefined;
+  if (!/^https?:\/\//i.test(base)) {
+    throw new Error(
+      'artifact.oss.publicBaseUrl must start with http:// or https://.',
+    );
+  }
+  return base;
 }
 
 /**
@@ -174,13 +186,18 @@ export class OssPublisher implements ArtifactPublisher {
 
     const prefix = normalizeKeyPrefix(this.config.keyPrefix);
     const key = `${prefix}/${input.id}/index.html`;
+    const base = normalizePublicBaseUrl(this.config.publicBaseUrl);
     const acl = this.config.acl ?? 'public-read';
     const date = (this.deps.now ? this.deps.now() : new Date()).toUTCString();
+    const contentMd5 = createHash('md5')
+      .update(input.html, 'utf8')
+      .digest('base64');
 
     const { authorization, ossHeaders } = signOssPut({
       credentials,
       bucket,
       key,
+      contentMd5,
       contentType: CONTENT_TYPE,
       date,
       acl,
@@ -192,6 +209,7 @@ export class OssPublisher implements ArtifactPublisher {
       putUrl,
       {
         Date: date,
+        'Content-MD5': contentMd5,
         'Content-Type': CONTENT_TYPE,
         Authorization: authorization,
         ...ossHeaders,
@@ -200,7 +218,6 @@ export class OssPublisher implements ArtifactPublisher {
       signal,
     );
 
-    const base = this.config.publicBaseUrl?.trim().replace(/\/+$/, '');
     const url = base ? `${base}/${key}` : putUrl;
     return { id: input.id, url };
   }

@@ -25,6 +25,7 @@ describe('signOssPut', () => {
     credentials: creds,
     bucket: 'bkt',
     key: 'artifacts/cafe1234/index.html',
+    contentMd5: '2jmj7l5rSw0yVb/vlWAYkK/YBwk=',
     contentType: 'text/html',
     date: 'Sun, 21 Jun 2026 00:00:00 GMT',
     acl: 'public-read',
@@ -98,6 +99,7 @@ describe('OssPublisher', () => {
       'https://bkt.oss-cn-hangzhou.aliyuncs.com/artifacts/cafe1234/index.html';
     expect(captured?.url).toBe(expectedUrl);
     expect(captured?.headers['Authorization']).toMatch(/^OSS AKID:/);
+    expect(captured?.headers['Content-MD5']).toMatch(/^[A-Za-z0-9+/]+=*$/);
     expect(captured?.headers['Content-Type']).toBe('text/html');
     expect(captured?.headers['x-oss-object-acl']).toBe('public-read');
     expect(captured?.headers['Date']).toBeTruthy();
@@ -118,6 +120,21 @@ describe('OssPublisher', () => {
     expect(res.url).toBe(
       'https://cdn.example.com/artifacts/cafe1234/index.html',
     );
+  });
+
+  it('rejects publicBaseUrl without a URL scheme', async () => {
+    const httpPut = vi.fn<HttpPut>(async () => {});
+    await expect(
+      new OssPublisher(
+        {
+          bucket: 'bkt',
+          endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+          publicBaseUrl: 'cdn.example.com',
+        },
+        { httpPut, credentials: () => creds, now: fixedNow },
+      ).publish(input),
+    ).rejects.toThrow(/publicBaseUrl/i);
+    expect(httpPut).not.toHaveBeenCalled();
   });
 
   it('uses a timeout signal for default uploads', async () => {

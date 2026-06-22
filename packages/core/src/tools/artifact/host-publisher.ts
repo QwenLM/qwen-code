@@ -82,6 +82,11 @@ function normalizeKeyPrefix(raw: string | undefined): string {
       'artifact.host.keyPrefix must not be empty or "/" after stripping slashes.',
     );
   }
+  if (/[#?%\s]/.test(prefix)) {
+    throw new Error(
+      'artifact.host.keyPrefix must not contain #, ?, %, or whitespace.',
+    );
+  }
   return prefix;
 }
 
@@ -128,6 +133,11 @@ export class HostPublisher implements ArtifactPublisher {
     if (!urlTemplate.includes('{key}')) {
       throw new Error(
         'artifact.host.urlTemplate must include the {key} placeholder (the remote object key).',
+      );
+    }
+    if (urlTemplate.includes('{file}')) {
+      throw new Error(
+        'artifact.host.urlTemplate must not include {file}; only {key} is supported.',
       );
     }
 
