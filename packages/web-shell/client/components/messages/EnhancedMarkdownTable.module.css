@@ -71,6 +71,11 @@
   outline: none;
 }
 
+.scroller:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
 .table {
   width: max-content;
   min-width: 100%;
@@ -159,8 +164,8 @@
 }
 
 .filterMenu {
-  position: absolute;
-  z-index: 20;
+  position: fixed;
+  z-index: 1000;
   width: 300px;
   max-width: min(320px, 80vw);
   max-height: min(430px, calc(100vh - 16px));
@@ -310,6 +315,9 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   cursor: cell;
+}
+
+.dragging .cell {
   user-select: none;
 }
 

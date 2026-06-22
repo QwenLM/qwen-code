@@ -95,6 +95,32 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
   between: 'markdownTable.filter.number.between',
 };
 
+const MAX_ENHANCED_TABLE_ROWS = 500;
+const MAX_ENHANCED_TABLE_COLUMNS = 50;
+
+function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(
+      target.closest(
+        'a, button, input, textarea, select, [contenteditable="true"]',
+      ),
+    )
+  );
+}
+
+function hasNativeSelectionWithin(container: HTMLElement | null): boolean {
+  const selection = document.getSelection();
+  if (!container || !selection || selection.isCollapsed) return false;
+  const { anchorNode, focusNode } = selection;
+  return Boolean(
+    anchorNode &&
+      focusNode &&
+      container.contains(anchorNode) &&
+      container.contains(focusNode),
+  );
+}
+
 function isTagElement(node: ReactNode, tag: string): node is TableElement {
   return isValidElement<{ children?: ReactNode }>(node) && node.type === tag;
 }
@@ -936,7 +962,15 @@ function ColumnFilterMenu({
   );
 }
 
-export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
+interface EnhancedMarkdownTableProps {
+  children?: ReactNode;
+  fallback?: ReactNode;
+}
+
+export function EnhancedMarkdownTable({
+  children,
+  fallback,
+}: EnhancedMarkdownTableProps) {
   const { t } = useI18n();
   const table = useMemo(
     () =>
@@ -945,6 +979,20 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
       ),
     [children, t],
   );
+
+  if (table.columnCount === 0) return null;
+  if (
+    table.rows.length > MAX_ENHANCED_TABLE_ROWS ||
+    table.columnCount > MAX_ENHANCED_TABLE_COLUMNS
+  ) {
+    return <>{fallback ?? <table>{children}</table>}</>;
+  }
+
+  return <InteractiveMarkdownTable table={table} />;
+}
+
+function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
+  const { t } = useI18n();
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
   const [selection, setSelection] = useState<SelectionRange | null>(null);
@@ -955,6 +1003,7 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
     () => new Set(),
   );
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const draggingRef = useRef(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -962,6 +1011,7 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
   useEffect(() => {
     const stopDragging = () => {
       draggingRef.current = false;
+      setIsDragging(false);
     };
     window.addEventListener('mouseup', stopDragging);
     return () => window.removeEventListener('mouseup', stopDragging);
@@ -1024,8 +1074,6 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
     }
   }, [detailRowKey, visibleRows]);
 
-  if (table.columnCount === 0) return null;
-
   const setColumnFilter = (
     columnIndex: number,
     nextFilter: ColumnFilter | undefined,
@@ -1069,29 +1117,23 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
     columnIndex: number,
   ) => {
     setSelection(null);
-    const shellRect = shellRef.current?.getBoundingClientRect();
     const buttonRect = event.currentTarget.getBoundingClientRect();
     const menuWidth = 300;
     const menuHeight = 430;
-    const nextMenu = shellRect
-      ? {
-          columnIndex,
-          left: Math.max(
-            6,
-            Math.min(
-              buttonRect.right - shellRect.left - menuWidth,
-              shellRect.width - menuWidth - 6,
-            ),
-          ),
-          top:
-            window.innerHeight - buttonRect.bottom < menuHeight
-              ? Math.max(
-                  8 - shellRect.top,
-                  buttonRect.top - shellRect.top - menuHeight - 2,
-                )
-              : buttonRect.bottom - shellRect.top + 2,
-        }
-      : { columnIndex, left: 6, top: 36 };
+    const nextMenu = {
+      columnIndex,
+      left: Math.max(
+        6,
+        Math.min(
+          buttonRect.right - menuWidth,
+          window.innerWidth - menuWidth - 6,
+        ),
+      ),
+      top:
+        window.innerHeight - buttonRect.bottom < menuHeight
+          ? Math.max(8, buttonRect.top - menuHeight - 2)
+          : buttonRect.bottom + 2,
+    };
 
     setOpenFilterMenu((current) =>
       current?.columnIndex === columnIndex ? null : nextMenu,
@@ -1135,9 +1177,8 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
     rowIndex: number,
     columnIndex: number,
   ) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    containerRef.current?.focus({ preventScroll: true });
+    if (event.button !== 0 || isInteractiveSelectionTarget(event.target))
+      return;
     draggingRef.current = true;
     setSelection({
       anchorRow: rowIndex,
@@ -1149,6 +1190,7 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
 
   const extendSelection = (rowIndex: number, columnIndex: number) => {
     if (!draggingRef.current) return;
+    setIsDragging(true);
     setSelection((current) =>
       current
         ? { ...current, focusRow: rowIndex, focusCol: columnIndex }
@@ -1173,6 +1215,7 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
+    if (hasNativeSelectionWithin(containerRef.current)) return;
     const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
     if (!text) return;
     event.preventDefault();
@@ -1193,13 +1236,17 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
     openFilterMenu === null
       ? undefined
       : table.headers[openFilterMenu.columnIndex];
-  const openFilterColumnName = openFilterHeader
-    ? openFilterHeader.text ||
-      t('markdownTable.column', { index: openFilterMenu!.columnIndex + 1 })
-    : '';
+  const openFilterColumnName =
+    openFilterHeader && openFilterMenu
+      ? openFilterHeader.text ||
+        t('markdownTable.column', { index: openFilterMenu.columnIndex + 1 })
+      : '';
 
   return (
-    <div ref={shellRef} className={styles.tableShell}>
+    <div
+      ref={shellRef}
+      className={`${styles.tableShell} ${isDragging ? styles.dragging : ''}`}
+    >
       <div className={styles.toolbar}>
         <span className={styles.summary}>{rowSummary}</span>
         <span className={styles.hint}>{t('markdownTable.hint')}</span>
@@ -1394,6 +1441,7 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
       </div>
       {openFilterMenu && openFilterHeader && (
         <ColumnFilterMenu
+          key={openFilterMenu.columnIndex}
           columnName={openFilterColumnName}
           columnIndex={openFilterMenu.columnIndex}
           filter={filters[openFilterMenu.columnIndex]}

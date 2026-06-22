@@ -143,9 +143,9 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
 }
 
 function dataRows(container: HTMLElement): HTMLTableRowElement[] {
-  return [...container.querySelectorAll<HTMLTableRowElement>('tbody tr')].filter(
-    (row) => row.querySelectorAll('td').length > 1,
-  );
+  return [
+    ...container.querySelectorAll<HTMLTableRowElement>('tbody tr'),
+  ].filter((row) => row.querySelectorAll('td').length > 1);
 }
 
 function dataCell(
@@ -276,9 +276,24 @@ describe('EnhancedMarkdownTable', () => {
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
     click(textButton(container, 'Copy TSV'));
 
-    expect(writeText).toHaveBeenCalledWith(
-      ['Alpha\t10', 'Beta\t2'].join('\n'),
+    expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
+  });
+
+  it('resets filter menu draft state when switching columns', () => {
+    const container = renderWideTable();
+
+    click(button(container, 'Filter Team'));
+    const teamSearch = container.querySelector<HTMLInputElement>(
+      'input[name="markdown-table-option-search-0"]',
     );
+    expect(teamSearch).not.toBeNull();
+    inputValue(teamSearch!, 'Al');
+
+    click(button(container, 'Filter Score'));
+    const scoreSearch = container.querySelector<HTMLInputElement>(
+      'input[name="markdown-table-option-search-2"]',
+    );
+    expect(scoreSearch?.value).toBe('');
   });
 
   it('does not offer hiding the last visible column', () => {

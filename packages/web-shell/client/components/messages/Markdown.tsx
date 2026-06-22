@@ -1,4 +1,4 @@
-import { memo, useEffect, useState, type ReactNode } from 'react';
+import { Component, memo, useEffect, useState, type ReactNode } from 'react';
 import { useTheme } from '../../themeContext';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
@@ -324,6 +324,33 @@ function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
+function PlainMarkdownTable({ children }: { children?: ReactNode }) {
+  return (
+    <div className={styles.tableWrapper}>
+      <table className={styles.table}>{children}</table>
+    </div>
+  );
+}
+
+class EnhancedMarkdownTableBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error) {
+    console.warn('[web-shell] enhanced markdown table failed:', error);
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
 function createComponents(
   deferMermaid?: boolean,
   enhanceTables?: boolean,
@@ -366,14 +393,17 @@ function createComponents(
       );
     },
     table({ children }: { children?: ReactNode }) {
+      const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
       if (enhanceTables) {
-        return <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>;
+        return (
+          <EnhancedMarkdownTableBoundary fallback={fallback}>
+            <EnhancedMarkdownTable fallback={fallback}>
+              {children}
+            </EnhancedMarkdownTable>
+          </EnhancedMarkdownTableBoundary>
+        );
       }
-      return (
-        <div className={styles.tableWrapper}>
-          <table className={styles.table}>{children}</table>
-        </div>
-      );
+      return fallback;
     },
     img({ src, alt }: { src?: string; alt?: string }) {
       const safeSrc = isSafeImageSrc(src) ? src : undefined;

@@ -56,3 +56,27 @@ describe('AssistantMessage compact thinking', () => {
     expect(container.textContent).toContain('Inspect workspace first.');
   });
 });
+
+describe('AssistantMessage markdown tables', () => {
+  const tableMarkdown = [
+    '| Team | Score |',
+    '| --- | ---: |',
+    '| Alpha | 10 |',
+  ].join('\n');
+
+  it('enhances completed assistant tables', () => {
+    const container = render(<AssistantMessage content={tableMarkdown} />);
+
+    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Details');
+  });
+
+  it('keeps streaming assistant tables plain', () => {
+    const container = render(
+      <AssistantMessage content={tableMarkdown} isStreaming />,
+    );
+
+    expect(container.querySelector('table')).not.toBeNull();
+    expect(container.textContent).not.toContain('Quick copy');
+  });
+});
