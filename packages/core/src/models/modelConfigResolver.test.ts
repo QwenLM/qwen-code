@@ -265,7 +265,7 @@ describe('modelConfigResolver', () => {
         expect(result.config.timeout).toBeUndefined();
       });
 
-      it('QWEN_CODE_API_TIMEOUT_MS works with float value in OAuth', () => {
+      it('ignores float QWEN_CODE_API_TIMEOUT_MS in OAuth (not a decimal integer)', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {},
@@ -275,7 +275,10 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.timeout).toBe(12345);
+        // Floats are not strict positive decimal integers — ignored, so the
+        // lower-priority layer applies (here: undefined / provider default).
+        expect(result.config.timeout).toBeUndefined();
+        expect(result.sources['timeout']).toBeUndefined();
       });
 
       it('QWEN_CODE_API_TIMEOUT_MS works with proxy in OAuth path', () => {
@@ -782,22 +785,24 @@ describe('modelConfigResolver', () => {
   });
 
   describe('[Additional] timeout env override edge cases', () => {
-    it('handles scientific notation in QWEN_CODE_API_TIMEOUT_MS', () => {
+    it('ignores scientific notation in QWEN_CODE_API_TIMEOUT_MS', () => {
       const result = resolveModelConfig({
         authType: AuthType.USE_OPENAI,
         cli: {},
-        settings: { apiKey: 'key' },
+        settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
         env: {
           OPENAI_API_KEY: 'key',
           QWEN_CODE_API_TIMEOUT_MS: '1.5e5',
         },
       });
 
-      expect(result.config.timeout).toBe(150000);
-      expect(result.sources['timeout'].kind).toBe('env');
+      // `1.5e5` is not a strict positive decimal integer — ignored, so the
+      // lower-priority settings value applies.
+      expect(result.config.timeout).toBe(30000);
+      expect(result.sources['timeout'].kind).toBe('settings');
     });
 
-    it('handles hex values in QWEN_CODE_API_TIMEOUT_MS', () => {
+    it('ignores hex values in QWEN_CODE_API_TIMEOUT_MS', () => {
       const result = resolveModelConfig({
         authType: AuthType.USE_OPENAI,
         cli: {},
@@ -808,8 +813,25 @@ describe('modelConfigResolver', () => {
         },
       });
 
-      expect(result.config.timeout).toBe(180000);
-      expect(result.sources['timeout'].kind).toBe('env');
+      // Hex literals are not decimal integers — ignored, settings value applies.
+      expect(result.config.timeout).toBe(30000);
+      expect(result.sources['timeout'].kind).toBe('settings');
+    });
+
+    it('ignores unsafe-integer QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
+        env: {
+          OPENAI_API_KEY: 'key',
+          // 2^53 — beyond Number.MAX_SAFE_INTEGER, rejected by the strict parser.
+          QWEN_CODE_API_TIMEOUT_MS: '9007199254740993',
+        },
+      });
+
+      expect(result.config.timeout).toBe(30000);
+      expect(result.sources['timeout'].kind).toBe('settings');
     });
 
     it('ignores empty string QWEN_CODE_API_TIMEOUT_MS', () => {

@@ -42,6 +42,7 @@ import {
   QWEN_OAUTH_ALLOWED_MODELS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
 import type { ModelConfig as ModelProviderConfig } from './types.js';
 export {
   validateModelConfig,
@@ -122,9 +123,18 @@ function applyTimeoutEnvOverride(
   const raw = env['QWEN_CODE_API_TIMEOUT_MS'];
   if (raw === undefined) return;
 
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) {
-    generationConfig.timeout = Math.floor(parsed);
+  // For a `*_MS` knob, only accept strict positive decimal integers — the same
+  // rule `parsePositiveIntegerEnv` already applies to the other env knobs. This
+  // rejects floats, scientific notation (`1.5e5`), hex (`0x2BF20`), and unsafe
+  // integers that `Number()` would otherwise silently coerce. Malformed values
+  // are ignored so the lower-priority layer applies (modelProvider > env >
+  // settings > default). The INVALID sentinel distinguishes a genuine override
+  // from a malformed value, so we never mis-attribute a settings-derived timeout
+  // to the env source.
+  const INVALID = -1;
+  const parsed = parsePositiveIntegerEnv(raw, INVALID);
+  if (parsed !== INVALID) {
+    generationConfig.timeout = parsed;
     sources['timeout'] = {
       kind: 'env',
       envKey: 'QWEN_CODE_API_TIMEOUT_MS',
