@@ -4369,6 +4369,78 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
+    it('always-on consecutive halt splices only the repeated tail, keeping distinct earlier calls', async () => {
+      // skipLoopDetection defaults true, so this also confirms the splice runs
+      // via the always-on path. The repeated-tail arithmetic
+      // (pendingToolCalls.length - consecutiveCount) must preserve the two
+      // distinct read_file calls collected before the identical run — an
+      // off-by-one in repeatedStartIndex would silently drop them.
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
+
+      const distinctA = {
+        callId: 'd1',
+        name: 'read_file',
+        args: { path: 'a.ts' },
+      };
+      const distinctB = {
+        callId: 'd2',
+        name: 'read_file',
+        args: { path: 'b.ts' },
+      };
+
+      mockTurnRunFn.mockImplementation(async function* (this: {
+        pendingToolCalls: unknown[];
+      }) {
+        for (const call of [distinctA, distinctB]) {
+          this.pendingToolCalls.push(call);
+          yield { type: GeminiEventType.ToolCallRequest, value: call };
+        }
+        // TOOL_CALL_LOOP_THRESHOLD (5) identical calls trip the guard on the 5th.
+        for (let i = 0; i < 5; i++) {
+          const call = {
+            callId: `r${i}`,
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+          };
+          this.pendingToolCalls.push(call);
+          yield { type: GeminiEventType.ToolCallRequest, value: call };
+        }
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'mix distinct then repeat' }],
+        new AbortController().signal,
+        'prompt-id-splice-mixed',
+      );
+      const events = [];
+      let result = await stream.next();
+      while (!result.done) {
+        events.push(result.value);
+        result = await stream.next();
+      }
+      const returnedTurn = result.value as
+        | { pendingToolCalls: Array<{ callId: string }> }
+        | undefined;
+
+      // Halts on the 5th identical call via the always-on consecutive guard.
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
+      // Only the repeated tail is dropped; the two distinct calls survive.
+      expect(returnedTurn?.pendingToolCalls).toHaveLength(2);
+      expect(returnedTurn?.pendingToolCalls.map((c) => c.callId)).toEqual([
+        'd1',
+        'd2',
+      ]);
+    });
+
     it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
       // Self-inflicted-regression guard for the round-4 finding:
       // the bottom-of-try `normalCompletion = true` doesn't cover the

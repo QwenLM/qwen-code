@@ -165,9 +165,15 @@ export class LoopDetectionService {
   }
 
   /**
-   * Processes a stream event and checks for loop conditions.
+   * Convenience aggregate that runs every tier in order: the always-on
+   * safeties (consecutive-identical guard + per-turn cap) followed by the
+   * opt-in heuristics. Intended as a single "check everything" entry point for
+   * unit tests. Production code (client.ts) intentionally calls the tiers
+   * separately so the `skipLoopDetection` gate can sit between them — a new
+   * guard added here will NOT take effect in production unless it is also
+   * wired into checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
    * @param event - The stream event to process
-   * @returns true if a loop is detected, false otherwise
+   * @returns true if any tier detects a loop, false otherwise
    */
   addAndCheck(event: ServerGeminiStreamEvent): boolean {
     if (this.checkAlwaysOnSafeties(event)) {
