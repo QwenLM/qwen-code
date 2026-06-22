@@ -494,6 +494,45 @@ describe('voiceTranscriber', () => {
     ).toBe(false);
   });
 
+  it('keeps longer speech that only mentions a small slice of keyterms', () => {
+    expect(
+      isKeytermEcho(
+        'commit schema endpoint async await api cli npm',
+        [
+          'commit',
+          'schema',
+          'endpoint',
+          'async',
+          'await',
+          'api',
+          'cli',
+          'npm',
+          'grep',
+          'regex',
+          'json',
+          'refactor',
+          'middleware',
+          'tokenizer',
+          'typescript',
+          'javascript',
+          'yaml',
+          'oauth',
+          'grpc',
+          'worktree',
+          'subagent',
+          'stdout',
+          'stderr',
+          'localhost',
+          'codebase',
+          'dotfiles',
+          'webhook',
+          'qwen',
+          'mcp',
+        ].join(' '),
+      ),
+    ).toBe(false);
+  });
+
   it('posts audio to chat/completions as input_audio content', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,

@@ -7,6 +7,7 @@
 import process from 'node:process';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { AvailableModel, Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { RecordedVoiceAudio } from '../hooks/useVoiceInput.js';
@@ -21,6 +22,8 @@ import {
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
 const MIN_KEYTERM_ECHO_TOKENS = 8;
+const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
+const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
 
 export { resolveVoiceTransport };
 export type { VoiceTransport } from './voiceModel.js';
@@ -367,7 +370,18 @@ export function isKeytermEcho(
   }
   const keyset = new Set(tokenize(keytermsContext));
   const overlap = tokens.filter((t) => keyset.has(t)).length;
-  return overlap >= MIN_KEYTERM_ECHO_TOKENS && overlap / tokens.length >= 0.9;
+  const transcriptRatio = overlap / tokens.length;
+  const keytermRatio = overlap / keyset.size;
+  const isEcho =
+    overlap >= MIN_KEYTERM_ECHO_TOKENS &&
+    transcriptRatio >= 0.9 &&
+    keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO;
+  if (isEcho) {
+    debugLogger.debug(
+      `[voice] dropped likely keyterm echo: transcriptRatio=${transcriptRatio.toFixed(2)} keytermRatio=${keytermRatio.toFixed(2)} text="${transcript}"`,
+    );
+  }
+  return isEcho;
 }
 
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV
