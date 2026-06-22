@@ -65,6 +65,9 @@ interface SettingsResponse {
 }
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
+const POSITIVE_NUMBER_SETTINGS = new Set([
+  'general.sessionRecapAwayThresholdMinutes',
+]);
 
 function getAllowedKeys(): Set<string> {
   const keys = new Set(
@@ -147,6 +150,9 @@ function validateSettingValue(
     case 'number':
       if (typeof value !== 'number' || !Number.isFinite(value))
         return 'Value must be a finite number';
+      if (def.key && POSITIVE_NUMBER_SETTINGS.has(def.key) && value <= 0) {
+        return 'Value must be greater than 0';
+      }
       break;
     case 'string':
       if (typeof value !== 'string') return 'Value must be a string';
