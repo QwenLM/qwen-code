@@ -16,7 +16,7 @@ import {
   applyReadHeaders,
   sendFsError,
   workspaceRelative,
-} from './workspaceFileRead.js';
+} from './workspace-file-read.js';
 
 interface RegisterDeps {
   bridge: AcpSessionBridge;

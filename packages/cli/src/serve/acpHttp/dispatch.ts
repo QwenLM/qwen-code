@@ -22,7 +22,7 @@ import {
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
   UpstreamDeviceFlowError,
-} from '../auth/deviceFlow.js';
+} from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
@@ -35,13 +35,13 @@ import {
   MAX_READ_BYTES,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
-import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
-import { collectWorkspaceMemoryStatus } from '../workspaceMemory.js';
+import type { DeviceFlowRegistry } from '../auth/device-flow.js';
+import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
   createDaemonSubagentManager,
   toSummary as agentToSummary,
   toDetail as agentToDetail,
-} from '../workspaceAgents.js';
+} from '../workspace-agents.js';
 import {
   InvalidCursorError,
   listWorkspaceSessionsForResponse,
@@ -1853,7 +1853,7 @@ export class AcpDispatcher {
           }
           const startResult = await this.deviceFlowRegistry.start({
             providerId:
-              providerId as import('../auth/deviceFlow.js').DeviceFlowProviderId,
+              providerId as import('../auth/device-flow.js').DeviceFlowProviderId,
             initiatorClientId: conn.clientId,
           });
           const { view, attached } = startResult;

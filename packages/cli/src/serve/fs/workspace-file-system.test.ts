@@ -18,7 +18,7 @@ import {
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
 } from './index.js';
-import type { BridgeEvent } from '../eventBus.js';
+import type { BridgeEvent } from '../event-bus.js';
 import { canonicalizeWorkspace } from './paths.js';
 import { isFsError } from './errors.js';
 

@@ -139,7 +139,7 @@ Settings I/O failure, such as malformed JSON, falls back to defaults. `InvalidPo
 
 ## 6. Boot refusal scenarios (explicit failures)
 
-`runQwenServe.ts` intentionally throws instead of falling back in these cases:
+`run-qwen-serve.ts` intentionally throws instead of falling back in these cases:
 
 | Scenario                                                                      | Error prefix                                                                                        |
 | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
@@ -232,7 +232,7 @@ commands/serve.ts                  const { runQwenServe } = await import('../ser
 commands/serve.ts                  await runQwenServe({...})
    |
    v
-serve/runQwenServe.ts              runQwenServe(opts, deps)
+serve/run-qwen-serve.ts              runQwenServe(opts, deps)
    |  |- trim token
    |  |- hostname mismatch fallback
    |  |- auth preflight
@@ -244,7 +244,7 @@ serve/runQwenServe.ts              runQwenServe(opts, deps)
    |  `- createHttpAcpBridge({...})
    |
    v
-serve/runQwenServe.ts              const app = createServeApp(opts, () => actualPort, {...})
+serve/run-qwen-serve.ts              const app = createServeApp(opts, () => actualPort, {...})
    |
    v
 serve/server.ts                    createServeApp() - builds Express app (**does not listen**)
@@ -253,7 +253,7 @@ serve/server.ts                    createServeApp() - builds Express app (**does
    |  `- return app
    |
    v
-serve/runQwenServe.ts              server = app.listen(port, hostname, cb)
+serve/run-qwen-serve.ts              server = app.listen(port, hostname, cb)
    |  |- server.maxConnections = cap
    |  |- actualPort = server.address().port
    |  |- write "qwen serve listening on ..."
@@ -277,10 +277,10 @@ The main assembly happens in `createServeApp()` in `server.ts`, which mounts fou
 | Routes                                                                                                                    | File                                                  | Mounting entry                                |
 | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------- |
 | `/health`, `/demo`, `/capabilities`, all session routes, device flow, permission vote, SSE, and single-server MCP restart | `packages/cli/src/serve/server.ts`                    | Registered directly inside `createServeApp()` |
-| `/workspace/memory` (GET/POST)                                                                                            | `packages/cli/src/serve/workspaceMemory.ts`           | `mountWorkspaceMemoryRoutes()`                |
-| All `/workspace/agents` CRUD routes                                                                                       | `packages/cli/src/serve/workspaceAgents.ts`           | `mountWorkspaceAgentsRoutes()`                |
-| `GET /file`, `/file/bytes`, `/list`, `/glob`, `/stat`                                                                     | `packages/cli/src/serve/routes/workspaceFileRead.ts`  | `registerWorkspaceFileReadRoutes()`           |
-| `POST /file/write`, `/file/edit`                                                                                          | `packages/cli/src/serve/routes/workspaceFileWrite.ts` | `registerWorkspaceFileWriteRoutes()`          |
+| `/workspace/memory` (GET/POST)                                                                                            | `packages/cli/src/serve/workspace-memory.ts`           | `mountWorkspaceMemoryRoutes()`                |
+| All `/workspace/agents` CRUD routes                                                                                       | `packages/cli/src/serve/workspace-agents.ts`           | `mountWorkspaceAgentsRoutes()`                |
+| `GET /file`, `/file/bytes`, `/list`, `/glob`, `/stat`                                                                     | `packages/cli/src/serve/routes/workspace-file-read.ts`  | `registerWorkspaceFileReadRoutes()`           |
+| `POST /file/write`, `/file/edit`                                                                                          | `packages/cli/src/serve/routes/workspace-file-write.ts` | `registerWorkspaceFileWriteRoutes()`          |
 
 For the complete route and wire protocol reference, see [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md). For architecture, see [`01-architecture.md`](./01-architecture.md).
 
@@ -361,7 +361,7 @@ QWEN_SERVE_DEBUG=1 qwen serve
 ## References
 
 - CLI entry: `packages/cli/src/commands/serve.ts`
-- Bootstrap: `packages/cli/src/serve/runQwenServe.ts`
+- Bootstrap: `packages/cli/src/serve/run-qwen-serve.ts`
 - Express factory: `packages/cli/src/serve/server.ts`
 - Middleware: `packages/cli/src/serve/auth.ts`
 - Bridge factory: `packages/acp-bridge/src/bridge.ts`

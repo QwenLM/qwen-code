@@ -27,7 +27,7 @@ import {
   type Ignore,
   type WriteTextFileOptions,
 } from '@qwen-code/qwen-code-core';
-import type { BridgeEvent } from '../eventBus.js';
+import type { BridgeEvent } from '../event-bus.js';
 import {
   type AuditContext,
   type AuditPublisher,

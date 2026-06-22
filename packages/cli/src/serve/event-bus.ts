@@ -5,7 +5,7 @@
  */
 
 // Re-export wrapper. The implementation lives in `@qwen-code/acp-bridge`
-// (lifted in #4175 PR 22a). Existing `import { ... } from './eventBus.js'`
+// (lifted in #4175 PR 22a). Existing `import { ... } from './event-bus.js'`
 // callers inside `serve/` and the one external import in
 // `cli/src/commands/serve.ts:14` keep resolving without churn.
 //
