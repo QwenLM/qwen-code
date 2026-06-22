@@ -675,7 +675,7 @@ async function handleAutomaticOAuth(
 
     if (!oauthConfig) {
       debugLogger.error(
-        `Could not configure OAuth. ` +
+        `Could not configure OAuth for server '${mcpServerName}'. ` +
           getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
       return false;
@@ -1327,30 +1327,33 @@ export async function connectToMcpServer(
         // For SSE servers without explicit OAuth config, if a token was found but rejected, report it accurately.
         const tokenStorage = new MCPOAuthTokenStorage();
         const credentials = await tokenStorage.getCredentials(mcpServerName);
+        let hasStoredTokens = false;
         if (credentials) {
           const authProvider = new MCPOAuthProvider(tokenStorage);
-          const hasStoredTokens = await authProvider.getValidToken(
-            mcpServerName,
-            {
+          hasStoredTokens = Boolean(
+            await authProvider.getValidToken(mcpServerName, {
               // Pass client ID if available
               clientId: credentials.clientId,
-            },
+            }),
           );
           if (hasStoredTokens) {
             debugLogger.warn(
-              `Stored OAuth token for the SSE server was rejected. ` +
+              `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
                 getMcpOAuthDialogInstruction('re-authenticate', mcpServerName),
             );
           } else {
             debugLogger.warn(
-              `401 error received for the SSE server without OAuth configuration. ` +
+              `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
                 getMcpOAuthDialogInstruction('authenticate', mcpServerName),
             );
           }
         }
         throw new Error(
-          `401 error received for the SSE server without OAuth configuration. ` +
-            getMcpOAuthDialogInstruction('authenticate', mcpServerName),
+          hasStoredTokens
+            ? `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
+              getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
+            : `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
+              getMcpOAuthDialogInstruction('authenticate', mcpServerName),
         );
       }
 
@@ -1487,18 +1490,18 @@ export async function connectToMcpServer(
         if (!shouldTryDiscovery) {
           const tokenStorage = new MCPOAuthTokenStorage();
           const credentials = await tokenStorage.getCredentials(mcpServerName);
+          let hasStoredTokens = false;
           if (credentials) {
             const authProvider = new MCPOAuthProvider(tokenStorage);
-            const hasStoredTokens = await authProvider.getValidToken(
-              mcpServerName,
-              {
+            hasStoredTokens = Boolean(
+              await authProvider.getValidToken(mcpServerName, {
                 // Pass client ID if available
                 clientId: credentials.clientId,
-              },
+              }),
             );
             if (hasStoredTokens) {
               debugLogger.warn(
-                `Stored OAuth token for the SSE server was rejected. ` +
+                `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
                   getMcpOAuthDialogInstruction(
                     're-authenticate',
                     mcpServerName,
@@ -1506,14 +1509,17 @@ export async function connectToMcpServer(
               );
             } else {
               debugLogger.warn(
-                `401 error received for the SSE server without OAuth configuration. ` +
+                `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
                   getMcpOAuthDialogInstruction('authenticate', mcpServerName),
               );
             }
           }
           throw new Error(
-            `401 error received for the SSE server without OAuth configuration. ` +
-              getMcpOAuthDialogInstruction('authenticate', mcpServerName),
+            hasStoredTokens
+              ? `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
+                getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
+              : `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
+                getMcpOAuthDialogInstruction('authenticate', mcpServerName),
           );
         }
 
@@ -1622,17 +1628,17 @@ export async function connectToMcpServer(
               }
             } else {
               debugLogger.error(
-                `Could not configure OAuth. ` +
+                `Could not configure OAuth for server '${mcpServerName}'. ` +
                   getMcpOAuthDialogInstruction('authenticate', mcpServerName),
               );
               throw new Error(
-                `OAuth configuration failed. ` +
+                `OAuth configuration failed for server '${mcpServerName}'. ` +
                   getMcpOAuthDialogInstruction('authenticate', mcpServerName),
               );
             }
           } catch (discoveryError) {
             debugLogger.error(
-              `OAuth discovery failed. ` +
+              `OAuth discovery failed for server '${mcpServerName}'. ` +
                 getMcpOAuthDialogInstruction('authenticate', mcpServerName),
             );
             throw discoveryError;
@@ -1759,11 +1765,11 @@ export async function createTransport(
 
     if (!accessToken) {
       debugLogger.error(
-        `The MCP server requires OAuth authentication. ` +
+        `The MCP server '${mcpServerName}' requires OAuth authentication. ` +
           getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
       throw new Error(
-        `The MCP server requires OAuth authentication. ` +
+        `The MCP server '${mcpServerName}' requires OAuth authentication. ` +
           getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
     }

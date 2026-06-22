@@ -31,8 +31,13 @@ export const mcpCommand: SlashCommand = {
         type: 'message',
         messageType: 'warning',
         content: serverName
-          ? `MCP OAuth is now managed in the /mcp dialog. Open /mcp, select '${serverName}', then use the Auth actions there.`
-          : 'MCP OAuth is now managed in the /mcp dialog. Open /mcp, select a server, then use the Auth actions there.',
+          ? t(
+              "MCP OAuth is now managed in the /mcp dialog. Open /mcp, select '{{serverName}}', then use the Auth actions there.",
+              { serverName },
+            )
+          : t(
+              'MCP OAuth is now managed in the /mcp dialog. Open /mcp, select a server, then use the Auth actions there.',
+            ),
       };
     }
 
