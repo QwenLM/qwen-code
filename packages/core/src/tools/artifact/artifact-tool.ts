@@ -43,7 +43,7 @@ export interface ArtifactToolParams {
   title?: string;
 }
 
-const DESCRIPTION = `Publishes a self-contained HTML page as an interactive Artifact and opens it in the browser (returning a shareable link when a remote host is configured). Use it to turn session output into a durable, interactive page — a PR walkthrough, an architecture tour, a project dashboard.
+const DESCRIPTION = `Publishes a self-contained HTML page as an interactive Artifact, optionally opens it in the browser depending on settings, and returns a shareable link when a remote host is configured. Use it to turn session output into a durable, interactive page — a PR walkthrough, an architecture tour, a project dashboard.
 
 Workflow:
 - Write the page to a file first (via Write/Edit), then call Artifact with that file's absolute path.
@@ -62,6 +62,8 @@ class ArtifactToolInvocation extends BaseToolInvocation<
   ArtifactToolParams,
   ToolResult
 > {
+  private readonly shouldAutoOpen: boolean;
+
   constructor(
     private readonly config: Config,
     private readonly publisher: ArtifactPublisher,
@@ -69,6 +71,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     params: ArtifactToolParams,
   ) {
     super(params);
+    this.shouldAutoOpen = config.shouldAutoOpenArtifact();
   }
 
   override getDescription(): string {
@@ -89,12 +92,11 @@ class ArtifactToolInvocation extends BaseToolInvocation<
       this.params.file_path,
       this.config.getTargetDir(),
     );
-    const autoOpen = this.config.shouldAutoOpenArtifact();
     const details: ToolInfoConfirmationDetails = {
       type: 'info',
       title: 'Publish Artifact',
       prompt: `Publish ${shortenPath(relativePath)} as an interactive Artifact${
-        autoOpen ? ' and open it in your browser' : ''
+        this.shouldAutoOpen ? ' and open it in your browser' : ''
       }.`,
       onConfirm: async () => {
         // Persistence handled by coreToolScheduler via PM rules.
@@ -177,7 +179,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
 
     // Open in the browser unless disabled. Best-effort: never fail the publish
     // because the browser could not be launched.
-    if (this.config.shouldAutoOpenArtifact()) {
+    if (this.shouldAutoOpen) {
       try {
         await this.openUrl(url, {
           allowFile: true,

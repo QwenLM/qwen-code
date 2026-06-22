@@ -1033,17 +1033,35 @@ describe('Server Config (config.ts)', () => {
     });
 
     describe('shouldAutoOpenArtifact', () => {
-      const originalNoAutoOpen = process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
+      const browserEnvKeys = [
+        'QWEN_ARTIFACT_NO_AUTO_OPEN',
+        'BROWSER',
+        'CI',
+        'DEBIAN_FRONTEND',
+        'SSH_CONNECTION',
+        'DISPLAY',
+        'WAYLAND_DISPLAY',
+        'MIR_SOCKET',
+      ] as const;
+      const originalEnv: Partial<
+        Record<(typeof browserEnvKeys)[number], string>
+      > = {};
 
       beforeEach(() => {
-        delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
+        for (const key of browserEnvKeys) {
+          originalEnv[key] = process.env[key];
+          delete process.env[key];
+        }
+        process.env['DISPLAY'] = ':0';
       });
 
       afterEach(() => {
-        if (originalNoAutoOpen === undefined) {
-          delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
-        } else {
-          process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] = originalNoAutoOpen;
+        for (const key of browserEnvKeys) {
+          if (originalEnv[key] === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = originalEnv[key];
+          }
         }
       });
 
@@ -1074,6 +1092,15 @@ describe('Server Config (config.ts)', () => {
           ...baseParams,
           artifactAutoOpen: true,
           noBrowser: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('honors CI browser launch suppression', () => {
+        process.env['CI'] = 'true';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
         });
         expect(config.shouldAutoOpenArtifact()).toBe(false);
       });

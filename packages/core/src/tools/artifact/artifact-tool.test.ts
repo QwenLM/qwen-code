@@ -55,6 +55,11 @@ describe('ArtifactTool', () => {
     vi.restoreAllMocks();
   });
 
+  it('describes browser opening as settings-dependent', () => {
+    expect(tool.description).toContain('depending on settings');
+    expect(tool.description).not.toContain('and opens it in the browser');
+  });
+
   it('publishes a fragment, wraps it, and opens the url', async () => {
     const file = await writeFragment('page.html', '<h1>Report</h1>');
     const res = await tool
@@ -192,6 +197,35 @@ describe('ArtifactTool', () => {
       throw new Error(`Unexpected confirmation type: ${details.type}`);
     }
     expect(details.prompt).toBe('Publish p.html as an interactive Artifact.');
+  });
+
+  it('reuses the confirmation auto-open decision during execution', async () => {
+    const shouldAutoOpenArtifact = vi
+      .fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    const consistentTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        shouldAutoOpenArtifact,
+      } as unknown as Config,
+      new LocalPublisher(outDir),
+      openSpy as unknown as UrlOpener,
+    );
+    const file = await writeFragment('p.html', '<p>x</p>');
+    const invocation = consistentTool.build({ file_path: file });
+
+    const details = await invocation.getConfirmationDetails(signal);
+    const res = await invocation.execute(signal);
+
+    expect(details.type).toBe('info');
+    if (details.type !== 'info') {
+      throw new Error(`Unexpected confirmation type: ${details.type}`);
+    }
+    expect(details.prompt).toContain('and open it in your browser');
+    expect(res.error).toBeUndefined();
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(shouldAutoOpenArtifact).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a relative file_path at build time', () => {
