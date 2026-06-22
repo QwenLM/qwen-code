@@ -1689,6 +1689,158 @@ describe('standalone release packaging', () => {
     }
   }, 30_000);
 
+  it('requires the native audio prebuild when release packaging opts in', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
+
+    try {
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            target,
+            '--node-archive',
+            fakeRuntimeArchive,
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          {
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1',
+            },
+            stdio: 'pipe',
+          },
+        ),
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  it('requires a native audio prebuild file when release packaging opts in', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      prebuildDirName,
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            target,
+            '--node-archive',
+            fakeRuntimeArchive,
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          {
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1',
+            },
+            stdio: 'pipe',
+          },
+        ),
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
+    } finally {
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
+      }
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  itOnUnix('does not package audio-capture test artifacts', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      'linux-x64',
+    );
+    const prebuildFile = path.join(
+      prebuildDir,
+      '@qwen-code+audio-capture.node',
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
+    const createdPrebuild = !existsSync(prebuildFile);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+      if (createdPrebuild) {
+        writeFileSync(prebuildFile, 'fake native addon\n');
+      }
+
+      const archive = packageFakeStandalone(tmpDir);
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      const addonDist = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@qwen-code',
+        'audio-capture',
+        'dist',
+      );
+      expect(existsSync(path.join(addonDist, 'index.js'))).toBe(true);
+      expect(existsSync(path.join(addonDist, 'platform.test.js'))).toBe(false);
+      expect(existsSync(path.join(addonDist, 'platform.test.d.ts'))).toBe(
+        false,
+      );
+      expect(existsSync(path.join(addonDist, 'platform.test.js.map'))).toBe(
+        false,
+      );
+    } finally {
+      if (createdPrebuild) {
+        rmSync(prebuildFile, { force: true });
+      }
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
+      }
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnUnix('dereferences safe Node.js runtime symlinks', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -1812,6 +1964,9 @@ describe('standalone release packaging', () => {
 
     // release.yml builds standalone archives, verifies them, and creates GitHub Release
     expect(releaseWorkflow).toContain('npm run package:standalone:release --');
+    expect(releaseWorkflow).toContain(
+      'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
+    );
     expect(releaseWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );

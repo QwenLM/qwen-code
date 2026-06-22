@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -34,6 +35,17 @@ const TARGETS = new Map([
   ],
   ['linux-x64', { outputExtension: 'tar.gz', nodeExecutable: ['bin', 'node'] }],
   ['win-x64', { outputExtension: 'zip', nodeExecutable: ['node.exe'] }],
+]);
+
+// Standalone target -> prebuildify platform-arch dir name (process.platform
+// based, so Windows is 'win32'). Only this archive's matching prebuild is
+// bundled, keeping each archive lean and correct-arch.
+const TARGET_PREBUILD_DIR = new Map([
+  ['darwin-arm64', 'darwin-arm64'],
+  ['darwin-x64', 'darwin-x64'],
+  ['linux-arm64', 'linux-arm64'],
+  ['linux-x64', 'linux-x64'],
+  ['win-x64', 'win32-x64'],
 ]);
 
 const DIST_REQUIRED_PATHS = [
@@ -118,6 +130,7 @@ async function main() {
     fs.mkdirSync(runtimeExtractDir, { recursive: true });
 
     copyRuntimeAssets(packageRoot, outDir);
+    copyNativeAddon(packageRoot, target);
     extractNodeArchive(nodeArchive, runtimeExtractDir);
     const nodeDir = path.join(packageRoot, 'node');
     copyExtractedNode(runtimeExtractDir, nodeDir);
@@ -275,6 +288,82 @@ function copyRuntimeAssets(packageRoot, outDir) {
   fs.copyFileSync(
     path.join(rootDir, 'package.json'),
     path.join(packageRoot, 'package.json'),
+  );
+}
+
+// Bundle the @qwen-code/audio-capture native addon (compiled JS + only this
+// target's prebuild + its runtime dep node-gyp-build) into lib/node_modules so
+// streaming voice works in standalone installs. The addon is esbuild-external
+// and resolved at runtime via import('@qwen-code/audio-capture') from
+// lib/cli.js, so lib/node_modules is where Node looks. Without it, standalone
+// users fall back to SoX/arecord (batch only) — #5502 follow-up #5590.
+function copyNativeAddon(packageRoot, target) {
+  const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
+  const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
+  const prebuildSrc = path.join(addonSrc, 'prebuilds', prebuildDirName);
+  if (!hasNativePrebuild(prebuildSrc)) {
+    if (process.env.QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1') {
+      fail(
+        `Required audio-capture prebuild is missing for ${prebuildDirName}: ${prebuildSrc}`,
+      );
+    }
+    // No prebuild for this target (e.g. a local build without the release
+    // artifacts). Ship without the addon: voice degrades to the SoX/arecord
+    // fallback, streaming is unavailable. The release pipeline downloads
+    // prebuilds before packaging, so release archives do bundle it.
+    console.warn(
+      `[standalone] no audio-capture prebuild for ${prebuildDirName}; ` +
+        'bundling without the native addon (streaming voice unavailable; ' +
+        'batch via SoX still works).',
+    );
+    return;
+  }
+
+  const nodeRequire = createRequire(import.meta.url);
+  const nodeGypBuildSrc = path.dirname(
+    nodeRequire.resolve('node-gyp-build/package.json'),
+  );
+
+  const modulesDir = path.join(packageRoot, 'lib', 'node_modules');
+  const addonDest = path.join(modulesDir, '@qwen-code', 'audio-capture');
+  fs.mkdirSync(addonDest, { recursive: true });
+
+  // Trimmed manifest: keep type/exports so ESM resolution works; drop the
+  // install hook (no npm runs inside the archive).
+  const addonPkg = JSON.parse(
+    fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
+  );
+  delete addonPkg.scripts;
+  delete addonPkg.devDependencies;
+  fs.writeFileSync(
+    path.join(addonDest, 'package.json'),
+    JSON.stringify(addonPkg, null, 2) + '\n',
+  );
+
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+  fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
+    ...copyOpts,
+    filter: (src) => !/\.test\.(d\.)?[mc]?[jt]s(\.map)?$/.test(src),
+  });
+  fs.cpSync(
+    prebuildSrc,
+    path.join(addonDest, 'prebuilds', prebuildDirName),
+    copyOpts,
+  );
+  // node-gyp-build is the addon's only runtime dependency (zero-dep itself).
+  fs.cpSync(nodeGypBuildSrc, path.join(modulesDir, 'node-gyp-build'), copyOpts);
+
+  assertNoSymlinks(modulesDir, 'Bundled native addon still contains symlinks.');
+}
+
+function hasNativePrebuild(prebuildDir) {
+  return (
+    fs.existsSync(prebuildDir) &&
+    fs.readdirSync(prebuildDir).some((entry) => entry.endsWith('.node'))
   );
 }
 
