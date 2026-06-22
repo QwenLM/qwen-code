@@ -6,7 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ExitPlanModeTool, type ExitPlanModeParams } from './exitPlanMode.js';
-import { ApprovalMode, type Config } from '../config/config.js';
+import {
+  ApprovalMode,
+  Config,
+  type ConfigParameters,
+} from '../config/config.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import { runPlanApprovalGate } from '../plan-gate/planApprovalGate.js';
 import type { GateDecision, MergedGateFinding } from '../plan-gate/types.js';
@@ -404,6 +408,7 @@ describe('ExitPlanModeTool', () => {
           entryId: 1,
           reviewCount: 0,
           gateMode: 'user_override',
+          enteredByModel: true,
           lastFindings: [],
           capEscalationPending: false,
           needsUserPending: false,
@@ -424,7 +429,7 @@ describe('ExitPlanModeTool', () => {
       );
     });
 
-    it('should return allow from getDefaultPermission when prePlanMode is YOLO', async () => {
+    it('should return allow from getDefaultPermission when model entered plan mode in YOLO', async () => {
       approvalMode = ApprovalMode.PLAN;
       (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
         ApprovalMode.YOLO,
@@ -434,6 +439,7 @@ describe('ExitPlanModeTool', () => {
           entryId: 1,
           reviewCount: 0,
           gateMode: 'capped',
+          enteredByModel: true,
           lastFindings: [],
           capEscalationPending: false,
           needsUserPending: false,
@@ -444,6 +450,33 @@ describe('ExitPlanModeTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    // Regression for #5574: cycling Shift+Tab to PLAN always lands with
+    // prePlanMode === 'yolo' (it is the mode right before PLAN in the cycle).
+    // A user-initiated entry must NOT auto-approve via the gate — it must show
+    // the confirmation dialog so the user can review the plan.
+    it('should return ask when the user entered plan mode in YOLO (not via the model)', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        {
+          entryId: 1,
+          reviewCount: 0,
+          gateMode: 'capped',
+          enteredByModel: false,
+          lastFindings: [],
+          capEscalationPending: false,
+          needsUserPending: false,
+        },
+      );
+
+      const params: ExitPlanModeParams = { plan: 'User Shift+Tab YOLO plan' };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should fall back to ask when no gateState even with YOLO prePlanMode', async () => {
@@ -507,6 +540,7 @@ describe('ExitPlanModeTool', () => {
           entryId: 1,
           reviewCount: 0,
           gateMode: 'capped' as const,
+          enteredByModel: true,
           lastFindings: [],
           capEscalationPending: false,
           needsUserPending: false,
@@ -556,6 +590,7 @@ describe('ExitPlanModeTool', () => {
         entryId: 1,
         reviewCount: 0,
         gateMode: 'capped' as const,
+        enteredByModel: true,
         lastFindings: [],
         capEscalationPending: false,
         needsUserPending: false,
@@ -594,6 +629,61 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.DEFAULT,
       );
       expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
+    });
+  });
+
+  // End-to-end regression for #5574 using a REAL Config (no mocks) wired to a
+  // REAL ExitPlanModeTool, exercising the exact production decision point the
+  // CoreToolScheduler consults (getDefaultPermission → needsConfirmation).
+  describe('issue #5574 — real Config + real tool, no mocks', () => {
+    const baseParams: ConfigParameters = {
+      targetDir: '.',
+      debugMode: false,
+      model: 'test-model',
+      cwd: '.',
+    };
+
+    function makeTrustedConfig(): Config {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      return config;
+    }
+
+    it('user cycling Shift+Tab into plan mode (…→auto→yolo→plan) gets the confirmation dialog', async () => {
+      const config = makeTrustedConfig();
+
+      // Exact reproduction of the issue: the user presses Shift+Tab four times
+      // from DEFAULT, walking the real APPROVAL_MODES cycle into plan mode.
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      // prePlanMode is yolo purely due to cycle order — NOT user intent.
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+
+      const tool = new ExitPlanModeTool(config);
+      const invocation = tool.build({ plan: 'Refactor the parser.' });
+
+      // 'ask' → CoreToolScheduler shows the plan confirmation dialog.
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    });
+
+    it('model self-entering plan mode in a YOLO session still auto-runs the gate', async () => {
+      const config = makeTrustedConfig();
+      config.setApprovalMode(ApprovalMode.YOLO);
+      // This is what enter_plan_mode does under the hood.
+      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+
+      const tool = new ExitPlanModeTool(config);
+      const invocation = tool.build({ plan: 'Autonomous plan.' });
+
+      // 'allow' → no user prompt; the gate runs inside execute() as designed.
+      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
     });
   });
 });

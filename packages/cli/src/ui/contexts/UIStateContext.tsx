@@ -59,6 +59,7 @@ export interface UIState {
   isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
+  isVoiceModelMode: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
@@ -142,6 +143,12 @@ export interface UIState {
   } | null;
   /** Visibility of WorktreeExitDialog (only shown when activeWorktree != null). */
   showWorktreeExitDialog: boolean;
+  /**
+   * P7-trigger: true while the current turn was steered toward the Workflow
+   * tool by the `workflow` keyword. Drives the Footer `workflow active`
+   * indicator; cleared when the turn returns to idle.
+   */
+  workflowKeywordActive: boolean;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;

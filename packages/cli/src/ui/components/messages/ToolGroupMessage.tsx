@@ -13,8 +13,6 @@ import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
-import { theme } from '../../semantic-colors.js';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
@@ -156,7 +154,7 @@ interface ToolGroupMessageProps {
   compactLabel?: string;
 }
 
-// Main component renders the border and maps the tools using ToolMessage
+// Main component maps the tools using ToolMessage
 export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   toolCalls,
   availableTerminalHeight,
@@ -292,15 +290,15 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Hide the entire group when the live-phase filter leaves nothing
   // inline to render — i.e. a pure-running-subagent batch with no
   // pending approval. LiveAgentPanel below the composer is the
-  // single source of truth for those rows; an empty bordered
-  // container floating above the panel would just be a duplicate
-  // chrome line. Terminal subagents (completed / failed / cancelled)
+  // single source of truth for those rows; an empty
+  // container floating above the panel would just be noise.
+  // Terminal subagents (completed / failed / cancelled)
   // pass through `inlineToolCalls` because `unregisterForeground`'s
   // post-delete emit already dropped them from the panel snapshot,
   // and the inline path must render `SubagentScrollbackSummary`
   // immediately so the user keeps a record of the run.
   // (Gate on `isPending` so a degenerate empty `toolCalls=[]` in the
-  // committed phase still falls through to the legacy empty-border
+  // committed phase still falls through to the legacy empty-container
   // snapshot — the suppression is specifically about live-phase
   // panel ownership, not about hiding empty inputs in general.)
   if (isPending && inlineToolCalls.length === 0) {
@@ -345,22 +343,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
 
   // Full expanded view
-  const hasPending = !inlineToolCalls.every(
-    (t) => t.status === ToolCallStatus.Success,
-  );
-  const isShellCommand = inlineToolCalls.some(
-    (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
-  );
-  const borderColor =
-    isShellCommand || isEmbeddedShellFocused
-      ? theme.ui.symbol
-      : hasPending
-        ? theme.status.warning
-        : theme.border.default;
-
-  const staticHeight = /* border */ 2 + /* marginBottom */ 1;
-  // account for border (2 chars) and padding (2 chars)
-  const innerWidth = contentWidth - 4;
+  const staticHeight = /* marginBottom */ 1;
+  const innerWidth = contentWidth - 2;
 
   let countToolCallsWithResults = 0;
   for (const tool of inlineToolCalls) {
@@ -385,12 +369,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     const readCount = memoryReadCount ?? 0;
     const writeCount = memoryWriteCount ?? 0;
     return (
-      <Box
-        flexDirection="column"
-        borderStyle="round"
-        width={contentWidth}
-        borderColor={theme.border.default}
-      >
+      <Box flexDirection="column" width={contentWidth}>
         {readCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
@@ -412,22 +391,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
 
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      /*
-        This width constraint is highly important and protects us from an Ink rendering bug.
-        Since the ToolGroup can typically change rendering states frequently, it can cause
-        Ink to render the border of the box incorrectly and span multiple lines and even
-        cause tearing.
-      */
-      width={contentWidth}
-      borderDimColor={
-        hasPending && (!isShellCommand || !isEmbeddedShellFocused)
-      }
-      borderColor={borderColor}
-      gap={0}
-    >
+    <Box flexDirection="column" width={contentWidth} gap={0}>
       {/* Memory badge for mixed groups (some memory ops + other ops) */}
       {!isMemoryOnlyGroup &&
         ((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0) &&

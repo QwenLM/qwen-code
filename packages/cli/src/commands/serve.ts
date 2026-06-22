@@ -11,11 +11,12 @@ import type { Argv, CommandModule } from 'yargs';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
+import { DEFAULT_RING_SIZE } from '../serve/event-bus.js';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
   openBrowserSecurely,
+  parsePositiveIntegerEnv,
   shouldLaunchBrowser,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
@@ -426,8 +427,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     let rateLimitWindowMs: number | undefined;
     if (rateLimit) {
       const envInt = (key: string): number | undefined => {
-        const v = process.env[key];
-        return v ? Number(v) : undefined;
+        const raw = process.env[key];
+        if (raw === undefined || raw === '') return undefined;
+        return parsePositiveIntegerEnv(raw, Number.NaN);
       };
       rateLimitPrompt =
         argv['rate-limit-prompt'] ?? envInt('QWEN_SERVE_RATE_LIMIT_PROMPT');

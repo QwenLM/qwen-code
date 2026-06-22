@@ -332,6 +332,8 @@ export type {
   DaemonProtocolVersions,
   BranchSessionRequest,
   DaemonBranchedSession,
+  DaemonForkSessionResult,
+  ForkSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
   DaemonAuthProviderId,

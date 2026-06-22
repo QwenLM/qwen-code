@@ -9,18 +9,16 @@
  *
  * These exercise the daemon end-to-end without needing a working model
  * credential: they spawn a real `node packages/cli/dist/index.js serve`
- * (which itself spawns real `qwen --acp` children), then probe the HTTP
- * surface. The agent's `initialize` + `newSession` handshake works
- * without auth, so session creation, listing, cancellation, validation,
- * SSE wiring, the CORS guard, the bearer-auth guard and shutdown all
- * run here.
+ * with dummy OpenAI auth env, then probe the HTTP surface without issuing
+ * model calls. Session creation, listing, cancellation, validation, SSE
+ * wiring, the CORS guard, the bearer-auth guard and shutdown all run here.
  *
- * Tests that require an actual model call (streaming prompts, real
- * permission flows, Last-Event-ID resume across a real reconnect) live
- * in `qwen-serve-streaming.test.ts` and skip when no auth is set.
+ * Tests that require prompt streaming or real permission flows live in
+ * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -45,11 +43,13 @@ const TOKEN = 'integration-test-token';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
+let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
 
 beforeAll(async () => {
+  homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
   daemon = spawn(
     process.execPath,
     [
@@ -78,17 +78,25 @@ beforeAll(async () => {
       // capabilities baseline below assumes their default state; a
       // dev machine exporting any of these would otherwise fail the
       // exact-equality assertion.
-      env: Object.fromEntries(
-        Object.entries(process.env).filter(
-          ([k]) =>
-            ![
-              'QWEN_SERVE_PROMPT_DEADLINE_MS',
-              'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
-              'QWEN_SERVE_RATE_LIMIT',
-              'QWEN_SERVE_NO_MCP_POOL',
-            ].includes(k),
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([k]) =>
+              ![
+                'QWEN_SERVE_PROMPT_DEADLINE_MS',
+                'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
+                'QWEN_SERVE_RATE_LIMIT',
+                'QWEN_SERVE_NO_MCP_POOL',
+              ].includes(k),
+          ),
         ),
-      ),
+        HOME: homeDir,
+        QWEN_HOME: path.join(homeDir, '.qwen'),
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+      },
     },
   );
   // Read stdout until we see the listening line + parse the port.
@@ -122,9 +130,15 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  if (!daemon || daemon.exitCode !== null) return;
-  daemon.kill('SIGTERM');
-  await new Promise((r) => daemon.once('exit', r));
+  try {
+    if (!daemon || daemon.exitCode !== null) return;
+    daemon.kill('SIGTERM');
+    await new Promise((r) => daemon.once('exit', r));
+  } finally {
+    if (homeDir) {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }
 }, 15_000);
 
 describe('qwen serve — bearer auth (timing-safe compare)', () => {

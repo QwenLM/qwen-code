@@ -102,7 +102,7 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
 
   if (
     process.env['OPENAI_API_KEY'] &&
-    process.env['OPENAI_MODEL'] &&
+    (process.env['OPENAI_MODEL'] || process.env['QWEN_MODEL']) &&
     process.env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;

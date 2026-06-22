@@ -101,6 +101,15 @@ interface MockClient {
   getWorkspaceAgent: () => Promise<unknown>;
   createWorkspaceAgent: () => Promise<unknown>;
   deleteWorkspaceAgent: () => Promise<void>;
+  branchSession: (
+    sessionId: string,
+    req: { name?: string },
+    clientId?: string,
+  ) => Promise<{
+    sessionId: string;
+    displayName: string;
+    clientId?: string;
+  }>;
 }
 
 const sdkMocks = vi.hoisted(() => {
@@ -123,6 +132,7 @@ const sdkMocks = vi.hoisted(() => {
   const getWorkspaceAgent = vi.fn();
   const createWorkspaceAgent = vi.fn();
   const deleteWorkspaceAgent = vi.fn();
+  const branchSession = vi.fn();
 
   class MockDaemonClient {
     constructor(_opts: unknown) {}
@@ -145,6 +155,7 @@ const sdkMocks = vi.hoisted(() => {
     getWorkspaceAgent = getWorkspaceAgent;
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
+    branchSession = branchSession;
     dispose = vi.fn();
   }
 
@@ -177,6 +188,7 @@ const sdkMocks = vi.hoisted(() => {
     MockDaemonSessionClient,
     workspaceProviders,
     workspaceMcpTools,
+    branchSession,
     reset() {
       sessions.length = 0;
       capabilities.mockReset();
@@ -252,6 +264,12 @@ const sdkMocks = vi.hoisted(() => {
       createWorkspaceAgent.mockResolvedValue({ ok: true });
       deleteWorkspaceAgent.mockReset();
       deleteWorkspaceAgent.mockResolvedValue(undefined);
+      branchSession.mockReset();
+      branchSession.mockResolvedValue({
+        sessionId: 'branch-session',
+        displayName: 'Branch Session',
+        clientId: 'branch-client',
+      });
       MockDaemonSessionClient.createOrAttach.mockReset();
       MockDaemonSessionClient.createOrAttach.mockImplementation(
         async (client: unknown, _req: unknown): Promise<MockSession> =>
@@ -2835,6 +2853,54 @@ describe('DaemonSessionProvider', () => {
     expect(loadCalls[0]?.[3]).not.toBe('client-a');
     expect(loadCalls[1]?.[1]).toBe('session-a');
     expect(loadCalls[1]?.[3]).toBe('client-a');
+  });
+
+  it('reuses the branched session client when switching after branch', async () => {
+    window.sessionStorage.clear();
+    const sourceSession = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+    });
+    const branchedSession = createMockSession({
+      sessionId: 'session-b',
+      clientId: 'client-b',
+    });
+    sdkMocks.branchSession.mockResolvedValue({
+      sessionId: 'session-b',
+      displayName: 'Branch 1',
+      clientId: 'client-b',
+    });
+    sdkMocks.sessions.push(sourceSession, branchedSession);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const branch = requireActions(actions).branchSession('Branch 1');
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+    await expect(branch).resolves.toEqual({
+      sessionId: 'session-b',
+      displayName: 'Branch 1',
+    });
+
+    expect(sdkMocks.branchSession).toHaveBeenCalledWith(
+      'session-a',
+      { name: 'Branch 1' },
+      'client-a',
+    );
+    const loadCalls = sdkMocks.MockDaemonSessionClient.load.mock.calls;
+    expect(loadCalls[0]?.[1]).toBe('session-b');
+    expect(loadCalls[0]?.[3]).toBe('client-b');
   });
 
   it('exposes daemon capabilities on the connection state', async () => {

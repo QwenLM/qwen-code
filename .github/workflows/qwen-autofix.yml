@@ -123,6 +123,9 @@ jobs:
     env:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/autofix'
+      BUG_LABEL: 'type/bug'
+      READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+      AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
       # Comments from these accounts (triage/followup bots and the autofix bot's
       # own qwen-code-dev-bot identity) do not count as human engagement when
       # judging whether an issue is unattended — otherwise the bot's own
@@ -163,22 +166,47 @@ jobs:
 
           if [[ -n "${FORCED_ISSUE}" ]]; then
             echo "🎯 Forced issue #${FORCED_ISSUE}"
+            forced_issue_json="${WORKDIR}/forced-issue.json"
             gh issue view "${FORCED_ISSUE}" --repo "${REPO}" \
               --json number,title,body,labels,createdAt,url \
-              | jq -c '[.]' > "${WORKDIR}/candidates.json"
+              > "${forced_issue_json}"
+            if jq -e \
+              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
+              "${forced_issue_json}" > /dev/null; then
+              echo "⏭️ Forced issue #${FORCED_ISSUE} has an autofix exclusion label; skipping."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            else
+              jq -c '[.]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"
+            fi
           else
             MIN_CREATED="$(date -u -d '2 days ago' +%Y-%m-%d)"
-            echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."
-            gh issue list --repo "${REPO}" \
-              --search "is:open is:issue label:type/bug no:assignee created:<${MIN_CREATED} -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc" \
-              --limit 30 --json number,title,body,labels,createdAt,url,comments \
-              > "${WORKDIR}/scan.json"
+            filter_unattended_candidates() {
+              # Triage bots comment on most new issues, so "unattended" means:
+              # no comments at all, or every commenter is a known bot account.
+              jq -c --argjson bots "${KNOWN_BOTS}" \
+                '[ .[] | select(([(.comments // [])[].author.login] | map(select(. != null))) - $bots == []) ] | .[0:10] | map(del(.comments))' \
+                "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
+            }
 
-            # Triage bots comment on most new issues, so "unattended" means:
-            # no comments at all, or every commenter is a known bot account.
-            jq -c --argjson bots "${KNOWN_BOTS}" \
-              '[ .[] | select(([(.comments // [])[].author.login] | map(select(. != null))) - $bots == []) ] | .[0:10] | map(del(.comments))' \
+            echo "🔍 Scanning for ready-for-agent bugs (newest first)..."
+            # ready-for-agent is an explicit triage signal, so tier-1 takes
+            # candidates directly and skips the unattended filter — no need to
+            # fetch comments here (tier-2 below still fetches them for its filter).
+            gh issue list --repo "${REPO}" \
+              --search "is:open is:issue label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
+              --limit 30 --json number,title,body,labels,createdAt,url \
+              > "${WORKDIR}/scan.json"
+            jq -c '.[0:10]' \
               "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
+
+            if [[ "$(jq length "${WORKDIR}/candidates.json")" == "0" ]]; then
+              echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."
+              gh issue list --repo "${REPO}" \
+                --search "is:open is:issue label:${BUG_LABEL} created:<${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
+                --limit 30 --json number,title,body,labels,createdAt,url,comments \
+                > "${WORKDIR}/scan.json"
+              filter_unattended_candidates
+            fi
           fi
 
           COUNT="$(jq length "${WORKDIR}/candidates.json")"

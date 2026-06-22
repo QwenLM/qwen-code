@@ -29,6 +29,7 @@ describe('SettingsSchema', () => {
         'security',
         'advanced',
         'plansDirectory',
+        'voiceModel',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -144,6 +145,34 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().plansDirectory.default).toBe(undefined);
       expect(getSettingsSchema().plansDirectory.requiresRestart).toBe(true);
       expect(getSettingsSchema().plansDirectory.showInDialog).toBe(false);
+    });
+
+    it('should have voice model setting in schema', () => {
+      const voiceModel = getSettingsSchema().voiceModel;
+
+      expect(voiceModel).toBeDefined();
+      expect(voiceModel.type).toBe('string');
+      expect(voiceModel.category).toBe('Model');
+      expect(voiceModel.default).toBe('');
+      expect(voiceModel.requiresRestart).toBe(false);
+      expect(voiceModel.showInDialog).toBe(false);
+    });
+
+    it('should have voice dictation settings under general', () => {
+      const voice =
+        getSettingsSchema().general.properties.voice.properties ?? {};
+
+      expect(voice.enabled.type).toBe('boolean');
+      expect(voice.enabled.default).toBe(false);
+
+      expect(voice.mode.type).toBe('enum');
+      expect(voice.mode.default).toBe('hold');
+      expect(
+        voice.mode.options?.map((o: { value: string }) => o.value),
+      ).toEqual(['hold', 'tap']);
+
+      expect(voice.language.type).toBe('string');
+      expect(voice.language.default).toBe('');
     });
 
     it('should have unique categories', () => {

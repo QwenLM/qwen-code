@@ -190,6 +190,16 @@ export interface DaemonBranchedSession extends DaemonRestoredSession {
   forkedFrom: { sessionId: string; displayName: string };
 }
 
+export interface ForkSessionRequest {
+  directive: string;
+}
+
+export interface DaemonForkSessionResult {
+  sessionId: string;
+  description: string;
+  launched: boolean;
+}
+
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
 export interface DaemonSessionSummary {
   sessionId: string;

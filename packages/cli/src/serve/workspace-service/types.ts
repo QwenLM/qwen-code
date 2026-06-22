@@ -24,7 +24,7 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
-import type { WorkspaceProvidersStatusProvider } from '../workspaceProvidersStatus.js';
+import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext

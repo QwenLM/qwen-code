@@ -268,6 +268,7 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isVoiceModelMode={uiState.isVoiceModelMode}
       />
     );
   }

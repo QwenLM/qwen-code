@@ -196,7 +196,7 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
-    it('renders shell command with yellow border', () => {
+    it('renders shell command', () => {
       const toolCalls = [
         createToolCall({
           callId: 'shell-1',
@@ -500,45 +500,6 @@ describe('<ToolGroupMessage />', () => {
       );
 
       expect(lastFrame()).toContain('MockSubagent[agent-done]: focused=false');
-    });
-  });
-
-  describe('Border Color Logic', () => {
-    it('uses yellow border when tools are pending', () => {
-      const toolCalls = [createToolCall({ status: ToolCallStatus.Pending })];
-      const { lastFrame } = renderWithProviders(
-        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
-      );
-      // The snapshot will capture the visual appearance including border color
-      expect(lastFrame()).toMatchSnapshot();
-    });
-
-    it('uses yellow border for shell commands even when successful', () => {
-      const toolCalls = [
-        createToolCall({
-          name: 'run_shell_command',
-          status: ToolCallStatus.Success,
-        }),
-      ];
-      const { lastFrame } = renderWithProviders(
-        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
-      );
-      expect(lastFrame()).toMatchSnapshot();
-    });
-
-    it('uses gray border when all tools are successful and no shell commands', () => {
-      const toolCalls = [
-        createToolCall({ status: ToolCallStatus.Success }),
-        createToolCall({
-          callId: 'tool-2',
-          name: 'another-tool',
-          status: ToolCallStatus.Success,
-        }),
-      ];
-      const { lastFrame } = renderWithProviders(
-        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
-      );
-      expect(lastFrame()).toMatchSnapshot();
     });
   });
 
