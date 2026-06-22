@@ -4369,12 +4369,13 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
-    it('always-on consecutive halt splices only the repeated tail, keeping distinct earlier calls', async () => {
-      // skipLoopDetection defaults true, so this also confirms the splice runs
-      // via the always-on path. The repeated-tail arithmetic
-      // (pendingToolCalls.length - consecutiveCount) must preserve the two
-      // distinct read_file calls collected before the identical run — an
-      // off-by-one in repeatedStartIndex would silently drop them.
+    it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
+      // skipLoopDetection defaults true, so this also confirms the consecutive
+      // guard halts via the always-on path on a mixed batch (distinct calls
+      // followed by an identical run). The halt drops the whole pending queue,
+      // matching the turn-cap path — turn.pendingToolCalls is not read after the
+      // early return; consumers schedule from the yielded events and stop on
+      // LoopDetected.
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       const distinctA = {
@@ -4433,12 +4434,8 @@ hello
         type: GeminiEventType.LoopDetected,
         value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
       });
-      // Only the repeated tail is dropped; the two distinct calls survive.
-      expect(returnedTurn?.pendingToolCalls).toHaveLength(2);
-      expect(returnedTurn?.pendingToolCalls.map((c) => c.callId)).toEqual([
-        'd1',
-        'd2',
-      ]);
+      // The pending queue is fully cleared on halt, same as the turn cap.
+      expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
     });
 
     it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {

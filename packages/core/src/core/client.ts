@@ -113,7 +113,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
-import { ApiRetryEvent, LoopType } from '../telemetry/types.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 
 // Hook types and utilities
@@ -2147,28 +2147,14 @@ export class GeminiClient {
         // gate so they cannot be bypassed by configuration.
         const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
         if (alwaysOnLoop) {
+          // Drop every tool call collected before the guard fired so the run
+          // halts here instead of spawning a continuation that re-trips it.
+          // turn.pendingToolCalls is internal to this loop and is not read
+          // after the early return — stream consumers (the TUI scheduler and
+          // the non-interactive runner) build their own list from the yielded
+          // ToolCallRequest events and stop on LoopDetected.
+          turn.pendingToolCalls.length = 0;
           const loopType = this.loopDetector.getLastLoopType();
-          if (
-            event.type === GeminiEventType.ToolCallRequest &&
-            loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
-          ) {
-            // Consecutive-identical halt: drop only the repeated tail so any
-            // distinct calls collected earlier in the same response still run.
-            const repeatedCount =
-              this.loopDetector.getConsecutiveToolCallCount();
-            const repeatedStartIndex = Math.max(
-              0,
-              turn.pendingToolCalls.length - repeatedCount,
-            );
-            turn.pendingToolCalls.splice(repeatedStartIndex);
-          } else {
-            // Turn-cap halt: the tripping response may carry several tool calls
-            // collected before the cap fired. Drop them all so the run halts
-            // here instead of executing them, spawning a continuation, and
-            // re-tripping the cap (which would double-print the halt message
-            // and waste a request).
-            turn.pendingToolCalls.length = 0;
-          }
           yield {
             type: GeminiEventType.LoopDetected,
             ...(loopType && { value: { loopType } }),
