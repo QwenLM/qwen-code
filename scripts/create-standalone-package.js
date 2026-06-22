@@ -345,11 +345,10 @@ function copyNativeAddon(packageRoot, target) {
     dereference: true,
     verbatimSymlinks: false,
   };
-  fs.cpSync(
-    path.join(addonSrc, 'dist'),
-    path.join(addonDest, 'dist'),
-    copyOpts,
-  );
+  fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
+    ...copyOpts,
+    filter: (src) => !/\.test\.(d\.)?[mc]?[jt]s(\.map)?$/.test(src),
+  });
   fs.cpSync(
     prebuildSrc,
     path.join(addonDest, 'prebuilds', prebuildDirName),

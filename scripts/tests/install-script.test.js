@@ -1723,6 +1723,57 @@ describe('standalone release packaging', () => {
     }
   });
 
+  itOnUnix('does not package audio-capture test artifacts', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      'linux-x64',
+    );
+    const prebuildFile = path.join(prebuildDir, 'node.napi.node');
+    const createdPrebuild = !existsSync(prebuildFile);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+      if (createdPrebuild) {
+        writeFileSync(prebuildFile, 'fake native addon\n');
+      }
+
+      const archive = packageFakeStandalone(tmpDir);
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      const addonDist = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@qwen-code',
+        'audio-capture',
+        'dist',
+      );
+      expect(existsSync(path.join(addonDist, 'index.js'))).toBe(true);
+      expect(existsSync(path.join(addonDist, 'platform.test.js'))).toBe(false);
+      expect(existsSync(path.join(addonDist, 'platform.test.d.ts'))).toBe(
+        false,
+      );
+      expect(existsSync(path.join(addonDist, 'platform.test.js.map'))).toBe(
+        false,
+      );
+    } finally {
+      if (createdPrebuild) {
+        rmSync(prebuildFile, { force: true });
+      }
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnUnix('dereferences safe Node.js runtime symlinks', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
