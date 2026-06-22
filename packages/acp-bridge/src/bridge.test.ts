@@ -4692,14 +4692,18 @@ describe('createAcpSessionBridge', () => {
       );
     });
 
-    it('rejects NaN maxSessions (BRApy: silent fail-OPEN guard)', () => {
+    it.each([
+      ['NaN', Number.NaN],
+      ['negative', -5],
+      ['float', 1.5],
+    ])('rejects invalid maxSessions (%s)', (_label, value) => {
       // A typo / parse error in CLI / config that yields NaN must
       // NOT silently disable the daemon's resource cap. We fail
       // boot loud instead of serving unbounded.
-      expect(() => makeBridge({ maxSessions: NaN })).toThrow(
-        /maxSessions: NaN/,
-      );
-      expect(() => makeBridge({ maxSessions: -5 })).toThrow(/maxSessions: -5/);
+      expect(() => makeBridge({ maxSessions: value })).toThrow(/maxSessions/);
+    });
+
+    it('accepts disabled maxSessions sentinels', () => {
       // Explicit zero or Infinity remain valid "unlimited" sentinels.
       expect(() => makeBridge({ maxSessions: 0 })).not.toThrow();
       expect(() => makeBridge({ maxSessions: Infinity })).not.toThrow();

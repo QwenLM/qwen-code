@@ -710,25 +710,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
   //              long-standing alias since the cap check is `>= max`).
-  // `NaN` / negative → throw. A typo / parse error in CLI/config
-  //                    silently disabling the daemon's only resource
-  //                    guard is fail-OPEN behavior — we'd rather fail
-  //                    boot than serve unbounded.
+  // non-integer / `NaN` / negative → throw. A typo / parse error in
+  //                    CLI/config silently disabling or rounding the
+  //                    daemon's only resource guard is fail-OPEN behavior —
+  //                    we'd rather fail boot than serve with the wrong cap.
   let maxSessions: number;
   if (opts.maxSessions === undefined) {
     maxSessions = DEFAULT_MAX_SESSIONS;
-  } else if (Number.isNaN(opts.maxSessions)) {
-    throw new TypeError(
-      `Invalid maxSessions: NaN. Must be a number >= 0 ` +
-        `(0 / Infinity = unlimited).`,
-    );
-  } else if (opts.maxSessions < 0) {
-    throw new TypeError(
-      `Invalid maxSessions: ${opts.maxSessions}. Must be >= 0 ` +
-        `(0 / Infinity = unlimited).`,
-    );
   } else if (opts.maxSessions === 0 || opts.maxSessions === Infinity) {
     maxSessions = Infinity;
+  } else if (
+    !Number.isFinite(opts.maxSessions) ||
+    !Number.isInteger(opts.maxSessions) ||
+    opts.maxSessions < 0
+  ) {
+    throw new TypeError(
+      `Invalid maxSessions: ${opts.maxSessions}. ` +
+        `Must be a non-negative integer ` +
+        `(0 / Infinity = unlimited).`,
+    );
   } else {
     maxSessions = opts.maxSessions;
   }
