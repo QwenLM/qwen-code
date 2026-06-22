@@ -223,15 +223,46 @@ function buildExplicitModelBaseUrls(
   const baseUrls = new Set<string>();
   if (!modelProviders) return baseUrls;
 
-  for (const [authType, models] of Object.entries(modelProviders)) {
-    if (!Array.isArray(models)) continue;
+  for (const [authType, providerConfig] of Object.entries(modelProviders)) {
+    const models = readProviderModels(providerConfig);
     for (const model of models) {
-      if (model.id && model.baseUrl) {
+      if (
+        typeof model.id === 'string' &&
+        typeof model.baseUrl === 'string' &&
+        model.baseUrl.length > 0
+      ) {
         baseUrls.add(modelBaseUrlKey(authType, model.id, model.baseUrl));
       }
     }
   }
   return baseUrls;
+}
+
+type ProviderModelBaseUrlConfig = {
+  id?: unknown;
+  baseUrl?: unknown;
+};
+
+function readProviderModels(
+  providerConfig: unknown,
+): ProviderModelBaseUrlConfig[] {
+  if (Array.isArray(providerConfig)) {
+    return providerConfig.filter(isProviderModelBaseUrlConfig);
+  }
+  if (typeof providerConfig !== 'object' || providerConfig === null) {
+    return [];
+  }
+
+  const { models } = providerConfig as { models?: unknown };
+  return Array.isArray(models)
+    ? models.filter(isProviderModelBaseUrlConfig)
+    : [];
+}
+
+function isProviderModelBaseUrlConfig(
+  value: unknown,
+): value is ProviderModelBaseUrlConfig {
+  return typeof value === 'object' && value !== null;
 }
 
 function modelBaseUrlKey(
