@@ -52,7 +52,21 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 // child-process crashes for the SIGKILL → `session_died` test, and those
 // binaries are POSIX-only. A Windows-equivalent (`taskkill`) would need
 // different test scaffolding.
-const SKIP = process.platform === 'win32';
+//
+// Container sandbox (QWEN_SANDBOX=docker/podman): the model side is a fake
+// OpenAI server bound to the host's 127.0.0.1, but under the sandbox the
+// daemon's `qwen --acp` child runs inside the container and cannot reach the
+// host loopback — every prompt turn fails with "Connection error", so the
+// permission fan-out and Last-Event-ID flows below never fire. (The host
+// `pgrep -P` in the SIGKILL test can't see the in-container PID either.) Skip
+// under any container sandbox, matching the existing qwen-serve-baseline /
+// acp-integration / cron-tools precedent.
+const SKIP =
+  process.platform === 'win32' ||
+  Boolean(
+    process.env['QWEN_SANDBOX'] &&
+      process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false',
+  );
 const describePOSIX = SKIP ? describe.skip : describe;
 
 let daemon: ChildProcess;
