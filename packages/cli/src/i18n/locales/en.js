@@ -1318,6 +1318,7 @@ export default {
   'Press Enter to confirm, Esc to cancel':
     'Press Enter to confirm, Esc to cancel',
   'View tools': 'View tools',
+  'View resources': 'View resources',
   Reconnect: 'Reconnect',
   Enable: 'Enable',
   Disable: 'Disable',
@@ -1332,6 +1333,8 @@ export default {
   'Error:': 'Error:',
   tool: 'tool',
   tools: 'tools',
+  resource: 'resource',
+  resources: 'resources',
   connected: 'connected',
   connecting: 'connecting',
   disconnected: 'disconnected',
@@ -1371,6 +1374,18 @@ export default {
   Parameters: 'Parameters',
   'No tool selected': 'No tool selected',
   Server: 'Server',
+
+  // MCP Resource List/Detail
+  'No resources available for this server.':
+    'No resources available for this server.',
+  'Resources for {{serverName}}': 'Resources for {{serverName}}',
+  'No resource selected': 'No resource selected',
+  'Resource Detail': 'Resource Detail',
+  'URI:': 'URI:',
+  'MIME Type:': 'MIME Type:',
+  'Size:': 'Size:',
+  '{{count}} bytes': '{{count}} bytes',
+  'Reference in chat': 'Reference in chat',
 
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} invalid tools',

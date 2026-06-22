@@ -1227,6 +1227,7 @@ export default {
     '选择将服务器添加到排除列表的位置：',
   'Press Enter to confirm, Esc to cancel': '按 Enter 确认，Esc 取消',
   'View tools': '查看工具',
+  'View resources': '查看资源',
   Reconnect: '重新连接',
   Enable: '启用',
   Disable: '禁用',
@@ -1239,6 +1240,8 @@ export default {
   'Error:': '错误：',
   tool: '工具',
   tools: '个工具',
+  resource: '资源',
+  resources: '个资源',
   connected: '已连接',
   connecting: '连接中',
   disconnected: '已断开',
@@ -1284,6 +1287,17 @@ export default {
   Parameters: '参数',
   'No tool selected': '未选择工具',
   Server: '服务器',
+
+  // MCP Resource List/Detail
+  'No resources available for this server.': '此服务器没有可用资源。',
+  'Resources for {{serverName}}': '{{serverName}} 的资源',
+  'No resource selected': '未选择资源',
+  'Resource Detail': '资源详情',
+  'URI:': 'URI：',
+  'MIME Type:': 'MIME 类型：',
+  'Size:': '大小：',
+  '{{count}} bytes': '{{count}} 字节',
+  'Reference in chat': '在对话中引用',
 
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} 个无效工具',
