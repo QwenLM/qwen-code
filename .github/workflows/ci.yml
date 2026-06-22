@@ -85,25 +85,15 @@ jobs:
           echo "skip_ci=${skip_ci}" >> "${GITHUB_OUTPUT}"
           echo "skip_ci=${skip_ci}"
 
-      # Route the (required) Linux Test job for in-repo PRs onto the self-hosted
-      # ECS runner so maintainer changes skip the shared GitHub-hosted Linux
-      # queue. A PR whose head branch lives in this repository can only have been
-      # pushed by someone with write access (read/triage roles cannot push
-      # branches and must fork), so an in-repo head is a reliable "has write
-      # access" signal. Forks always stay on hosted runners, so untrusted code
-      # never executes on the self-hosted machine. Set the
-      # MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to force
-      # every PR back onto hosted runners if the ECS runner is unavailable.
+      # In-repo PR (head branch in this repo => author has write access) runs the
+      # Linux Test on ECS; forks stay hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
           SAME_REPO: "${{ github.event.pull_request.head.repo.full_name == github.repository }}"
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
         run: |-
-          # Default to the shared GitHub-hosted Linux runner.
           ubuntu_runner='["ubuntu-latest"]'
-          # In-repo branch (author had write access) and ECS routing enabled:
-          # use the self-hosted ECS runner instead.
           if [[ "${ECS_DISABLED}" != "true" && "${SAME_REPO}" == "true" ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
@@ -114,9 +104,6 @@ jobs:
     name: 'Lint'
     needs: 'classify_pr'
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
-    # Same routing as the Test job: self-hosted ECS for in-repo (write-access)
-    # PRs, GitHub-hosted for forks, with a hosted fallback when classify_pr did
-    # not run.
     runs-on: ${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '["ubuntu-latest"]') }}
     steps:
       - name: 'Checkout'
@@ -125,11 +112,7 @@ jobs:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
 
-      # See the Test job: hosted runners install Node via actions/setup-node;
-      # self-hosted ECS runners reuse the machine's pre-installed Node to avoid
-      # the unreliable nodejs.org download through the egress proxy. The linter
-      # binaries (actionlint/shellcheck/yamllint) are handled by scripts/lint.js,
-      # which skips installation when the tools are already on PATH.
+      # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node. lint.js skips linters already on PATH.
       - name: 'Set up Node.js 22.x (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -215,9 +198,6 @@ jobs:
             runner: '["macos-latest"]'
             node-version: '22.x'
             upload-coverage: 'false'
-          # Linux runner is chosen by classify_pr: self-hosted ECS for in-repo
-          # (write-access) PRs, GitHub-hosted for forks. Falls back to the hosted
-          # runner when classify_pr did not run (e.g. push / merge_group events).
           - os: 'ubuntu-latest'
             runner: "${{ needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]' }}"
             node-version: '22.x'
@@ -231,11 +211,7 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
 
-      # Hosted runners install Node via actions/setup-node. Self-hosted ECS
-      # runners cannot reliably download the Node tarball from nodejs.org through
-      # the egress proxy, so they reuse the Node toolchain already on the machine
-      # instead of re-downloading it every run — this both avoids the proxy abort
-      # and is faster.
+      # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js ${{ matrix.node-version }} (hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
