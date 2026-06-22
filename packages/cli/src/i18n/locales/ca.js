@@ -1407,6 +1407,7 @@ export default {
   'Tools:': 'Eines:',
   'Parameters:': 'Paràmetres:',
   'Prompts:': 'Missatges:',
+  'Resources:': 'Recursos:',
   Blocked: 'Bloquejat',
   '💡 Tips:': '💡 Consells:',
   Use: 'Useu',
@@ -2040,7 +2041,7 @@ export default {
   'Set history to collapse by default when resuming a session':
     'Establir la història per reduir-se per defecte en reprendre una sessió',
   'Set history to expand by default when resuming a session':
-    "Establir la història per expandir-se per defecte en reprendre una sessió",
+    'Establir la història per expandir-se per defecte en reprendre una sessió',
   'Expand the currently collapsed history transcript':
     'Expandir la transcripció de la història actualment reduïda',
   'Control history display preferences and visibility':

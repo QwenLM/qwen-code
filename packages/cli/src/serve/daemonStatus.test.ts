@@ -11,12 +11,12 @@ import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
 } from './acpSessionBridge.js';
-import { DeviceFlowRegistry } from './auth/deviceFlow.js';
+import { DeviceFlowRegistry } from './auth/device-flow.js';
 import {
   buildDaemonStatusResponse,
   type BuildDaemonStatusOptions,
 } from './daemonStatus.js';
-import type { RateLimiterInstance, RateLimitTier } from './rateLimit.js';
+import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 
 const BASE_WORKSPACE = '/work/status';

@@ -1036,14 +1036,46 @@ describe('createWorkflowSandbox security', () => {
     ).rejects.toThrow(/pipeline\(\) is unavailable/);
   });
 
-  it('workflow() throws a P1-unsupported error rather than ReferenceError', async () => {
+  it('workflow() throws "unavailable" when no workflow impl is injected (bare sandbox / nesting limit)', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
       sandbox.run(`return workflow('child', { foo: 1 });`),
-    ).rejects.toThrow(/workflow\(\).*not supported in P1/);
+    ).rejects.toThrow(/workflow\(\) is unavailable here/);
+  });
+
+  it('workflow() resolves through the injected host impl (single result revived)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      workflow: async (nameOrRef, wfArgs) => ({
+        echoedRef: nameOrRef,
+        echoedArgs: wfArgs,
+      }),
+    });
+    const result = await sandbox.run(
+      `return await workflow('child', { foo: 1 });`,
+    );
+    expect(result).toEqual({
+      echoedRef: 'child',
+      echoedArgs: { foo: 1 },
+    });
+  });
+
+  it('workflow({scriptPath}) passes the object ref through to the host impl', async () => {
+    let received: unknown;
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      workflow: async (nameOrRef) => {
+        received = nameOrRef;
+        return 'ok';
+      },
+    });
+    await sandbox.run(`return await workflow({ scriptPath: '/tmp/x.js' });`);
+    expect(received).toEqual({ scriptPath: '/tmp/x.js' });
   });
 
   it('budget.spent() / .remaining() throw with clear P1-unsupported errors', async () => {

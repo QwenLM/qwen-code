@@ -125,6 +125,10 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     USE_GEMINI: 'gemini',
     USE_VERTEX_AI: 'vertex-ai',
   },
+  ToolNames: {
+    AGENT: 'agent',
+  },
+  FORK_SUBAGENT_TYPE: 'fork',
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -2099,6 +2103,83 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
     dateNowSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('launches fork agents with neutral history text', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const addHistory = vi.fn();
+    const execute = vi.fn().mockResolvedValue({ llmContent: 'ok' });
+    const build = vi.fn().mockReturnValue({ execute });
+    const directive = `review   this\nbranch ${'x'.repeat(220)}`;
+    const collapsed = `review this branch ${'x'.repeat(220)}`;
+
+    Object.assign(innerConfig, {
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
+        addHistory,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn((name: string) =>
+          name === 'agent' ? { build } : undefined,
+        ),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionForkAgent, {
+        sessionId,
+        directive,
+      }),
+    ).resolves.toEqual({
+      sessionId,
+      description: `${collapsed.slice(0, 57)}…`,
+      launched: true,
+    });
+
+    expect(build).toHaveBeenCalledWith({
+      description: `${collapsed.slice(0, 57)}…`,
+      prompt: directive.trim(),
+      subagent_type: 'fork',
+      run_in_background: true,
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [
+        {
+          text: `User launched a background fork via /fork. Directive (truncated): ${collapsed.slice(
+            0,
+            197,
+          )}…`,
+        },
+      ],
+    });
+    expect(addHistory.mock.calls[0]?.[0]?.parts[0]?.text).not.toContain(
+      '[system]',
+    );
+
     mockConnectionState.resolve();
     await agentPromise;
   });

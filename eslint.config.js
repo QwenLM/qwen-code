@@ -14,6 +14,8 @@ import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
 // For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
 import storybook from 'eslint-plugin-storybook';
+import checkFile from 'eslint-plugin-check-file';
+import { legacyFilenames } from './eslint.legacy-filenames.mjs';
 
 export default tseslint.config(
   {
@@ -164,6 +166,24 @@ export default tseslint.config(
       'prefer-const': ['error', { destructuring: 'all' }],
       radix: 'error',
       'default-case': 'error',
+    },
+  },
+  {
+    // Enforce kebab-case filenames
+    files: ['packages/core/src/**/*.ts', 'packages/cli/src/**/*.ts'],
+    ignores: legacyFilenames.flatMap((name) => [
+      `**/${name}.ts`,
+      `**/${name}.*.ts`,
+    ]),
+    plugins: {
+      'check-file': checkFile,
+    },
+    rules: {
+      'check-file/filename-naming-convention': [
+        'error',
+        { '**/*.ts': 'KEBAB_CASE' },
+        { ignoreMiddleExtensions: true },
+      ],
     },
   },
   {

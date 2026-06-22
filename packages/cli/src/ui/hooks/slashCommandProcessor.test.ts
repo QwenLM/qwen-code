@@ -28,6 +28,8 @@ import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
   makeFakeConfig,
+  MCPServerStatus,
+  updateMCPServerStatus,
 } from '@qwen-code/qwen-code-core';
 
 const { logSlashCommand, debugLoggerMock } = vi.hoisted(() => ({
@@ -229,6 +231,47 @@ describe('useSlashCommandProcessor', () => {
       expect(BuiltinCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(FileCommandLoader).toHaveBeenCalledWith(mockConfig);
       expect(McpPromptLoader).toHaveBeenCalledWith(mockConfig);
+    });
+
+    it('rebuilds commands when an MCP server connects (surfaces MCP prompts in /)', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+      const before = vi.mocked(McpPromptLoader).mock.calls.length;
+
+      // A server reaching CONNECTED fires the real status listener the hook
+      // registered; after the debounce it rebuilds the command tree so a
+      // progressively-discovered MCP prompt appears as a /<prompt> command.
+      // Use a fresh server name so the global status registry actually
+      // transitions (undefined -> CONNECTED).
+      act(() => {
+        updateMCPServerStatus('srv-reload-test', MCPServerStatus.CONNECTED);
+      });
+
+      await waitFor(
+        () => {
+          expect(vi.mocked(McpPromptLoader).mock.calls.length).toBeGreaterThan(
+            before,
+          );
+        },
+        { timeout: 2000 },
+      );
+    });
+
+    it('ignores non-connected MCP status changes (no rebuild)', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+      const before = vi.mocked(McpPromptLoader).mock.calls.length;
+
+      act(() => {
+        updateMCPServerStatus('srv-noreload-test', MCPServerStatus.CONNECTING);
+      });
+      // Wait past the 250ms debounce window: CONNECTING must not reload.
+      await new Promise((r) => setTimeout(r, 400));
+      expect(vi.mocked(McpPromptLoader).mock.calls.length).toBe(before);
     });
 
     it('should call loadCommands and populate state after mounting', async () => {
@@ -520,6 +563,25 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockOpenModelDialog).toHaveBeenCalled();
+    });
+
+    it('should handle "dialog: voice-model" action', async () => {
+      const command = createTestCommand({
+        name: 'voicemodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'voice-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/voicemodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        voiceModelMode: true,
+      });
     });
 
     it('awaits direct resume session switching before returning handled', async () => {
