@@ -11,8 +11,8 @@
  * `defaultSpawnChannelFactory`, `createAcpSessionBridge` factory closure,
  * plus the supporting types/errors/options/status) to
  * `@qwen-code/acp-bridge`. This shim preserves every existing relative
- * import path (`./acpSessionBridge.js`) so `server.ts`, `runQwenServe.ts`,
- * `workspaceAgents.ts`, `workspaceMemory.ts`, `index.ts`, plus the
+ * import path (`./acpSessionBridge.js`) so `server.ts`, `run-qwen-serve.ts`,
+ * `workspace-agents.ts`, `workspace-memory.ts`, `index.ts`, plus the
  * bridge test suite, keep resolving without any call-site changes.
  *
  * The implementation now lives at:

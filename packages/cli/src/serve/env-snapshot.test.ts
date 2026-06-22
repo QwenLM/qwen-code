@@ -12,7 +12,7 @@ import {
   ENV_SECRET_VARS,
   buildEnvStatusFromProcess,
   readProxyVar,
-} from './envSnapshot.js';
+} from './env-snapshot.js';
 
 const TRACKED_ENV = [
   ...ENV_SECRET_VARS,

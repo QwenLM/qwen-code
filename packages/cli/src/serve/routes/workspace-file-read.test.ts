@@ -16,7 +16,7 @@ import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
 } from '../fs/index.js';
-import type { BridgeEvent } from '../eventBus.js';
+import type { BridgeEvent } from '../event-bus.js';
 import type { ServeOptions } from '../types.js';
 
 const baseOpts: ServeOptions = {

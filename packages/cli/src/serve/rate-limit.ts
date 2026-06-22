@@ -5,7 +5,7 @@
  */
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { isLoopbackBind } from './loopbackBinds.js';
+import { isLoopbackBind } from './loopback-binds.js';
 
 // ---------------------------------------------------------------------------
 // Types

@@ -8,8 +8,8 @@ import * as fs from 'node:fs';
 import { type Server } from 'node:http';
 import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import type { BridgeEvent } from './eventBus.js';
-import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
+import type { BridgeEvent } from './event-bus.js';
+import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   loadSettings,
   reloadEnvironment,
@@ -48,15 +48,15 @@ import {
   type TelemetryRuntimeConfig,
   type TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
-import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
-import { createDaemonStatusProvider } from './daemonStatusProvider.js';
-import { isLoopbackBind } from './loopbackBinds.js';
+import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { isLoopbackBind } from './loopback-binds.js';
 import { resolveWebShellDir } from './webShellStatic.js';
 import { parseAllowOriginPatterns } from './auth.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
-} from './permissionAudit.js';
+} from './permission-audit.js';
 import {
   createServeApp,
   getActiveSseCount,
@@ -74,7 +74,7 @@ import type {
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
-import { getRateLimiter } from './rateLimit.js';
+import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acpHttp/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
@@ -862,7 +862,7 @@ export async function runQwenServe(
 
   // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
   // through `BridgeFileSystem` for ACP-side writeTextFile / readTextFile
-  // calls. See `bridgeFileSystemAdapter.ts` for the translation layer.
+  // calls. See `bridge-file-system-adapter.ts` for the translation layer.
   const trustedWorkspace = deps.trustedWorkspace ?? true;
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,

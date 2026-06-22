@@ -11,7 +11,7 @@ import type { Argv, CommandModule } from 'yargs';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
+import { DEFAULT_RING_SIZE } from '../serve/event-bus.js';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,

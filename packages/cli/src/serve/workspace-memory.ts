@@ -15,7 +15,7 @@ import {
   writeWorkspaceContextFile,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { isServeDebugMode } from './debugMode.js';
+import { isServeDebugMode } from './debug-mode.js';
 import type { AcpSessionBridge } from './acpSessionBridge.js';
 import {
   createIdleWorkspaceMemoryStatus,
@@ -159,7 +159,7 @@ export function mountWorkspaceMemoryRoutes(
       if (clientId === null) return;
       let originatorClientId: string | undefined;
       if (clientId !== undefined) {
-        // Mirror the workspaceAgents.ts `resolveOriginatorClientId`
+        // Mirror the workspace-agents.ts `resolveOriginatorClientId`
         // posture: validate against `bridge.knownClientIds()`, send
         // 400 directly, return `null` so the caller short-circuits.
         // Previously this branch threw `InvalidClientIdError` and

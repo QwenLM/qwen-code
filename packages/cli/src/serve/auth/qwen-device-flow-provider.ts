@@ -28,7 +28,7 @@ import {
   type DeviceFlowProvider,
   type DeviceFlowProviderId,
   type DeviceFlowStartResult,
-} from './deviceFlow.js';
+} from './device-flow.js';
 
 const QWEN_OAUTH_SCOPE = 'openid profile email model.completion';
 
