@@ -1482,48 +1482,9 @@ export async function connectToMcpServer(
         }
       } else {
         // No www-authenticate header found, but we got a 401
-        // Only try OAuth discovery for HTTP servers or when OAuth is explicitly configured
-        // For SSE servers, we should not trigger new OAuth flows automatically
-        const shouldTryDiscovery =
-          mcpServerConfig.httpUrl || mcpServerConfig.oauth?.enabled;
-
-        if (!shouldTryDiscovery) {
-          const tokenStorage = new MCPOAuthTokenStorage();
-          const credentials = await tokenStorage.getCredentials(mcpServerName);
-          let hasStoredTokens = false;
-          if (credentials) {
-            const authProvider = new MCPOAuthProvider(tokenStorage);
-            hasStoredTokens = Boolean(
-              await authProvider.getValidToken(mcpServerName, {
-                // Pass client ID if available
-                clientId: credentials.clientId,
-              }),
-            );
-            if (hasStoredTokens) {
-              debugLogger.warn(
-                `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-                  getMcpOAuthDialogInstruction(
-                    're-authenticate',
-                    mcpServerName,
-                  ),
-              );
-            } else {
-              debugLogger.warn(
-                `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-                  getMcpOAuthDialogInstruction('authenticate', mcpServerName),
-              );
-            }
-          }
-          throw new Error(
-            hasStoredTokens
-              ? `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-                getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
-              : `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-                getMcpOAuthDialogInstruction('authenticate', mcpServerName),
-          );
-        }
-
-        // For SSE/HTTP servers, try to discover OAuth configuration from the base URL
+        // For HTTP servers and explicitly configured OAuth, try to discover
+        // OAuth configuration from the base URL. SSE servers without explicit
+        // OAuth are handled above before this branch.
         debugLogger.info(
           `Attempting OAuth discovery for '${mcpServerName}'...`,
         );

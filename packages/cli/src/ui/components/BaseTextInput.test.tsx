@@ -12,6 +12,18 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 
+const mockSetCursorPosition = vi.hoisted(() => vi.fn());
+
+vi.mock('ink', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink')>();
+  return {
+    ...actual,
+    useCursor: () => ({
+      setCursorPosition: mockSetCursorPosition,
+    }),
+  };
+});
+
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
 }));
@@ -107,6 +119,18 @@ describe('BaseTextInput', () => {
     handler(typedKey);
 
     expect(buffer.handleInput).toHaveBeenCalledWith(typedKey);
+  });
+
+  it('clears the physical cursor position on unmount', () => {
+    const buffer = createBuffer();
+    const { unmount } = render(
+      <BaseTextInput buffer={buffer} onSubmit={vi.fn()} />,
+    );
+
+    mockSetCursorPosition.mockClear();
+    unmount();
+
+    expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
   });
 });
 

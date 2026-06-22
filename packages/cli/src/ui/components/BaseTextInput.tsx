@@ -20,7 +20,7 @@
  */
 
 import type { ReactNode } from 'react';
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
@@ -281,6 +281,7 @@ export const BaseTextInput = ({
   const rootRef = useRef<DOMElement | null>(null);
   const { hasMeasured } = useBoxMetrics(rootRef);
   const { setCursorPosition } = useCursor();
+  useEffect(() => () => setCursorPosition(undefined), [setCursorPosition]);
 
   const cursorPosition =
     showCursor && hasMeasured

@@ -342,6 +342,9 @@ OAuth tokens are automatically:
 - **Refreshed** when expired (if refresh tokens are available)
 - **Validated** before each connection attempt
 
+> [!WARNING]
+> By default, OAuth tokens are stored unencrypted on disk. On shared or multi-user machines, set `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` to protect credentials.
+
 Use the `/mcp` dialog within Qwen Code to inspect MCP servers and manage
 authentication interactively.
 

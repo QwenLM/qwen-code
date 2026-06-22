@@ -207,6 +207,9 @@ OAuth tokens are automatically:
 - **Validated** before each connection attempt
 - **Cleaned up** when invalid or expired
 
+> [!WARNING]
+> By default, OAuth tokens are stored unencrypted on disk. On shared or multi-user machines, set `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` to protect credentials.
+
 #### Authentication Provider Type
 
 You can specify the authentication provider type using the `authProviderType` property:
