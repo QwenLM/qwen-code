@@ -5,7 +5,14 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { handleList, SESSION_COL, TIME_COL, TITLE_COL } from './list.js';
+import yargs, { type Argv } from 'yargs';
+import {
+  handleList,
+  listCommand,
+  SESSION_COL,
+  TIME_COL,
+  TITLE_COL,
+} from './list.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -38,6 +45,12 @@ const sampleSession = {
   customTitle: 'React 组件开发',
   titleSource: 'auto',
 };
+
+function buildParser(): Argv {
+  return (listCommand.builder as (argv: Argv) => Argv)(
+    yargs([]).exitProcess(false).fail(false).locale('en'),
+  );
+}
 
 describe('sessions list command', () => {
   beforeEach(() => {
@@ -201,6 +214,24 @@ describe('sessions list command', () => {
     expect(mockListSessions).toHaveBeenCalledWith({
       size: 20,
     });
+  });
+
+  it('parses --limit as a positive integer', () => {
+    const argv = buildParser().parseSync('--limit 10');
+
+    expect(argv['limit']).toBe(10);
+  });
+
+  it('defaults --limit to 20 in the parser', () => {
+    const argv = buildParser().parseSync('');
+
+    expect(argv['limit']).toBe(20);
+  });
+
+  it.each(['0', '-1', '1.5'])('rejects invalid --limit value %s', (value) => {
+    expect(() => buildParser().parseSync(`--limit ${value}`)).toThrow(
+      '--limit must be a positive integer.',
+    );
   });
 
   it('should yield JSON without header for multiple sessions', async () => {

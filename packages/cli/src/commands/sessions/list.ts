@@ -215,7 +215,12 @@ export const listCommand: CommandModule<unknown, ListArgs> = {
         type: 'number',
         describe: 'Maximum number of sessions to show',
         default: 20,
-        coerce: (v) => (Number.isInteger(v) && v > 0 ? v : 20),
+        coerce: (v) => {
+          if (Number.isInteger(v) && v > 0) {
+            return v;
+          }
+          throw new Error('--limit must be a positive integer.');
+        },
       }),
   handler: async (argv) => {
     await handleList(argv);
