@@ -325,7 +325,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       transcribeVoiceAudio(audio, { config, settings, voiceModel }),
     [config, settings],
   );
-  const voiceMicWarnedRef = useRef(false);
+  const voiceMicWarnedStatusRef = useRef<string | null>(null);
   const voiceRecorderRef = useRef<ReturnType<
     typeof createVoiceRecorder
   > | null>(null);
@@ -338,11 +338,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     void Promise.resolve(recorder.warmup?.()).catch(() => {});
     void Promise.resolve(recorder.microphoneStatus?.())
       .then((status) => {
-        if (voiceMicWarnedRef.current) {
+        if (voiceMicWarnedStatusRef.current === status) {
           return;
         }
         if (status === 'denied') {
-          voiceMicWarnedRef.current = true;
+          voiceMicWarnedStatusRef.current = status;
           uiState.historyManager?.addItem(
             {
               type: 'error',
@@ -356,7 +356,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // notDetermined: macOS raises the permission dialog on first capture,
           // so that first recording can come back empty. Tell the user once
           // instead of letting it look like a silent no-op.
-          voiceMicWarnedRef.current = true;
+          voiceMicWarnedStatusRef.current = status;
           uiState.historyManager?.addItem(
             {
               type: 'info',

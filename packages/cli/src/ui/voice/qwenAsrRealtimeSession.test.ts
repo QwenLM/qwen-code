@@ -389,7 +389,7 @@ describe('qwenAsrRealtimeSession', () => {
     );
   });
 
-  it('salvages committed transcript when the socket closes after finish', async () => {
+  it('rejects committed transcript when the socket closes before session.finished', async () => {
     const socket = new FakeSocket();
     const sessionPromise = openQwenAsrRealtimeStream(
       {
@@ -418,6 +418,42 @@ describe('qwenAsrRealtimeSession', () => {
     const transcriptPromise = session.finish();
     socket.emit('close');
 
-    await expect(transcriptPromise).resolves.toBe('hello world');
+    await expect(transcriptPromise).rejects.toThrow(
+      'Qwen ASR realtime connection closed unexpectedly.',
+    );
+  });
+
+  it('sanitizes and caps realtime server error messages', async () => {
+    const socket = new FakeSocket();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    const transcriptPromise = session.finish();
+    const longMessage = `bad\x1b[8mhidden\x1b[0m ${'x'.repeat(300)}`;
+    socket.emit(
+      'message',
+      JSON.stringify({
+        type: 'error',
+        error: { message: longMessage },
+      }),
+      false,
+    );
+
+    await expect(transcriptPromise).rejects.toThrow(
+      'bad\\u001b[8mhidden\\u001b[0m',
+    );
+    await expect(transcriptPromise).rejects.not.toThrow('x'.repeat(220));
   });
 });

@@ -14,6 +14,7 @@ import type {
   VoiceStreamSession,
 } from './voiceStreamSession.js';
 import { deriveWebSocketBase } from './voiceStreamSession.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 export interface QwenRealtimeDeps {
   createWebSocket?: (
@@ -25,6 +26,7 @@ export interface QwenRealtimeDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
+const MAX_SERVER_ERROR_MESSAGE_LENGTH = 200;
 const debugLogger = createDebugLogger('VOICE_QWEN_REALTIME');
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
@@ -39,6 +41,11 @@ function appendTranscript(existing: string, next: string): string {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function formatServerErrorMessage(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw : 'Qwen ASR realtime failed.';
+  return escapeAnsiCtrlCodes(text).slice(0, MAX_SERVER_ERROR_MESSAGE_LENGTH);
 }
 
 export function openQwenAsrRealtimeStream(
@@ -235,9 +242,11 @@ export function openQwenAsrRealtimeStream(
         case 'conversation.item.input_audio_transcription.failed':
           fail(
             new Error(
-              msg.error?.message ??
-                msg.error?.code ??
-                'Qwen ASR realtime transcription failed.',
+              formatServerErrorMessage(
+                msg.error?.message ??
+                  msg.error?.code ??
+                  'Qwen ASR realtime transcription failed.',
+              ),
             ),
           );
           break;
@@ -261,9 +270,11 @@ export function openQwenAsrRealtimeStream(
         case 'error':
           fail(
             new Error(
-              msg.error?.message ??
-                msg.error?.code ??
-                'Qwen ASR realtime request failed.',
+              formatServerErrorMessage(
+                msg.error?.message ??
+                  msg.error?.code ??
+                  'Qwen ASR realtime request failed.',
+              ),
             ),
           );
           break;
@@ -283,14 +294,6 @@ export function openQwenAsrRealtimeStream(
         return;
       }
       if (finishReject) {
-        const salvage = committed.trim();
-        if (salvage) {
-          finishedTranscript = salvage;
-          finishResolve?.(salvage);
-          finishResolve = null;
-          finishReject = null;
-          return;
-        }
         finishReject(
           new Error(
             'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',

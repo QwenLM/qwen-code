@@ -100,7 +100,7 @@ describe('voiceStreamSession', () => {
     );
   });
 
-  it('salvages committed transcript when the stream closes after finish', async () => {
+  it('rejects committed transcript when the stream closes before task-finished', async () => {
     const socket = new FakeSocket();
     const session = await startSession(socket);
 
@@ -118,7 +118,9 @@ describe('voiceStreamSession', () => {
     const transcriptPromise = session.finish();
     socket.emit('close');
 
-    await expect(transcriptPromise).resolves.toBe('hello world');
+    await expect(transcriptPromise).rejects.toThrow(
+      'Voice stream connection closed unexpectedly.',
+    );
   });
 
   it('rejects when task-finished arrives before task-started', async () => {

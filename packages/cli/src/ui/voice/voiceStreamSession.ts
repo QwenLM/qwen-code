@@ -327,15 +327,6 @@ export function openVoiceStream(
       clearFinishTimer();
       if (settled) return;
       if (started && finishReject) {
-        const salvage = committed.trim();
-        if (salvage) {
-          settled = true;
-          finishedTranscript = salvage;
-          finishResolve?.(salvage);
-          finishResolve = null;
-          finishReject = null;
-          return;
-        }
         settled = true;
         finishReject(
           new Error(

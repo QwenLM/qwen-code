@@ -394,7 +394,9 @@ jobs:
           npm run prepare:package
 
       - name: 'Download audio capture prebuilds'
-        uses: 'actions/download-artifact@v4'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' }}
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'audio-capture-prebuilds'
           path: 'packages/audio-capture/prebuilds'
@@ -405,6 +407,8 @@ jobs:
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
       - name: 'Publish @qwen-code/audio-capture'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' }}
         working-directory: 'packages/audio-capture'
         run: |-
           npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
