@@ -19,7 +19,7 @@ describe('<ThinkMessage />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).not.toContain('ctrl+o to expand');
+    expect(output).not.toContain('click to view');
   });
 
   it('should render collapsed line when committed and not expanded', () => {
@@ -28,7 +28,7 @@ describe('<ThinkMessage />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain('click to view');
     expect(output).not.toContain('Analyzing the code structure');
   });
 
@@ -45,7 +45,7 @@ describe('<ThinkMessage />', () => {
       <ThinkMessage {...defaultProps} isPending={false} />,
     );
     const output = lastFrame();
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain('click to view');
     expect(output).not.toContain('Analyzing the code structure');
   });
 
@@ -61,7 +61,7 @@ describe('<ThinkMessage />', () => {
     const output = lastFrame();
     expect(output).toContain('Thought for');
     expect(output).toContain('15s');
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain('click to view');
   });
 
   it('should show present-tense duration while pending (streaming)', () => {

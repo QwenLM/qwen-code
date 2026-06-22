@@ -24,6 +24,10 @@ vi.mock('./messages/ToolGroupMessage.js', () => ({
   ToolGroupMessage: vi.fn(() => <div />),
 }));
 
+vi.mock('../hooks/useMouseEvents.js', () => ({
+  useMouseEvents: vi.fn(),
+}));
+
 describe('<HistoryItemDisplay />', () => {
   const mockConfig = {
     getChatRecordingService: () => undefined,
@@ -337,7 +341,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('●');
   });
 
-  it('renders committed thinking text in full transcript mode', () => {
+  it('renders committed thinking collapsed by default', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_thought',
@@ -353,10 +357,11 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('Inspecting the repository');
+    expect(output).toContain('click to view');
+    expect(output).not.toContain('Inspecting the repository');
   });
 
-  it('renders committed thinking continuations in full transcript mode', () => {
+  it('renders committed thinking continuations hidden by default', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_thought_content',
@@ -369,10 +374,10 @@ describe('<HistoryItemDisplay />', () => {
       </CompactModeProvider>,
     );
 
-    expect(lastFrame()).toContain('Continuing the reasoning');
+    expect(lastFrame()).not.toContain('Continuing the reasoning');
   });
 
-  it('keeps committed thinking collapsed in compact mode', () => {
+  it('keeps committed thinking collapsed in compact mode too', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_thought',
@@ -388,7 +393,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain('click to view');
     expect(output).not.toContain('Inspecting the repository');
   });
 

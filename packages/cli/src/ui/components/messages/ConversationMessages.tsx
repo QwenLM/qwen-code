@@ -388,7 +388,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
         : t('Thinking');
     return (
       <Text dimColor italic>
-        {label} {t('(ctrl+o to expand)')}
+        {label} {t('(click to view)')}
       </Text>
     );
   }

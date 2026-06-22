@@ -197,6 +197,11 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
+import {
+  ThinkingViewerProvider,
+  type ThinkingViewerData,
+} from './contexts/ThinkingViewerContext.js';
+import { ThinkingViewer } from './components/ThinkingViewer.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -472,6 +477,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
+
+  // Thinking viewer overlay state
+  const [thinkingViewerData, setThinkingViewerData] =
+    useState<ThinkingViewerData | null>(null);
+  const openThinkingViewer = useCallback((data: ThinkingViewerData) => {
+    setThinkingViewerData(data);
+  }, []);
+  const closeThinkingViewer = useCallback(() => {
+    setThinkingViewerData(null);
+  }, []);
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -3130,6 +3145,12 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // Close thinking viewer overlay first if open
+        if (thinkingViewerData) {
+          closeThinkingViewer();
+          return;
+        }
+
         // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
         // the Esc to switch to NORMAL mode. Without this guard, both handlers
         // fire on the same keypress — vim switches mode AND AppContainer
@@ -3361,6 +3382,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleDoubleEscRewind,
       vimEnabled,
       vimMode,
+      thinkingViewerData,
+      closeThinkingViewer,
     ],
   );
 
@@ -3900,6 +3923,11 @@ export const AppContainer = (props: AppContainerProps) => {
     [renderMode, setRenderMode],
   );
 
+  const thinkingViewerValue = useMemo(
+    () => ({ openThinkingViewer }),
+    [openThinkingViewer],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -3913,9 +3941,17 @@ export const AppContainer = (props: AppContainerProps) => {
             <CompactModeProvider value={compactModeValue}>
               <RenderModeProvider value={renderModeValue}>
                 <TerminalOutputProvider value={writeRaw}>
-                  <ShellFocusContext.Provider value={isFocused}>
-                    <App />
-                  </ShellFocusContext.Provider>
+                  <ThinkingViewerProvider value={thinkingViewerValue}>
+                    <ShellFocusContext.Provider value={isFocused}>
+                      <App />
+                      {thinkingViewerData && (
+                        <ThinkingViewer
+                          data={thinkingViewerData}
+                          onClose={closeThinkingViewer}
+                        />
+                      )}
+                    </ShellFocusContext.Provider>
+                  </ThinkingViewerProvider>
                 </TerminalOutputProvider>
               </RenderModeProvider>
             </CompactModeProvider>

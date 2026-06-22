@@ -1,0 +1,138 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { FC } from 'react';
+import { useState, useCallback } from 'react';
+import { Box, Text } from 'ink';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useKeypress, type Key } from '../hooks/useKeypress.js';
+import { useMouseEvents } from '../hooks/useMouseEvents.js';
+import type { MouseEvent } from '../utils/mouse.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
+import { theme } from '../semantic-colors.js';
+import { t } from '../../i18n/index.js';
+import { AlternateScreen } from './AlternateScreen.js';
+import type { ThinkingViewerData } from '../contexts/ThinkingViewerContext.js';
+
+interface ThinkingViewerProps {
+  data: ThinkingViewerData;
+  onClose: () => void;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
+const WHEEL_LINES = 3;
+
+export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
+  const { rows } = useTerminalSize();
+  const [scrollOffset, setScrollOffset] = useState(0);
+
+  const headerHeight = 2;
+  const footerHeight = 2;
+  const contentHeight = Math.max(rows - headerHeight - footerHeight, 1);
+
+  const lines = data.text.split('\n');
+  const maxScroll = Math.max(0, lines.length - contentHeight);
+
+  const scrollBy = useCallback(
+    (delta: number) => {
+      setScrollOffset((prev) => Math.max(0, Math.min(maxScroll, prev + delta)));
+    },
+    [maxScroll],
+  );
+
+  useKeypress(
+    useCallback(
+      (key: Key) => {
+        if (keyMatchers[Command.ESCAPE](key)) {
+          onClose();
+        } else if (keyMatchers[Command.SCROLL_UP](key) || key.name === 'up') {
+          scrollBy(-1);
+        } else if (
+          keyMatchers[Command.SCROLL_DOWN](key) ||
+          key.name === 'down'
+        ) {
+          scrollBy(1);
+        } else if (keyMatchers[Command.PAGE_UP](key)) {
+          scrollBy(-contentHeight);
+        } else if (keyMatchers[Command.PAGE_DOWN](key)) {
+          scrollBy(contentHeight);
+        } else if (keyMatchers[Command.SCROLL_HOME](key)) {
+          setScrollOffset(0);
+        } else if (keyMatchers[Command.SCROLL_END](key)) {
+          setScrollOffset(maxScroll);
+        }
+      },
+      [onClose, scrollBy, contentHeight, maxScroll],
+    ),
+    { isActive: true },
+  );
+
+  useMouseEvents(
+    useCallback(
+      (event: MouseEvent) => {
+        if (event.name === 'scroll-up') {
+          scrollBy(-WHEEL_LINES);
+        } else if (event.name === 'scroll-down') {
+          scrollBy(WHEEL_LINES);
+        }
+      },
+      [scrollBy],
+    ),
+    { isActive: true },
+  );
+
+  const title =
+    data.durationMs != null
+      ? `${t('Thought for')} ${formatDuration(data.durationMs)}`
+      : t('Thinking');
+
+  const visibleLines = lines.slice(scrollOffset, scrollOffset + contentHeight);
+  const scrollPercent =
+    maxScroll > 0 ? Math.round((scrollOffset / maxScroll) * 100) : 0;
+  const scrollIndicator = maxScroll > 0 ? ` (${scrollPercent}%)` : '';
+
+  return (
+    <AlternateScreen>
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={theme.text.secondary}
+        paddingX={1}
+        height={rows}
+      >
+        <Box>
+          <Text color={theme.text.accent} bold>
+            {'⟡ '}
+            {title}
+          </Text>
+          <Text dimColor>{scrollIndicator}</Text>
+        </Box>
+        <Box flexDirection="column" flexGrow={1}>
+          {visibleLines.map((line, i) => (
+            <Text key={scrollOffset + i} dimColor wrap="truncate-end">
+              {line || ' '}
+            </Text>
+          ))}
+        </Box>
+        <Box justifyContent="center">
+          <Text dimColor italic>
+            ESC {t('to close')} {'  '}↑↓ {t('to scroll')} {'  '}PgUp/PgDn{' '}
+            Home/End
+          </Text>
+        </Box>
+      </Box>
+    </AlternateScreen>
+  );
+};

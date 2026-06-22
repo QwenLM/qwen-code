@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { useMemo } from 'react';
+import { useMemo, useRef, useCallback } from 'react';
+import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
@@ -58,6 +59,10 @@ import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useThinkingViewer } from '../contexts/ThinkingViewerContext.js';
+import { useMouseEvents } from '../hooks/useMouseEvents.js';
+import type { MouseEvent } from '../utils/mouse.js';
+import { measureElementPosition } from '../utils/measure-element-position.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -140,10 +145,48 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const { compactMode } = useCompactMode();
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
+  const { openThinkingViewer } = useThinkingViewer();
 
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
+
+  const thoughtRef = useRef<DOMElement>(null);
+  const isCommittedThought =
+    !isPending &&
+    (itemForDisplay.type === 'gemini_thought' ||
+      itemForDisplay.type === 'gemini_thought_content');
+
+  const thoughtText =
+    isCommittedThought && 'text' in itemForDisplay
+      ? (itemForDisplay as { text: string }).text
+      : '';
+  const thoughtDurationMs =
+    itemForDisplay.type === 'gemini_thought'
+      ? itemForDisplay.durationMs
+      : undefined;
+
+  useMouseEvents(
+    useCallback(
+      (event: MouseEvent) => {
+        if (event.name !== 'left-press' || !thoughtRef.current) return;
+        const metrics = measureElementPosition(thoughtRef.current);
+        if (
+          event.col >= metrics.x &&
+          event.col < metrics.x + metrics.width &&
+          event.row >= metrics.y &&
+          event.row < metrics.y + metrics.height
+        ) {
+          openThinkingViewer({
+            text: thoughtText,
+            durationMs: thoughtDurationMs,
+          });
+        }
+      },
+      [openThinkingViewer, thoughtText, thoughtDurationMs],
+    ),
+    { isActive: isCommittedThought },
+  );
 
   return (
     <Box
@@ -197,27 +240,31 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'gemini_thought' && (
-        <ThinkMessage
-          text={itemForDisplay.text.trimEnd()}
-          isPending={isPending}
-          expanded={!compactMode}
-          availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
-          }
-          contentWidth={contentWidth}
-          durationMs={itemForDisplay.durationMs}
-        />
+        <Box ref={isCommittedThought ? thoughtRef : undefined}>
+          <ThinkMessage
+            text={itemForDisplay.text.trimEnd()}
+            isPending={isPending}
+            expanded={false}
+            availableTerminalHeight={
+              availableTerminalHeightGemini ?? availableTerminalHeight
+            }
+            contentWidth={contentWidth}
+            durationMs={itemForDisplay.durationMs}
+          />
+        </Box>
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (
-        <ThinkMessageContent
-          text={itemForDisplay.text.trimEnd()}
-          isPending={isPending}
-          expanded={!compactMode}
-          availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
-          }
-          contentWidth={contentWidth}
-        />
+        <Box ref={isCommittedThought ? thoughtRef : undefined}>
+          <ThinkMessageContent
+            text={itemForDisplay.text.trimEnd()}
+            isPending={isPending}
+            expanded={false}
+            availableTerminalHeight={
+              availableTerminalHeightGemini ?? availableTerminalHeight
+            }
+            contentWidth={contentWidth}
+          />
+        </Box>
       )}
       {itemForDisplay.type === 'info' && (
         <InfoMessage
