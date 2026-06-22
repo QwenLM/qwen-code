@@ -44,6 +44,30 @@
           "type": "boolean",
           "default": false
         },
+        "voice": {
+          "description": "Voice dictation settings.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable voice dictation in the prompt input.",
+              "type": "boolean",
+              "default": false
+            },
+            "mode": {
+              "description": "How push-to-talk behaves: \"hold\" to talk while held, or \"tap\" to start and tap (or pause) to stop and submit. Options: hold, tap",
+              "enum": [
+                "hold",
+                "tap"
+              ],
+              "default": "hold"
+            },
+            "language": {
+              "description": "Preferred spoken language for voice transcription (e.g. \"english\", \"chinese\"). Leave empty to auto-detect.",
+              "type": "string",
+              "default": ""
+            }
+          }
+        },
         "enableAutoUpdate": {
           "description": "Enable automatic update checks and installations on startup.",
           "type": "boolean",
@@ -60,7 +84,7 @@
           "default": 5
         },
         "cleanupPeriodDays": {
-          "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind. Backups older than this are removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session. Other persistent caches will honor the same setting in the future.",
+          "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
           "type": "number",
           "default": 30
         },
@@ -479,6 +503,11 @@
     },
     "fastModel": {
       "description": "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
+      "type": "string",
+      "default": ""
+    },
+    "voiceModel": {
+      "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
       "type": "string",
       "default": ""
     },
@@ -2633,10 +2662,82 @@
           "type": "boolean",
           "default": false
         },
+        "artifact": {
+          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. Can also be enabled via QWEN_CODE_ENABLE_ARTIFACT=1, or hard-disabled via QWEN_CODE_DISABLE_ARTIFACT=1.",
+          "type": "boolean",
+          "default": false
+        },
         "emitToolUseSummaries": {
           "description": "Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
           "type": "boolean",
           "default": true
+        }
+      }
+    },
+    "artifact": {
+      "description": "Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
+      "type": "object",
+      "properties": {
+        "publisher": {
+          "description": "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload). Options: local, host, oss",
+          "enum": [
+            "local",
+            "host",
+            "oss"
+          ],
+          "default": "local"
+        },
+        "host": {
+          "description": "Host-backend config, used when artifact.publisher is \"host\".",
+          "type": "object",
+          "properties": {
+            "uploadCommand": {
+              "description": "Command that uploads the artifact, run with execFile (no shell). {file} = local HTML path, {key} = remote object key. e.g. \"aws s3 cp {file} s3://bucket/{key} --content-type text/html\".",
+              "type": "string",
+              "default": ""
+            },
+            "urlTemplate": {
+              "description": "Shareable URL template; {key} is substituted. e.g. \"https://bucket.example.com/{key}\".",
+              "type": "string",
+              "default": ""
+            },
+            "keyPrefix": {
+              "description": "Remote key prefix; the object key is \"{prefix}/{id}/index.html\".",
+              "type": "string",
+              "default": "artifacts"
+            }
+          }
+        },
+        "oss": {
+          "description": "Native Aliyun OSS backend, used when artifact.publisher is \"oss\". Credentials are read from OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET (or ALIBABA_CLOUD_*), never from settings.",
+          "type": "object",
+          "properties": {
+            "bucket": {
+              "description": "OSS bucket name.",
+              "type": "string",
+              "default": ""
+            },
+            "endpoint": {
+              "description": "OSS endpoint host, e.g. \"oss-cn-hangzhou.aliyuncs.com\".",
+              "type": "string",
+              "default": ""
+            },
+            "keyPrefix": {
+              "description": "Remote key prefix; the object key is \"{prefix}/{id}/index.html\".",
+              "type": "string",
+              "default": "artifacts"
+            },
+            "acl": {
+              "description": "Object ACL applied on upload. \"public-read\" (default) makes the link shareable.",
+              "type": "string",
+              "default": "public-read"
+            },
+            "publicBaseUrl": {
+              "description": "Optional CDN / custom-domain base for the returned URL. Upload still goes through endpoint. e.g. \"https://cdn.example.com\".",
+              "type": "string",
+              "default": ""
+            }
+          }
         }
       }
     },

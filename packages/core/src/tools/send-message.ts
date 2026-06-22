@@ -115,6 +115,31 @@ class SendMessageInvocation extends BaseToolInvocation<
         };
       }
 
+      // A completed background agent is revived from its persisted transcript
+      // and continued with this message — lets the model keep iterating on a
+      // finished sub-agent instead of spawning a fresh one.
+      if (entry.status === 'completed') {
+        const revived = await this.config.reviveCompletedBackgroundAgent(
+          this.params.task_id,
+          this.params.message,
+        );
+        if (!revived) {
+          return {
+            llmContent: `Error: Background task "${this.params.task_id}" could not be revived.`,
+            returnDisplay: 'Task could not be revived.',
+            error: {
+              message: `Task could not be revived: ${this.params.task_id}`,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
+          };
+        }
+
+        return {
+          llmContent: `Background task "${this.params.task_id}" had completed; revived it with your message as the next instruction.`,
+          returnDisplay: `Revived ${entry.description}`,
+        };
+      }
+
       if (entry.status !== 'running') {
         return {
           llmContent: `Error: Background task "${this.params.task_id}" is not running (status: ${entry.status}). Cannot send messages to stopped tasks.`,
@@ -216,8 +241,8 @@ export class SendMessageTool extends BaseDeclarativeTool<
       ToolDisplayNames.SEND_MESSAGE,
       'Send a message to a teammate (use "to") or to a running background task (use "task_id"). ' +
         'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
-        'For background tasks, set "task_id" to the id from the launch response or a recovered paused task. ' +
-        'Running tasks receive it at the next tool-round boundary; paused recovered tasks are resumed with the message as their first continuation instruction. ' +
+        'For background tasks, set "task_id" to the id from the launch response, a recovered paused task, or a completed task to revive. ' +
+        'Running tasks receive it at the next tool-round boundary; paused recovered tasks are resumed with the message as their first continuation instruction; a completed task is revived from its transcript and continued with your message. ' +
         'Your text output is NOT visible to other agents — use this tool to communicate.',
       Kind.Other,
       {
@@ -230,7 +255,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           task_id: {
             type: 'string',
             description:
-              'The ID of the background task (from the launch response or a recovered paused task).',
+              'The ID of the background task (from the launch response, a recovered paused task, or a completed task to revive).',
           },
           message: {
             type: 'string',
