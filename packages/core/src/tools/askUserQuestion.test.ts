@@ -330,6 +330,47 @@ describe('AskUserQuestionTool', () => {
       expect(result.llmContent).toContain('No valid answers were provided.');
     });
 
+    it('should ignore non-canonical decimal answer indexes', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+            multiSelect: false,
+          },
+          {
+            question: 'Pick a language?',
+            header: 'Language',
+            options: [
+              { label: 'TypeScript', description: 'Typed JavaScript' },
+              { label: 'Python', description: 'General purpose language' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: {
+          '01': 'TypeScript',
+        },
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('Language**: TypeScript');
+      expect(result.llmContent).toContain('No valid answers were provided.');
+    });
+
     it('should ignore answers with out-of-range question indexes', async () => {
       const params = {
         questions: [

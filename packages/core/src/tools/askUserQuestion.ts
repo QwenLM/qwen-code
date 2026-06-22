@@ -29,9 +29,13 @@ function parseAnswerQuestionIndex(
   key: string,
   questionCount: number,
 ): number | undefined {
-  if (!/^\d+$/.test(key)) return undefined;
   const index = Number(key);
-  if (!Number.isSafeInteger(index) || index < 0 || index >= questionCount) {
+  if (
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= questionCount ||
+    String(index) !== key
+  ) {
     return undefined;
   }
   return index;
