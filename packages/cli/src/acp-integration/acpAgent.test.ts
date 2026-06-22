@@ -5302,41 +5302,40 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
     return { agent, agentPromise };
   }
 
-  it.each(['abc', 'Infinity', '-Infinity'])(
-    'rejects invalid cursor %s before listing sessions',
-    async (cursor) => {
-      const { agent, agentPromise } = await bootAgent();
+  it('rejects invalid cursors before listing sessions', async () => {
+    const { agent, agentPromise } = await bootAgent();
 
-      try {
+    try {
+      for (const cursor of ['abc', 'Infinity', '-Infinity']) {
         await expect(
           agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
         ).rejects.toThrow(
           `Invalid cursor: "${cursor}" is not a valid numeric cursor`,
         );
-        expect(SessionService).not.toHaveBeenCalled();
-      } finally {
-        mockConnectionState.resolve();
-        await agentPromise;
       }
-    },
-  );
+      expect(SessionService).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
-  it.each([undefined, null, ''])(
-    'treats %s cursor as absent',
-    async (cursor) => {
-      const listSessions = vi.fn().mockResolvedValue({
-        items: [],
-        nextCursor: undefined,
-      });
-      vi.mocked(SessionService).mockImplementation(
-        () =>
-          ({
-            listSessions,
-          }) as unknown as InstanceType<typeof SessionService>,
-      );
-      const { agent, agentPromise } = await bootAgent();
+  it('treats absent cursor values as no cursor', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
 
-      try {
+    try {
+      for (const cursor of [undefined, null, '']) {
+        listSessions.mockClear();
         await expect(
           agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
         ).resolves.toEqual({
@@ -5347,12 +5346,95 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
           cursor: undefined,
           size: undefined,
         });
-      } finally {
-        mockConnectionState.resolve();
-        await agentPromise;
       }
-    },
-  );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('ignores invalid _meta.size values', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      for (const size of [
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        Number.NaN,
+        0.5,
+        Number.MAX_SAFE_INTEGER + 1,
+        '2',
+      ]) {
+        listSessions.mockClear();
+        await expect(
+          agent.unstable_listSessions({
+            cwd: '/tmp/project',
+            _meta: { size },
+          }),
+        ).resolves.toEqual({
+          sessions: [],
+          nextCursor: undefined,
+        });
+        expect(listSessions).toHaveBeenCalledWith({
+          cursor: undefined,
+          size: undefined,
+        });
+      }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('clamps _meta.size to the supported page range', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      for (const { input, expected } of [
+        { input: 0, expected: 1 },
+        { input: -5, expected: 1 },
+        { input: 200, expected: 100 },
+      ]) {
+        listSessions.mockClear();
+        await expect(
+          agent.unstable_listSessions({
+            cwd: '/tmp/project',
+            _meta: { size: input },
+          }),
+        ).resolves.toEqual({
+          sessions: [],
+          nextCursor: undefined,
+        });
+        expect(listSessions).toHaveBeenCalledWith({
+          cursor: undefined,
+          size: expected,
+        });
+      }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('passes a finite cursor through to SessionService', async () => {
     const listSessions = vi.fn().mockResolvedValue({

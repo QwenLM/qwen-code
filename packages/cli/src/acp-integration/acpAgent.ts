@@ -2506,6 +2506,16 @@ function createWorkspaceMcpBudget(
   });
 }
 
+const MAX_ACP_SESSION_PAGE_SIZE = 100;
+
+function normalizeAcpSessionListSize(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    return undefined;
+  }
+  return Math.min(Math.max(value, 1), MAX_ACP_SESSION_PAGE_SIZE);
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
@@ -2881,11 +2891,7 @@ class QwenAgent implements Agent {
     // so the SDK's zod validator strips any top-level `size` the client sends
     // before it reaches this handler. Carry page size through `_meta.size`
     // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
-    const metaSize = params._meta?.['size'];
-    const size =
-      typeof metaSize === 'number' && metaSize > 0
-        ? Math.floor(metaSize)
-        : undefined;
+    const size = normalizeAcpSessionListSize(params._meta?.['size']);
 
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
