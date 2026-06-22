@@ -36,6 +36,7 @@ import {
   WorkflowBudgetImpl,
   MAX_TOKENS_PER_WORKFLOW_ENV,
 } from '../../agents/runtime/workflow-budget.js';
+import { resolveSavedWorkflowScript } from '../../agents/runtime/workflow-saved.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { randomBytes } from 'node:crypto';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
@@ -229,6 +230,10 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         runId,
         emitter,
         budget,
+        // P-nested: resolve `workflow('<name>')` / `workflow({scriptPath})`
+        // against the saved-workflow scripts in `.qwen/workflows/`.
+        resolveSavedWorkflow: (ref) =>
+          resolveSavedWorkflowScript(ref, this.config),
       });
 
       // P4b: snapshot meta + logs onto the registry record so the dialog

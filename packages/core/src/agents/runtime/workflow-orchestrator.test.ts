@@ -745,6 +745,148 @@ describe('WorkflowOrchestrator', () => {
     });
     expect(outcome.result).toBe('done');
   });
+
+  // ── P-nested: workflow() global ───────────────────────────────────────
+
+  it('P-nested: workflow(name) resolves via injected resolver and returns nested result', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `agent:${prompt}`,
+    );
+    const resolveSavedWorkflow = async (
+      ref: string | { scriptPath: string },
+    ) => {
+      expect(ref).toBe('child');
+      return { script: `return 'nested-' + (await agent('inner'));`, name: 'child' };
+    };
+    const outcome = await orchestrator.run({
+      script: `const r = await workflow('child'); return 'parent:' + r;`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toBe('parent:nested-agent:inner');
+  });
+
+  it('P-nested: nested args are passed to the child script', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const resolveSavedWorkflow = async () => ({
+      script: `return args.x * 2;`,
+    });
+    const outcome = await orchestrator.run({
+      script: `return await workflow('child', { x: 21 });`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toBe(42);
+  });
+
+  it('P-nested: nested agents share the parent agent-count cap', async () => {
+    // Cap is read from env; set a tiny cap so parent(1) + nested(2) trips it.
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+    try {
+      let dispatchCalls = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatchCalls += 1;
+        return 'ok';
+      });
+      const resolveSavedWorkflow = async () => ({
+        // nested fires 2 agents; with parent's 1 already spent and cap=2,
+        // the 2nd nested agent (3rd overall) must throw the cap error.
+        script: `await agent('n1'); await agent('n2'); return 'done';`,
+      });
+      let caught: unknown;
+      try {
+        await orchestrator.run({
+          script: `await agent('p1'); return await workflow('child');`,
+          args: undefined,
+          resolveSavedWorkflow,
+        });
+      } catch (e) {
+        caught = e;
+      }
+      // parent p1 (1) + nested n1 (2) pass; nested n2 (3) trips the cap.
+      expect(dispatchCalls).toBe(2);
+      expect(String(caught)).toMatch(/exceeded the maximum of 2 agent/);
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
+
+  it('P-nested: nested agents share the parent token budget', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      budget.recordSpent(60); // each agent burns 60 → 2 agents = 120 > 100
+      return 'ok';
+    });
+    const resolveSavedWorkflow = async () => ({
+      script: `await agent('n1'); await agent('n2'); return 'done';`,
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('p1'); return await workflow('child');`,
+        args: undefined,
+        budget,
+        resolveSavedWorkflow,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // parent p1 spends 60; nested n1 spends 60 (total 120); nested n2 gated.
+    expect(String(caught)).toMatch(/exceeded the token budget/);
+    expect(budget.spent()).toBe(120);
+  });
+
+  it('P-nested: single-level limit — a nested workflow() call throws', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const resolveSavedWorkflow = async () => ({
+      // The nested script tries to nest again — must throw.
+      script: `return await workflow('grandchild');`,
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `return await workflow('child');`,
+        args: undefined,
+        resolveSavedWorkflow,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).toMatch(/workflow\(\) is unavailable here/);
+    expect(String(caught)).toMatch(/single level/);
+  });
+
+  it('P-nested: workflow() throws when no resolver is wired', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `return await workflow('child');`,
+        args: undefined,
+        // resolveSavedWorkflow omitted
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).toMatch(/workflow\(\) is unavailable here/);
+  });
+
+  it('P-nested: resolver rejection (workflow not found) surfaces to the parent script', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const resolveSavedWorkflow = async () => {
+      throw new Error(`workflow('child'): no workflow with that name.`);
+    };
+    const outcome = await orchestrator.run({
+      script: `try { await workflow('child'); return 'no-throw'; }
+               catch (e) { return 'caught:' + e.message; }`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toMatch(/caught:.*no workflow with that name/);
+  });
 });
 
 describe('createProductionDispatch', () => {

@@ -240,6 +240,22 @@ export interface WorkflowRunRequest {
    * `budget.recordSpent(N)` directly.
    */
   budget?: WorkflowBudget;
+  /**
+   * P-nested: resolver for the `workflow(nameOrRef, args)` global. When
+   * provided, the top-level sandbox exposes `workflow`, which resolves a
+   * saved workflow (by name from `.qwen/workflows/<name>.js`, or by
+   * `{scriptPath}`) and runs it as a nested orchestration that shares THIS
+   * run's agent-count cap, concurrency window, token budget, and emitter
+   * (so nested phases/logs and token spend roll into the same registry
+   * entry). Nesting is limited to a single level: the nested sandbox is
+   * created without a `workflow` impl, so a second-level `workflow()` call
+   * throws. When omitted, `workflow()` throws "unavailable". The production
+   * caller (`WorkflowTool`) wires `resolveSavedWorkflowScript(ref, config)`;
+   * tests inject a mock resolver.
+   */
+  resolveSavedWorkflow?: (
+    nameOrRef: string | { scriptPath: string },
+  ) => Promise<{ script: string; scriptPath?: string; name?: string }>;
 }
 
 export interface WorkflowRunOutcome {
@@ -1339,11 +1355,45 @@ export class WorkflowOrchestrator {
     const parallelImpl = makeParallelImpl(signal);
     const pipelineImpl = makePipelineImpl(signal);
 
+    // P-nested: build the host-side `workflow(nameOrRef, args)` impl. Only
+    // wired at the top level (when a resolver is provided). The nested
+    // sandbox shares THIS run's countedDispatch (so agentCount cap + budget
+    // gate are global across parent + nested), the same concurrency window
+    // (parallelImpl / pipelineImpl close over the shared `signal`/limiter),
+    // the same budget, and the same emitter (nested phase()/log() and token
+    // spend roll into the same registry entry). Crucially the nested sandbox
+    // is created WITHOUT a `workflow` impl — that throws on a second-level
+    // `workflow()` call, enforcing the single-level nesting limit.
+    const resolveSavedWorkflow = req.resolveSavedWorkflow;
+    const workflowImpl = resolveSavedWorkflow
+      ? async (
+          nameOrRef: string | { scriptPath: string },
+          nestedArgs: unknown,
+        ): Promise<unknown> => {
+          const resolved = await resolveSavedWorkflow(nameOrRef);
+          const nestedSandbox = createWorkflowSandbox({
+            args: nestedArgs,
+            dispatch: countedDispatch,
+            parallel: parallelImpl,
+            pipeline: pipelineImpl,
+            abortOnTimeout: req.abortOnTimeout,
+            emitter,
+            budget,
+            // No `workflow` — single-level nesting limit.
+          });
+          // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
+          // rejection crosses back to the parent script's `await workflow()`
+          // so the parent can try/catch it like any other async failure.
+          return nestedSandbox.run(resolved.script);
+        }
+      : undefined;
+
     const sandbox = createWorkflowSandbox({
       args: req.args,
       dispatch: countedDispatch,
       parallel: parallelImpl,
       pipeline: pipelineImpl,
+      workflow: workflowImpl,
       abortOnTimeout: req.abortOnTimeout,
       emitter,
       budget,

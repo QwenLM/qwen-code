@@ -478,6 +478,20 @@ export interface SandboxOptions {
       (prev: unknown, item: unknown, idx: number) => Promise<unknown>
     >
   ) => Promise<unknown[]>;
+  /**
+   * Host-side `workflow(nameOrRef, args)` implementation. When provided, the
+   * sandbox exposes the `workflow` global that resolves a saved workflow
+   * (by name from `.qwen/workflows/<name>.js`, or by `{scriptPath}`) and runs
+   * it as a nested orchestration sharing this run's agent-count cap and token
+   * budget. When omitted the sandbox falls back to a throwing stub — this is
+   * also how single-level nesting is enforced: the orchestrator injects
+   * `workflow` only at the top level, so a nested workflow's sandbox has no
+   * `workflow` impl and a second-level `workflow()` call throws.
+   */
+  workflow?: (
+    nameOrRef: string | { scriptPath: string },
+    args: unknown,
+  ) => Promise<unknown>;
   budget?: WorkflowBudget;
   /**
    * T23 (PR #4732 R2): async wall-clock cap (ms) covering the entire script
@@ -699,9 +713,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     // init script without leaking the host function itself when not used.
     hasParallel: !!opts.parallel,
     hasPipeline: !!opts.pipeline,
+    hasWorkflow: !!opts.workflow,
     hasBudget: !!opts.budget,
     hostParallel: opts.parallel,
     hostPipeline: opts.pipeline,
+    hostWorkflow: opts.workflow,
     budgetTotal: opts.budget ? opts.budget.total : null,
     hostBudgetSpent: opts.budget ? opts.budget.spent.bind(opts.budget) : null,
     hostBudgetRemaining: opts.budget
@@ -995,15 +1011,64 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           });
         };
       }
-      // workflow() always throws in P1.
-      globalThis.workflow = function workflow() {
-        return new Promise(function (_, reject) {
-          reject(new Error(
-            'workflow() (nested workflow invocation) is not supported in P1. ' +
-            'Scheduled for a later phase.'
-          ));
+      // --- workflow (nested, single-level) ---
+      // Mirrors agent(): args cross vm→host verbatim (safe direction), the
+      // single result is revived back into the vm realm via JSON round-trip
+      // (same T1/T8/T14 escape defense as agent / parallel / pipeline). The
+      // host impl resolves a saved workflow and runs it sharing this run's
+      // agent-count cap + token budget. When __b.hasWorkflow is false, the
+      // sandbox is either bare (no resolver wired) OR is itself a nested
+      // workflow — in both cases workflow() must throw, which is how the
+      // single-level nesting limit is enforced (a nested sandbox is created
+      // without a workflow impl, so its workflow() lands in the else branch).
+      if (__b.hasWorkflow) {
+        const callWorkflow = vmAsync(function (nameOrRef, wfArgs) {
+          // Sanitize args through a JSON round-trip BEFORE crossing so the
+          // host only ever sees vm-realm plain objects (same defense as
+          // agent()'s safeOpts). nameOrRef may be a string or {scriptPath}.
+          var safeRef;
+          var safeArgs;
+          try {
+            safeRef = nameOrRef === undefined
+              ? undefined
+              : JSON.parse(JSON.stringify(nameOrRef));
+            safeArgs = wfArgs === undefined
+              ? undefined
+              : JSON.parse(JSON.stringify(wfArgs));
+          } catch (e) {
+            throw new Error(
+              'workflow() received a non-JSON-serializable argument: ' +
+              String(e && e.message != null ? e.message : e)
+            );
+          }
+          return __b.hostWorkflow(safeRef, safeArgs).then(function (value) {
+            if (value === null || typeof value !== 'object') {
+              return value;
+            }
+            try {
+              return JSON.parse(JSON.stringify(value));
+            } catch (e) {
+              __b.logRevivalFailure(0, String(e && e.message != null ? e.message : e));
+              return null;
+            }
+          });
         });
-      };
+        globalThis.workflow = function workflow(nameOrRef, wfArgs) {
+          return callWorkflow(nameOrRef, wfArgs);
+        };
+      } else {
+        globalThis.workflow = function workflow() {
+          return new Promise(function (_, reject) {
+            reject(new Error(
+              "workflow() is unavailable here. Either this sandbox was created " +
+              "without a saved-workflow resolver, or this script is already " +
+              "running as a nested workflow — workflow() nesting is limited to " +
+              "a single level (a workflow cannot call another workflow that " +
+              "itself calls workflow())."
+            ));
+          });
+        };
+      }
 
       // --- budget ---
       const safeBudget = Object.create(null);
