@@ -17,6 +17,8 @@ import type {
 } from './workflow-sandbox.js';
 import { WorkflowBudgetExceededError } from './workflow-budget.js';
 import { resolveStallMs, runStallResilient } from './workflow-stall.js';
+import { deriveAgentKey } from './workflow-journal.js';
+import type { WorkflowJournal, JournalReplay } from './workflow-journal.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
@@ -257,6 +259,20 @@ export interface WorkflowRunRequest {
   resolveSavedWorkflow?: (
     nameOrRef: string | { scriptPath: string },
   ) => Promise<{ script: string; scriptPath?: string; name?: string }>;
+  /**
+   * P6: append-only resume journal for THIS run. When provided, every live
+   * `agent()` dispatch appends a `started` then a `result` line keyed by the
+   * rolling prefix-hash. Always set by the production caller (`WorkflowTool`)
+   * so any run is resumable; omitted by tests that don't exercise resume.
+   */
+  journal?: WorkflowJournal;
+  /**
+   * P6: replay maps loaded from a prior run's journal. Present only when
+   * resuming (`Workflow({resumeFromRunId})`). Cached results are served for
+   * the longest unchanged prefix; the first cache miss flips the run to
+   * live for the remainder ("first miss invalidates the suffix").
+   */
+  resumeReplay?: JournalReplay;
 }
 
 export interface WorkflowRunOutcome {
@@ -1278,7 +1294,70 @@ export class WorkflowOrchestrator {
     let agentCount = 0;
     const emitter = req.emitter;
     const budget = req.budget;
+
+    // P6: resume journal state. `prefixHash` chains across sequential
+    // agent() calls; `hadMiss` enforces the "first miss invalidates the
+    // suffix" invariant (once any dispatch runs live, no later dispatch
+    // trusts the cache). `journalAgentId` numbers journal entries.
+    const journal = req.journal;
+    const replay = req.resumeReplay;
+    let prefixHash = '';
+    let hadMiss = false;
+    let journalAgentId = 0;
+
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
+      // P6: journal cache lookup — runs BEFORE the budget gate + agent
+      // counter so a cached result is free (no token spend, no agent-cap
+      // slot, no live dispatch). The key is computed SYNCHRONOUSLY here so
+      // the rolling prefix chains in deterministic call order even under
+      // parallel()/pipeline() fan-out (the thunks' synchronous prefixes run
+      // in array/microtask order).
+      let journalKey: string | undefined;
+      // Captured per-dispatch (NOT read from the shared counter later) so a
+      // concurrent dispatch can't clobber the id used in the result append.
+      let journalEntryId: string | undefined;
+      if (journal) {
+        journalKey = deriveAgentKey(prefixHash, prompt, opts);
+        prefixHash = journalKey;
+        if (!hadMiss && replay) {
+          const cached = replay.results.get(journalKey);
+          if (cached !== undefined) {
+            // Cache hit: surface dispatch + completion to the registry so
+            // the UI counters advance, then return the cached result. A
+            // prior `started`-without-`result` for this key means the agent
+            // was respawned in an earlier resume — log it for diagnostics.
+            const respawns = replay.started.get(journalKey);
+            if (respawns && respawns.length > 0) {
+              debugLogger.info(
+                `[Workflow] resume cache hit after ${respawns.length} prior ` +
+                  `respawn(s) for runId=${runId}.`,
+              );
+            }
+            const label = typeof opts.label === 'string' ? opts.label : undefined;
+            try {
+              emitter?.agentDispatched?.(label);
+            } catch (e) {
+              debugLogger.warn('emitter.agentDispatched threw:', e);
+            }
+            try {
+              emitter?.agentCompleted?.(label);
+            } catch (e) {
+              debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            return Promise.resolve(cached.result as WorkflowAgentResult);
+          }
+        }
+        // First miss → suffix goes live; append a `started` marker so an
+        // interrupted run leaves a trace for the next resume.
+        hadMiss = true;
+        journalEntryId = String((journalAgentId += 1));
+        journal
+          .append({ type: 'started', key: journalKey, agentId: journalEntryId })
+          .catch((e) =>
+            debugLogger.warn(`journal started-append failed: ${e}`),
+          );
+      }
+
       // P5 R3 (wenshao #7): budget gate runs BEFORE `agentCount += 1`
       // so budget-rejected dispatches don't consume agent-cap slots.
       // Previously the order was reversed: budget exhaustion incremented
@@ -1364,6 +1443,23 @@ export class WorkflowOrchestrator {
               emitter?.agentCompleted?.(label);
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            // P6: append the live result to the journal so a later resume
+            // serves it from cache. Only JSON-serializable results are
+            // resumable; a non-serializable result is skipped (the next
+            // resume re-runs that dispatch live). Fire-and-forget — a
+            // journal write failure must not fail the dispatch.
+            if (journal && journalKey !== undefined) {
+              journal
+                .append({
+                  type: 'result',
+                  key: journalKey,
+                  agentId: journalEntryId ?? '',
+                  result,
+                })
+                .catch((e) =>
+                  debugLogger.warn(`journal result-append failed: ${e}`),
+                );
             }
             // P5: re-snapshot the budget after successful completion so the
             // registry sees the cumulative spent. The dispatch's onTokens

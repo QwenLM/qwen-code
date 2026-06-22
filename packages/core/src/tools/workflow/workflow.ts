@@ -37,6 +37,8 @@ import {
   MAX_TOKENS_PER_WORKFLOW_ENV,
 } from '../../agents/runtime/workflow-budget.js';
 import { resolveSavedWorkflowScript } from '../../agents/runtime/workflow-saved.js';
+import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
+import type { JournalReplay } from '../../agents/runtime/workflow-journal.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { randomBytes } from 'node:crypto';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
@@ -46,6 +48,14 @@ export interface WorkflowParams {
   script: string;
   /** Optional structured value bound to the `args` global inside the script. */
   args?: unknown;
+  /**
+   * P6: resume a prior run by id. When set, the run reuses `<runId>` and
+   * loads `<projectDir>/workflows/<runId>/journal.jsonl`; `agent()` calls
+   * whose rolling prefix-hash matches a journaled result are served from
+   * cache (no re-dispatch) for the longest unchanged prefix. The first miss
+   * runs live and the run goes live for the remainder.
+   */
+  resumeFromRunId?: string;
 }
 
 export interface WorkflowToolOptions {
@@ -111,6 +121,16 @@ const WORKFLOW_PARAM_SCHEMA = {
       description:
         'Optional structured value bound to the `args` global. Pass actual JSON, not a stringified value.',
     },
+    resumeFromRunId: {
+      type: 'string',
+      description:
+        'Optional. Resume a prior workflow run by id (e.g. wf_abc123…). ' +
+        'Re-runs the SAME script; agent() calls whose rolling prefix-hash ' +
+        '(prompt + opts, chained in call order) matches a journaled result ' +
+        'are served from cache for the longest unchanged prefix, and the ' +
+        'first changed/missing call onward runs live. Pass the same script ' +
+        'and args as the original run for the cache to apply.',
+    },
   },
   required: ['script'],
 } as const;
@@ -168,7 +188,24 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     // P4b: pre-generate the runId so the registry record exists before
     // the first sandbox event fires. Without this, `agentDispatched` /
     // `phaseStarted` callbacks would have no entry to update.
-    const runId = `wf_${randomBytes(8).toString('hex')}`;
+    // P6: a resume reuses the prior run's id so it appends to the same
+    // journal; a fresh run gets a new id.
+    const runId =
+      this.params.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
+    // P6: per-run resume journal. Always created (any run is resumable);
+    // the replay maps are loaded only when resuming. Production storage
+    // path is `<projectDir>/workflows/<runId>/journal.jsonl`; the tool's
+    // test-injected dispatch path leaves `config.storage` undefined, so
+    // guard and skip journaling there.
+    let journal: WorkflowJournal | undefined;
+    let resumeReplay: JournalReplay | undefined;
+    const storage = this.config.storage;
+    if (storage) {
+      journal = new WorkflowJournal(storage.getWorkflowRunJournalPath(runId));
+      if (this.params.resumeFromRunId) {
+        resumeReplay = await journal.load();
+      }
+    }
     const registry = this.config.getWorkflowRunRegistry?.();
     const registryEntry = registry?.register({
       runId,
@@ -234,6 +271,9 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // against the saved-workflow scripts in `.qwen/workflows/`.
         resolveSavedWorkflow: (ref) =>
           resolveSavedWorkflowScript(ref, this.config),
+        // P6: resume journal (always wired) + replay maps (resume only).
+        journal,
+        resumeReplay,
       });
 
       // P4b: snapshot meta + logs onto the registry record so the dialog

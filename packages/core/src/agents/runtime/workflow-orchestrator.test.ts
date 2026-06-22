@@ -887,6 +887,181 @@ describe('WorkflowOrchestrator', () => {
     });
     expect(outcome.result).toMatch(/caught:.*no workflow with that name/);
   });
+
+  // ── P6: resume journal ────────────────────────────────────────────────
+
+  it('P6: a normal run journals a started+result per agent() call', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const journal = {
+      path: 'mem',
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+      load: () => Promise.resolve(buildReplay(entries)),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `r:${prompt}`,
+    );
+    await orchestrator.run({
+      script: `await agent('a'); await agent('b'); return 'done';`,
+      args: undefined,
+      journal,
+    });
+    // 2 agents → 2 started + 2 result.
+    expect(entries.filter((e) => e.type === 'started')).toHaveLength(2);
+    const results = entries.filter((e) => e.type === 'result');
+    expect(results).toHaveLength(2);
+    expect((results[0] as { result: unknown }).result).toBe('r:a');
+    expect((results[1] as { result: unknown }).result).toBe('r:b');
+  });
+
+  it('P6: resume serves the cached prefix without re-dispatching', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    // Run 1: record the journal.
+    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('b'); return 'done';`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    // Run 2 (resume): same script. The dispatch counter must stay 0 because
+    // both agents are cached.
+    let dispatchCalls = 0;
+    const orch2 = new WorkflowOrchestrator(async (prompt) => {
+      dispatchCalls += 1;
+      return `LIVE:${prompt}`;
+    });
+    const journal2 = {
+      append: () => Promise.resolve(),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const outcome = await orch2.run({
+      script: `const a = await agent('a'); const b = await agent('b'); return a + '|' + b;`,
+      args: undefined,
+      journal: journal2,
+      resumeReplay: buildReplay(entries),
+    });
+    expect(dispatchCalls).toBe(0); // fully cached
+    expect(outcome.result).toBe('r:a|r:b'); // cached values, not LIVE
+  });
+
+  it('P6: first miss runs live and the suffix goes live (first-miss invalidates suffix)', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    // Run 1 journaled agents a, b, c.
+    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('b'); await agent('c'); return 1;`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    // Run 2: change agent #2's prompt ('b' → 'B'). #1 ('a') is cached; #2
+    // ('B') misses → live; #3 ('c') must ALSO run live even though 'c' was
+    // journaled (first-miss invalidates suffix + the prefix-hash chain from
+    // #2's new prompt changes #3's key anyway).
+    const dispatched: string[] = [];
+    const orch2 = new WorkflowOrchestrator(async (prompt) => {
+      dispatched.push(prompt);
+      return `LIVE:${prompt}`;
+    });
+    const outcome = await orch2.run({
+      script: `const a = await agent('a');
+               const b = await agent('B');
+               const c = await agent('c');
+               return [a, b, c].join('|');`,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+    });
+    // 'a' cached; 'B' and 'c' live.
+    expect(dispatched).toEqual(['B', 'c']);
+    expect(outcome.result).toBe('r:a|LIVE:B|LIVE:c');
+  });
+
+  it('P6: cache hit advances the registry counters (agentDispatched + agentCompleted)', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async () => 'cached');
+    await orch1.run({
+      script: `await agent('a'); return 1;`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    const events: string[] = [];
+    const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+    await orch2.run({
+      script: `await agent('a'); return 1;`,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+      emitter: {
+        agentDispatched: () => events.push('dispatched'),
+        agentCompleted: () => events.push('completed'),
+      },
+    });
+    expect(events).toEqual(['dispatched', 'completed']);
+  });
+
+  it('P6: cached dispatches do NOT consume the agent-count cap', async () => {
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+    try {
+      const { buildReplay } = await import('./workflow-journal.js');
+      const entries: import('./workflow-journal.js').JournalEntry[] = [];
+      const journal1 = {
+        append: (e: import('./workflow-journal.js').JournalEntry) => {
+          entries.push(e);
+          return Promise.resolve();
+        },
+      } as unknown as import('./workflow-journal.js').WorkflowJournal;
+      // Run 1 with a larger cap to record 3 agents.
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '10';
+      const orch1 = new WorkflowOrchestrator(async (p) => `r:${p}`);
+      await orch1.run({
+        script: `await agent('a'); await agent('b'); await agent('c'); return 1;`,
+        args: undefined,
+        journal: journal1,
+      });
+      // Run 2 (resume) with cap=2: all 3 are cached, so the cap (which
+      // counts only LIVE dispatches) is never hit.
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+      const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+      const outcome = await orch2.run({
+        script: `await agent('a'); await agent('b'); await agent('c'); return 'ok';`,
+        args: undefined,
+        journal: { append: () => Promise.resolve() } as never,
+        resumeReplay: buildReplay(entries),
+      });
+      expect(outcome.result).toBe('ok'); // no cap error despite 3 > 2
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
 });
 
 describe('createProductionDispatch', () => {
