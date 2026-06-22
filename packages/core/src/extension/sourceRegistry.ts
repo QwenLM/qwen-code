@@ -125,10 +125,11 @@ function pluginInstalls(
  */
 export function parseExtensionSourceType(source: string): ExtensionSourceType {
   const trimmed = source.trim();
-  if (trimmed.startsWith('git@') || trimmed.startsWith('sso://')) {
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('git@') || lower.startsWith('sso://')) {
     return 'git';
   }
-  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
     return isGitHubHost(trimmed) ? 'github' : 'http';
   }
   if (isOwnerRepoShorthand(trimmed)) {

@@ -16,10 +16,12 @@ import type {
   JSONRPCMessage,
   Prompt,
   ReadResourceResult,
+  Resource,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
   GetPromptResultSchema,
   ListPromptsResultSchema,
+  ListResourcesResultSchema,
   ListRootsRequestSchema,
   ReadResourceResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -51,6 +53,7 @@ import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
 import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
@@ -211,6 +214,17 @@ export type DiscoveredMCPPrompt = Prompt & {
 };
 
 /**
+ * A resource advertised by an MCP server (`resources/list`), tagged with
+ * the originating server so the read path (`readMcpResource`) and the
+ * `/mcp` view can address it by `(serverName, uri)`. Unlike prompts,
+ * resources carry no bound `invoke` closure — they are read on demand by
+ * URI via `ToolRegistry.readMcpResource`.
+ */
+export type DiscoveredMCPResource = Resource & {
+  serverName: string;
+};
+
+/**
  * Enum representing the overall MCP discovery state
  */
 export enum MCPDiscoveryState {
@@ -352,12 +366,39 @@ export class McpClient {
     // (operators saw unexpected permission prompts) and include/
     // exclude filters were ignored. Now `discoverAndReturn` defaults
     // to applying filters; pool callers explicitly opt out.
-    const { tools, prompts } = await this.discoverAndReturn(cliConfig);
+    const { tools, prompts, resources } =
+      await this.discoverAndReturn(cliConfig);
     for (const tool of tools) {
       this.toolRegistry.registerTool(tool);
     }
     for (const prompt of prompts) {
       this.promptRegistry.registerPrompt(prompt);
+    }
+    // Resources are registered via the Config-owned `ResourceRegistry`
+    // rather than a constructor-injected field. `this.promptRegistry` is
+    // already `cliConfig.getPromptRegistry()` on this non-pool path, so
+    // this is the same single global registry — fetching it here avoids
+    // threading a 4th registry through all ~20 `new McpClient(...)` sites.
+    //
+    // Clear-then-register makes re-discovery (health-monitor reconnect,
+    // incremental settings-change discovery) idempotent: a resource the
+    // server dropped between discoveries must not linger in the registry.
+    // Mirrors `SessionMcpView.applyResources`' remove-then-register on the
+    // pool path.
+    //
+    // Guard on `resources.length > 0`: `listMcpResources` swallows ALL errors
+    // (including transient network failures / timeouts) and returns [], so an
+    // unconditional clear would silently purge a server's resources whenever a
+    // `resources/list` call transiently fails while tools/prompts succeed. We
+    // only replace the set when we actually got one back. (Trade-off: a server
+    // that legitimately drops to zero resources keeps the stale set until a
+    // non-empty discovery — far less harmful than wiping good resources.)
+    const resourceRegistry = cliConfig.getResourceRegistry();
+    if (resources.length > 0) {
+      resourceRegistry.removeResourcesByServer(this.serverName);
+      for (const resource of resources) {
+        resourceRegistry.registerResource(resource);
+      }
     }
   }
 
@@ -390,26 +431,39 @@ export class McpClient {
   ): Promise<{
     tools: DiscoveredMCPTool[];
     prompts: DiscoveredMCPPrompt[];
+    resources: DiscoveredMCPResource[];
   }> {
     if (this.status !== MCPServerStatus.CONNECTED) {
       throw new Error('Client is not connected.');
     }
 
     try {
-      const prompts = await listMcpPrompts(this.serverName, this.client);
-      const tools = await discoverTools(
-        this.serverName,
-        this.serverConfig,
-        this.client,
-        cliConfig,
-        { applyConfigFilters: opts?.applyConfigFilters ?? true },
-      );
+      // Prompts, resources, and tools are independent reads with no data
+      // dependency; run them concurrently (the SDK client multiplexes
+      // requests by JSON-RPC id) to save round-trips per server at startup.
+      // Each helper swallows its own errors and returns [], so Promise.all
+      // never rejects here.
+      const [prompts, resources, tools] = await Promise.all([
+        listMcpPrompts(this.serverName, this.client),
+        listMcpResources(this.serverName, this.client),
+        discoverTools(
+          this.serverName,
+          this.serverConfig,
+          this.client,
+          cliConfig,
+          { applyConfigFilters: opts?.applyConfigFilters ?? true },
+        ),
+      ]);
 
-      if (prompts.length === 0 && tools.length === 0) {
-        throw new Error('No prompts or tools found on the server.');
+      if (
+        prompts.length === 0 &&
+        tools.length === 0 &&
+        resources.length === 0
+      ) {
+        throw new Error('No prompts, tools, or resources found on the server.');
       }
 
-      return { tools, prompts };
+      return { tools, prompts, resources };
     } catch (error) {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
       throw error;
@@ -493,11 +547,14 @@ export class McpClient {
       throw new Error('Client is not connected.');
     }
 
-    // Only request resources if the server supports them.
-    if (this.client.getServerCapabilities()?.resources == null) {
-      throw new Error('MCP server does not support resources.');
-    }
-
+    // No `getServerCapabilities()?.resources` precheck, to match the lenient
+    // `listMcpResources` discovery path: a server that answers `resources/list`
+    // but under-declares the `resources` capability would otherwise have its
+    // resources discovered, listed in `/mcp`, and offered in `@server:`
+    // completion, yet fail on read with a misleading "does not support
+    // resources" error. The underlying `request` is the raw `Protocol.request`
+    // (no capability assertion); a server that genuinely lacks resources
+    // answers `-32601`, which surfaces naturally to the caller.
     return this.client.request(
       { method: 'resources/read', params: { uri } },
       ReadResourceResultSchema,
@@ -808,11 +865,16 @@ export async function connectAndDiscover(
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
 
-    // Attempt to discover both prompts and tools
+    // Attempt to discover prompts, resources, and tools
     const prompts = await discoverPrompts(
       mcpServerName,
       mcpClient,
       promptRegistry,
+    );
+    const resources = await discoverResources(
+      mcpServerName,
+      mcpClient,
+      cliConfig.getResourceRegistry(),
     );
     const tools = await discoverTools(
       mcpServerName,
@@ -821,9 +883,9 @@ export async function connectAndDiscover(
       cliConfig,
     );
 
-    // If we have neither prompts nor tools, it's a failed discovery
-    if (prompts.length === 0 && tools.length === 0) {
-      throw new Error('No prompts or tools found on the server.');
+    // If we found no prompts, resources, or tools, it's a failed discovery
+    if (prompts.length === 0 && resources.length === 0 && tools.length === 0) {
+      throw new Error('No prompts, tools, or resources found on the server.');
     }
 
     // If we found anything, the server is connected
@@ -948,10 +1010,7 @@ export async function discoverTools(
     }
     return discoveredTools;
   } catch (error) {
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error discovering tools from ${mcpServerName}: ${getErrorMessage(
           error,
@@ -963,23 +1022,45 @@ export async function discoverTools(
 }
 
 /**
+ * True when an MCP request failed because the method is not implemented.
+ * JSON-RPC guarantees the numeric code (`-32601`), so that is the primary,
+ * precise check. The message fallback (for transports that drop the code)
+ * keeps the original case-sensitive exact substring `'Method not found'` —
+ * deliberately NOT a broad `/method not found/i`, which would also swallow
+ * unrelated errors like "Error in method not found handler: ...".
+ */
+function isMethodNotFound(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === -32601) return true;
+  return error instanceof Error && error.message.includes('Method not found');
+}
+
+/**
  * Pure prompt listing. Asks the MCP server for its prompts and returns
  * enriched `DiscoveredMCPPrompt[]` (with `serverName` + bound `invoke`)
  * WITHOUT registering them anywhere. pool uses this so a single
  * shared transport can produce the snapshot once and let each session's
  * `SessionMcpView` register into its own registry.
  *
- * Returns `[]` on protocol errors or when the server lacks `prompts`
- * capability — matches `discoverPrompts` swallow-and-continue behavior.
+ * Returns `[]` on protocol errors or when the server has no prompts —
+ * matches `discoverPrompts` swallow-and-continue behavior.
+ *
+ * We deliberately do NOT gate on `getServerCapabilities()?.prompts`. A
+ * non-trivial number of real MCP servers implement `prompts/list` but
+ * under-declare (or omit) the `prompts` capability in their `initialize`
+ * response; gating on the declared capability made those servers' prompts
+ * silently invisible in qwen-code (no `/`-menu entry) while lenient
+ * clients still surfaced them. The underlying `mcpClient.request` is the
+ * raw `Protocol.request` (the SDK only asserts capabilities for its typed
+ * `listPrompts()` helper, which we don't use), so attempting the call is
+ * safe: a server that truly lacks prompts answers `-32601 Method not
+ * found`, which the catch below swallows silently.
  */
 export async function listMcpPrompts(
   mcpServerName: string,
   mcpClient: Client,
 ): Promise<DiscoveredMCPPrompt[]> {
   try {
-    // Only request prompts if the server supports them.
-    if (mcpClient.getServerCapabilities()?.prompts == null) return [];
-
     const response = await mcpClient.request(
       { method: 'prompts/list', params: {} },
       ListPromptsResultSchema,
@@ -994,10 +1075,7 @@ export async function listMcpPrompts(
   } catch (error) {
     // It's okay if this fails, not all servers will have prompts.
     // Don't log an error if the method is not found, which is a common case.
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error discovering prompts from ${mcpServerName}: ${getErrorMessage(
           error,
@@ -1062,10 +1140,7 @@ export async function invokeMcpPrompt(
 
     return response;
   } catch (error) {
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error invoking prompt '${promptName}' from ${mcpServerName} ${promptParams}: ${getErrorMessage(
           error,
@@ -1074,6 +1149,72 @@ export async function invokeMcpPrompt(
     }
     throw error;
   }
+}
+
+/**
+ * Lists resources advertised by an MCP server (`resources/list`) WITHOUT
+ * registering them anywhere — the pool uses this so a single shared
+ * transport can produce the snapshot once and let each session register
+ * into its own registry. Mirrors `listMcpPrompts`.
+ *
+ * As with prompts, we do NOT gate on `getServerCapabilities()?.resources`:
+ * some servers expose resources but under-declare the capability, and the
+ * raw `mcpClient.request` does not assert capabilities. A server with no
+ * resources answers `-32601 Method not found`, swallowed below.
+ *
+ * Note: cursor pagination is not followed (matching `listMcpPrompts`);
+ * only the first page of resources is returned. Servers that paginate
+ * their resource list would have later pages omitted — acceptable parity
+ * with the prompt path and rare in practice.
+ */
+export async function listMcpResources(
+  mcpServerName: string,
+  mcpClient: Client,
+): Promise<DiscoveredMCPResource[]> {
+  try {
+    const response = await mcpClient.request(
+      { method: 'resources/list', params: {} },
+      ListResourcesResultSchema,
+    );
+
+    return response.resources.map((resource) => ({
+      ...resource,
+      serverName: mcpServerName,
+    }));
+  } catch (error) {
+    // It's okay if this fails; not all servers expose resources. Don't log
+    // when the method is simply absent (the common case for tool-only
+    // servers).
+    if (!isMethodNotFound(error)) {
+      debugLogger.error(
+        `Error discovering resources from ${mcpServerName}: ${getErrorMessage(
+          error,
+        )}`,
+      );
+    }
+    return [];
+  }
+}
+
+/**
+ * Discovers resources AND registers them into the supplied
+ * `ResourceRegistry`. Thin wrapper over `listMcpResources`, mirroring
+ * `discoverPrompts`.
+ *
+ * @param mcpServerName The name of the MCP server.
+ * @param mcpClient The active MCP client instance.
+ * @param resourceRegistry The registry to register discovered resources into.
+ */
+export async function discoverResources(
+  mcpServerName: string,
+  mcpClient: Client,
+  resourceRegistry: ResourceRegistry,
+): Promise<DiscoveredMCPResource[]> {
+  const resources = await listMcpResources(mcpServerName, mcpClient);
+  for (const resource of resources) {
+    resourceRegistry.registerResource(resource);
+  }
+  return resources;
 }
 
 /**

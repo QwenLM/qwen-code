@@ -68,6 +68,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     const mcpServers = config.getMcpServers() || {};
     const toolRegistry = config.getToolRegistry();
     const promptRegistry = config.getPromptRegistry();
+    const resourceRegistry = config.getResourceRegistry();
 
     const serverInfos: MCPServerDisplayInfo[] = [];
 
@@ -89,6 +90,10 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       const serverPrompts = allPrompts.filter(
         (p) => 'serverName' in p && p.serverName === name,
       );
+
+      // Get resources for this server
+      const serverResources =
+        resourceRegistry?.getResourcesByServer(name) || [];
 
       // Determine source type
       let source: MCPServerDisplayInfo['source'] = 'user';
@@ -135,6 +140,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         toolCount: serverTools.length,
         invalidToolCount,
         promptCount: serverPrompts.length,
+        resourceCount: serverResources.length,
         isDisabled,
         hasOAuthTokens,
         requiresAuth,
