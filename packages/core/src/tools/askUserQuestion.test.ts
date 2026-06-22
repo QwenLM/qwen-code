@@ -297,6 +297,70 @@ describe('AskUserQuestionTool', () => {
         'has provided the following answers:',
       );
     });
+
+    it('should ignore answers with malformed question indexes', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: {
+          '0junk': 'React',
+        },
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('Framework**: React');
+      expect(result.llmContent).toContain('No valid answers were provided.');
+    });
+
+    it('should ignore answers with out-of-range question indexes', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: {
+          '1': 'TypeScript',
+        },
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('Question 2**: TypeScript');
+      expect(result.llmContent).toContain('No valid answers were provided.');
+    });
   });
 
   describe('applyPlanGateMetadata', () => {

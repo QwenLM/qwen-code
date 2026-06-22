@@ -25,6 +25,18 @@ import { InputFormat } from '../output/types.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
 
+function parseAnswerQuestionIndex(
+  key: string,
+  questionCount: number,
+): number | undefined {
+  if (!/^\d+$/.test(key)) return undefined;
+  const index = Number(key);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= questionCount) {
+    return undefined;
+  }
+  return index;
+}
+
 export interface QuestionOption {
   label: string;
   description: string;
@@ -233,18 +245,26 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
       // Format the answers for LLM consumption
       const answersContent = Object.entries(this.userAnswers)
-        .map(([key, value]) => {
-          const questionIndex = parseInt(key, 10);
-          const question = this.params.questions[questionIndex];
-          return `**${question?.header || `Question ${questionIndex + 1}`}**: ${value}`;
+        .flatMap(([key, value]) => {
+          const questionIndex = parseAnswerQuestionIndex(
+            key,
+            this.params.questions.length,
+          );
+          if (questionIndex === undefined) return [];
+          const question = this.params.questions[questionIndex]!;
+          return `**${question.header || `Question ${questionIndex + 1}`}**: ${value}`;
         })
         .join('\n');
 
       // ── Plan gate metadata side effects ──────────────────────────
       this.applyPlanGateMetadata();
 
-      const llmMessage = `User has provided the following answers:\n\n${answersContent}`;
-      const displayMessage = `User has provided the following answers:\n\n${answersContent}`;
+      const messageBody =
+        answersContent.length > 0
+          ? answersContent
+          : 'No valid answers were provided.';
+      const llmMessage = `User has provided the following answers:\n\n${messageBody}`;
+      const displayMessage = `User has provided the following answers:\n\n${messageBody}`;
 
       return {
         llmContent: llmMessage,
