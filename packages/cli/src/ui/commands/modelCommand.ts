@@ -390,7 +390,7 @@ export const modelCommand: SlashCommand = {
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
         .getAvailableModelsForAuthType(targetAuthType)
-        .filter((m) => !m.fastOnly);
+        .filter((m) => !m.fastOnly && !m.voiceOnly);
       if (!availableModels.some((model) => model.id === parsed.modelId)) {
         return {
           type: 'message',

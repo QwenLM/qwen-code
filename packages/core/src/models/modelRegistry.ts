@@ -152,6 +152,7 @@ export class ModelRegistry {
       baseUrl: model.baseUrl,
       envKey: model.envKey,
       fastOnly: model.fastOnly,
+      voiceOnly: model.voiceOnly,
     }));
   }
 
@@ -254,6 +255,7 @@ export class ModelRegistry {
       generationConfig,
       capabilities: config.capabilities || {},
       fastOnly: config.fastOnly,
+      voiceOnly: config.voiceOnly,
     };
   }
 
