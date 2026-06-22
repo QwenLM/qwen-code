@@ -53,6 +53,13 @@ export interface ResolvedSavedWorkflow {
   script: string;
 }
 
+/** Result of a {@link saveWorkflowScript} attempt. */
+export type WorkflowSaveResult =
+  | { status: 'saved'; name: string; scope: SavedWorkflowSource; path: string }
+  | { status: 'exists'; name: string; scope: SavedWorkflowSource; path: string }
+  | { status: 'invalid-name'; error: string }
+  | { status: 'empty-script'; error: string };
+
 /**
  * Validate a saved-workflow name. Returns an error string when invalid,
  * `null` when OK. Shared by the save dialog (CLI) and any caller that
@@ -173,4 +180,51 @@ export async function resolveSavedWorkflowScript(
     `workflow('${name}'): no workflow with that name. Available: ` +
       `${available.length > 0 ? available.join(', ') : '(none)'}.`,
   );
+}
+
+/**
+ * Save a workflow script to `.qwen/workflows/<name>.js` (project) or
+ * `~/.qwen/workflows/<name>.js` (user). Powers the `/workflows` save dialog.
+ *
+ * Validates the name and refuses to clobber an existing file unless
+ * `overwrite` is set (the dialog uses the `exists` result to prompt for
+ * confirmation, then retries with `overwrite: true`). Returns a discriminated
+ * result rather than throwing on the expected user-facing failures
+ * (invalid name, empty script, name collision); only a genuine I/O failure
+ * (mkdir / writeFile) rejects.
+ */
+export async function saveWorkflowScript(
+  config: Config,
+  opts: {
+    name: string;
+    scope: SavedWorkflowSource;
+    script: string;
+    overwrite?: boolean;
+  },
+): Promise<WorkflowSaveResult> {
+  const { name, scope, script, overwrite = false } = opts;
+  const nameError = validateWorkflowName(name);
+  if (nameError) return { status: 'invalid-name', error: nameError };
+  if (!script || script.trim().length === 0) {
+    return {
+      status: 'empty-script',
+      error: 'This run has no script source to save.',
+    };
+  }
+  const dir =
+    scope === 'project'
+      ? config.storage.getProjectWorkflowsDir()
+      : Storage.getUserWorkflowsDir();
+  const filePath = path.join(dir, `${name}.js`);
+  if (!overwrite) {
+    try {
+      await fs.access(filePath);
+      return { status: 'exists', name, scope, path: filePath };
+    } catch {
+      // Doesn't exist — fall through and write.
+    }
+  }
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(filePath, script, 'utf8');
+  return { status: 'saved', name, scope, path: filePath };
 }

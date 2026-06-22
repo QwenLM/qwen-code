@@ -13,6 +13,7 @@ import { Storage } from '../../config/storage.js';
 import {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
+  saveWorkflowScript,
   validateWorkflowName,
   WORKFLOW_NAME_PATTERN,
 } from './workflow-saved.js';
@@ -209,6 +210,95 @@ describe('workflow-saved', () => {
     it('returns empty when no workflows dir exists', async () => {
       const list = await listSavedWorkflows(fakeConfig(projectDir));
       expect(list).toEqual([]);
+    });
+  });
+
+  describe('saveWorkflowScript', () => {
+    it('writes a new project-scope workflow and reports the path', async () => {
+      const config = fakeConfig(projectDir);
+      const result = await saveWorkflowScript(config, {
+        name: 'my-flow',
+        scope: 'project',
+        script: 'return 42;',
+      });
+      expect(result.status).toBe('saved');
+      if (result.status !== 'saved') throw new Error('expected saved');
+      const written = await fs.readFile(result.path, 'utf8');
+      expect(written).toBe('return 42;');
+      // Round-trips through discovery as a /<name> candidate.
+      const list = await listSavedWorkflows(config);
+      expect(list.map((e) => e.name)).toContain('my-flow');
+    });
+
+    it('writes a user-scope workflow under the sandboxed QWEN_HOME', async () => {
+      const config = fakeConfig(projectDir);
+      const result = await saveWorkflowScript(config, {
+        name: 'user-flow',
+        scope: 'user',
+        script: 'return 1;',
+      });
+      expect(result.status).toBe('saved');
+      if (result.status !== 'saved') throw new Error('expected saved');
+      expect(result.path).toContain(path.join(userHome, '.qwen'));
+      expect(result.scope).toBe('user');
+    });
+
+    it('refuses an invalid name without writing', async () => {
+      const config = fakeConfig(projectDir);
+      const result = await saveWorkflowScript(config, {
+        name: 'Bad Name',
+        scope: 'project',
+        script: 'return 1;',
+      });
+      expect(result.status).toBe('invalid-name');
+      expect(await listSavedWorkflows(config)).toEqual([]);
+    });
+
+    it('rejects an empty script', async () => {
+      const result = await saveWorkflowScript(fakeConfig(projectDir), {
+        name: 'empty',
+        scope: 'project',
+        script: '   ',
+      });
+      expect(result.status).toBe('empty-script');
+    });
+
+    it('reports `exists` for a collision and does not clobber by default', async () => {
+      const config = fakeConfig(projectDir);
+      await saveWorkflowScript(config, {
+        name: 'dup',
+        scope: 'project',
+        script: 'return "original";',
+      });
+      const result = await saveWorkflowScript(config, {
+        name: 'dup',
+        scope: 'project',
+        script: 'return "replacement";',
+      });
+      expect(result.status).toBe('exists');
+      if (result.status !== 'exists') throw new Error('expected exists');
+      // Original is untouched.
+      expect(await fs.readFile(result.path, 'utf8')).toBe('return "original";');
+    });
+
+    it('overwrites when overwrite:true', async () => {
+      const config = fakeConfig(projectDir);
+      await saveWorkflowScript(config, {
+        name: 'dup',
+        scope: 'project',
+        script: 'return "original";',
+      });
+      const result = await saveWorkflowScript(config, {
+        name: 'dup',
+        scope: 'project',
+        script: 'return "replacement";',
+        overwrite: true,
+      });
+      expect(result.status).toBe('saved');
+      if (result.status !== 'saved') throw new Error('expected saved');
+      expect(await fs.readFile(result.path, 'utf8')).toBe(
+        'return "replacement";',
+      );
     });
   });
 });

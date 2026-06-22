@@ -232,12 +232,14 @@ export * from './agents/workflow-snapshot.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
+  saveWorkflowScript,
   validateWorkflowName,
   getSavedWorkflowDirs,
   WORKFLOW_NAME_PATTERN,
   type SavedWorkflowEntry,
   type SavedWorkflowSource,
   type ResolvedSavedWorkflow,
+  type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
