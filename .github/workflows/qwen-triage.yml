@@ -389,14 +389,14 @@ jobs:
           set +e
           {
             printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
-            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV \
+            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH \
               npm ci --prefer-offline --no-audit --progress=false
             install_status=$?
             if [ "$install_status" -ne 0 ]; then
               printf '\n%s\n' "npm ci failed with exit code ${install_status}."
             else
               printf '\n%s\n' '$ npm run build'
-              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV \
+              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH \
                 npm run build
               build_status=$?
               if [ "$build_status" -ne 0 ]; then
@@ -784,22 +784,27 @@ jobs:
           # as markdown — which a
           # backtick fence (breakable by a long enough ``` run) cannot guarantee.
           # Order matters: escape & first so the < / > entities aren't re-escaped.
+          html_escape() {
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+          }
+
           emit_block() {
-            local summary="$1" file="$2" max="$3" content truncated=''
+            local summary="$1" file="$2" max="$3" content truncated='' summary_html
             [ -n "$file" ] && [ -f "$file" ] || return 0
+            summary_html="$(printf '%s' "$summary" | html_escape)"
             if [ "$(wc -c < "$file")" -gt "$max" ]; then
               truncated=$'\n\n...truncated -- full log in the run artifacts.'
             fi
             if ! content="$(
               set -o pipefail
-              head -c "$max" "$file" | tr -d '\000' | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+              head -c "$max" "$file" | tr -d '\000' | html_escape
             )"; then
               echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
               content='<em>Log could not be rendered; see run artifacts.</em>'
             elif [ -n "$truncated" ]; then
               content="${content}${truncated}"
             fi
-            printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
+            printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"
             printf '%s\n' "$content"
             printf '</code></pre>\n\n</details>\n\n'
           }
@@ -856,7 +861,10 @@ jobs:
                 ;;
               *)
                 VERDICT_LABEL='unknown'
-                DESCRIPTION='The tmux test produced an unrecognized verdict, so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details.'
+                UNKNOWN_VERDICT="$(
+                  printf '%s' "${VERDICT:-}" | tr -d '\000' | tr '\r\n' '  ' | head -c 200 | html_escape
+                )"
+                DESCRIPTION="The tmux test produced an unrecognized verdict (<code>${UNKNOWN_VERDICT}</code>), so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details."
                 ;;
             esac
             {

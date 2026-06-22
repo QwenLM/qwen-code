@@ -33,11 +33,18 @@ describe('qwen-triage tmux workflow', () => {
     expect(postStep).toContain("sed -e 's/&/\\&amp;/g'");
     expect(postStep).toContain("-e 's/</\\&lt;/g'");
     expect(postStep).toContain("-e 's/>/\\&gt;/g'");
+    expect(postStep).toContain('html_escape()');
     expect(postStep).toContain("tr -d '\\000'");
     expect(postStep).toContain('Log could not be rendered');
     expect(postStep).toContain('if ! content="$(');
     expect(postStep).toContain('set -o pipefail');
     expect(postStep).toContain('::warning::emit_block failed');
+    expect(postStep).toContain(
+      "summary_html=\"$(printf '%s' \"$summary\" | html_escape)\"",
+    );
+    expect(postStep).toContain(
+      "'<details>\\n<summary>%s</summary>\\n\\n<pre><code>\\n' \"$summary_html\"",
+    );
   });
 
   it('passes the selected OpenAI model into the app under tmux test', () => {
@@ -50,13 +57,12 @@ describe('qwen-triage tmux workflow', () => {
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
 
-    expect(postStep).toContain('if [ "${VERDICT:-}" = "infra-error" ]; then');
-    expect(postStep).toContain('elif [ "${VERDICT:-}" = "timeout" ]; then');
-    expect(postStep).toContain(
-      'elif [ "${VERDICT:-}" = "pass" ] || [ "${VERDICT:-}" = "fail" ]; then',
-    );
-    expect(postStep).toContain('VERDICT_LABEL="${VERDICT:-unknown}"');
+    expect(postStep).toContain('case "${VERDICT:-}" in');
     expect(postStep).toContain("VERDICT_LABEL='infra-error (crash/OOM)'");
+    expect(postStep).toContain("VERDICT_LABEL='timeout'");
+    expect(postStep).toContain("VERDICT_LABEL='pass'");
+    expect(postStep).toContain("VERDICT_LABEL='fail'");
+    expect(postStep).toContain("VERDICT_LABEL='unknown'");
     expect(postStep).toContain('The tmux test did not complete');
     expect(postStep).toContain(
       'The tmux test did not complete before the time limit',
@@ -67,8 +73,20 @@ describe('qwen-triage tmux workflow', () => {
       'Launched the changed app in a real tmux session and exercised the affected flow.',
     );
     expect(postStep).toContain('produced an unrecognized verdict');
+    expect(postStep).toContain('UNKNOWN_VERDICT="$(');
+    expect(postStep).toContain('tr \'\\r\\n\' \'  \'');
+    expect(postStep).toContain('<code>${UNKNOWN_VERDICT}</code>');
     expect(postStep).toContain('"$VERDICT_LABEL" "$RUN_URL"');
     expect(postStep).toContain('printf \'%s\\n\\n\' "$DESCRIPTION"');
+  });
+
+  it('removes GitHub command files from PR-controlled lifecycle scripts', () => {
+    const prepareStep = step('Install and build PR app');
+
+    expect(prepareStep).toContain('-u GITHUB_OUTPUT');
+    expect(prepareStep).toContain('-u GITHUB_STATE');
+    expect(prepareStep).toContain('-u GITHUB_ENV');
+    expect(prepareStep).toContain('-u GITHUB_PATH');
   });
 
   it('installs the heavy tmux test harness only for runnable PRs', () => {
