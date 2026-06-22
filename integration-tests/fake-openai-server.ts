@@ -95,6 +95,13 @@ export async function startFakeOpenAIServer(
         writeNonStreamed(res, getModel(body), response);
       }
     } catch {
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          res.destroy();
+        }
+        return;
+      }
+
       res.writeHead(500, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -259,7 +266,7 @@ function nowSeconds(): number {
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
-    server.closeAllConnections();
     server.close((error) => (error ? reject(error) : resolve()));
+    server.closeAllConnections();
   });
 }

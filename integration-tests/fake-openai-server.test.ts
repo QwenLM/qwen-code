@@ -115,4 +115,22 @@ describe('fake OpenAI server', () => {
       },
     });
   });
+
+  it('closes the response when streaming fails after headers are sent', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      content: 1n as unknown as string,
+    }));
+
+    await expect(
+      fetch(`${server.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'fake-model',
+          stream: true,
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      }),
+    ).rejects.toThrow();
+  });
 });
