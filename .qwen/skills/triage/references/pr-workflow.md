@@ -39,6 +39,32 @@ Never create duplicates.
 
 **Approval:** the `gh pr review --approve` command is a separate step that runs **after** Stage 3 comment is posted. Comment first, then approve only when genuinely confident.
 
+### Gate Philosophy
+
+The gate's job is to **say no**. A gate that approves everything is not a gate — it is a rubber stamp. The default posture is skepticism, not welcome. Every PR must earn its way in; the burden of proof is on the author, not the reviewer.
+
+This is especially critical for AI-bot-generated PRs. An AI bot can produce 20 plausible-sounding PRs in a day, each with perfect grammar and tests. Volume does not equal value. "Theoretically possible input" does not equal "real bug." The gate must distinguish **observed failures** from **theoretical hardening**, and treat them very differently.
+
+If the gate feels uncomfortable — if it feels like you are being "too strict" — that is the gate working correctly. Being a pushover is not kindness; it is negligence.
+
+### Stage 0: Batch Pattern Detection (run before Stage 1)
+
+Before evaluating any PR individually, check for batch patterns:
+
+```bash
+gh pr list --repo "$REPO" --author "<author>" --state all --limit 20 \
+  --json number,title,createdAt --jq '.[] | select(.createdAt > "7 days ago")'
+```
+
+If the same author has **3+ open PRs in 7 days** with similar patterns (e.g., multiple "add validation" / "reject X" / "require Y" PRs):
+
+- **Stop individual review.** Evaluate the batch as a group.
+- Ask: is this one consolidated change split into N PRs to inflate contribution metrics?
+- If the batch is mostly noise (validation hygiene, schema alignment, theoretical hardening): close the entire batch with a single explanation, not N individual reviews.
+- If a few PRs in the batch have genuine value: extract those, close the rest.
+
+**Why this matters:** reviewing each PR individually makes every single one look "fine" — small change, has tests, follows template. The problem only appears at batch scale. The gate must zoom out before zooming in.
+
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
 **⛔ Before anything else: create a worktree.** This is the #1 forgotten step.
@@ -59,7 +85,24 @@ PR body missing required headings from `.github/pull_request_template.md` (read 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
 ```
 
-**1b. Product direction:**
+**1b. Problem existence check (MANDATORY — this is where most noise PRs get caught):**
+
+Before asking "is the direction right?", ask **"does this problem actually exist?"**
+
+- **Observed bug**: Is there a linked issue, user report, error log, or reproduction case? Does the PR show a before/after demonstrating the failure? → Legitimate fix, proceed.
+- **Theoretical hardening**: "The model could theoretically send `maxConnections: 1.5`" or "this env var could contain a non-integer" — with no evidence it ever has? → **Default to close.** Ask: "What scenario triggers this? Show me the before/after." If the author cannot answer, the PR is solving a non-problem.
+- **No reproduction = no fix.** A `fix:` PR without a reproduction case is not a fix — it is a hypothesis. Hypotheses belong in issues, not PRs.
+
+The key distinction: **"direction is correct" ≠ "problem exists."** "Rejecting fractional values for integer parameters" sounds reasonable as a direction. But if no one has ever passed a fractional value, and the runtime coerces it correctly anyway, there is no bug to fix — only code hygiene to perform. Code hygiene does not warrant a standalone PR, let alone 20 in a single day.
+
+Red flag phrases in PR descriptions that signal "no real problem":
+
+- "The runtime validators already require/enforce..." → the problem is already handled
+- "This aligns the schema with..." → documentation hygiene, not a behavioral fix
+- "Fractional values like 1.5 were accepted" → who sent 1.5? Why? What broke?
+- "Values such as 0 or -1 were accepted and quietly coerced" → coercion is often correct behavior
+
+**1c. Product direction:**
 
 Ask the hard questions before reading a single line of code:
 
@@ -78,7 +121,7 @@ curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.
 
 **Escalate to maintainer** (never auto-reject): touches auth/sandbox/model selection/telemetry/release/public contract, or direction is genuinely unclear.
 
-**1c. Solution review** (never skip — judge from the PR description and a skim of the diff structure, before reading code in detail):
+**1d. Solution review** (never skip — judge from the PR description and a skim of the diff structure, before reading code in detail):
 
 - If we cut 80% of the scope, would the remaining 20% already solve the problem?
 - Could we achieve the same goal by modifying something that already exists, instead of adding something new?
@@ -98,11 +141,14 @@ Thanks for the PR!
 
 Template looks good ✓
 
-On direction: <state your honest assessment — aligned and why, or concerns and why>. CHANGELOG <reference if found, or "no direct reference but the area is relevant">.
+Problem: <state whether the problem is an observed bug with evidence, or theoretical hardening without reproduction. If no reproduction exists, say so plainly: "No before/after reproduction is provided. What scenario triggers this issue?">
 
-On approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
+Direction: <state your honest assessment — aligned and why, or concerns and why>. CHANGELOG <reference if found, or "no direct reference but the area is relevant">.
+
+Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
 <If passing:> Moving on to code review. 🔍
+<If problem does not exist:> Closing — no demonstrated failure. Feel free to reopen with a reproduction case.
 <If concerns:> Flagging these for discussion before diving deeper.
 
 <details>
@@ -112,11 +158,14 @@ On approach: <state your honest assessment — the scope feels right / feels lik
 
 模板完整 ✓
 
+问题：<说明问题是已观测到的 bug（有证据）还是理论性加固（无复现）。如果没有复现，直接说明："未提供 before/after 复现。什么场景会触发这个问题？">
+
 方向：<直接说判断——对齐的原因/担心的原因>。
 
 方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
 
 <如果通过：> 进入代码审查 🔍
+<如果问题不存在：> 关闭——未展示实际故障。欢迎带上复现案例重新打开。
 <如果有顾虑：> 先提出来讨论，再深入看代码。
 
 </details>
@@ -231,6 +280,9 @@ Step back and look at the whole picture — the motivation, the implementation, 
 - After seeing it run, do the results match what the PR promised?
 - If I had to maintain this in six months, would I curse the author or thank them?
 - Am I approving this because it's genuinely good, or because I ran out of reasons to say no?
+- **Did I verify the problem actually exists?** Or did I accept the PR's framing ("this value could be passed") without asking "has this ever happened?" If the PR has no before/after reproduction, I should not be this far in the pipeline.
+- **Is this part of a batch?** If the same author has 10+ similar PRs, am I evaluating each one on merit, or am I being worn down by volume? Step back: would I have accepted this as a single consolidated PR? If not, the batch is noise.
+- **Am I being a pushover?** If I feel "this is probably fine but I'm not sure it's needed" — that feeling IS the signal. The gate's job is to say no to things that are not clearly needed.
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 
