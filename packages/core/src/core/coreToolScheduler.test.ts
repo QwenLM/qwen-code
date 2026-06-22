@@ -54,6 +54,8 @@ import {
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
+import { InputFormat } from '../output/types.js';
+import { unescapePath } from '../utils/paths.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
@@ -5801,9 +5803,13 @@ describe('CoreToolScheduler telemetry spans', () => {
     execute?: () => Promise<ToolResult>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
+    isInteractive?: boolean;
+    inputFormat?: InputFormat;
+    shouldAvoidPermissionPrompts?: boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
+    onToolCallsUpdate: ReturnType<typeof vi.fn>;
   } {
     const mockTool = new MockTool({
       name: 'mockTool',
@@ -5853,17 +5859,25 @@ describe('CoreToolScheduler telemetry spans', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(options.messageBus),
       getDisableAllHooks: vi.fn().mockReturnValue(options.disableHooks ?? true),
+      // Confirmation-prompt capability stubs — consumed by
+      // canPromptForAskBounce when a PreToolUse hook returns 'ask'.
+      isInteractive: () => options.isInteractive ?? true,
+      getInputFormat: () => options.inputFormat ?? InputFormat.TEXT,
+      getExperimentalZedIntegration: () => false,
+      getShouldAvoidPermissionPrompts: () =>
+        options.shouldAvoidPermissionPrompts ?? false,
     } as unknown as Config;
 
     const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
     const scheduler = new CoreToolScheduler({
       config: mockConfig,
       onAllToolCallsComplete,
-      onToolCallsUpdate: vi.fn(),
+      onToolCallsUpdate,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
     });
-    return { scheduler, onAllToolCallsComplete };
+    return { scheduler, onAllToolCallsComplete, onToolCallsUpdate };
   }
 
   async function runSingleTool(
@@ -6495,6 +6509,266 @@ describe('CoreToolScheduler telemetry spans', () => {
     // No blocked span either — the deny path takes the permission_hook
     // branch BEFORE awaiting_approval is set.
     expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------
+  // PreToolUse hook permissionDecision:'ask' — bounce the tool from the
+  // EXECUTION phase back to awaiting_approval for a native TUI confirmation
+  // instead of denying it (the historical behavior). When we cannot prompt
+  // (non-interactive / background agent) it still falls back to deny.
+  // -------------------------------------------------------------------
+
+  function askMessageBus(reason = 'please confirm'): {
+    request: ReturnType<typeof vi.fn>;
+  } {
+    return {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: { decision: 'ask', reason },
+      }),
+    };
+  }
+
+  async function scheduleWithAsk(options: {
+    messageBus: { request: ReturnType<typeof vi.fn> };
+    execute?: () => Promise<ToolResult>;
+    isInteractive?: boolean;
+    inputFormat?: InputFormat;
+    shouldAvoidPermissionPrompts?: boolean;
+    args?: Record<string, unknown>;
+    abortController?: AbortController;
+  }): Promise<{
+    scheduler: CoreToolScheduler;
+    onAllToolCallsComplete: ReturnType<typeof vi.fn>;
+    onToolCallsUpdate: ReturnType<typeof vi.fn>;
+    abortController: AbortController;
+  }> {
+    toolSpanRecords.length = 0;
+    const built = buildScheduler({ disableHooks: false, ...options });
+    const abortController = options.abortController ?? new AbortController();
+    await built.scheduler.schedule(
+      [
+        {
+          callId: 'ask-call',
+          name: 'mockTool',
+          args: options.args ?? { input: 'x' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-ask',
+        },
+      ],
+      abortController.signal,
+    );
+    return { ...built, abortController };
+  }
+
+  // Count only PreToolUse fires — the same messageBus mock also serves
+  // PostToolUse/PostToolBatch, so a raw call count would be ambiguous.
+  function preToolUseCallCount(messageBus: {
+    request: ReturnType<typeof vi.fn>;
+  }): number {
+    return messageBus.request.mock.calls.filter(
+      (call) => (call[0] as { eventName?: string })?.eventName === 'PreToolUse',
+    ).length;
+  }
+
+  it('bounces a PreToolUse ask to awaiting_approval with an info confirmation', async () => {
+    const messageBus = askMessageBus('confirm deploy 38111');
+    const { onToolCallsUpdate } = await scheduleWithAsk({ messageBus });
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    expect(waiting.confirmationDetails.type).toBe('info');
+    // The hook re-evaluates on every call, so "always allow" is hidden.
+    expect(
+      (waiting.confirmationDetails as { hideAlwaysAllow?: boolean })
+        .hideAlwaysAllow,
+    ).toBe(true);
+    expect(
+      (waiting.confirmationDetails as { prompt: string }).prompt,
+    ).toContain('confirm deploy 38111');
+    // One open blocked_on_user span; the tool span stays open across the
+    // bounce (it is NOT finalized until the confirmation resolves).
+    const blocked = getBlockedSpans();
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].ended).toBe(false);
+    expect(getToolSpans()[0].ended).toBe(false);
+  });
+
+  it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = askMessageBus();
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus,
+        execute,
+      },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    // The re-execution skips the hook → PreToolUse fired exactly once.
+    expect(preToolUseCallCount(messageBus)).toBe(1);
+
+    // Tool span finalized exactly once; blocked span ended.
+    const toolSpans = getToolSpans();
+    expect(toolSpans).toHaveLength(1);
+    expect(toolSpans[0].ended).toBe(true);
+    const blocked = getBlockedSpans();
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].ended).toBe(true);
+  });
+
+  it('cancels the tool without executing when the user declines an ask', async () => {
+    const execute = vi.fn();
+    const messageBus = askMessageBus();
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus,
+        execute,
+      },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('denies a PreToolUse ask (no bounce) in non-interactive mode', async () => {
+    const execute = vi.fn();
+    const messageBus = askMessageBus();
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      messageBus,
+      execute,
+      isInteractive: false,
+      inputFormat: InputFormat.TEXT,
+    });
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('error');
+    expect(execute).not.toHaveBeenCalled();
+    // Never bounced → no blocked span.
+    expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('denies a PreToolUse ask for background agents', async () => {
+    const execute = vi.fn();
+    const messageBus = askMessageBus();
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      messageBus,
+      execute,
+      shouldAvoidPermissionPrompts: true,
+    });
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('error');
+    expect(execute).not.toHaveBeenCalled();
+    expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('cancels a pending ask (no hang) when the signal aborts', async () => {
+    const execute = vi.fn();
+    const messageBus = askMessageBus();
+    const abortController = new AbortController();
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus,
+        execute,
+        abortController,
+      },
+    );
+
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    abortController.abort();
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not double-unescape path args across an ask bounce', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = askMessageBus();
+    // Two backslashes before the space: unescaping once → `a\ b`, twice →
+    // `a b`. The re-execution must skip the unescape prelude so the path is
+    // unescaped exactly once.
+    const rawPath = 'a\\\\ b';
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus,
+        execute,
+        args: { file_path: rawPath },
+      },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    expect(
+      (completed[0].request.args as Record<string, unknown>)['file_path'],
+    ).toBe(unescapePath(rawPath));
   });
 
   it('blocked_on_user span ends with cancel when the user rejects (#3731 Phase 2)', async () => {

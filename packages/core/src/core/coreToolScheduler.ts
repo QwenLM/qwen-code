@@ -1093,6 +1093,14 @@ export class CoreToolScheduler {
   // callIdToBatch is drained earlier when spans end, so it cannot be used
   // to recover the PostToolBatch AbortSignal reliably.
   private callIdToPostToolBatchSignal = new Map<string, AbortSignal>();
+  // Tool calls that a PreToolUse 'ask' hook bounced from the EXECUTION
+  // phase back to awaiting_approval. Tracked so that, once the user
+  // approves, the re-execution skips BOTH the PreToolUse hook (otherwise
+  // the hook would return 'ask' again → infinite confirmation loop) and
+  // the path-unescape prelude (unescapePath is not idempotent — running
+  // it twice corrupts paths containing escaped metacharacters). Cleared
+  // on terminal state via finalizeToolSpan.
+  private readonly bouncedAwaitingApproval = new Set<string>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -1374,6 +1382,11 @@ export class CoreToolScheduler {
    * `setToolSpan{Failure,Cancelled,Ok}` before this call (#4321 review).
    */
   private finalizeToolSpan(callId: string): void {
+    // Terminal-state cleanup: drop any PreToolUse 'ask' bounce marker so it
+    // never leaks past the tool call's lifetime. Done unconditionally
+    // (before the span guard) so a bounced call is cleared even on the
+    // defensive no-span path.
+    this.bouncedAwaitingApproval.delete(callId);
     const span = this.toolSpans.get(callId);
     if (!span) return;
     this.toolSpans.delete(callId);
@@ -1462,6 +1475,18 @@ export class CoreToolScheduler {
         // remaining entries — the timer callback would otherwise surface
         // an unhandled exception (#4321 review-3 wenshao Suggestion).
         try {
+          // Safety-net for a tool still non-terminal at abort time — e.g.
+          // one bounced to awaiting_approval by a PreToolUse 'ask' the user
+          // never answered. The spans are cancelled below, but without a
+          // terminal tool-call status checkAndNotifyCompletion never
+          // completes the batch and the turn hangs. setStatusInternal
+          // no-ops on already-terminal/cleared calls, so this only affects
+          // a genuine walk-away-then-abort.
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            'Tool call cancelled by user.',
+          );
           if (this.blockedSpans.has(callId)) {
             this.finalizeBlockedSpan(callId, 'aborted', 'system');
           }
@@ -2962,10 +2987,111 @@ export class CoreToolScheduler {
       );
       throw error;
     } finally {
-      // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED) via
-      // setToolSpan*; finalize without metadata to preserve that.
-      this.finalizeToolSpan(callId);
+      // A PreToolUse 'ask' hook can bounce this tool back to
+      // awaiting_approval (see bounceToAwaitingApprovalForAsk). The tool
+      // span must then stay open until handleConfirmationResponse resolves
+      // the confirmation — finalizing here would orphan it and the
+      // re-execution would open a second span. The re-execution consumes
+      // the marker before running, so the post-approval finally finalizes
+      // normally. Checking the marker (not a re-read of tool status) avoids
+      // a race where a STREAM_JSON client answers the confirmation
+      // synchronously and flips status to 'scheduled' before this runs.
+      if (!this.bouncedAwaitingApproval.has(callId)) {
+        // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED)
+        // via setToolSpan*; finalize without metadata to preserve that.
+        this.finalizeToolSpan(callId);
+      }
       this.memoryMonitor?.scheduleCheck();
+    }
+  }
+
+  /**
+   * Whether a PreToolUse 'ask' decision can be surfaced as an interactive
+   * TUI confirmation. Mirrors the confirmation-phase guards: a
+   * non-interactive CLI (unless STREAM_JSON, which can answer control
+   * requests) and background agents cannot prompt, so an 'ask' there must
+   * fall back to deny rather than hang forever in awaiting_approval.
+   */
+  private canPromptForAskBounce(): boolean {
+    const isNonInteractive =
+      !this.config.isInteractive() &&
+      !this.config.getExperimentalZedIntegration() &&
+      this.config.getInputFormat() !== InputFormat.STREAM_JSON;
+    if (isNonInteractive) {
+      return false;
+    }
+    if (this.config.getShouldAvoidPermissionPrompts?.()) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Bounce a tool from the EXECUTION phase back to awaiting_approval so the
+   * user can confirm a PreToolUse 'ask' decision in the TUI. Reuses the
+   * standard confirmation machinery: a synthetic 'info' confirmation whose
+   * onConfirm routes through handleConfirmationResponse (ProceedOnce →
+   * re-execute, Cancel → cancelled). `hideAlwaysAllow` is set because the
+   * hook re-evaluates on every call, so an "always allow" rule is
+   * meaningless. The callId is added to `bouncedAwaitingApproval` BEFORE
+   * the status change so executeSingleToolCall's finally keeps the tool
+   * span open across the bounce and the re-execution skips the hook +
+   * prelude (see `_executeToolCallBody`).
+   */
+  private bounceToAwaitingApprovalForAsk(
+    scheduledCall: ScheduledToolCall,
+    reason: string | undefined,
+    toolSpan: Span,
+    signal: AbortSignal,
+  ): void {
+    const { callId, name: toolName } = scheduledCall.request;
+    const canonicalName = canonicalToolName(toolName);
+
+    this.bouncedAwaitingApproval.add(callId);
+
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: `Hook requested confirmation to run ${toolName}`,
+      prompt:
+        reason ||
+        `A PreToolUse hook requested confirmation before running ${toolName}.`,
+      hideAlwaysAllow: true,
+      onConfirm: (outcome, payload) =>
+        this.handleConfirmationResponse(
+          callId,
+          // No real tool onConfirm — for this synthetic prompt all of the
+          // approve/deny handling lives in handleConfirmationResponse.
+          async () => {},
+          outcome,
+          signal,
+          payload,
+        ),
+    };
+
+    this.setStatusInternal(callId, 'awaiting_approval', confirmationDetails);
+
+    // blocked_on_user span as a child of the tool span — mirrors the
+    // confirmation-phase setup so walk-away aborts and finalize paths
+    // behave identically.
+    const blockedSpan = startToolBlockedOnUserSpan(toolSpan, {
+      tool_name: canonicalName,
+      call_id: callId,
+    });
+    this.blockedSpans.set(callId, blockedSpan);
+
+    // Surface the prompt the same way the confirmation phase does.
+    const messageBus = this.config.getMessageBus() as MessageBus | undefined;
+    if (!this.config.getDisableAllHooks() && messageBus) {
+      fireNotificationHook(
+        messageBus,
+        `Qwen Code needs your permission to use ${toolName}`,
+        NotificationType.PermissionPrompt,
+        'Permission needed',
+      ).catch((error) => {
+        debugLogger.warn(
+          `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     }
   }
 
@@ -2979,11 +3105,22 @@ export class CoreToolScheduler {
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
-    // Normalize shell-escaped path params so hooks operate on actual filesystem
-    // paths, matching the normalization done in tool validation.
-    for (const key of PATH_ARG_KEYS) {
-      if (typeof toolInput[key] === 'string') {
-        toolInput[key] = unescapePath(String(toolInput[key]).trim());
+    // Re-execution after the user approved a PreToolUse 'ask' bounce: the
+    // hook already ran and the user already confirmed. Consuming the marker
+    // here (a) lets executeSingleToolCall's finally finalize the span
+    // normally for this run, and (b) signals that we must skip BOTH the
+    // hook re-fire below (otherwise the hook returns 'ask' again → infinite
+    // confirmation loop) and the path-unescape prelude (unescapePath is not
+    // idempotent — running it twice corrupts paths with escaped metachars).
+    const isPostAskReexecution = this.bouncedAwaitingApproval.delete(callId);
+
+    if (!isPostAskReexecution) {
+      // Normalize shell-escaped path params so hooks operate on actual
+      // filesystem paths, matching the normalization done in tool validation.
+      for (const key of PATH_ARG_KEYS) {
+        if (typeof toolInput[key] === 'string') {
+          toolInput[key] = unescapePath(String(toolInput[key]).trim());
+        }
       }
     }
 
@@ -3006,8 +3143,9 @@ export class CoreToolScheduler {
     const messageBus = this.config.getMessageBus() as MessageBus | undefined;
     const hooksEnabled = !this.config.getDisableAllHooks();
 
-    // PreToolUse Hook
-    if (hooksEnabled && messageBus) {
+    // PreToolUse Hook — skipped on a post-'ask' re-execution (the hook
+    // already ran and the user already confirmed; re-firing would loop).
+    if (hooksEnabled && messageBus && !isPostAskReexecution) {
       // Convert ApprovalMode to permission_mode string for hooks
       const permissionMode = this.config.getApprovalMode();
       const preHookResult = await this.withHookSpan(
@@ -3044,7 +3182,23 @@ export class CoreToolScheduler {
               },
       );
       if (!preHookResult.shouldProceed) {
-        // Hook blocked the execution
+        // A PreToolUse hook returning permissionDecision:'ask' wants the
+        // user to confirm in the TUI before the tool runs. When we can
+        // prompt, bounce the tool into the existing awaiting_approval flow
+        // instead of denying it. 'denied'/'stop' (and 'ask' in a
+        // non-interactive/background context where we cannot prompt) keep
+        // the original deny-as-error behavior.
+        if (preHookResult.blockType === 'ask' && this.canPromptForAskBounce()) {
+          this.bounceToAwaitingApprovalForAsk(
+            scheduledCall,
+            preHookResult.blockReason,
+            span,
+            signal,
+          );
+          return;
+        }
+
+        // Hook blocked the execution.
         const blockMessage =
           preHookResult.blockReason || 'Tool execution blocked by hook';
         const errorResponse = createErrorResponse(
