@@ -331,22 +331,25 @@ describe('applyProviderInstallPlan', () => {
       delete process.env[envKey];
     }
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'model-b', name: 'model-b', baseUrl, envKey },
-      {
-        id: 'model-b',
-        name: 'model-b',
-        baseUrl: otherBaseUrl,
-        envKey: otherEnvKey,
-      },
-      { id: 'model-a', name: 'model-a', baseUrl, envKey },
-      {
-        id: 'shared-model',
-        name: 'shared-model',
-        baseUrl: otherBaseUrl,
-        envKey: otherEnvKey,
-      },
-    ]);
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', {
+      protocol: Protocol.OPENAI,
+      models: [
+        { id: 'model-b', name: 'model-b', baseUrl, envKey },
+        {
+          id: 'model-b',
+          name: 'model-b',
+          baseUrl: otherBaseUrl,
+          envKey: otherEnvKey,
+        },
+        { id: 'model-a', name: 'model-a', baseUrl, envKey },
+        {
+          id: 'shared-model',
+          name: 'shared-model',
+          baseUrl: otherBaseUrl,
+          envKey: otherEnvKey,
+        },
+      ],
+    });
     expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'model-b');
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', baseUrl);
     expect(syncAuthState).toHaveBeenCalledWith(

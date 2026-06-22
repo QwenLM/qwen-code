@@ -6,17 +6,17 @@
 
 import { useState, useCallback } from 'react';
 import {
-  AuthType,
+  Protocol,
   shouldShowStep,
   resolveBaseUrl,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
 } from '@qwen-code/qwen-code-core';
 import type {
+  AuthType,
   InputModalities,
   ProviderConfig,
   ProviderSetupInputs,
-  Protocol,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
@@ -60,7 +60,7 @@ export interface ProviderSetupState {
   totalSteps: number;
 
   // Protocol (for custom provider)
-  protocol: AuthType;
+  protocol: Protocol;
 
   // BaseUrl
   baseUrl: string;
@@ -104,7 +104,7 @@ export function useProviderSetupFlow(
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
   const [stepIndex, setStepIndex] = useState(0);
 
-  const [protocol, setProtocol] = useState<AuthType>(AuthType.USE_OPENAI);
+  const [protocol, setProtocol] = useState<Protocol>(Protocol.OPENAI);
   const [baseUrl, setBaseUrl] = useState('');
   const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
   const [baseUrlOptionIndex, setBaseUrlOptionIndex] = useState(0);
@@ -129,7 +129,7 @@ export function useProviderSetupFlow(
   const start = useCallback(
     (
       config: ProviderConfig,
-      initialProtocol?: AuthType,
+      initialProtocol?: Protocol,
       existingEnv?: Record<string, string>,
     ) => {
       setProvider(config);
@@ -154,7 +154,7 @@ export function useProviderSetupFlow(
       if (existingEnv) {
         const envKeyName =
           typeof config.envKey === 'function'
-            ? config.envKey(proto as Protocol, resolved)
+            ? config.envKey(proto, resolved)
             : config.envKey;
         prefillKey = existingEnv[envKeyName] ?? '';
       }
@@ -198,11 +198,12 @@ export function useProviderSetupFlow(
 
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
-      setProtocol(selectedProtocol);
+      const proto = selectedProtocol as Protocol;
+      setProtocol(proto);
       // Clear baseUrl so the user types fresh; show the protocol's default
       // endpoint as a placeholder (used if they submit blank).
       setBaseUrl('');
-      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
+      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(proto));
       setApiKey('');
       setApiKeyError(null);
       goNext();
@@ -252,7 +253,7 @@ export function useProviderSetupFlow(
   // Shared helper: assemble ProviderSetupInputs from current form state
   const buildCurrentInputs = useCallback(
     (overrides?: Partial<ProviderSetupInputs>): ProviderSetupInputs => ({
-      protocol: provider?.protocolOptions ? (protocol as Protocol) : undefined,
+      protocol: provider?.protocolOptions ? protocol : undefined,
       baseUrl: baseUrl.trim(),
       apiKey: apiKey.trim(),
       modelIds: normalizeModelIds(modelIds),
@@ -411,7 +412,7 @@ export function useProviderSetupFlow(
     if (!provider) return '';
     const envKey =
       typeof provider.envKey === 'function'
-        ? provider.envKey(protocol as Protocol, baseUrl.trim())
+        ? provider.envKey(protocol, baseUrl.trim())
         : provider.envKey;
     const normalizedIds = normalizeModelIds(modelIds);
     const masked = maskApiKey(apiKey);
