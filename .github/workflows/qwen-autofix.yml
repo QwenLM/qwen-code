@@ -193,7 +193,8 @@ jobs:
               --search "is:open is:issue label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url,comments \
               > "${WORKDIR}/scan.json"
-            filter_unattended_candidates
+            jq -c '.[0:10] | map(del(.comments))' \
+              "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
 
             if [[ "$(jq length "${WORKDIR}/candidates.json")" == "0" ]]; then
               echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."

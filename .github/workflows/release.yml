@@ -593,13 +593,17 @@ jobs:
               --state open \
               --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
               --limit 1 \
-              --json number,url,labels \
+              --json number,url,labels,author \
               --jq '.[0] // empty'
           )"
           if [[ -n "${existing_issue}" ]]; then
             issue_number="$(jq -r '.number' <<<"${existing_issue}")"
             issue_url="$(jq -r '.url' <<<"${existing_issue}")"
-            if jq -e \
+            issue_author="$(jq -r '.author.login // ""' <<<"${existing_issue}")"
+            if [[ "${issue_author}" != "github-actions[bot]" ]]; then
+              echo "::warning::Existing ${issue_url} was opened by ${issue_author:-unknown}; creating a workflow-owned issue instead."
+              existing_issue=''
+            elif jq -e \
               '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
               <<<"${existing_issue}" > /dev/null; then
               echo "Existing ${issue_url} has an autofix exclusion label; skipping dispatch."
@@ -608,7 +612,9 @@ jobs:
               gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
                 || echo "::warning::Failed to comment on existing issue #${issue_number}; proceeding with dispatch."
             fi
-          else
+          fi
+
+          if [[ -z "${existing_issue}" ]]; then
             issue_url="$(gh issue create --repo "${GH_REPO}" \
               --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
               --body-file "${body_file}" \
@@ -618,8 +624,10 @@ jobs:
           fi
 
           echo "Using ${issue_url}; dispatching autofix."
-          gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
+          if ! gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
             -f phase=issue \
             -f issue_number="${issue_number}" \
-            -f dry_run=false \
-            || echo "::warning::Autofix dispatch failed; scheduled autofix can still pick up issue #${issue_number}."
+            -f dry_run=false; then
+            echo "::warning::Autofix dispatch failed; scheduled autofix can still pick up issue #${issue_number}."
+            exit 1
+          fi
