@@ -6,7 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AcpHttpHandle } from './acpHttp/index.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,

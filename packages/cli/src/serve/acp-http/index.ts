@@ -799,7 +799,7 @@ function headerOf(req: Request, name: string): string | undefined {
  * True when the request's KERNEL-stamped peer address is loopback. Mirrors
  * the REST surface's `detectFromLoopback` (NOT derived from forgeable
  * headers like `X-Forwarded-For`). Replicated here rather than imported
- * from `server.ts` to avoid a server↔acpHttp import cycle.
+ * from `server.ts` to avoid a server↔acp-http import cycle.
  */
 function isLoopbackSocket(socket: Duplex): boolean {
   const addr = (socket as unknown as { remoteAddress?: string }).remoteAddress;

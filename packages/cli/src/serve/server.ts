@@ -65,7 +65,7 @@ import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
-import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import {
   buildDaemonStatusResponse,
   parseDaemonStatusDetail,

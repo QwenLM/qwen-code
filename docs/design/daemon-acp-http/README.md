@@ -25,7 +25,7 @@ standard ACP method (model switch, workspace introspection, heartbeat,
 multi-client permission policy, SSE backpressure tuning). Rationale in §5.
 
 A complete, locally-runnable reference implementation ships in this PR
-(`packages/cli/src/serve/acpHttp/`) plus a verification harness
+(`packages/cli/src/serve/acp-http/`) plus a verification harness
 (`scripts/acp-http-smoke.mjs`).
 
 ---
@@ -151,7 +151,7 @@ client  ────────────────────────
                                                                  qwen --acp child
 ```
 
-### 3.1 New module layout (`packages/cli/src/serve/acpHttp/`)
+### 3.1 New module layout (`packages/cli/src/serve/acp-http/`)
 
 | File                     | Responsibility                                                                                                                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -284,7 +284,7 @@ thin compat shim over `/acp` (separate, later PR).
 - `session/request_permission` agent→client round-trip.
 - `_qwen/session/set_model` extension as the worked example of #2.
 - Bearer-auth + host allowlist reuse (same middleware as REST).
-- Unit tests (`acpHttp/*.test.ts`) + a black-box smoke script driving a real daemon.
+- Unit tests (`acp-http/*.test.ts`) + a black-box smoke script driving a real daemon.
 
 **Deferred (documented, not built now):**
 
@@ -309,7 +309,7 @@ thin compat shim over `/acp` (separate, later PR).
    - Trigger a tool needing permission → assert `session/request_permission` request,
      POST a grant response → assert prompt completes.
    - `POST {_qwen/session/set_model}` → assert model switch + `session/update`.
-4. Vitest: `acpHttp/*.test.ts` green.
+4. Vitest: `acp-http/*.test.ts` green.
 
 ---
 
@@ -326,11 +326,11 @@ thin compat shim over `/acp` (separate, later PR).
 
 ## 10. Implementation & verification log (v1)
 
-Implemented in `packages/cli/src/serve/acpHttp/` (`json-rpc.ts`, `sse-stream.ts`,
+Implemented in `packages/cli/src/serve/acp-http/` (`json-rpc.ts`, `sse-stream.ts`,
 `connection-registry.ts`, `dispatch.ts`, `index.ts`), mounted from `server.ts`
 via `mountAcpHttp(app, bridge, { boundWorkspace })`.
 
-### Automated (`packages/cli/src/serve/acpHttp/*.test.ts`)
+### Automated (`packages/cli/src/serve/acp-http/*.test.ts`)
 
 `transport.test.ts` boots a real Express server + the real `mountAcpHttp` over
 a controllable fake bridge and drives it with `fetch` + manual SSE parsing.

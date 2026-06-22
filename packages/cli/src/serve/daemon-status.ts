@@ -5,7 +5,7 @@
  */
 
 import type { ServeProtocolVersions } from './capabilities.js';
-import type { AcpHttpHandle } from './acpHttp/index.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import type {
