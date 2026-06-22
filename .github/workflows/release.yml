@@ -554,14 +554,27 @@ jobs:
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
         run: |-
-          issue_url="$(gh issue create --repo "${GH_REPO}" \
-            --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
-            --body "The release workflow failed. See the full run for details: ${DETAILS_URL}" \
-            --label "${BUG_LABEL}" \
-            --label "${READY_FOR_AGENT_LABEL}")"
-          issue_number="${issue_url##*/}"
+          existing_issue="$(
+            gh issue list --repo "${GH_REPO}" \
+              --state open \
+              --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
+              --limit 1 \
+              --json number,url \
+              --jq '.[0] | select(.) | "\(.number) \(.url)"'
+          )"
+          if [[ -n "${existing_issue}" ]]; then
+            issue_number="${existing_issue%% *}"
+            issue_url="${existing_issue#* }"
+          else
+            issue_url="$(gh issue create --repo "${GH_REPO}" \
+              --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
+              --body "The release workflow failed. See the full run for details: ${DETAILS_URL}" \
+              --label "${BUG_LABEL}" \
+              --label "${READY_FOR_AGENT_LABEL}")"
+            issue_number="${issue_url##*/}"
+          fi
 
-          echo "Created ${issue_url}; dispatching autofix."
+          echo "Using ${issue_url}; dispatching autofix."
           gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
             -f phase=issue \
             -f issue_number="${issue_number}" \
