@@ -14,7 +14,7 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 import { logicalPosToOffset } from './shared/text-buffer.js';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import {
@@ -1677,7 +1677,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               cursorVisualColAbsolute - segStart + 1,
             );
             const highlighted = showCursorOpt
-              ? chalk.inverse(charToHighlight)
+              ? renderSoftwareCursor(charToHighlight)
               : charToHighlight;
             display =
               cpSlice(seg.text, 0, cursorVisualColAbsolute - segStart) +
@@ -1705,7 +1705,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (ghostText && showCursorOpt && ghostText.text.length > 0) {
           if (ghostText.showCursorBeforeText) {
             renderedLine.push(
-              <Text key="ghost-cursor">{chalk.inverse(' ')}</Text>,
+              <Text key="ghost-cursor">{renderSoftwareCursor(' ')}</Text>,
             );
             renderedLine.push(
               <Text key="ghost-rest" color={theme.text.secondary}>
@@ -1713,11 +1713,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               </Text>,
             );
           } else {
-            // First ghost char: inverted (as cursor). Rest: dimmed gray.
+            // First ghost char: software cursor. Rest: dimmed gray.
             const firstChar = ghostText.text[0]!;
             const rest = ghostText.text.slice(firstChar.length);
             renderedLine.push(
-              <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
+              <Text key="ghost-cursor">{renderSoftwareCursor(firstChar)}</Text>,
             );
             if (rest.length > 0) {
               renderedLine.push(
@@ -1732,7 +1732,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
           renderedLine.push(
             <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
-              {showCursorOpt ? chalk.inverse(' ') + '\u200B' : ' \u200B'}
+              {showCursorOpt ? renderSoftwareCursor(' ') + '\u200B' : ' \u200B'}
             </Text>,
           );
         }
