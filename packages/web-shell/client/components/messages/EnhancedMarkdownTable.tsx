@@ -11,6 +11,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
+import { useI18n } from '../../i18n';
 import styles from './EnhancedMarkdownTable.module.css';
 
 type TableElement = ReactElement<{ children?: ReactNode }>;
@@ -77,20 +78,20 @@ interface FilterOption {
   count: number;
 }
 
-const TEXT_FILTER_LABELS: Record<TextFilterOperator, string> = {
-  contains: '包含',
-  equals: '等于',
-  notEquals: '不等于',
-  startsWith: '开头是',
-  endsWith: '结尾是',
+const TEXT_FILTER_LABEL_KEYS: Record<TextFilterOperator, string> = {
+  contains: 'markdownTable.filter.text.contains',
+  equals: 'markdownTable.filter.text.equals',
+  notEquals: 'markdownTable.filter.text.notEquals',
+  startsWith: 'markdownTable.filter.text.startsWith',
+  endsWith: 'markdownTable.filter.text.endsWith',
 };
 
-const NUMBER_FILTER_LABELS: Record<NumberFilterOperator, string> = {
-  gt: '大于',
-  gte: '大于等于',
-  lt: '小于',
-  lte: '小于等于',
-  between: '区间',
+const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
+  gt: 'markdownTable.filter.number.gt',
+  gte: 'markdownTable.filter.number.gte',
+  lt: 'markdownTable.filter.number.lt',
+  lte: 'markdownTable.filter.number.lte',
+  between: 'markdownTable.filter.number.between',
 };
 
 function isTagElement(node: ReactNode, tag: string): node is TableElement {
@@ -159,7 +160,10 @@ function normalizeRow(row: RowData, columnCount: number): RowData {
   };
 }
 
-function parseTable(children: ReactNode): ParsedTable {
+function parseTable(
+  children: ReactNode,
+  defaultColumnLabel: (columnIndex: number) => string,
+): ParsedTable {
   const topLevel = Children.toArray(children);
   const headerRows: RowData[] = [];
   const bodyRows: RowData[] = [];
@@ -191,10 +195,11 @@ function parseTable(children: ReactNode): ParsedTable {
   const headers = Array.from({ length: columnCount }, (_, columnIndex) => {
     const cell = firstHeaderRow?.cells[columnIndex];
     if (cell) return cell;
+    const label = defaultColumnLabel(columnIndex);
     return {
       key: `header-${columnIndex}`,
-      content: `Column ${columnIndex + 1}`,
-      text: `Column ${columnIndex + 1}`,
+      content: label,
+      text: label,
       isHeader: true,
     };
   });
@@ -366,6 +371,7 @@ function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
 function getColumnOptions(
   rows: RowData[],
   columnIndex: number,
+  blankLabel: string,
 ): FilterOption[] {
   const counts = new Map<string, number>();
   rows.forEach((row) => {
@@ -376,7 +382,7 @@ function getColumnOptions(
   return Array.from(counts.entries())
     .map(([value, count]) => ({
       value,
-      label: value || '(空白)',
+      label: value || blankLabel,
       count,
     }))
     .sort((a, b) => compareCellText(a.value, b.value));
@@ -464,6 +470,7 @@ function ColumnFilterMenu({
     direction: SortState['direction'] | null,
   ) => void;
 }) {
+  const { t } = useI18n();
   const allOptionValues = useMemo(
     () => options.map((option) => option.value),
     [options],
@@ -567,7 +574,7 @@ function ColumnFilterMenu({
           type="button"
           onClick={() => onSort(columnIndex, 'asc')}
         >
-          升序排序
+          {t('markdownTable.sort.asc')}
         </button>
         <button
           className={`${styles.filterMenuAction} ${
@@ -576,14 +583,14 @@ function ColumnFilterMenu({
           type="button"
           onClick={() => onSort(columnIndex, 'desc')}
         >
-          降序排序
+          {t('markdownTable.sort.desc')}
         </button>
         <button
           className={styles.filterMenuAction}
           type="button"
           onClick={() => onSort(columnIndex, null)}
         >
-          清除排序
+          {t('markdownTable.sort.clear')}
         </button>
       </div>
 
@@ -592,9 +599,11 @@ function ColumnFilterMenu({
           className={styles.filterSearch}
           value={search}
           onChange={(event) => setSearch(event.currentTarget.value)}
-          placeholder="搜索筛选值"
+          placeholder={t('markdownTable.filter.searchPlaceholder')}
           name={`markdown-table-option-search-${columnIndex}`}
-          aria-label={`搜索 ${columnName}`}
+          aria-label={t('markdownTable.filter.searchAria', {
+            column: columnName,
+          })}
         />
         <label className={styles.filterOption}>
           <input
@@ -605,7 +614,7 @@ function ColumnFilterMenu({
               setFilteredSelection(event.currentTarget.checked)
             }
           />
-          <span>全选当前结果</span>
+          <span>{t('markdownTable.filter.selectVisible')}</span>
           <span className={styles.optionCount}>{filteredOptions.length}</span>
         </label>
         <div className={styles.filterOptionList}>
@@ -623,17 +632,23 @@ function ColumnFilterMenu({
           ))}
           {filteredOptions.length > visibleOptions.length && (
             <div className={styles.optionLimitHint}>
-              已显示前 {visibleOptions.length} 项，请搜索缩小范围
+              {t('markdownTable.filter.optionLimit', {
+                count: visibleOptions.length,
+              })}
             </div>
           )}
           {filteredOptions.length === 0 && (
-            <div className={styles.optionLimitHint}>没有匹配项</div>
+            <div className={styles.optionLimitHint}>
+              {t('markdownTable.filter.noOptions')}
+            </div>
           )}
         </div>
       </div>
 
       <div className={styles.filterMenuSection}>
-        <div className={styles.conditionTitle}>自定义筛选</div>
+        <div className={styles.conditionTitle}>
+          {t('markdownTable.filter.custom')}
+        </div>
         {isNumeric ? (
           <>
             <select
@@ -645,20 +660,24 @@ function ColumnFilterMenu({
                   event.currentTarget.value as NumberFilterOperator,
                 )
               }
-              aria-label={`数字筛选 ${columnName}`}
+              aria-label={t('markdownTable.filter.numberAria', {
+                column: columnName,
+              })}
             >
-              {Object.entries(NUMBER_FILTER_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
+              {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
+                ([value, labelKey]) => (
+                  <option key={value} value={value}>
+                    {t(labelKey)}
+                  </option>
+                ),
+              )}
             </select>
             <div className={styles.conditionInputs}>
               <input
                 className={styles.conditionInput}
                 value={numberValue}
                 onChange={(event) => setNumberValue(event.currentTarget.value)}
-                placeholder="数值"
+                placeholder={t('markdownTable.filter.numberPlaceholder')}
                 name={`markdown-table-number-filter-${columnIndex}`}
               />
               {numberOperator === 'between' && (
@@ -668,7 +687,7 @@ function ColumnFilterMenu({
                   onChange={(event) =>
                     setNumberValueTo(event.currentTarget.value)
                   }
-                  placeholder="到"
+                  placeholder={t('markdownTable.filter.toPlaceholder')}
                   name={`markdown-table-number-filter-to-${columnIndex}`}
                 />
               )}
@@ -683,19 +702,23 @@ function ColumnFilterMenu({
               onChange={(event) =>
                 setTextOperator(event.currentTarget.value as TextFilterOperator)
               }
-              aria-label={`文本筛选 ${columnName}`}
+              aria-label={t('markdownTable.filter.textAria', {
+                column: columnName,
+              })}
             >
-              {Object.entries(TEXT_FILTER_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
+              {Object.entries(TEXT_FILTER_LABEL_KEYS).map(
+                ([value, labelKey]) => (
+                  <option key={value} value={value}>
+                    {t(labelKey)}
+                  </option>
+                ),
+              )}
             </select>
             <input
               className={styles.conditionInput}
               value={textValue}
               onChange={(event) => setTextValue(event.currentTarget.value)}
-              placeholder="输入筛选条件"
+              placeholder={t('markdownTable.filter.textPlaceholder')}
               name={`markdown-table-text-filter-${columnIndex}`}
             />
           </>
@@ -708,7 +731,7 @@ function ColumnFilterMenu({
           type="button"
           onClick={clearFilter}
         >
-          重置
+          {t('markdownTable.filter.reset')}
         </button>
         <span className={styles.footerSpacer} />
         <button
@@ -716,14 +739,14 @@ function ColumnFilterMenu({
           type="button"
           onClick={onClose}
         >
-          取消
+          {t('markdownTable.filter.cancel')}
         </button>
         <button
           className={styles.primaryButton}
           type="button"
           onClick={applyDraft}
         >
-          确认
+          {t('markdownTable.filter.confirm')}
         </button>
       </div>
     </div>
@@ -731,7 +754,14 @@ function ColumnFilterMenu({
 }
 
 export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
-  const table = useMemo(() => parseTable(children), [children]);
+  const { t } = useI18n();
+  const table = useMemo(
+    () =>
+      parseTable(children, (columnIndex) =>
+        t('markdownTable.column', { index: columnIndex + 1 }),
+      ),
+    [children, t],
+  );
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
   const [selection, setSelection] = useState<SelectionRange | null>(null);
@@ -781,9 +811,10 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
         getColumnOptions(
           applyFilters(table.rows, filters, columnIndex),
           columnIndex,
+          t('markdownTable.blank'),
         ),
       ),
-    [filters, table.headers, table.rows],
+    [filters, t, table.headers, table.rows],
   );
   const numericColumns = useMemo(
     () =>
@@ -922,37 +953,41 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
     Object.values(filters).filter(isFilterActive).length;
   const rowSummary =
     visibleRows.length === table.rows.length
-      ? `${table.rows.length} rows`
-      : `${visibleRows.length}/${table.rows.length} rows`;
+      ? t('markdownTable.rows', { count: table.rows.length })
+      : t('markdownTable.rowsFiltered', {
+          visible: visibleRows.length,
+          total: table.rows.length,
+        });
   const openFilterHeader =
     openFilterMenu === null
       ? undefined
       : table.headers[openFilterMenu.columnIndex];
   const openFilterColumnName = openFilterHeader
-    ? openFilterHeader.text || `Column ${openFilterMenu!.columnIndex + 1}`
+    ? openFilterHeader.text ||
+      t('markdownTable.column', { index: openFilterMenu!.columnIndex + 1 })
     : '';
 
   return (
     <div ref={shellRef} className={styles.tableShell}>
       <div className={styles.toolbar}>
         <span className={styles.summary}>{rowSummary}</span>
-        <span className={styles.hint}>
-          Click headers to sort, open filters from ▾.
-        </span>
+        <span className={styles.hint}>{t('markdownTable.hint')}</span>
         {activeFilterCount > 0 && (
-          <span className={styles.selection}>{activeFilterCount} filters</span>
+          <span className={styles.selection}>
+            {t('markdownTable.filtersActive', { count: activeFilterCount })}
+          </span>
         )}
         {selectedCount > 0 && (
           <>
             <span className={styles.selection}>
-              {selectedCount} cells selected
+              {t('markdownTable.cellsSelected', { count: selectedCount })}
             </span>
             <button
               className={styles.copyButton}
               type="button"
               onClick={copySelection}
             >
-              Copy TSV
+              {t('markdownTable.copyTsv')}
             </button>
           </>
         )}
@@ -975,7 +1010,9 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
                     ? '↑'
                     : '↓'
                   : '↕';
-                const columnName = header.text || `Column ${columnIndex + 1}`;
+                const columnName =
+                  header.text ||
+                  t('markdownTable.column', { index: columnIndex + 1 });
                 return (
                   <th key={header.key} className={styles.headerCell}>
                     <div className={styles.headerControls}>
@@ -983,7 +1020,9 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
                         className={styles.headerButton}
                         type="button"
                         onClick={() => toggleSort(columnIndex)}
-                        aria-label={`Sort by ${columnName}`}
+                        aria-label={t('markdownTable.sortByColumn', {
+                          column: columnName,
+                        })}
                       >
                         <span className={styles.headerText}>
                           {header.content}
@@ -998,7 +1037,9 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
                         onClick={(event) =>
                           toggleFilterMenu(event, columnIndex)
                         }
-                        aria-label={`Filter ${columnName}`}
+                        aria-label={t('markdownTable.filterColumn', {
+                          column: columnName,
+                        })}
                         aria-expanded={isMenuOpen}
                       >
                         ▾
@@ -1033,7 +1074,9 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
           </tbody>
         </table>
         {visibleRows.length === 0 && (
-          <div className={styles.emptyState}>No rows match the filters.</div>
+          <div className={styles.emptyState}>
+            {t('markdownTable.emptyFiltered')}
+          </div>
         )}
       </div>
       {openFilterMenu && openFilterHeader && (
