@@ -1571,6 +1571,16 @@ const SETTINGS_SCHEMA = {
           'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,
       },
+      autoSkillConfirm: {
+        type: 'boolean',
+        label: 'Confirm Auto Skills Before Saving',
+        category: 'Memory',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.',
+        showInDialog: false,
+      },
     },
   },
 
