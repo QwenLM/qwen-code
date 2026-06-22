@@ -16,7 +16,7 @@ import {
   lstatSync,
 } from 'node:fs';
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { buildDaemonLogLine, initDaemonLogger } from './daemonLogger.js';
+import { buildDaemonLogLine, initDaemonLogger } from './daemon-logger.js';
 
 describe('buildDaemonLogLine', () => {
   const FIXED = new Date('2026-05-26T03:14:15.926Z');

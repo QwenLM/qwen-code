@@ -10,12 +10,12 @@ import type { AcpHttpHandle } from './acpHttp/index.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import { DeviceFlowRegistry } from './auth/device-flow.js';
 import {
   buildDaemonStatusResponse,
   type BuildDaemonStatusOptions,
-} from './daemonStatus.js';
+} from './daemon-status.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 

@@ -7,7 +7,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Response } from 'express';
-import { SseStream } from './sseStream.js';
+import { SseStream } from './sse-stream.js';
 
 /**
  * Minimal Express `Response` mock: an EventEmitter with the `write`/`end`/

@@ -18,11 +18,11 @@ import { AcpDispatcher } from './dispatch.js';
 import {
   ConnectionRegistry,
   type AcpConnection,
-} from './connectionRegistry.js';
-import { SseStream } from './sseStream.js';
-import { WsStream } from './wsStream.js';
+} from './connection-registry.js';
+import { SseStream } from './sse-stream.js';
+import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
-import { RPC, error as rpcError, isRequest, parseInbound } from './jsonRpc.js';
+import { RPC, error as rpcError, isRequest, parseInbound } from './json-rpc.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
@@ -362,7 +362,7 @@ export function mountAcpHttp(
         // stream. A reconnect already installed a newer stream — the prompt
         // must survive the old stream's close. CONTRACT: this identity guard
         // pairs with `attachSessionStream`'s install-before-close ordering
-        // (connectionRegistry.ts) — keep both in lockstep.
+        // (connection-registry.ts) — keep both in lockstep.
         if (conn.sessions.get(sessionId)?.stream === stream) {
           conn.sessions.get(sessionId)?.promptAbort?.abort();
         }

@@ -5,7 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
-import type { AcpSessionBridge } from '../acpSessionBridge.js';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   isContentHash,
   type ContentHash,
