@@ -121,6 +121,27 @@ export function deriveAgentKey(
 }
 
 /**
+ * Seed for the resume prefix-hash chain, derived from the run's `args`. Folding
+ * `args` into the chain root means a resume with DIFFERENT args produces a
+ * disjoint key space: every `agent()` call misses the journal and re-runs live
+ * instead of silently replaying the previous run's results. (The tool documents
+ * "pass the same args" as a user obligation; this enforces it.)
+ */
+export function deriveArgsSeed(args: unknown): string {
+  const hash = createHash('sha256');
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(args ?? null) ?? 'null';
+  } catch {
+    // `args` is contractually JSON; a non-serializable value (cycle/BigInt)
+    // hashes to a stable sentinel so the chain stays deterministic.
+    serialized = 'non-serializable-args';
+  }
+  hash.update(serialized);
+  return `${JOURNAL_KEY_VERSION}:${hash.digest('hex')}`;
+}
+
+/**
  * Build the replay maps from a flat list of journal entries. `result`
  * entries win last-write; `started` entries accumulate (so a key started
  * N times surfaces N prior attempts for the respawn telemetry).

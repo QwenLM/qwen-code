@@ -109,8 +109,8 @@ export interface WorkflowTask extends TaskBase {
   /**
    * P7b: the path the script was loaded from, when the run was launched
    * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
-   * slash command). `undefined` for inline scripts. A run launched from a
-   * file is already saved, so the save dialog offers "already saved".
+   * slash command). `undefined` for inline scripts. Recorded as run
+   * provenance (e.g. for the snapshot).
    */
   scriptPath?: string;
   /** Final script return value once the run completes (success path). */

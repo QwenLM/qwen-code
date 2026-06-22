@@ -1778,6 +1778,10 @@ export const AppContainer = (props: AppContainerProps) => {
       if (
         workflowTriggerEnabled &&
         !isSlashCommand(userPromptText) &&
+        // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
+        // break the BTW routing check below (which tests `submittedValue`),
+        // queuing the side question as a normal prompt instead.
+        !isBtwCommand(userPromptText) &&
         detectWorkflowKeyword(userPromptText)
       ) {
         setWorkflowKeywordActive(true);

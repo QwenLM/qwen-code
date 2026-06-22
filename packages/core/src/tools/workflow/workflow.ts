@@ -267,8 +267,8 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       tokenBudgetTotal: budget.total,
       // P7b: carry the script source so a completed run can be snapshotted
       // to disk and saved to `.qwen/workflows/<name>.js` from the dialog.
-      // `scriptPath` is set when the run was launched from a saved file (the
-      // save dialog then offers "already saved" for it).
+      // `scriptPath` is set when the run was launched from a saved file (run
+      // provenance for the snapshot).
       script: resolvedScript,
       scriptPath: resolvedScriptPath,
     });
@@ -714,6 +714,17 @@ export class WorkflowTool extends BaseDeclarativeTool<
     }
     if (hasScript && hasPath) {
       return 'WorkflowTool: provide exactly one of `script` or `scriptPath`, not both.';
+    }
+    // Security: `resumeFromRunId` becomes the `runId` and flows verbatim into
+    // `getWorkflowRunJournalPath` / `getWorkflowRunSnapshotPath` (both
+    // `path.join`-based), so a value containing `..` or path separators could
+    // move journal/snapshot reads and writes outside `<projectDir>/workflows`.
+    // Accept only the generated id shape.
+    if (
+      params.resumeFromRunId !== undefined &&
+      !/^wf_[0-9a-f]+$/.test(params.resumeFromRunId)
+    ) {
+      return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }
     return null;
   }

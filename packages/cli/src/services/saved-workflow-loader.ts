@@ -70,7 +70,11 @@ export class SavedWorkflowLoader implements ICommandLoader {
       source: 'workflow-command',
       sourceLabel: 'Workflow',
       sourceDetail: entry.source, // 'project' | 'user'
-      supportedModes: ['interactive', 'non_interactive', 'acp'],
+      // Interactive only: the action returns a `{type:'tool'}` dispatch, which
+      // the non-interactive command adapter converts to `unsupported`. Listing
+      // these in headless / ACP modes would advertise a command that then fails
+      // to run, so restrict them until those paths can execute a tool return.
+      supportedModes: ['interactive'],
       acceptsInput: true,
       argumentHint: '[json-args]',
       action: (

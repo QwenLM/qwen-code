@@ -90,7 +90,18 @@ export function getSavedWorkflowDirs(config: Config): Array<{
 async function listJsFiles(dir: string): Promise<string[]> {
   try {
     const names = await fs.readdir(dir);
-    return names.filter((n) => n.endsWith('.js'));
+    const out: string[] = [];
+    for (const n of names) {
+      if (!n.endsWith('.js')) continue;
+      // Skip symlinks. A malicious repo could ship `<name>.js` as a symlink to
+      // an arbitrary file (e.g. `~/.aws/credentials`); discovering and later
+      // reading it would leak the target through the snapshot `script` field,
+      // sandbox parse-error messages, and telemetry.
+      const st = await fs.lstat(path.join(dir, n)).catch(() => null);
+      if (!st || st.isSymbolicLink()) continue;
+      out.push(n);
+    }
+    return out;
   } catch (e) {
     // Missing directory is the common case (user never saved a workflow).
     const code = (e as NodeJS.ErrnoException)?.code;
@@ -99,6 +110,38 @@ async function listJsFiles(dir: string): Promise<string[]> {
     }
     return [];
   }
+}
+
+/**
+ * Read a candidate workflow file, but only after proving its canonical real
+ * path stays inside one of the saved-workflow directories. `fs.realpath`
+ * resolves both `..` and symlinks, so this single check defeats path
+ * traversal (a `name`/`scriptPath` containing `..`) AND symlink escape (a
+ * file inside the dir that links out). Throws otherwise.
+ */
+async function readWorkflowFileSecurely(
+  filePath: string,
+  config: Config,
+): Promise<string> {
+  const real = await fs.realpath(filePath); // throws ENOENT if absent
+  const dirs = await Promise.all(
+    getSavedWorkflowDirs(config).map(async ({ dir }) => {
+      try {
+        return await fs.realpath(dir);
+      } catch {
+        return path.resolve(dir);
+      }
+    }),
+  );
+  const inside = dirs.some(
+    (d) => real === d || real.startsWith(d + path.sep),
+  );
+  if (!inside) {
+    throw new Error(
+      `refusing to load a workflow file outside the saved-workflow directories: '${filePath}'.`,
+    );
+  }
+  return fs.readFile(real, 'utf8');
 }
 
 /**
@@ -147,11 +190,11 @@ export async function resolveSavedWorkflowScript(
     }
     let script: string;
     try {
-      script = await fs.readFile(scriptPath, 'utf8');
+      script = await readWorkflowFileSecurely(scriptPath, config);
     } catch (e) {
       throw new Error(
-        `workflow({scriptPath: '${scriptPath}'}): cannot read file ` +
-          `(${e instanceof Error ? e.message : String(e)}).`,
+        `workflow({scriptPath: '${scriptPath}'}): ` +
+          `${e instanceof Error ? e.message : String(e)}`,
       );
     }
     const name = path.basename(scriptPath).replace(/\.js$/, '');
@@ -165,13 +208,21 @@ export async function resolveSavedWorkflowScript(
   }
 
   const name = nameOrRef;
+  // Reject names that aren't legal workflow stems before joining them into a
+  // directory path, so `workflow('../../outside')` can't escape the saved-
+  // workflow dirs. The realpath boundary check in `readWorkflowFileSecurely`
+  // is a second line of defence, but a clear name error is the better signal.
+  const nameError = validateWorkflowName(name);
+  if (nameError) {
+    throw new Error(`workflow('${name}'): ${nameError}`);
+  }
   for (const { dir } of getSavedWorkflowDirs(config)) {
     const scriptPath = path.join(dir, `${name}.js`);
     try {
-      const script = await fs.readFile(scriptPath, 'utf8');
+      const script = await readWorkflowFileSecurely(scriptPath, config);
       return { name, scriptPath, script };
     } catch {
-      // Not in this scope — try the next.
+      // Not in this scope (absent or rejected) — try the next.
     }
   }
 

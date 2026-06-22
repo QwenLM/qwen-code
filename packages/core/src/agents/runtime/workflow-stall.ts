@@ -87,6 +87,14 @@ export interface StallWatchdogHandle {
  * flight the timer is held (a long tool call is not a stall). When the
  * timer elapses with no in-flight tool, it fires `controller.abort('stalled')`.
  *
+ * The watchdog arms on the FIRST progress event, not at attach time. The
+ * time-to-first-response window — connection setup, server-side queueing, and
+ * a reasoning model's pre-first-token thinking — emits no events (`ROUND_START`
+ * fires only AFTER `await sendMessageStream` resolves), so counting it would
+ * false-trip on a healthy-but-slow first response and waste 3× tokens on the
+ * retry loop. That window is instead bounded by the subagent's own
+ * `max_time_minutes`; the watchdog's job is post-first-response streaming stalls.
+ *
  * A `stallMs` of 0 means "no watchdog" — this returns an inert handle.
  */
 export function attachStallWatchdog(
@@ -151,7 +159,10 @@ export function attachStallWatchdog(
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
   emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
 
-  arm(); // start counting immediately
+  // Intentionally NOT armed here. The first `onActivity` (the first response
+  // event of round 1) arms it, so time-to-first-response is not counted as a
+  // stall (see the doc comment); first-response hangs are bounded by the
+  // subagent's `max_time_minutes`.
 
   return {
     stalled: () => fired,

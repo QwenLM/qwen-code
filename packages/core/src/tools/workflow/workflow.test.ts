@@ -12,6 +12,7 @@ import { WorkflowTool } from './workflow.js';
 import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
+import { Storage } from '../../config/storage.js';
 
 function fakeConfig(): Config {
   return {} as unknown as Config;
@@ -62,6 +63,17 @@ describe('WorkflowTool', () => {
     ).toThrow(/exactly one/);
   });
 
+  it('rejects build() when resumeFromRunId is not a wf_<hex> id (path-traversal guard)', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    expect(() =>
+      tool.build({ script: 'return 1', resumeFromRunId: '../../etc/evil' }),
+    ).toThrow(/resumeFromRunId/);
+    // A well-formed generated id is accepted.
+    expect(() =>
+      tool.build({ script: 'return 1', resumeFromRunId: 'wf_1a2b3c4d5e6f7081' }),
+    ).not.toThrow();
+  });
+
   it('build() accepts a scriptPath without inline script', () => {
     const tool = new WorkflowTool(fakeConfig());
     const invocation = tool.build({
@@ -73,11 +85,19 @@ describe('WorkflowTool', () => {
   });
 
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-'));
-    const scriptPath = path.join(dir, 'greet.js');
-    await fs.writeFile(scriptPath, 'return await agent("hi");', 'utf8');
+    const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-'));
     try {
-      const { config, registry } = configWithRegistry();
+      const registry = new WorkflowRunRegistry();
+      const config = {
+        getWorkflowRunRegistry: () => registry,
+        storage: new Storage(projectDir),
+      } as unknown as Config;
+      // The scriptPath MUST live under a saved-workflow dir (the resolver
+      // refuses paths outside it — the #2 path-traversal / symlink guard).
+      const dir = new Storage(projectDir).getProjectWorkflowsDir();
+      await fs.mkdir(dir, { recursive: true });
+      const scriptPath = path.join(dir, 'greet.js');
+      await fs.writeFile(scriptPath, 'return await agent("hi");', 'utf8');
       const tool = new WorkflowTool(config, {
         dispatch: async (prompt) => `T:${prompt}`,
       });
@@ -85,13 +105,13 @@ describe('WorkflowTool', () => {
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error).toBeUndefined();
       expect(JSON.stringify(result.llmContent)).toContain('T:hi');
-      // The registry entry carries the resolved absolute path (provenance for
-      // the snapshot writer + the save dialog's "already saved" branch).
+      // The registry entry carries the resolved absolute path (run provenance
+      // for the snapshot writer).
       const entries = registry.list();
       expect(entries).toHaveLength(1);
       expect(entries[0].scriptPath).toBe(scriptPath);
     } finally {
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(projectDir, { recursive: true, force: true });
     }
   });
 

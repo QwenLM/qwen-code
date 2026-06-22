@@ -17,7 +17,7 @@ import type {
 } from './workflow-sandbox.js';
 import { WorkflowBudgetExceededError } from './workflow-budget.js';
 import { resolveStallMs, runStallResilient } from './workflow-stall.js';
-import { deriveAgentKey } from './workflow-journal.js';
+import { deriveAgentKey, deriveArgsSeed } from './workflow-journal.js';
 import type { WorkflowJournal, JournalReplay } from './workflow-journal.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -1301,7 +1301,10 @@ export class WorkflowOrchestrator {
     // trusts the cache). `journalAgentId` numbers journal entries.
     const journal = req.journal;
     const replay = req.resumeReplay;
-    let prefixHash = '';
+    // Seed the chain with the run's `args` so a resume with different args
+    // produces a disjoint key space (every dispatch misses → re-runs live)
+    // rather than silently replaying the prior run's results.
+    let prefixHash = deriveArgsSeed(req.args);
     let hadMiss = false;
     let journalAgentId = 0;
 

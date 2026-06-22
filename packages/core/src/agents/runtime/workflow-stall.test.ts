@@ -48,17 +48,34 @@ describe('attachStallWatchdog', () => {
     vi.useRealTimers();
   });
 
-  it('fires after stallMs of no activity', () => {
+  it('fires after stallMs of no activity once the first response has arrived', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
+    // #8: not armed until the first progress event (the time-to-first-response
+    // window is not a stall) — so advancing past stallMs here does nothing.
+    vi.advanceTimersByTime(2000);
     expect(wd.stalled()).toBe(false);
+    // First response arrives → watchdog arms; then silence trips it.
+    emitter.emit(AgentEventType.ROUND_START, {} as never);
     vi.advanceTimersByTime(999);
     expect(wd.stalled()).toBe(false);
     vi.advanceTimersByTime(2);
     expect(wd.stalled()).toBe(true);
     expect(controller.signal.aborted).toBe(true);
     expect(controller.signal.reason).toBe('stalled');
+    wd.dispose();
+  });
+
+  it('does NOT fire during the time-to-first-response window (#8)', () => {
+    const emitter = new AgentEventEmitter();
+    const controller = new AbortController();
+    const wd = attachStallWatchdog(emitter, controller, 1000);
+    // A reasoning model thinking for a long time before the first token emits
+    // no events; that must not be treated as a stall.
+    vi.advanceTimersByTime(10_000);
+    expect(wd.stalled()).toBe(false);
+    expect(controller.signal.aborted).toBe(false);
     wd.dispose();
   });
 
@@ -127,8 +144,14 @@ describe('runStallResilient', () => {
     let calls = 0;
     // Each attempt stalls immediately: the attemptFn waits for the watchdog
     // to abort its signal, then throws the "did not complete" terminal.
-    const attemptFn = async (signal: AbortSignal): Promise<string> => {
+    const attemptFn = async (
+      signal: AbortSignal,
+      emitter: AgentEventEmitter,
+    ): Promise<string> => {
       calls += 1;
+      // Emit a first response event so the watchdog arms (#8: the time-to-
+      // first-response window is not a stall), then go silent → it trips.
+      emitter.emit(AgentEventType.ROUND_START, {} as never);
       await new Promise<void>((resolve) => {
         if (signal.aborted) return resolve();
         signal.addEventListener('abort', () => resolve(), { once: true });
@@ -148,10 +171,15 @@ describe('runStallResilient', () => {
 
   it('retries on stall then SUCCEEDS on a later attempt', async () => {
     let calls = 0;
-    const attemptFn = async (signal: AbortSignal): Promise<string> => {
+    const attemptFn = async (
+      signal: AbortSignal,
+      emitter: AgentEventEmitter,
+    ): Promise<string> => {
       calls += 1;
       if (calls < 2) {
-        // First attempt stalls.
+        // First attempt stalls: emit a first response event to arm the
+        // watchdog (#8), then go silent until it aborts.
+        emitter.emit(AgentEventType.ROUND_START, {} as never);
         await new Promise<void>((resolve) => {
           if (signal.aborted) return resolve();
           signal.addEventListener('abort', () => resolve(), { once: true });

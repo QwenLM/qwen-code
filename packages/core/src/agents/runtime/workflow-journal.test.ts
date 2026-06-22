@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import {
   canonicalizeAgentOpts,
   deriveAgentKey,
+  deriveArgsSeed,
   buildReplay,
   WorkflowJournal,
   JOURNAL_KEY_VERSION,
@@ -125,5 +126,21 @@ describe('WorkflowJournal', () => {
     const replay = await j.load();
     expect(replay.results.size).toBe(0);
     expect(replay.started.size).toBe(0);
+  });
+});
+
+// #7: the resume prefix chain is seeded with the run's args, so a resume with
+// different args yields a disjoint key space (cache misses → live re-run).
+describe('deriveArgsSeed', () => {
+  it('is deterministic for equal args and differs for different args', () => {
+    expect(deriveArgsSeed({ a: 1 })).toBe(deriveArgsSeed({ a: 1 }));
+    expect(deriveArgsSeed({ a: 1 })).not.toBe(deriveArgsSeed({ a: 2 }));
+    expect(deriveArgsSeed(undefined)).toBe(deriveArgsSeed(null));
+  });
+
+  it('changes the first agent key when args change', () => {
+    const k1 = deriveAgentKey(deriveArgsSeed({ topic: 'a' }), 'do x', {});
+    const k2 = deriveAgentKey(deriveArgsSeed({ topic: 'b' }), 'do x', {});
+    expect(k1).not.toBe(k2); // same prompt+opts, different args → different key
   });
 });

@@ -157,10 +157,19 @@ async function pruneSnapshots(dir: string): Promise<void> {
   stats.sort((a, b) => a.mtime - b.mtime);
   const toPrune = stats.slice(0, stats.length - MAX_RETAINED_SNAPSHOTS);
   await Promise.all(
-    toPrune.map((s) =>
-      fs.unlink(`${dir}/${s.f}`).catch((e) =>
-        debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
-      ),
-    ),
+    toPrune.map((s) => {
+      // Each run also has a sibling `<runId>/journal.jsonl` directory (the
+      // resume journal). Removing only the `<runId>.json` snapshot would leave
+      // those journal dirs to grow without bound, so prune both together.
+      const runId = s.f.replace(/\.json$/, '');
+      return Promise.all([
+        fs.unlink(`${dir}/${s.f}`).catch((e) =>
+          debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
+        ),
+        fs.rm(`${dir}/${runId}`, { recursive: true, force: true }).catch((e) =>
+          debugLogger.warn(`prune journal dir failed for ${runId}: ${e}`),
+        ),
+      ]);
+    }),
   );
 }

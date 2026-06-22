@@ -70,11 +70,9 @@ describe('SavedWorkflowLoader', () => {
     expect(c.kind).toBe(CommandKind.FILE);
     expect(c.source).toBe('workflow-command');
     expect(c.sourceDetail).toBe('project');
-    expect(c.supportedModes).toEqual([
-      'interactive',
-      'non_interactive',
-      'acp',
-    ]);
+    // Interactive only — the tool-dispatch action can't run in headless / ACP,
+    // so advertising those modes would surface a command that then fails.
+    expect(c.supportedModes).toEqual(['interactive']);
   });
 
   it('action dispatches the workflow tool with the scriptPath', async () => {

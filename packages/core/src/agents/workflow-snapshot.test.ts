@@ -129,18 +129,23 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(list.map((s) => s.runId)).toEqual(['wf_good']);
   });
 
-  it('prunes the oldest beyond MAX_RETAINED_SNAPSHOTS', async () => {
+  it('prunes the oldest beyond MAX_RETAINED_SNAPSHOTS, journal dirs too', async () => {
     const config = fakeConfig(projectDir);
+    const dir = config.storage.getWorkflowRunsDir();
     const total = MAX_RETAINED_SNAPSHOTS + 4;
     for (let i = 0; i < total; i++) {
+      const runId = `wf_${i}`;
+      // Each run also has a sibling journal dir; prune must remove both.
+      await fs.mkdir(`${dir}/${runId}`, { recursive: true });
+      await fs.writeFile(`${dir}/${runId}/journal.jsonl`, '{}\n', 'utf8');
       // Distinct runId per write; startTime ascending. Each write prunes.
-      await writeWorkflowSnapshot(
-        config,
-        task({ runId: `wf_${i}`, startTime: 1_000 + i }),
-      );
+      await writeWorkflowSnapshot(config, task({ runId, startTime: 1_000 + i }));
     }
-    const dir = config.storage.getWorkflowRunsDir();
-    const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json'));
+    const entries = await fs.readdir(dir);
+    const files = entries.filter((f) => f.endsWith('.json'));
+    const journalDirs = entries.filter((f) => /^wf_\d+$/.test(f));
     expect(files.length).toBe(MAX_RETAINED_SNAPSHOTS);
+    // The pruned runs' journal directories are gone too (no orphan leak).
+    expect(journalDirs.length).toBe(MAX_RETAINED_SNAPSHOTS);
   });
 });

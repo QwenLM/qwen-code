@@ -140,8 +140,10 @@ describe('workflow-saved', () => {
   });
 
   describe('resolveSavedWorkflowScript — by {scriptPath}', () => {
-    it('reads an explicit script path', async () => {
-      const p = path.join(projectDir, 'custom.js');
+    it('reads a script path inside a saved-workflow dir', async () => {
+      const dir = new Storage(projectDir).getProjectWorkflowsDir();
+      await fs.mkdir(dir, { recursive: true });
+      const p = path.join(dir, 'custom.js');
       await fs.writeFile(p, `return 'custom';`, 'utf8');
       const resolved = await resolveSavedWorkflowScript(
         { scriptPath: p },
@@ -151,13 +153,15 @@ describe('workflow-saved', () => {
       expect(resolved.name).toBe('custom');
     });
 
-    it('throws a clear error for an unreadable path', async () => {
+    it('throws a clear error for a missing path under a saved dir', async () => {
+      const dir = new Storage(projectDir).getProjectWorkflowsDir();
+      await fs.mkdir(dir, { recursive: true });
       await expect(
         resolveSavedWorkflowScript(
-          { scriptPath: path.join(projectDir, 'nope.js') },
+          { scriptPath: path.join(dir, 'nope.js') },
           fakeConfig(projectDir),
         ),
-      ).rejects.toThrow(/cannot read file/);
+      ).rejects.toThrow(/scriptPath/);
     });
 
     it('rejects an empty scriptPath', async () => {
@@ -167,6 +171,28 @@ describe('workflow-saved', () => {
           fakeConfig(projectDir),
         ),
       ).rejects.toThrow(/workflow name \(string\) or \{scriptPath/);
+    });
+
+    // Security (#2): a scriptPath resolving outside the saved-workflow dirs is
+    // refused, even when the file exists.
+    it('refuses a scriptPath outside the saved-workflow directories', async () => {
+      const outside = path.join(projectDir, 'evil.js');
+      await fs.writeFile(outside, `return 'pwned';`, 'utf8');
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: outside },
+          fakeConfig(projectDir),
+        ),
+      ).rejects.toThrow(/outside the saved-workflow directories/);
+    });
+  });
+
+  // Security (#2): the string-name form must not escape the saved dirs.
+  describe('resolveSavedWorkflowScript — name traversal', () => {
+    it('rejects a traversal name before any path join', async () => {
+      await expect(
+        resolveSavedWorkflowScript('../../outside', fakeConfig(projectDir)),
+      ).rejects.toThrow(/Invalid workflow name|lower-case/);
     });
   });
 
@@ -210,6 +236,20 @@ describe('workflow-saved', () => {
     it('returns empty when no workflows dir exists', async () => {
       const list = await listSavedWorkflows(fakeConfig(projectDir));
       expect(list).toEqual([]);
+    });
+
+    // Security (#4): a symlinked `<name>.js` could point at an arbitrary file
+    // (e.g. credentials); discovery must skip it so it never reaches the
+    // snapshot `script` field / telemetry.
+    it('skips symlinked entries', async () => {
+      const dir = new Storage(projectDir).getProjectWorkflowsDir();
+      await fs.mkdir(dir, { recursive: true });
+      const secret = path.join(projectDir, 'secret.txt');
+      await fs.writeFile(secret, 'TOP SECRET', 'utf8');
+      await fs.symlink(secret, path.join(dir, 'leak.js'));
+      await writeWorkflow(dir, 'real', `return 1;`);
+      const list = await listSavedWorkflows(fakeConfig(projectDir));
+      expect(list.map((e) => e.name)).toEqual(['real']);
     });
   });
 
