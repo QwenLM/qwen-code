@@ -1541,6 +1541,18 @@ describe('BackgroundTaskRegistry', () => {
       expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
     });
 
+    it('can suppress the register callback for background entries', () => {
+      const onRegister = vi.fn();
+      registry.setRegisterCallback(onRegister);
+
+      const entry = registry.register(makeRegistration('bg-suppressed'), {
+        suppressRegisterCallback: true,
+      });
+
+      expect(entry.agentId).toBe('bg-suppressed');
+      expect(onRegister).not.toHaveBeenCalled();
+    });
+
     it('unregisterForeground emits status change after removing the entry', () => {
       // The entry is deleted from the Map before the status-change callback
       // fires, so a callback that rebuilds its snapshot via getAll() no
