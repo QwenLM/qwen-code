@@ -737,6 +737,16 @@ const SETTINGS_SCHEMA = {
         description: 'Hide the window title bar',
         showInDialog: false,
       },
+      disableWorkflowKeywordTrigger: {
+        type: 'boolean',
+        label: 'Disable Workflow Keyword Trigger',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+        showInDialog: true,
+      },
       showStatusInTitle: {
         type: 'boolean',
         label: 'Show Status in Title',
