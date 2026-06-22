@@ -350,12 +350,14 @@ export const BaseTextInput = ({
     });
   }, [getCurrentCursorPosition, setCursorPosition]);
 
-  const cursorPosition = hasMeasured ? getCurrentCursorPosition() : undefined;
+  // Ink publishes this ref from its own insertion effect, so write it before
+  // Ink's effect setup reads the latest committed position.
+  setCursorPosition(hasMeasured ? getCurrentCursorPosition() : undefined);
 
-  useInsertionEffect(() => {
-    setCursorPosition(cursorPosition);
-    return () => setCursorPosition(undefined);
-  }, [cursorPosition, setCursorPosition]);
+  useInsertionEffect(
+    () => () => setCursorPosition(undefined),
+    [setCursorPosition],
+  );
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
