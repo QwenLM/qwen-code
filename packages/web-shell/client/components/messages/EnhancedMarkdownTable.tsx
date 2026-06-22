@@ -1,5 +1,6 @@
 import {
   Children,
+  Fragment,
   isValidElement,
   useEffect,
   useMemo,
@@ -241,26 +242,57 @@ function getSelectionBounds(range: SelectionRange) {
 function getSelectionText(
   range: SelectionRange | null,
   rows: RowData[],
+  visibleColumnIndexes: number[],
 ): string {
   if (!range) return '';
   const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(range);
+  const selectedColumns = visibleColumnIndexes.filter(
+    (columnIndex) => columnIndex >= minCol && columnIndex <= maxCol,
+  );
+  if (selectedColumns.length === 0) return '';
+
   const lines: string[] = [];
   for (let rowIndex = minRow; rowIndex <= maxRow; rowIndex++) {
     const row = rows[rowIndex];
     if (!row) continue;
-    const values: string[] = [];
-    for (let columnIndex = minCol; columnIndex <= maxCol; columnIndex++) {
-      values.push(row.cells[columnIndex]?.text ?? '');
-    }
-    lines.push(values.join('\t'));
+    lines.push(
+      selectedColumns
+        .map((columnIndex) => row.cells[columnIndex]?.text ?? '')
+        .join('\t'),
+    );
   }
   return lines.join('\n');
 }
 
-function selectionSize(range: SelectionRange | null): number {
+function getVisibleTableText(
+  headers: CellData[],
+  rows: RowData[],
+  visibleColumnIndexes: number[],
+): string {
+  if (visibleColumnIndexes.length === 0) return '';
+  const lines = [
+    visibleColumnIndexes
+      .map((columnIndex) => headers[columnIndex]?.text ?? '')
+      .join('\t'),
+    ...rows.map((row) =>
+      visibleColumnIndexes
+        .map((columnIndex) => row.cells[columnIndex]?.text ?? '')
+        .join('\t'),
+    ),
+  ];
+  return lines.join('\n');
+}
+
+function selectionSize(
+  range: SelectionRange | null,
+  visibleColumnIndexes: number[],
+): number {
   if (!range) return 0;
   const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(range);
-  return (maxRow - minRow + 1) * (maxCol - minCol + 1);
+  const selectedColumnCount = visibleColumnIndexes.filter(
+    (columnIndex) => columnIndex >= minCol && columnIndex <= maxCol,
+  ).length;
+  return (maxRow - minRow + 1) * selectedColumnCount;
 }
 
 function isFilterActive(filter: ColumnFilter | undefined): boolean {
@@ -484,6 +516,22 @@ function SortMenuSection({
         onClick={() => onSort(columnIndex, null)}
       >
         {t('markdownTable.sort.clear')}
+      </button>
+    </div>
+  );
+}
+
+function VisibilityMenuSection({ onHideColumn }: { onHideColumn: () => void }) {
+  const { t } = useI18n();
+
+  return (
+    <div className={styles.filterMenuSection}>
+      <button
+        className={styles.filterMenuAction}
+        type="button"
+        onClick={onHideColumn}
+      >
+        {t('markdownTable.hideColumn')}
       </button>
     </div>
   );
@@ -727,8 +775,10 @@ function ColumnFilterMenu({
   options,
   sort,
   style,
+  canHideColumn,
   onApply,
   onClose,
+  onHideColumn,
   onSort,
 }: {
   columnName: string;
@@ -738,8 +788,10 @@ function ColumnFilterMenu({
   options: FilterOption[];
   sort: SortState | null;
   style?: CSSProperties;
+  canHideColumn: boolean;
   onApply: (columnIndex: number, filter: ColumnFilter | undefined) => void;
   onClose: () => void;
+  onHideColumn: (columnIndex: number) => void;
   onSort: (
     columnIndex: number,
     direction: SortState['direction'] | null,
@@ -845,6 +897,9 @@ function ColumnFilterMenu({
         sortedThisColumn={sortedThisColumn}
         onSort={onSort}
       />
+      {canHideColumn && (
+        <VisibilityMenuSection onHideColumn={() => onHideColumn(columnIndex)} />
+      )}
       <ValueFilterSection
         columnIndex={columnIndex}
         columnName={columnName}
@@ -896,6 +951,10 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
   const [openFilterMenu, setOpenFilterMenu] = useState<OpenFilterMenu | null>(
     null,
   );
+  const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const draggingRef = useRef(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -951,6 +1010,19 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
       ),
     [table.headers, table.rows],
   );
+  const visibleColumnIndexes = useMemo(
+    () =>
+      table.headers
+        .map((_, index) => index)
+        .filter((index) => !hiddenColumns.has(index)),
+    [hiddenColumns, table.headers],
+  );
+
+  useEffect(() => {
+    if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
+      setDetailRowKey(null);
+    }
+  }, [detailRowKey, visibleRows]);
 
   if (table.columnCount === 0) return null;
 
@@ -1026,6 +1098,27 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
     );
   };
 
+  const hideColumn = (columnIndex: number) => {
+    if (visibleColumnIndexes.length <= 1) return;
+    setSelection(null);
+    setOpenFilterMenu(null);
+    setHiddenColumns((current) => {
+      const next = new Set(current);
+      next.add(columnIndex);
+      return next;
+    });
+  };
+
+  const showHiddenColumns = () => {
+    setSelection(null);
+    setHiddenColumns(new Set());
+  };
+
+  const toggleRowDetail = (rowKey: string) => {
+    setSelection(null);
+    setDetailRowKey((current) => (current === rowKey ? null : rowKey));
+  };
+
   const isCellSelected = (rowIndex: number, columnIndex: number): boolean => {
     if (!selection) return false;
     const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(selection);
@@ -1064,19 +1157,29 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
   };
 
   const copySelection = () => {
-    const text = getSelectionText(selection, visibleRows);
+    const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
+    if (!text || !navigator.clipboard) return;
+    void navigator.clipboard.writeText(text).catch(() => {});
+  };
+
+  const copyVisibleTable = () => {
+    const text = getVisibleTableText(
+      table.headers,
+      visibleRows,
+      visibleColumnIndexes,
+    );
     if (!text || !navigator.clipboard) return;
     void navigator.clipboard.writeText(text).catch(() => {});
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
-    const text = getSelectionText(selection, visibleRows);
+    const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
     if (!text) return;
     event.preventDefault();
     event.clipboardData.setData('text/plain', text);
   };
 
-  const selectedCount = selectionSize(selection);
+  const selectedCount = selectionSize(selection, visibleColumnIndexes);
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
   const rowSummary =
@@ -1100,6 +1203,24 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
       <div className={styles.toolbar}>
         <span className={styles.summary}>{rowSummary}</span>
         <span className={styles.hint}>{t('markdownTable.hint')}</span>
+        <button
+          className={styles.copyButton}
+          type="button"
+          onClick={copyVisibleTable}
+        >
+          {t('markdownTable.copyVisible')}
+        </button>
+        {hiddenColumns.size > 0 && (
+          <button
+            className={styles.copyButton}
+            type="button"
+            onClick={showHiddenColumns}
+          >
+            {t('markdownTable.showHiddenColumns', {
+              count: hiddenColumns.size,
+            })}
+          </button>
+        )}
         {activeFilterCount > 0 && (
           <span className={styles.selection}>
             {t('markdownTable.filtersActive', { count: activeFilterCount })}
@@ -1129,7 +1250,12 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
         <table className={styles.table}>
           <thead>
             <tr>
-              {table.headers.map((header, columnIndex) => {
+              <th className={`${styles.headerCell} ${styles.actionHeaderCell}`}>
+                {t('markdownTable.actions')}
+              </th>
+              {visibleColumnIndexes.map((columnIndex) => {
+                const header = table.headers[columnIndex];
+                if (!header) return null;
                 const isSorted = sort?.columnIndex === columnIndex;
                 const isFiltered = isFilterActive(filters[columnIndex]);
                 const isMenuOpen = openFilterMenu?.columnIndex === columnIndex;
@@ -1179,26 +1305,85 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map((row, rowIndex) => (
-              <tr key={row.key}>
-                {row.cells.map((cell, columnIndex) => (
-                  <td
-                    key={cell.key}
-                    className={`${styles.cell} ${
-                      isCellSelected(rowIndex, columnIndex)
-                        ? styles.selectedCell
-                        : ''
-                    }`}
-                    onMouseDown={(event) =>
-                      startSelection(event, rowIndex, columnIndex)
-                    }
-                    onMouseEnter={() => extendSelection(rowIndex, columnIndex)}
-                  >
-                    {cell.content}
-                  </td>
-                ))}
-              </tr>
-            ))}
+            {visibleRows.map((row, rowIndex) => {
+              const detailOpen = detailRowKey === row.key;
+              return (
+                <Fragment key={row.key}>
+                  <tr>
+                    <td className={`${styles.cell} ${styles.actionCell}`}>
+                      <button
+                        className={styles.rowDetailButton}
+                        type="button"
+                        onClick={() => toggleRowDetail(row.key)}
+                        aria-expanded={detailOpen}
+                        aria-label={t(
+                          detailOpen
+                            ? 'markdownTable.closeRowDetailsAria'
+                            : 'markdownTable.rowDetailsAria',
+                          { index: rowIndex + 1 },
+                        )}
+                      >
+                        {t('markdownTable.rowDetails')}
+                      </button>
+                    </td>
+                    {visibleColumnIndexes.map((columnIndex) => {
+                      const cell = row.cells[columnIndex];
+                      if (!cell) return null;
+                      return (
+                        <td
+                          key={cell.key}
+                          className={`${styles.cell} ${
+                            isCellSelected(rowIndex, columnIndex)
+                              ? styles.selectedCell
+                              : ''
+                          }`}
+                          onMouseDown={(event) =>
+                            startSelection(event, rowIndex, columnIndex)
+                          }
+                          onMouseEnter={() =>
+                            extendSelection(rowIndex, columnIndex)
+                          }
+                        >
+                          {cell.content}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                  {detailOpen && (
+                    <tr className={styles.detailRow}>
+                      <td
+                        className={styles.detailCell}
+                        colSpan={visibleColumnIndexes.length + 1}
+                      >
+                        <div className={styles.detailPanel}>
+                          <div className={styles.detailTitle}>
+                            {t('markdownTable.detailsHeader')}
+                          </div>
+                          {visibleColumnIndexes.map((columnIndex) => {
+                            const header = table.headers[columnIndex];
+                            const cell = row.cells[columnIndex];
+                            if (!header || !cell) return null;
+                            return (
+                              <div
+                                key={`${row.key}-detail-${columnIndex}`}
+                                className={styles.detailItem}
+                              >
+                                <div className={styles.detailLabel}>
+                                  {header.content}
+                                </div>
+                                <div className={styles.detailValue}>
+                                  {cell.content}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
         {visibleRows.length === 0 && (
@@ -1216,8 +1401,10 @@ export function EnhancedMarkdownTable({ children }: { children?: ReactNode }) {
           options={columnOptions[openFilterMenu.columnIndex] ?? []}
           sort={sort}
           style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
+          canHideColumn={visibleColumnIndexes.length > 1}
           onApply={setColumnFilter}
           onClose={() => setOpenFilterMenu(null)}
+          onHideColumn={hideColumn}
           onSort={setColumnSort}
         />
       )}

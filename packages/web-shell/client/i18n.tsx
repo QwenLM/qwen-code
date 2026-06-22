@@ -233,6 +233,19 @@ const EN: Messages = {
     return `${count} cell${count === 1 ? '' : 's'} selected`;
   },
   'markdownTable.copyTsv': 'Copy TSV',
+  'markdownTable.copyVisible': 'Quick copy',
+  'markdownTable.hideColumn': 'Hide column',
+  'markdownTable.showHiddenColumns': (v) => {
+    const count = Number(v?.count ?? 0);
+    return `Show ${count} hidden column${count === 1 ? '' : 's'}`;
+  },
+  'markdownTable.rowDetails': 'Details',
+  'markdownTable.rowDetailsAria': (v) =>
+    `View details for row ${v?.index ?? ''}`,
+  'markdownTable.closeRowDetailsAria': (v) =>
+    `Hide details for row ${v?.index ?? ''}`,
+  'markdownTable.detailsHeader': 'Row details',
+  'markdownTable.actions': 'Actions',
   'markdownTable.sortByColumn': (v) => `Sort by ${v?.column ?? ''}`,
   'markdownTable.filterColumn': (v) => `Filter ${v?.column ?? ''}`,
   'markdownTable.emptyFiltered': 'No rows match the filters.',
@@ -248,8 +261,7 @@ const EN: Messages = {
   'markdownTable.filter.custom': 'Custom filter',
   'markdownTable.filter.numberAria': (v) =>
     `Number filter for ${v?.column ?? ''}`,
-  'markdownTable.filter.textAria': (v) =>
-    `Text filter for ${v?.column ?? ''}`,
+  'markdownTable.filter.textAria': (v) => `Text filter for ${v?.column ?? ''}`,
   'markdownTable.filter.numberPlaceholder': 'Value',
   'markdownTable.filter.toPlaceholder': 'To',
   'markdownTable.filter.textPlaceholder': 'Enter filter condition',
@@ -1173,13 +1185,19 @@ const ZH: Messages = {
   'markdownTable.blank': '(空白)',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `${v?.count ?? 0} 行`,
-  'markdownTable.rowsFiltered': (v) =>
-    `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
+  'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
   'markdownTable.hint': '点击表头排序，点击 ▾ 打开筛选。',
   'markdownTable.filtersActive': (v) => `${v?.count ?? 0} 个筛选`,
-  'markdownTable.cellsSelected': (v) =>
-    `${v?.count ?? 0} 个单元格已选中`,
+  'markdownTable.cellsSelected': (v) => `${v?.count ?? 0} 个单元格已选中`,
   'markdownTable.copyTsv': '复制 TSV',
+  'markdownTable.copyVisible': '快捷复制',
+  'markdownTable.hideColumn': '隐藏列',
+  'markdownTable.showHiddenColumns': (v) => `显示 ${v?.count ?? 0} 个隐藏列`,
+  'markdownTable.rowDetails': '详情',
+  'markdownTable.rowDetailsAria': (v) => `查看第 ${v?.index ?? ''} 行详情`,
+  'markdownTable.closeRowDetailsAria': (v) => `收起第 ${v?.index ?? ''} 行详情`,
+  'markdownTable.detailsHeader': '单行详情',
+  'markdownTable.actions': '操作',
   'markdownTable.sortByColumn': (v) => `按 ${v?.column ?? ''} 排序`,
   'markdownTable.filterColumn': (v) => `筛选 ${v?.column ?? ''}`,
   'markdownTable.emptyFiltered': '没有符合筛选条件的行。',
@@ -1193,8 +1211,7 @@ const ZH: Messages = {
     `已显示前 ${v?.count ?? 0} 项，请搜索缩小范围`,
   'markdownTable.filter.noOptions': '没有匹配项',
   'markdownTable.filter.custom': '自定义筛选',
-  'markdownTable.filter.numberAria': (v) =>
-    `数字筛选 ${v?.column ?? ''}`,
+  'markdownTable.filter.numberAria': (v) => `数字筛选 ${v?.column ?? ''}`,
   'markdownTable.filter.textAria': (v) => `文本筛选 ${v?.column ?? ''}`,
   'markdownTable.filter.numberPlaceholder': '数值',
   'markdownTable.filter.toPlaceholder': '到',

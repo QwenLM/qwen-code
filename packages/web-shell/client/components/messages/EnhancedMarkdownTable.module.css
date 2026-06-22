@@ -328,6 +328,75 @@ tr:hover .selectedCell {
   box-shadow: inset 0 0 0 1px var(--accent-color);
 }
 
+.actionHeaderCell,
+.actionCell {
+  width: 72px;
+  min-width: 72px;
+  max-width: 72px;
+  text-align: center;
+}
+
+.actionCell {
+  padding: 4px 6px;
+  cursor: default;
+  user-select: none;
+}
+
+.rowDetailButton {
+  padding: 3px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.rowDetailButton:hover,
+.rowDetailButton[aria-expanded='true'] {
+  background: var(--subtle-bg-strong);
+}
+
+.detailRow {
+  background: var(--subtle-bg);
+}
+
+.detailCell {
+  padding: 0;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--subtle-bg);
+  color: var(--text-primary);
+}
+
+.detailPanel {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+}
+
+.detailTitle {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.detailItem {
+  display: grid;
+  grid-template-columns: minmax(90px, 180px) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.detailLabel {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.detailValue {
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .emptyState {
   padding: 16px;
   color: var(--text-secondary);

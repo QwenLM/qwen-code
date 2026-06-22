@@ -73,11 +73,31 @@ function inputValue(input: HTMLInputElement, value: string): void {
 }
 
 function rowTexts(container: HTMLElement): string[] {
-  return [...container.querySelectorAll('tbody tr')].map((row) =>
-    [...row.querySelectorAll('td')]
-      .map((cell) => cell.textContent ?? '')
-      .join('|'),
+  return [...container.querySelectorAll('tbody tr')]
+    .filter((row) => row.querySelectorAll('td').length > 1)
+    .map((row) =>
+      [...row.querySelectorAll('td')]
+        .slice(1)
+        .map((cell) => cell.textContent ?? '')
+        .join('|'),
+    );
+}
+
+function textButton(container: HTMLElement, text: string): HTMLButtonElement {
+  const el = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === text,
   );
+  expect(el).not.toBeNull();
+  return el!;
+}
+
+function mockClipboard() {
+  const writeText = vi.fn(() => Promise.resolve());
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  return writeText;
 }
 
 function button(container: HTMLElement, label: string): HTMLButtonElement {
@@ -133,13 +153,74 @@ describe('EnhancedMarkdownTable', () => {
     );
     expect(numberFilter).not.toBeNull();
     inputValue(numberFilter!, '10');
-    click(
-      [...container.querySelectorAll('button')].find(
-        (el) => el.textContent === 'Confirm',
-      )!,
-    );
+    click(textButton(container, 'Confirm'));
 
     expect(rowTexts(container)).toEqual(['Gamma|30']);
     expect(container.textContent).toContain('1/3 rows');
+  });
+
+  it('quick copies the visible sorted table', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+
+    click(button(container, 'Sort by Score'));
+    click(textButton(container, 'Quick copy'));
+
+    expect(writeText).toHaveBeenCalledWith(
+      ['Team\tScore', 'Beta\t2', 'Alpha\t10', 'Gamma\t30'].join('\n'),
+    );
+  });
+
+  it('hides columns and restores them from the toolbar', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Hide column'));
+
+    expect(rowTexts(container)).toEqual(['10', '2', '30']);
+    expect(container.textContent).toContain('Show 1 hidden column');
+    expect(container.querySelector('thead')?.textContent).not.toContain('Team');
+
+    click(textButton(container, 'Show 1 hidden column'));
+    expect(rowTexts(container)).toEqual(['Alpha|10', 'Beta|2', 'Gamma|30']);
+  });
+
+  it('quick copy skips hidden columns', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Hide column'));
+    click(textButton(container, 'Quick copy'));
+
+    expect(writeText).toHaveBeenCalledWith(
+      ['Score', '10', '2', '30'].join('\n'),
+    );
+  });
+
+  it('shows row details for visible columns', () => {
+    const container = renderTable();
+
+    click(button(container, 'View details for row 2'));
+    expect(container.textContent).toContain('Row details');
+    expect(container.textContent).toContain('Team');
+    expect(container.textContent).toContain('Beta');
+    expect(container.textContent).toContain('Score');
+    expect(container.textContent).toContain('2');
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Hide column'));
+    expect(container.textContent).not.toContain('Beta');
+    expect(container.textContent).toContain('Score');
+    expect(container.textContent).toContain('2');
+  });
+
+  it('localizes the new controls', () => {
+    const container = renderTable('zh-CN');
+
+    expect(container.textContent).toContain('快捷复制');
+    expect(container.textContent).toContain('详情');
+    click(button(container, '筛选 Team'));
+    expect(container.textContent).toContain('隐藏列');
   });
 });
