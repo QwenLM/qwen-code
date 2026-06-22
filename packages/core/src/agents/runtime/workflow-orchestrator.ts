@@ -16,6 +16,7 @@ import type {
   WorkflowOrchestratorEmitter,
 } from './workflow-sandbox.js';
 import { WorkflowBudgetExceededError } from './workflow-budget.js';
+import { resolveStallMs, runStallResilient } from './workflow-stall.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
@@ -339,67 +340,108 @@ export function createProductionDispatch(
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
-    const { AgentHeadless, ContextState } = await import('./agent-headless.js');
-    const ctx = new ContextState();
-    ctx.set('task_prompt', prompt);
-
-    if (
-      opts.agentType === undefined &&
-      opts.model === undefined &&
-      opts.isolation === undefined &&
-      opts.schema === undefined
-    ) {
-      const subagent = await AgentHeadless.create(
-        opts.label ?? 'workflow-agent',
-        config,
-        {
-          systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
-          initialMessages: [],
-        },
-        {},
-        // T11 (PR #4732 R1): bound resource ceiling so a single agent() call
-        // cannot loop the model indefinitely. Without this, runConfig was {}
-        // and the loop guards never tripped — combined with the cancellation
-        // bug below, workflows were effectively unkillable.
-        {
-          max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-          max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
-        },
-        // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
-        // upstream Tg8 — closes the back-channel that would let a subagent
-        // deliver its answer via user message instead of the script's read.
-        { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
-      );
-      // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
-      // are reported even when `subagent.execute()` THROWS. R1 #3 moved
-      // `reportTokens` before the terminate-mode check but kept it on
-      // the line AFTER `await subagent.execute(...)` — so the production
-      // ERROR path (AgentHeadless's catch arm re-throws after setting
-      // terminateMode=ERROR, see agent-headless.ts:287-294) skipped
-      // recording, leaking the dispatch's tokens. `getExecutionSummary()`
-      // is valid inside the throw path because AgentHeadless's own
-      // outer `finally` finalizes stats before propagating the error.
-      try {
-        await subagent.execute(ctx, signal);
-      } finally {
-        reportTokens(subagent, opts, onTokens);
-      }
-      // T10 (PR #4732 R1): runReasoningLoop does NOT throw on abort / turn /
-      // time limit — it returns with terminateMode = CANCELLED|MAX_TURNS|
-      // TIMEOUT|ERROR and getFinalText() = '' or partial. Without this check,
-      // `await agent(...)` would resolve to '' on user cancel and the script
-      // would happily loop on empty results.
-      const mode = subagent.getTerminateMode();
-      if (mode !== AgentTerminateMode.GOAL) {
-        throw new Error(
-          `Workflow subagent did not complete (terminate mode: ${mode}).`,
-        );
-      }
-      return subagent.getFinalText();
-    }
-
-    return runOverridePath(config, ctx, opts, signal, onTokens);
+    // P-stall: wrap the single-attempt dispatch in the stall watchdog +
+    // retry loop. The wrapper owns the per-attempt AbortController +
+    // AgentEventEmitter; it chains the caller's `signal` into the
+    // per-attempt controller and hands both into `runSingleDispatch`. A
+    // stall fires `controller.abort('stalled')`, the attempt returns
+    // CANCELLED, runSingleDispatch throws its "did not complete" terminal,
+    // and the wrapper retries (up to 3) when `watchdog.stalled()` is set
+    // and the parent signal is NOT aborted.
+    const stallMs = resolveStallMs(
+      typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
+    );
+    return runStallResilient(
+      (attemptSignal, emitter) =>
+        runSingleDispatch(config, prompt, opts, attemptSignal, emitter, onTokens),
+      {
+        stallMs,
+        signal,
+        label: typeof opts.label === 'string' ? opts.label : undefined,
+      },
+    );
   };
+}
+
+/**
+ * One single-attempt production dispatch. Receives the per-attempt abort
+ * signal (the stall wrapper chains the parent signal into it + the watchdog
+ * aborts it on stall) and the per-attempt event emitter (the stall watchdog
+ * is already attached; the override/schema path additionally attaches its
+ * `structured_output` capture listeners to the same emitter). Returns the
+ * agent result on success; throws on any non-success terminal.
+ */
+async function runSingleDispatch(
+  config: Config,
+  prompt: string,
+  opts: WorkflowAgentOpts,
+  attemptSignal: AbortSignal,
+  emitter: AgentEventEmitter,
+  onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+): Promise<WorkflowAgentResult> {
+  const { AgentHeadless, ContextState } = await import('./agent-headless.js');
+  const ctx = new ContextState();
+  ctx.set('task_prompt', prompt);
+
+  if (
+    opts.agentType === undefined &&
+    opts.model === undefined &&
+    opts.isolation === undefined &&
+    opts.schema === undefined
+  ) {
+    const subagent = await AgentHeadless.create(
+      opts.label ?? 'workflow-agent',
+      config,
+      {
+        systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
+        initialMessages: [],
+      },
+      {},
+      // T11 (PR #4732 R1): bound resource ceiling so a single agent() call
+      // cannot loop the model indefinitely. Without this, runConfig was {}
+      // and the loop guards never tripped — combined with the cancellation
+      // bug below, workflows were effectively unkillable.
+      {
+        max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
+        max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      },
+      // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
+      // upstream Tg8 — closes the back-channel that would let a subagent
+      // deliver its answer via user message instead of the script's read.
+      { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
+      // P-stall: the stall-watchdog emitter observes reasoning-loop events
+      // (round/tool/usage) to detect a hang and abort `attemptSignal`.
+      emitter,
+    );
+    // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
+    // are reported even when `subagent.execute()` THROWS. R1 #3 moved
+    // `reportTokens` before the terminate-mode check but kept it on
+    // the line AFTER `await subagent.execute(...)` — so the production
+    // ERROR path (AgentHeadless's catch arm re-throws after setting
+    // terminateMode=ERROR, see agent-headless.ts:287-294) skipped
+    // recording, leaking the dispatch's tokens. `getExecutionSummary()`
+    // is valid inside the throw path because AgentHeadless's own
+    // outer `finally` finalizes stats before propagating the error.
+    try {
+      await subagent.execute(ctx, attemptSignal);
+    } finally {
+      reportTokens(subagent, opts, onTokens);
+    }
+    // T10 (PR #4732 R1): runReasoningLoop does NOT throw on abort / turn /
+    // time limit — it returns with terminateMode = CANCELLED|MAX_TURNS|
+    // TIMEOUT|ERROR and getFinalText() = '' or partial. Without this check,
+    // `await agent(...)` would resolve to '' on user cancel and the script
+    // would happily loop on empty results.
+    const mode = subagent.getTerminateMode();
+    if (mode !== AgentTerminateMode.GOAL) {
+      throw new Error(
+        `Workflow subagent did not complete (terminate mode: ${mode}).`,
+      );
+    }
+    return subagent.getFinalText();
+  }
+
+  return runOverridePath(config, ctx, opts, attemptSignal, onTokens, emitter);
 }
 
 /**
@@ -476,6 +518,13 @@ async function runOverridePath(
    * so the token report site is identical.
    */
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+  /**
+   * P-stall: the per-attempt event emitter with the stall watchdog already
+   * attached. The schema path additionally attaches its `structured_output`
+   * capture listeners to this SAME emitter (rather than creating its own),
+   * so the watchdog and schema capture observe the one subagent's events.
+   */
+  emitter?: AgentEventEmitter,
 ): Promise<WorkflowAgentResult> {
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
@@ -640,9 +689,16 @@ async function runOverridePath(
       dispatchSignal = child.signal;
     }
 
-    const eventEmitter = schemaState
-      ? createSchemaEventEmitter(schemaState)
-      : undefined;
+    // P-stall: use the stall-watchdog emitter the wrapper handed us. The
+    // schema path attaches its `structured_output` capture listeners to the
+    // SAME emitter so both concerns observe the one subagent's events. When
+    // no emitter was passed (legacy / direct callers), fall back to a fresh
+    // emitter only in schema mode (the watchdog is then absent, matching the
+    // pre-P-stall behaviour for direct override-path callers).
+    const eventEmitter = emitter ?? (schemaState ? new AgentEventEmitter() : undefined);
+    if (schemaState && eventEmitter) {
+      attachSchemaListeners(eventEmitter, schemaState);
+    }
 
     const { subagent, dispose } = await subagentMgr.createAgentHeadless(
       augmented,
@@ -1116,8 +1172,10 @@ function createSchemaModeState(): SchemaModeState {
  *     signal into this state's controller, so a caller cancellation
  *     propagates straight to the subagent.
  */
-function createSchemaEventEmitter(state: SchemaModeState): AgentEventEmitter {
-  const emitter = new AgentEventEmitter();
+function attachSchemaListeners(
+  emitter: AgentEventEmitter,
+  state: SchemaModeState,
+): void {
   const targetTool = ToolNames.STRUCTURED_OUTPUT;
   emitter.on(AgentEventType.TOOL_CALL, (evt: AgentToolCallEvent) => {
     if (evt.name !== targetTool) return;
@@ -1142,7 +1200,6 @@ function createSchemaEventEmitter(state: SchemaModeState): AgentEventEmitter {
       state.abortController.abort();
     }
   });
-  return emitter;
 }
 
 /**

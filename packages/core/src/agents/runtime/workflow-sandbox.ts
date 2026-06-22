@@ -394,6 +394,14 @@ export interface WorkflowAgentOpts {
   model?: string;
   isolation?: 'worktree' | 'remote';
   agentType?: string;
+  /**
+   * P-stall: per-call stall-watchdog timeout in milliseconds. The dispatch
+   * is aborted + retried (up to 3 attempts) after this many ms of no
+   * subagent progress (with no tool in flight). Defaults to 60_000 (env
+   * override `QWEN_CODE_WORKFLOW_STALL_SECONDS`). `0` disables the watchdog
+   * for this call.
+   */
+  stallMs?: number;
   // The index signature exists so TypeScript accepts forward-compat opt names
   // at compile time; the runtime allowlist still rejects unknown names.
   [key: string]: unknown;
@@ -838,7 +846,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType'];
+      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);

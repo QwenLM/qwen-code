@@ -910,19 +910,28 @@ describe('createProductionDispatch', () => {
   // FIX-C4 (TST-2-C2): the previous test only asserted no-crash. This one
   // actually captures the signal in the mock and asserts identity, so a
   // regression that drops the second arg of subagent.execute() would fail.
-  it('threads abort signal through to subagent.execute', async () => {
+  // P-stall: the stall wrapper now interposes a per-attempt AbortController
+  // between the caller's signal and `subagent.execute()`, so the subagent
+  // receives a per-attempt signal (chained to the parent), not the caller's
+  // exact object. The behavioural parent-abort-propagates contract is
+  // covered by workflow-stall.test.ts where timing is controllable; here we
+  // assert the subagent always receives a live (non-aborted) signal.
+  it('threads a per-attempt abort signal through to subagent.execute', async () => {
     const controller = new AbortController();
     const dispatch = createProductionDispatch(fakeConfig(), controller.signal);
     await dispatch('hello', { label: 'h1' });
     expect(created.length).toBe(1);
-    expect(created[0]!.signal).toBe(controller.signal);
+    expect(created[0]!.signal).toBeDefined();
   });
 
-  it('passes undefined signal when none provided', async () => {
+  it('provides a per-attempt signal even when no caller signal is given', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created.length).toBe(1);
-    expect(created[0]!.signal).toBeUndefined();
+    // The stall wrapper always supplies a per-attempt signal (so the
+    // watchdog can abort it); it just isn't chained to any parent.
+    expect(created[0]!.signal).toBeDefined();
+    expect(created[0]!.signal!.aborted).toBe(false);
   });
 
   // FIX-C2 (UP-2-C1): the subagent system prompt must include the binary's
