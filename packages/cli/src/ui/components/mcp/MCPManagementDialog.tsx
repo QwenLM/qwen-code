@@ -13,12 +13,15 @@ import type {
   MCPManagementDialogProps,
   MCPServerDisplayInfo,
   MCPToolDisplayInfo,
+  MCPResourceDisplayInfo,
 } from './types.js';
 import { MCP_MANAGEMENT_STEPS } from './types.js';
 import { ServerListStep } from './steps/ServerListStep.js';
 import { ServerDetailStep } from './steps/ServerDetailStep.js';
 import { ToolListStep } from './steps/ToolListStep.js';
 import { ToolDetailStep } from './steps/ToolDetailStep.js';
+import { ResourceListStep } from './steps/ResourceListStep.js';
+import { ResourceDetailStep } from './steps/ResourceDetailStep.js';
 import { DisableScopeSelectStep } from './steps/DisableScopeSelectStep.js';
 import { AuthenticateStep } from './steps/AuthenticateStep.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
@@ -54,6 +57,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   const [selectedTool, setSelectedTool] = useState<MCPToolDisplayInfo | null>(
     null,
   );
+  const [selectedResource, setSelectedResource] =
+    useState<MCPResourceDisplayInfo | null>(null);
   const [navigationStack, setNavigationStack] = useState<string[]>([
     MCP_MANAGEMENT_STEPS.SERVER_LIST,
   ]);
@@ -288,9 +293,34 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     });
   }, [config, selectedServer]);
 
+  // Get server resource list
+  const getServerResources = useCallback((): MCPResourceDisplayInfo[] => {
+    if (!config || !selectedServer) return [];
+
+    const resourceRegistry = config.getResourceRegistry();
+    if (!resourceRegistry) return [];
+
+    return resourceRegistry
+      .getResourcesByServer(selectedServer.name)
+      .map((resource) => ({
+        uri: resource.uri,
+        name: resource.name,
+        title: resource.title,
+        description: resource.description,
+        mimeType: resource.mimeType,
+        size: resource.size,
+        serverName: resource.serverName,
+      }));
+  }, [config, selectedServer]);
+
   // View tool list
   const handleViewTools = useCallback(() => {
     handleNavigateToStep(MCP_MANAGEMENT_STEPS.TOOL_LIST);
+  }, [handleNavigateToStep]);
+
+  // View resource list
+  const handleViewResources = useCallback(() => {
+    handleNavigateToStep(MCP_MANAGEMENT_STEPS.RESOURCE_LIST);
   }, [handleNavigateToStep]);
 
   // Authenticate
@@ -303,6 +333,15 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     (tool: MCPToolDisplayInfo) => {
       setSelectedTool(tool);
       handleNavigateToStep(MCP_MANAGEMENT_STEPS.TOOL_DETAIL);
+    },
+    [handleNavigateToStep],
+  );
+
+  // Select resource
+  const handleSelectResource = useCallback(
+    (resource: MCPResourceDisplayInfo) => {
+      setSelectedResource(resource);
+      handleNavigateToStep(MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL);
     },
     [handleNavigateToStep],
   );
@@ -622,6 +661,36 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           </Box>
         );
         break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
+        headerText = (
+          <Box flexDirection="column">
+            <Text color={theme.text.accent} bold>
+              {t('Resources for {{serverName}}', {
+                serverName: selectedServer?.name || 'Server',
+              })}
+            </Text>
+            <Text color={theme.text.secondary}>
+              ({getServerResources().length}{' '}
+              {getServerResources().length === 1
+                ? t('resource')
+                : t('resources')}
+              )
+            </Text>
+          </Box>
+        );
+        break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
+        headerText = (
+          <Box flexDirection="column">
+            <Text color={theme.text.accent} bold wrap="truncate">
+              {selectedResource?.uri || t('Resource Detail')}
+            </Text>
+            <Text color={theme.text.secondary}>
+              {selectedResource?.serverName || t('Server')}
+            </Text>
+          </Box>
+        );
+        break;
       case MCP_MANAGEMENT_STEPS.AUTHENTICATE:
         headerText = (
           <Box>
@@ -637,7 +706,15 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     }
 
     return headerText;
-  }, [getCurrentStep, selectedServer, selectedTool, getServerTools, servers]);
+  }, [
+    getCurrentStep,
+    selectedServer,
+    selectedTool,
+    selectedResource,
+    getServerTools,
+    getServerResources,
+    servers,
+  ]);
 
   // Render step content
   const renderStepContent = useCallback(() => {
@@ -658,6 +735,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           <ServerDetailStep
             server={selectedServer}
             onViewTools={handleViewTools}
+            onViewResources={handleViewResources}
             onReconnect={handleReconnect}
             onDisable={handleDisable}
             onAuthenticate={handleAuthenticate}
@@ -690,6 +768,24 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           <ToolDetailStep tool={selectedTool} onBack={handleNavigateBack} />
         );
 
+      case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
+        return (
+          <ResourceListStep
+            resources={getServerResources()}
+            serverName={selectedServer?.name || ''}
+            onSelect={handleSelectResource}
+            onBack={handleNavigateBack}
+          />
+        );
+
+      case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
+        return (
+          <ResourceDetailStep
+            resource={selectedResource}
+            onBack={handleNavigateBack}
+          />
+        );
+
       case MCP_MANAGEMENT_STEPS.AUTHENTICATE:
         return (
           <AuthenticateStep
@@ -714,16 +810,20 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     servers,
     selectedServer,
     selectedTool,
+    selectedResource,
     handleSelectServer,
     handleViewTools,
+    handleViewResources,
     handleReconnect,
     handleDisable,
     handleAuthenticate,
     handleClearAuth,
     handleNavigateBack,
     handleSelectTool,
+    handleSelectResource,
     handleSelectDisableScope,
     getServerTools,
+    getServerResources,
     reloadServers,
   ]);
 
@@ -750,6 +850,12 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         footerText = t('↑↓ to navigate · Enter to select · Esc to back');
         break;
       case MCP_MANAGEMENT_STEPS.TOOL_DETAIL:
+        footerText = t('Esc to back');
+        break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
+        footerText = t('↑↓ to navigate · Enter to select · Esc to back');
+        break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
         footerText = t('Esc to back');
         break;
       case MCP_MANAGEMENT_STEPS.AUTHENTICATE:
