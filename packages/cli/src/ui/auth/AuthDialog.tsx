@@ -19,6 +19,7 @@ import { t } from '../../i18n/index.js';
 import {
   findProviderById,
   findProviderByCredentials,
+  findExistingProviderModels,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -171,11 +172,25 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
+  // Model IDs already saved for this provider in settings.json (including any
+  // custom ones), so re-entering the wizard pre-fills them instead of resetting
+  // to the built-in defaults and overwriting them on submit.
+  const existingModelIds = (providerConfig: ProviderConfig): string[] =>
+    findExistingProviderModels(
+      providerConfig,
+      settings.merged.modelProviders as Record<string, unknown> | undefined,
+    )?.models.map((model) => model.id) ?? [];
+
   const handleProviderSelect = (providerId: string) => {
     clearErrors();
     const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
-    setupFlow.start(providerConfig, undefined, existingEnv);
+    setupFlow.start(
+      providerConfig,
+      undefined,
+      existingEnv,
+      existingModelIds(providerConfig),
+    );
     pushView('provider-setup');
   };
 
@@ -228,7 +243,12 @@ export function AuthDialog(): React.JSX.Element {
         pushView('thirdparty-select');
         break;
       case 'CUSTOM_PROVIDER':
-        setupFlow.start(customProvider, undefined, existingEnv);
+        setupFlow.start(
+          customProvider,
+          undefined,
+          existingEnv,
+          existingModelIds(customProvider),
+        );
         pushView('provider-setup');
         break;
       default:

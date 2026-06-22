@@ -130,6 +130,7 @@ export function useProviderSetupFlow(
       config: ProviderConfig,
       initialProtocol?: AuthType,
       existingEnv?: Record<string, string>,
+      existingModelIds?: string[],
     ) => {
       setProvider(config);
       const steps = getVisibleSteps(config);
@@ -160,7 +161,14 @@ export function useProviderSetupFlow(
       setApiKey(prefillKey);
 
       setApiKeyError(null);
-      setModelIds(getDefaultModelIds(config).join(', '));
+      // Pre-fill with the user's previously saved model IDs (including custom
+      // ones) when present, so re-entering the wizard doesn't reset to — and
+      // later overwrite with — the provider's built-in defaults.
+      const initialModelIds =
+        existingModelIds && existingModelIds.length > 0
+          ? existingModelIds
+          : getDefaultModelIds(config);
+      setModelIds(initialModelIds.join(', '));
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);

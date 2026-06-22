@@ -355,6 +355,41 @@ export function getDefaultModelIds(config: ProviderConfig): string[] {
   return config.models?.map((s) => s.id) ?? [];
 }
 
+function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { id?: unknown }).id === 'string'
+  );
+}
+
+/**
+ * Find the model entries a user has already saved for `config` under the
+ * `modelProviders` map in settings. Returns the first protocol (in the
+ * provider's own preference order) that owns stored models, or `undefined`
+ * when none are saved. Used to pre-fill the auth wizard / connect form with
+ * existing model IDs instead of resetting to the provider's built-in defaults.
+ */
+export function findExistingProviderModels(
+  config: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+):
+  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
+  | undefined {
+  const ownsModel = resolveOwnsModel(config);
+  if (!ownsModel || !modelProviders) return undefined;
+  const protocols = config.protocolOptions?.length
+    ? config.protocolOptions
+    : [config.protocol];
+  for (const protocol of protocols) {
+    const raw = modelProviders[protocol];
+    if (!Array.isArray(raw)) continue;
+    const models = raw.filter(isProviderModelConfig).filter(ownsModel);
+    if (models.length > 0) return { protocol, models };
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Check if a step should be shown in the UI
 // ---------------------------------------------------------------------------
