@@ -14,6 +14,7 @@ import { tokenPlanProvider } from './presets/alibaba-token-plan.js';
 import { alibabaStandardProvider } from './presets/alibaba-standard.js';
 import { openRouterProvider } from './presets/openrouter.js';
 import { requestyProvider } from './presets/requesty.js';
+import { pleumRouterProvider } from './presets/pleumrouter.js';
 import { deepseekProvider } from './presets/deepseek.js';
 import { minimaxProvider } from './presets/minimax.js';
 import { zaiProvider } from './presets/zai.js';
@@ -28,6 +29,7 @@ export {
   alibabaStandardProvider,
   openRouterProvider,
   requestyProvider,
+  pleumRouterProvider,
   deepseekProvider,
   minimaxProvider,
   zaiProvider,
@@ -56,6 +58,7 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   modelscopeProvider,
   openRouterProvider,
   requestyProvider,
+  pleumRouterProvider,
   customProvider,
 ];
 
