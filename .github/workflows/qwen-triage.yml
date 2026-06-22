@@ -830,12 +830,25 @@ jobs:
             case "$PREPARE_FAILURE_PHASE" in
               install) PREPARE_COMMAND='npm ci' ;;
               build) PREPARE_COMMAND='npm run build' ;;
-              *) PREPARE_COMMAND='install/build' ;;
+              *)
+                PREPARE_COMMAND='install/build'
+                UNKNOWN_PREPARE_PHASE="$(
+                  printf '%s' "$PREPARE_FAILURE_PHASE" | tr -d '\000' | tr '\r\n' '  ' | head -c 200 | html_escape
+                )"
+                echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
+                ;;
             esac
+            if [ -z "$PREPARE_LOG" ]; then
+              PREPARE_LOG_NOTE='No prepare.log was found in tmux-results, so the install/build log section is omitted.'
+              echo "::warning::${PREPARE_LOG_NOTE}"
+            fi
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
               printf '**tmux real-user testing: fail** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The PR app could not be launched because `%s` failed before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              if [ -n "${PREPARE_LOG_NOTE:-}" ]; then
+                printf '%s\n\n' "$PREPARE_LOG_NOTE"
+              fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
             } > "$BODY_FILE"

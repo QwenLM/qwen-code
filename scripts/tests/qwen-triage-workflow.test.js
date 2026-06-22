@@ -87,12 +87,32 @@ describe('qwen-triage tmux workflow', () => {
 
   it('removes GitHub command files from PR-controlled lifecycle scripts', () => {
     const prepareStep = step('Install and build PR app');
+    const strippedEnv =
+      'env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY';
 
     expect(prepareStep).toContain('-u GITHUB_OUTPUT');
     expect(prepareStep).toContain('-u GITHUB_STATE');
     expect(prepareStep).toContain('-u GITHUB_ENV');
     expect(prepareStep).toContain('-u GITHUB_PATH');
     expect(prepareStep).toContain('-u GITHUB_STEP_SUMMARY');
+    expect(prepareStep).toMatch(
+      new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+npm ci`),
+    );
+    expect(prepareStep).toMatch(
+      new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+npm run build`),
+    );
+  });
+
+  it('does not echo unrecognized prepare failure phases into comments', () => {
+    const postStep = step('Post tmux result comment');
+
+    expect(postStep).toContain("PREPARE_COMMAND='install/build'");
+    expect(postStep).toContain('::warning::Unrecognized prepare failure phase');
+    expect(postStep).toContain('PREPARE_LOG_NOTE=');
+    expect(postStep).toContain(
+      'No prepare.log was found in tmux-results, so the install/build log section is omitted.',
+    );
+    expect(postStep).not.toContain('PREPARE_COMMAND="$PREPARE_FAILURE_PHASE"');
   });
 
   it('installs the heavy tmux test harness only for runnable PRs', () => {
