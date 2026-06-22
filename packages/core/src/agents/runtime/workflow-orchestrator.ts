@@ -16,6 +16,9 @@ import type {
   WorkflowOrchestratorEmitter,
 } from './workflow-sandbox.js';
 import { WorkflowBudgetExceededError } from './workflow-budget.js';
+import { resolveStallMs, runStallResilient } from './workflow-stall.js';
+import { deriveAgentKey, deriveArgsSeed } from './workflow-journal.js';
+import type { WorkflowJournal, JournalReplay } from './workflow-journal.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
@@ -240,6 +243,36 @@ export interface WorkflowRunRequest {
    * `budget.recordSpent(N)` directly.
    */
   budget?: WorkflowBudget;
+  /**
+   * P-nested: resolver for the `workflow(nameOrRef, args)` global. When
+   * provided, the top-level sandbox exposes `workflow`, which resolves a
+   * saved workflow (by name from `.qwen/workflows/<name>.js`, or by
+   * `{scriptPath}`) and runs it as a nested orchestration that shares THIS
+   * run's agent-count cap, concurrency window, token budget, and emitter
+   * (so nested phases/logs and token spend roll into the same registry
+   * entry). Nesting is limited to a single level: the nested sandbox is
+   * created without a `workflow` impl, so a second-level `workflow()` call
+   * throws. When omitted, `workflow()` throws "unavailable". The production
+   * caller (`WorkflowTool`) wires `resolveSavedWorkflowScript(ref, config)`;
+   * tests inject a mock resolver.
+   */
+  resolveSavedWorkflow?: (
+    nameOrRef: string | { scriptPath: string },
+  ) => Promise<{ script: string; scriptPath?: string; name?: string }>;
+  /**
+   * P6: append-only resume journal for THIS run. When provided, every live
+   * `agent()` dispatch appends a `started` then a `result` line keyed by the
+   * rolling prefix-hash. Always set by the production caller (`WorkflowTool`)
+   * so any run is resumable; omitted by tests that don't exercise resume.
+   */
+  journal?: WorkflowJournal;
+  /**
+   * P6: replay maps loaded from a prior run's journal. Present only when
+   * resuming (`Workflow({resumeFromRunId})`). Cached results are served for
+   * the longest unchanged prefix; the first cache miss flips the run to
+   * live for the remainder ("first miss invalidates the suffix").
+   */
+  resumeReplay?: JournalReplay;
 }
 
 export interface WorkflowRunOutcome {
@@ -323,67 +356,108 @@ export function createProductionDispatch(
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
-    const { AgentHeadless, ContextState } = await import('./agent-headless.js');
-    const ctx = new ContextState();
-    ctx.set('task_prompt', prompt);
-
-    if (
-      opts.agentType === undefined &&
-      opts.model === undefined &&
-      opts.isolation === undefined &&
-      opts.schema === undefined
-    ) {
-      const subagent = await AgentHeadless.create(
-        opts.label ?? 'workflow-agent',
-        config,
-        {
-          systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
-          initialMessages: [],
-        },
-        {},
-        // T11 (PR #4732 R1): bound resource ceiling so a single agent() call
-        // cannot loop the model indefinitely. Without this, runConfig was {}
-        // and the loop guards never tripped — combined with the cancellation
-        // bug below, workflows were effectively unkillable.
-        {
-          max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-          max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
-        },
-        // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
-        // upstream Tg8 — closes the back-channel that would let a subagent
-        // deliver its answer via user message instead of the script's read.
-        { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
-      );
-      // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
-      // are reported even when `subagent.execute()` THROWS. R1 #3 moved
-      // `reportTokens` before the terminate-mode check but kept it on
-      // the line AFTER `await subagent.execute(...)` — so the production
-      // ERROR path (AgentHeadless's catch arm re-throws after setting
-      // terminateMode=ERROR, see agent-headless.ts:287-294) skipped
-      // recording, leaking the dispatch's tokens. `getExecutionSummary()`
-      // is valid inside the throw path because AgentHeadless's own
-      // outer `finally` finalizes stats before propagating the error.
-      try {
-        await subagent.execute(ctx, signal);
-      } finally {
-        reportTokens(subagent, opts, onTokens);
-      }
-      // T10 (PR #4732 R1): runReasoningLoop does NOT throw on abort / turn /
-      // time limit — it returns with terminateMode = CANCELLED|MAX_TURNS|
-      // TIMEOUT|ERROR and getFinalText() = '' or partial. Without this check,
-      // `await agent(...)` would resolve to '' on user cancel and the script
-      // would happily loop on empty results.
-      const mode = subagent.getTerminateMode();
-      if (mode !== AgentTerminateMode.GOAL) {
-        throw new Error(
-          `Workflow subagent did not complete (terminate mode: ${mode}).`,
-        );
-      }
-      return subagent.getFinalText();
-    }
-
-    return runOverridePath(config, ctx, opts, signal, onTokens);
+    // P-stall: wrap the single-attempt dispatch in the stall watchdog +
+    // retry loop. The wrapper owns the per-attempt AbortController +
+    // AgentEventEmitter; it chains the caller's `signal` into the
+    // per-attempt controller and hands both into `runSingleDispatch`. A
+    // stall fires `controller.abort('stalled')`, the attempt returns
+    // CANCELLED, runSingleDispatch throws its "did not complete" terminal,
+    // and the wrapper retries (up to 3) when `watchdog.stalled()` is set
+    // and the parent signal is NOT aborted.
+    const stallMs = resolveStallMs(
+      typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
+    );
+    return runStallResilient(
+      (attemptSignal, emitter) =>
+        runSingleDispatch(config, prompt, opts, attemptSignal, emitter, onTokens),
+      {
+        stallMs,
+        signal,
+        label: typeof opts.label === 'string' ? opts.label : undefined,
+      },
+    );
   };
+}
+
+/**
+ * One single-attempt production dispatch. Receives the per-attempt abort
+ * signal (the stall wrapper chains the parent signal into it + the watchdog
+ * aborts it on stall) and the per-attempt event emitter (the stall watchdog
+ * is already attached; the override/schema path additionally attaches its
+ * `structured_output` capture listeners to the same emitter). Returns the
+ * agent result on success; throws on any non-success terminal.
+ */
+async function runSingleDispatch(
+  config: Config,
+  prompt: string,
+  opts: WorkflowAgentOpts,
+  attemptSignal: AbortSignal,
+  emitter: AgentEventEmitter,
+  onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+): Promise<WorkflowAgentResult> {
+  const { AgentHeadless, ContextState } = await import('./agent-headless.js');
+  const ctx = new ContextState();
+  ctx.set('task_prompt', prompt);
+
+  if (
+    opts.agentType === undefined &&
+    opts.model === undefined &&
+    opts.isolation === undefined &&
+    opts.schema === undefined
+  ) {
+    const subagent = await AgentHeadless.create(
+      opts.label ?? 'workflow-agent',
+      config,
+      {
+        systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
+        initialMessages: [],
+      },
+      {},
+      // T11 (PR #4732 R1): bound resource ceiling so a single agent() call
+      // cannot loop the model indefinitely. Without this, runConfig was {}
+      // and the loop guards never tripped — combined with the cancellation
+      // bug below, workflows were effectively unkillable.
+      {
+        max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
+        max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      },
+      // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
+      // upstream Tg8 — closes the back-channel that would let a subagent
+      // deliver its answer via user message instead of the script's read.
+      { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
+      // P-stall: the stall-watchdog emitter observes reasoning-loop events
+      // (round/tool/usage) to detect a hang and abort `attemptSignal`.
+      emitter,
+    );
+    // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
+    // are reported even when `subagent.execute()` THROWS. R1 #3 moved
+    // `reportTokens` before the terminate-mode check but kept it on
+    // the line AFTER `await subagent.execute(...)` — so the production
+    // ERROR path (AgentHeadless's catch arm re-throws after setting
+    // terminateMode=ERROR, see agent-headless.ts:287-294) skipped
+    // recording, leaking the dispatch's tokens. `getExecutionSummary()`
+    // is valid inside the throw path because AgentHeadless's own
+    // outer `finally` finalizes stats before propagating the error.
+    try {
+      await subagent.execute(ctx, attemptSignal);
+    } finally {
+      reportTokens(subagent, opts, onTokens);
+    }
+    // T10 (PR #4732 R1): runReasoningLoop does NOT throw on abort / turn /
+    // time limit — it returns with terminateMode = CANCELLED|MAX_TURNS|
+    // TIMEOUT|ERROR and getFinalText() = '' or partial. Without this check,
+    // `await agent(...)` would resolve to '' on user cancel and the script
+    // would happily loop on empty results.
+    const mode = subagent.getTerminateMode();
+    if (mode !== AgentTerminateMode.GOAL) {
+      throw new Error(
+        `Workflow subagent did not complete (terminate mode: ${mode}).`,
+      );
+    }
+    return subagent.getFinalText();
+  }
+
+  return runOverridePath(config, ctx, opts, attemptSignal, onTokens, emitter);
 }
 
 /**
@@ -460,6 +534,13 @@ async function runOverridePath(
    * so the token report site is identical.
    */
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+  /**
+   * P-stall: the per-attempt event emitter with the stall watchdog already
+   * attached. The schema path additionally attaches its `structured_output`
+   * capture listeners to this SAME emitter (rather than creating its own),
+   * so the watchdog and schema capture observe the one subagent's events.
+   */
+  emitter?: AgentEventEmitter,
 ): Promise<WorkflowAgentResult> {
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
@@ -624,9 +705,16 @@ async function runOverridePath(
       dispatchSignal = child.signal;
     }
 
-    const eventEmitter = schemaState
-      ? createSchemaEventEmitter(schemaState)
-      : undefined;
+    // P-stall: use the stall-watchdog emitter the wrapper handed us. The
+    // schema path attaches its `structured_output` capture listeners to the
+    // SAME emitter so both concerns observe the one subagent's events. When
+    // no emitter was passed (legacy / direct callers), fall back to a fresh
+    // emitter only in schema mode (the watchdog is then absent, matching the
+    // pre-P-stall behaviour for direct override-path callers).
+    const eventEmitter = emitter ?? (schemaState ? new AgentEventEmitter() : undefined);
+    if (schemaState && eventEmitter) {
+      attachSchemaListeners(eventEmitter, schemaState);
+    }
 
     const { subagent, dispose } = await subagentMgr.createAgentHeadless(
       augmented,
@@ -1100,8 +1188,10 @@ function createSchemaModeState(): SchemaModeState {
  *     signal into this state's controller, so a caller cancellation
  *     propagates straight to the subagent.
  */
-function createSchemaEventEmitter(state: SchemaModeState): AgentEventEmitter {
-  const emitter = new AgentEventEmitter();
+function attachSchemaListeners(
+  emitter: AgentEventEmitter,
+  state: SchemaModeState,
+): void {
   const targetTool = ToolNames.STRUCTURED_OUTPUT;
   emitter.on(AgentEventType.TOOL_CALL, (evt: AgentToolCallEvent) => {
     if (evt.name !== targetTool) return;
@@ -1126,7 +1216,6 @@ function createSchemaEventEmitter(state: SchemaModeState): AgentEventEmitter {
       state.abortController.abort();
     }
   });
-  return emitter;
 }
 
 /**
@@ -1205,7 +1294,73 @@ export class WorkflowOrchestrator {
     let agentCount = 0;
     const emitter = req.emitter;
     const budget = req.budget;
+
+    // P6: resume journal state. `prefixHash` chains across sequential
+    // agent() calls; `hadMiss` enforces the "first miss invalidates the
+    // suffix" invariant (once any dispatch runs live, no later dispatch
+    // trusts the cache). `journalAgentId` numbers journal entries.
+    const journal = req.journal;
+    const replay = req.resumeReplay;
+    // Seed the chain with the run's `args` so a resume with different args
+    // produces a disjoint key space (every dispatch misses → re-runs live)
+    // rather than silently replaying the prior run's results.
+    let prefixHash = deriveArgsSeed(req.args);
+    let hadMiss = false;
+    let journalAgentId = 0;
+
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
+      // P6: journal cache lookup — runs BEFORE the budget gate + agent
+      // counter so a cached result is free (no token spend, no agent-cap
+      // slot, no live dispatch). The key is computed SYNCHRONOUSLY here so
+      // the rolling prefix chains in deterministic call order even under
+      // parallel()/pipeline() fan-out (the thunks' synchronous prefixes run
+      // in array/microtask order).
+      let journalKey: string | undefined;
+      // Captured per-dispatch (NOT read from the shared counter later) so a
+      // concurrent dispatch can't clobber the id used in the result append.
+      let journalEntryId: string | undefined;
+      if (journal) {
+        journalKey = deriveAgentKey(prefixHash, prompt, opts);
+        prefixHash = journalKey;
+        if (!hadMiss && replay) {
+          const cached = replay.results.get(journalKey);
+          if (cached !== undefined) {
+            // Cache hit: surface dispatch + completion to the registry so
+            // the UI counters advance, then return the cached result. A
+            // prior `started`-without-`result` for this key means the agent
+            // was respawned in an earlier resume — log it for diagnostics.
+            const respawns = replay.started.get(journalKey);
+            if (respawns && respawns.length > 0) {
+              debugLogger.info(
+                `[Workflow] resume cache hit after ${respawns.length} prior ` +
+                  `respawn(s) for runId=${runId}.`,
+              );
+            }
+            const label = typeof opts.label === 'string' ? opts.label : undefined;
+            try {
+              emitter?.agentDispatched?.(label);
+            } catch (e) {
+              debugLogger.warn('emitter.agentDispatched threw:', e);
+            }
+            try {
+              emitter?.agentCompleted?.(label);
+            } catch (e) {
+              debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            return Promise.resolve(cached.result as WorkflowAgentResult);
+          }
+        }
+        // First miss → suffix goes live; append a `started` marker so an
+        // interrupted run leaves a trace for the next resume.
+        hadMiss = true;
+        journalEntryId = String((journalAgentId += 1));
+        journal
+          .append({ type: 'started', key: journalKey, agentId: journalEntryId })
+          .catch((e) =>
+            debugLogger.warn(`journal started-append failed: ${e}`),
+          );
+      }
+
       // P5 R3 (wenshao #7): budget gate runs BEFORE `agentCount += 1`
       // so budget-rejected dispatches don't consume agent-cap slots.
       // Previously the order was reversed: budget exhaustion incremented
@@ -1292,6 +1447,23 @@ export class WorkflowOrchestrator {
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
             }
+            // P6: append the live result to the journal so a later resume
+            // serves it from cache. Only JSON-serializable results are
+            // resumable; a non-serializable result is skipped (the next
+            // resume re-runs that dispatch live). Fire-and-forget — a
+            // journal write failure must not fail the dispatch.
+            if (journal && journalKey !== undefined) {
+              journal
+                .append({
+                  type: 'result',
+                  key: journalKey,
+                  agentId: journalEntryId ?? '',
+                  result,
+                })
+                .catch((e) =>
+                  debugLogger.warn(`journal result-append failed: ${e}`),
+                );
+            }
             // P5: re-snapshot the budget after successful completion so the
             // registry sees the cumulative spent. The dispatch's onTokens
             // callback (when wired) has already called budget.recordSpent
@@ -1339,11 +1511,45 @@ export class WorkflowOrchestrator {
     const parallelImpl = makeParallelImpl(signal);
     const pipelineImpl = makePipelineImpl(signal);
 
+    // P-nested: build the host-side `workflow(nameOrRef, args)` impl. Only
+    // wired at the top level (when a resolver is provided). The nested
+    // sandbox shares THIS run's countedDispatch (so agentCount cap + budget
+    // gate are global across parent + nested), the same concurrency window
+    // (parallelImpl / pipelineImpl close over the shared `signal`/limiter),
+    // the same budget, and the same emitter (nested phase()/log() and token
+    // spend roll into the same registry entry). Crucially the nested sandbox
+    // is created WITHOUT a `workflow` impl — that throws on a second-level
+    // `workflow()` call, enforcing the single-level nesting limit.
+    const resolveSavedWorkflow = req.resolveSavedWorkflow;
+    const workflowImpl = resolveSavedWorkflow
+      ? async (
+          nameOrRef: string | { scriptPath: string },
+          nestedArgs: unknown,
+        ): Promise<unknown> => {
+          const resolved = await resolveSavedWorkflow(nameOrRef);
+          const nestedSandbox = createWorkflowSandbox({
+            args: nestedArgs,
+            dispatch: countedDispatch,
+            parallel: parallelImpl,
+            pipeline: pipelineImpl,
+            abortOnTimeout: req.abortOnTimeout,
+            emitter,
+            budget,
+            // No `workflow` — single-level nesting limit.
+          });
+          // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
+          // rejection crosses back to the parent script's `await workflow()`
+          // so the parent can try/catch it like any other async failure.
+          return nestedSandbox.run(resolved.script);
+        }
+      : undefined;
+
     const sandbox = createWorkflowSandbox({
       args: req.args,
       dispatch: countedDispatch,
       parallel: parallelImpl,
       pipeline: pipelineImpl,
+      workflow: workflowImpl,
       abortOnTimeout: req.abortOnTimeout,
       emitter,
       budget,
@@ -1400,6 +1606,9 @@ export class WorkflowOrchestrator {
 async function settleToNullArray(
   thunks: Array<() => Promise<unknown>>,
   signal?: AbortSignal,
+  // P5 R3 Gap-3: which fan-out primitive is calling, for the budget-drop
+  // summary log. Defaults to 'parallel'.
+  kind: 'parallel' | 'pipeline' = 'parallel',
 ): Promise<unknown[]> {
   const settled = await Promise.allSettled(
     thunks.map((t) => Promise.resolve().then(t)),
@@ -1423,13 +1632,32 @@ async function settleToNullArray(
   // return — all of which surface as the same `null` to the script by
   // design. The log line is the only operator-side signal of which path
   // fired; the contract to the script stays opaque.
-  return settled.map((r, i) => {
+  //
+  // P5 R3 Gap-3: budget-exhausted drops are counted separately and
+  // summarized so an operator can distinguish "N slots dropped because the
+  // token budget was hit" (expected, capacity-shaped) from arbitrary
+  // dispatch failures. Duck-type on the error name because the rejection
+  // reason may be a cross-realm Error whose `instanceof` is unreliable.
+  let budgetDropped = 0;
+  const result = settled.map((r, i) => {
     if (r.status === 'fulfilled') return r.value;
-    debugLogger.warn(
-      `Workflow thunk at index ${i} rejected: ${String((r.reason as { message?: unknown })?.message ?? r.reason)}`,
-    );
+    const reason = r.reason as { name?: unknown; message?: unknown };
+    if (reason?.name === 'WorkflowBudgetExceededError') {
+      budgetDropped += 1;
+    } else {
+      debugLogger.warn(
+        `Workflow thunk at index ${i} rejected: ${String(reason?.message ?? r.reason)}`,
+      );
+    }
     return null;
   });
+  if (budgetDropped > 0) {
+    debugLogger.warn(
+      `${kind}: ${budgetDropped} slot${budgetDropped === 1 ? '' : 's'} ` +
+        `dropped — token budget exceeded.`,
+    );
+  }
+  return result;
 }
 
 /**
@@ -1508,7 +1736,7 @@ function makePipelineImpl(
     const chains = items.map(
       (item, idx) => () => runPipelineChain(item, idx, stages),
     );
-    return settleToNullArray(chains, signal);
+    return settleToNullArray(chains, signal, 'pipeline');
   };
 }
 
