@@ -18,7 +18,7 @@ import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 
-const MISSING_TOOL_RESULT_MESSAGE =
+export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
   'before this tool completed.';
 
@@ -75,6 +75,12 @@ export class HistoryReplayer {
         danglingError = error;
       }
 
+      if (replayError && danglingError) {
+        throw new AggregateError(
+          [replayError, danglingError],
+          'Replay and dangling-cleanup both failed',
+        );
+      }
       if (replayError) {
         throw replayError;
       }

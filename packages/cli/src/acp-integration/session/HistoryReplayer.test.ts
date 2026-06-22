@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { HistoryReplayer } from './HistoryReplayer.js';
+import {
+  HistoryReplayer,
+  MISSING_TOOL_RESULT_MESSAGE,
+} from './HistoryReplayer.js';
 import type { SessionContext } from './types.js';
 import type {
   Config,
@@ -54,9 +57,6 @@ describe('HistoryReplayer', () => {
   });
 
   const toEpochMs = (ts: string) => new Date(ts).getTime();
-  const missingToolResultMessage =
-    'Tool result missing from saved history; the previous run likely ended ' +
-    'before this tool completed.';
   const sentUpdates = () =>
     sendUpdateSpy.mock.calls.map(
       (call: unknown[]) => call[0] as Record<string, unknown>,
@@ -352,7 +352,7 @@ describe('HistoryReplayer', () => {
             type: 'content',
             content: {
               type: 'text',
-              text: missingToolResultMessage,
+              text: MISSING_TOOL_RESULT_MESSAGE,
             },
           },
         ],
@@ -413,7 +413,7 @@ describe('HistoryReplayer', () => {
       });
     });
 
-    it('should continue failing dangling calls after a synthetic update error', async () => {
+    it('should throw dangling errors and continue failing later dangling calls', async () => {
       const record: ChatRecord = {
         ...createAssistantRecord(''),
         message: {
@@ -466,6 +466,52 @@ describe('HistoryReplayer', () => {
         toolCallId: 'call-b',
         status: 'failed',
       });
+    });
+
+    it('should aggregate replay and dangling cleanup errors', async () => {
+      const danglingRecord: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+      const failingRecord = createUserRecord('this send fails');
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'user_message_chunk') {
+            throw new Error('replay failed');
+          }
+          if (update['sessionUpdate'] === 'tool_call_update') {
+            throw new Error('dangling cleanup failed');
+          }
+        },
+      );
+
+      let caughtError: unknown;
+      try {
+        await replayer.replay([danglingRecord, failingRecord]);
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(AggregateError);
+      expect((caughtError as AggregateError).message).toBe(
+        'Replay and dangling-cleanup both failed',
+      );
+      expect(
+        (caughtError as AggregateError).errors.map((error) =>
+          error instanceof Error ? error.message : String(error),
+        ),
+      ).toEqual(['replay failed', 'dangling cleanup failed']);
     });
 
     it('should not fail function calls that have matching tool results', async () => {
