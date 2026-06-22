@@ -1187,16 +1187,65 @@ export const AppContainer = (props: AppContainerProps) => {
   const openSkillReviewDialog = useCallback(() => {
     setIsSkillReviewDialogOpen(true);
   }, []);
+  // Tracks the pending batch the user dismissed via Esc ("decide later") so
+  // the idle effect doesn't immediately reopen the dialog on the next idle
+  // transition. Auto-open resumes when a new batch (different taskId) arrives.
+  const skillReviewDismissedTaskIdRef = useRef<string | null>(null);
   const closeSkillReviewDialog = useCallback(() => {
+    if (skillReviewPending) {
+      skillReviewDismissedTaskIdRef.current = skillReviewPending.taskId;
+    }
     setIsSkillReviewDialogOpen(false);
-    setSkillReviewPending(null);
-  }, []);
-  const acceptPendingSkill = useCallback((_skillName: string) => {
-    // Placeholder — real implementation lands in Task 11.
-  }, []);
-  const rejectPendingSkill = useCallback((_skillName: string) => {
-    // Placeholder — real implementation lands in Task 11.
-  }, []);
+  }, [skillReviewPending]);
+  const acceptPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .acceptPendingSkillFromTask(skillReviewPending.taskId, skillName);
+    },
+    [config, skillReviewPending],
+  );
+  const rejectPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .rejectPendingSkillFromTask(skillReviewPending.taskId, skillName);
+    },
+    [config, skillReviewPending],
+  );
+
+  // Subscribe to skill-review task changes and keep skillReviewPending in sync.
+  useEffect(() => {
+    const mgr = config.getMemoryManager();
+    const projectRoot = config.getProjectRoot();
+    const refresh = () => {
+      const tasks = mgr.listTasksByType('skill-review', projectRoot);
+      const withPending = tasks.find((tk) => {
+        const p = tk.metadata?.['pendingSkills'];
+        return Array.isArray(p) && p.length > 0;
+      });
+      if (!withPending) {
+        setSkillReviewPending(null);
+        return;
+      }
+      const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
+        name: string;
+        description: string;
+      }>;
+      setSkillReviewPending({
+        taskId: withPending.id,
+        skills: pendingSkills.map((p) => ({
+          name: p.name,
+          description: p.description,
+        })),
+      });
+    };
+    const unsub = mgr.subscribe(refresh, { taskType: 'skill-review' });
+    refresh();
+    return unsub;
+  }, [config]);
 
   const slashCommandActions = useMemo(
     () => ({
@@ -1542,6 +1591,18 @@ export const AppContainer = (props: AppContainerProps) => {
       updateHandlerRef.current?.flush();
     }
   }, [streamingState]);
+
+  // Auto-open the skill-review dialog when idle and there are pending skills.
+  useEffect(() => {
+    if (
+      skillReviewPending &&
+      skillReviewPending.skills.length > 0 &&
+      streamingState === StreamingState.Idle &&
+      skillReviewPending.taskId !== skillReviewDismissedTaskIdRef.current
+    ) {
+      setIsSkillReviewDialogOpen(true);
+    }
+  }, [skillReviewPending, streamingState]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
