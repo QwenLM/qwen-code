@@ -618,6 +618,23 @@ jobs:
             else
               gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
                 || echo "::warning::Failed to comment on existing issue #${issue_number}; proceeding with dispatch."
+              # Mirror the scheduled scan's exclusions for this release-forced
+              # dispatch: don't send the agent onto an issue a maintainer has
+              # taken over (assignee / linked PR / status/need-information /
+              # status/need-retesting). Fail closed — if the check can't run,
+              # skip the dispatch.
+              still_eligible="$(gh issue list --repo "${GH_REPO}" --state open \
+                --search "\"Release Failed for ${RELEASE_TAG}\" in:title no:assignee -linked:pr -label:status/need-information -label:status/need-retesting" \
+                --json number --jq "any(.[]; .number == ${issue_number})" || echo 'false')"
+              if [[ "${still_eligible}" != "true" ]]; then
+                echo "::warning::Reused ${issue_url} looks maintainer-owned (assignee / linked PR / need-information / need-retesting); skipping autofix dispatch."
+                exit 0
+              fi
+              # Ensure the fallback labels are present so that, if the dispatch
+              # below fails, the scheduled ready-for-agent scan can still find it.
+              gh issue edit "${issue_number}" --repo "${GH_REPO}" \
+                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL}" \
+                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL} on issue #${issue_number}."
             fi
           fi
 
