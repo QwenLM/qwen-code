@@ -5312,6 +5312,267 @@ describe('QwenAgent extMethod renameSession routing', () => {
   });
 });
 
+describe('QwenAgent unstable_listSessions cursor parsing', () => {
+  let capturedAgentFactory:
+    | ((conn: { closed: Promise<void> }) => {
+        unstable_listSessions: (
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      })
+    | undefined;
+
+  let mockConfig: Config;
+  let processExitSpy: MockInstance<typeof process.exit>;
+  let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
+  let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
+
+  const mockArgv = {} as CliArgs;
+  const mockSettings = { merged: { mcpServers: {} } } as LoadedSettings;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as InstanceType<typeof AgentSideConnection>;
+    });
+
+    mockConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+
+    processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    stdinDestroySpy = vi
+      .spyOn(process.stdin, 'destroy')
+      .mockImplementation(() => process.stdin);
+    stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockImplementation(() => process.stdout);
+  });
+
+  afterEach(() => {
+    processExitSpy.mockRestore();
+    stdinDestroySpy.mockRestore();
+    stdoutDestroySpy.mockRestore();
+  });
+
+  async function bootAgent() {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    return { agent, agentPromise };
+  }
+
+  it('rejects invalid cursors before listing sessions', async () => {
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      for (const cursor of ['abc', 'Infinity', '-Infinity']) {
+        await expect(
+          agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
+        ).rejects.toThrow(
+          `Invalid cursor: "${cursor}" is not a valid numeric cursor`,
+        );
+      }
+      expect(SessionService).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('treats absent cursor values as no cursor', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      for (const cursor of [undefined, null, '']) {
+        listSessions.mockClear();
+        await expect(
+          agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
+        ).resolves.toEqual({
+          sessions: [],
+          nextCursor: undefined,
+        });
+        expect(listSessions).toHaveBeenCalledWith({
+          cursor: undefined,
+          size: undefined,
+        });
+      }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('ignores invalid _meta.size values', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      for (const size of [
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        Number.NaN,
+        0.5,
+        Number.MAX_SAFE_INTEGER + 1,
+        '2',
+      ]) {
+        listSessions.mockClear();
+        await expect(
+          agent.unstable_listSessions({
+            cwd: '/tmp/project',
+            _meta: { size },
+          }),
+        ).resolves.toEqual({
+          sessions: [],
+          nextCursor: undefined,
+        });
+        expect(listSessions).toHaveBeenCalledWith({
+          cursor: undefined,
+          size: undefined,
+        });
+      }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('clamps _meta.size to the supported page range', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      for (const { input, expected } of [
+        { input: 0, expected: 1 },
+        { input: -5, expected: 1 },
+        { input: 200, expected: 100 },
+      ]) {
+        listSessions.mockClear();
+        await expect(
+          agent.unstable_listSessions({
+            cwd: '/tmp/project',
+            _meta: { size: input },
+          }),
+        ).resolves.toEqual({
+          sessions: [],
+          nextCursor: undefined,
+        });
+        expect(listSessions).toHaveBeenCalledWith({
+          cursor: undefined,
+          size: expected,
+        });
+      }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('passes a finite cursor through to SessionService', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [
+        {
+          sessionId: 'session-1',
+          cwd: '/tmp/project',
+          startTime: '2026-06-22T01:00:00.000Z',
+          prompt: 'hello',
+          mtime: 1_797_860_000_000,
+        },
+      ],
+      nextCursor: 1_797_859_999_000,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await expect(
+        agent.unstable_listSessions({
+          cwd: '/tmp/project',
+          cursor: '1797860000000',
+          _meta: { size: 2 },
+        }),
+      ).resolves.toEqual({
+        sessions: [
+          {
+            _meta: {
+              createdAt: '2026-06-22T01:00:00.000Z',
+              startTime: '2026-06-22T01:00:00.000Z',
+              preview: 'hello',
+            },
+            cwd: '/tmp/project',
+            sessionId: 'session-1',
+            title: 'hello',
+            updatedAt: '2026-12-21T13:33:20.000Z',
+          },
+        ],
+        nextCursor: '1797859999000',
+      });
+      expect(SessionService).toHaveBeenCalledWith('/tmp/project');
+      expect(listSessions).toHaveBeenCalledWith({
+        cursor: 1_797_860_000_000,
+        size: 2,
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+});
+
 // Tests for QwenAgent.loadSession() and QwenAgent.unstable_resumeSession()
 // — locks the session-existence guard, the resourceNotFound error contract,
 // and the resume-vs-load semantic difference (load replays UI history,

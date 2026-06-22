@@ -50,7 +50,7 @@ import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
 } from '../workspace-service/types.js';
-import type { AcpConnection } from './connectionRegistry.js';
+import type { AcpConnection } from './connection-registry.js';
 import {
   QWEN_META_KEY,
   QWEN_METHOD_NS,
@@ -68,7 +68,7 @@ import {
   type JsonRpcInbound,
   type JsonRpcRequest,
   type JsonRpcResponse,
-} from './jsonRpc.js';
+} from './json-rpc.js';
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -2697,5 +2697,5 @@ export class AcpDispatcher {
   }
 }
 
-// Re-export so tests can reference the request type without the jsonRpc path.
+// Re-export so tests can reference the request type without the json-rpc path.
 export type { JsonRpcRequest };

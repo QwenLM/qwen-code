@@ -12,9 +12,9 @@ import {
   parseInbound,
   QWEN_METHOD_NS,
   RPC,
-} from './jsonRpc.js';
+} from './json-rpc.js';
 
-describe('jsonRpc helpers', () => {
+describe('json-rpc helpers', () => {
   it('classifies a request', () => {
     const m = { jsonrpc: '2.0', id: 1, method: 'initialize' };
     expect(isRequest(m)).toBe(true);

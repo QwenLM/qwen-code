@@ -6,7 +6,7 @@
 
 /**
  * Minimal JSON-RPC 2.0 helpers for the ACP-over-HTTP transport
- * (`packages/cli/src/serve/acpHttp/`). The official ACP Streamable HTTP
+ * (`packages/cli/src/serve/acp-http/`). The official ACP Streamable HTTP
  * transport (RFD #721) frames every message as a JSON-RPC 2.0 object;
  * this module owns the wire types + parse/validate/serialize so the
  * dispatcher stays focused on bridge routing.

@@ -23,6 +23,13 @@ import {
 } from '../../themes/color-utils.js';
 import { t } from '../../../i18n/index.js';
 import { getCachedStringWidth } from '../../utils/textUtils.js';
+import { formatDuration } from '../../utils/displayUtils.js';
+
+const isUtf8 = /utf-?8/i.test(
+  process.env['LANG'] || process.env['LC_ALL'] || '',
+);
+export const THINKING_ICON =
+  !process.env['CI'] && isUtf8 ? '💡 ' : isUtf8 ? '⟡ ' : '';
 
 interface UserMessageProps {
   text: string;
@@ -360,16 +367,6 @@ function tailVisualLines(
   return lines.slice(-maxLines).join('\n');
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
-  }
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
-}
-
 export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   text,
   isPending,
@@ -388,7 +385,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
         : t('Thinking');
     return (
       <Text dimColor italic>
-        {label} {t('(ctrl+o to expand)')}
+        {THINKING_ICON}
+        {label} {t('(alt+t to expand)')}
       </Text>
     );
   }
@@ -409,7 +407,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Box flexDirection="column">
         <Text dimColor italic>
-          ⟡ {t('Thinking')}…{durationSuffix}
+          {THINKING_ICON}
+          {t('Thinking')}…{durationSuffix}
         </Text>
         <Box paddingLeft={2}>
           <Text dimColor wrap="truncate">
@@ -427,7 +426,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {expandedLabel}
+        {THINKING_ICON}
+        {expandedLabel} {t('(alt+t to collapse)')}
       </Text>
       <Box paddingLeft={2} flexDirection="column">
         <MarkdownDisplay

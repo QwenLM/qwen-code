@@ -116,7 +116,7 @@ export {
   // embeds that want to recognize these errors (parallel to how
   // they already match `WorkspaceInitConflictError` /
   // `SessionNotFoundError`) need them on the public barrel; without
-  // this they have to deep-import `./acpSessionBridge.js`.
+  // this they have to deep-import `./acp-session-bridge.js`.
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
@@ -133,7 +133,7 @@ export {
   type BridgeSpawnRequest,
   type ChannelFactory,
   type HttpAcpBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 export {
   EventBus,
   EVENT_SCHEMA_VERSION,

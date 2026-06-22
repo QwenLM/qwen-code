@@ -14,7 +14,7 @@ import {
   runQwenServe,
   validatePolicyConfig,
 } from './run-qwen-serve.js';
-import type { HttpAcpBridge } from './acpSessionBridge.js';
+import type { HttpAcpBridge } from './acp-session-bridge.js';
 
 /**
  * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Lock the

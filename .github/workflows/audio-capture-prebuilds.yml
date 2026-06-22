@@ -34,12 +34,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # arm64 runner; also cross-compiles the x64 slice (see Build step) to
+          # avoid the scarce macos-13 Intel runner that queues 20+ min (#5642).
           - os: 'macos-14'
             runner: 'macos-14'
             arch: 'arm64'
-          - os: 'macos-13'
-            runner: 'macos-13'
-            arch: 'x64'
           - os: 'ubuntu-latest'
             runner: 'ubuntu-latest'
             arch: 'x64'
@@ -59,7 +58,14 @@ jobs:
       - name: 'Install build deps'
         run: 'npm install --no-workspaces --ignore-scripts --no-audit --no-fund'
       - name: 'Build prebuild'
-        run: 'npm run prebuildify'
+        shell: 'bash'
+        run: |
+          npm run prebuildify
+          # Cross-compile the Intel (x64) slice on this arm64 runner instead of
+          # a separate macos-13 runner (frameworks are universal). See #5642.
+          if [ "$RUNNER_OS" = 'macOS' ]; then
+            npm run prebuildify -- --arch x64
+          fi
       - name: 'Upload prebuild'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:

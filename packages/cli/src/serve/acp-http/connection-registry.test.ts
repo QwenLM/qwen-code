@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ConnectionRegistry } from './connectionRegistry.js';
-import type { TransportStream } from './transportStream.js';
+import { ConnectionRegistry } from './connection-registry.js';
+import type { TransportStream } from './transport-stream.js';
 
 class FakeStream implements TransportStream {
   isClosed = false;

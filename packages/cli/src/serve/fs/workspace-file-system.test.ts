@@ -768,6 +768,27 @@ describe('WorkspaceFileSystem - write/edit', () => {
     }
   });
 
+  it('rejects non-positive-integer opts.limit with parse_error', async () => {
+    const target = path.join(h.workspace, 'v.txt');
+    await fsp.writeFile(target, 'a\nb\nc\n');
+    const r = await h.fs.resolve('v.txt', 'read');
+    for (const bad of [
+      Infinity,
+      -Infinity,
+      Number.MAX_SAFE_INTEGER + 1,
+      0,
+      -1,
+      1.5,
+      NaN,
+    ]) {
+      const err = await h.fs
+        .readText(r, { limit: bad })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('parse_error');
+    }
+  });
+
   it('records matchedIgnore on edit() audit (parity with readText/writeText)', async () => {
     const ignore = new Ignore().add(['*.log']);
     h = await makeHarness({ ignore });
