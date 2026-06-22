@@ -2436,6 +2436,8 @@ export class SessionManager implements ISessionManager {
     )
       return
 
+    const connection = backendContext.connection
+
     await this.withExternalSessionAgentForWorkspace(
       workspace,
       backendContext,
@@ -2465,7 +2467,7 @@ export class SessionManager implements ISessionManager {
           const didUpsert = await this.upsertExternalListedSession({
             workspace,
             info,
-            connectionSlug: backendContext.connection.slug,
+            connectionSlug: connection.slug,
             model: backendContext.resolvedModel || undefined,
             defaultPermissionMode,
             defaultThinkingLevel:
@@ -2485,7 +2487,7 @@ export class SessionManager implements ISessionManager {
         const removedMissingSessions = reachedEnd
           ? await this.removeMissingExternalListedSessions(
               workspace,
-              backendContext.connection.slug,
+              connection.slug,
               seenSdkSessionIds,
             )
           : false
