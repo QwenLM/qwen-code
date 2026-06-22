@@ -165,4 +165,45 @@ describe('ArtifactTool', () => {
     const html = await fs.readFile(res.resultFilePaths![0], 'utf8');
     expect(html).toContain('<title>release-notes</title>');
   });
+
+  it('tells the user a remote backend uploads, but a local one does not', async () => {
+    const file = path.join(workdir, 'p.html');
+    const remoteTool = new ArtifactTool(
+      makeConfig(),
+      { kind: 'oss', publish: async () => ({ id: 'x', url: 'https://h/x' }) },
+      openSpy as unknown as UrlOpener,
+    );
+    const remote = await remoteTool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+    expect((remote as { prompt: string }).prompt).toMatch(
+      /remote host \(oss\)/i,
+    );
+
+    const local = await tool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+    expect((local as { prompt: string }).prompt).not.toMatch(/remote/i);
+  });
+
+  it('reports a cancellation when the publisher aborts', async () => {
+    const file = await writeFragment('page.html', '<p>x</p>');
+    const abortErr = Object.assign(new Error('aborted'), {
+      name: 'AbortError',
+    });
+    const cancelTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'oss',
+        publish: async () => {
+          throw abortErr;
+        },
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const res = await cancelTool.build({ file_path: file }).execute(signal);
+    expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(res.llmContent).toMatch(/cancelled/i);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
 });

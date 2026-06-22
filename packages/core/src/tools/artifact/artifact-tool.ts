@@ -89,10 +89,17 @@ class ArtifactToolInvocation extends BaseToolInvocation<
       this.params.file_path,
       this.config.getTargetDir(),
     );
+    // Remote backends (host/oss) upload the HTML to a server and hand back a
+    // shareable link — say so in the prompt so the user knows the page leaves
+    // their machine before they approve.
+    const prompt =
+      this.publisher.kind === 'local'
+        ? `Publish ${shortenPath(relativePath)} as an interactive Artifact and open it in your browser.`
+        : `Publish ${shortenPath(relativePath)} as an interactive Artifact. This uploads the page to a remote host (${this.publisher.kind}) and opens the shareable link in your browser.`;
     const details: ToolInfoConfirmationDetails = {
       type: 'info',
       title: 'Publish Artifact',
-      prompt: `Publish ${shortenPath(relativePath)} as an interactive Artifact and open it in your browser.`,
+      prompt,
       onConfirm: async () => {
         // Persistence handled by coreToolScheduler via PM rules.
       },
@@ -164,6 +171,19 @@ class ArtifactToolInvocation extends BaseToolInvocation<
       url = published.url;
       filePath = published.filePath;
     } catch (err) {
+      // A user-initiated cancel (Esc / aborted signal) is not a failure —
+      // surface it as a cancellation rather than a publish error.
+      if (
+        signal.aborted ||
+        (err instanceof Error && err.name === 'AbortError')
+      ) {
+        const message = 'Artifact publishing was cancelled.';
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message, type: ToolErrorType.EXECUTION_FAILED },
+        };
+      }
       const message = `Failed to publish artifact: ${getErrorMessage(err)}`;
       return {
         llmContent: message,
@@ -197,10 +217,9 @@ class ArtifactToolInvocation extends BaseToolInvocation<
 }
 
 /**
- * The Artifact tool (option B): publishes a self-contained HTML fragment as a
- * local interactive page and opens it. Backend is pluggable via
- * {@link ArtifactPublisher} so remote/shared publishing (option C) can drop in
- * later without changing the tool.
+ * The Artifact tool: publishes a self-contained HTML fragment as an interactive
+ * page and opens it. The backend is pluggable via {@link ArtifactPublisher}
+ * (local file://, a custom upload command, or native OSS).
  */
 export class ArtifactTool extends BaseDeclarativeTool<
   ArtifactToolParams,
