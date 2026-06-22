@@ -44,7 +44,7 @@ jobs:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' }}"
     # Gate runs on ECS for in-repo PRs too, else a busy hosted pool delays it and blocks the ECS-bound jobs. The kill-switch is read here, so flipping it reverts everything to hosted.
-    runs-on: ${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
@@ -91,7 +91,7 @@ jobs:
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
-          SAME_REPO: "${{ github.event.pull_request.head.repo.full_name == github.repository }}"
+          SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
@@ -105,7 +105,7 @@ jobs:
     name: 'Lint'
     needs: 'classify_pr'
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
-    runs-on: ${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '["ubuntu-latest"]') }}
+    runs-on: "${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]') }}"
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
