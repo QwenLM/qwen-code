@@ -129,9 +129,12 @@ jobs:
             exit 1
           fi
           echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
+            echo "::warning::Expected Node 22.x but found $(node -v); lint results may diverge from local development."
+          fi
 
       - name: 'Install dependencies and run prepare'
-        run: 'npm ci'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
 
       - name: 'Check lockfile'
         run: 'npm run check:lockfile'
