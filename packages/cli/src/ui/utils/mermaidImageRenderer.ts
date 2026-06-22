@@ -1063,8 +1063,8 @@ function getMermaidRenderWidth(env: NodeJS.ProcessEnv): number {
 
 function getMermaidRenderTimeout(env: NodeJS.ProcessEnv): number {
   const configuredTimeout = Number(env['QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS']);
-  if (Number.isFinite(configuredTimeout) && configuredTimeout > 0) {
-    return Math.min(Math.round(configuredTimeout), MAX_RENDER_TIMEOUT_MS);
+  if (Number.isInteger(configuredTimeout) && configuredTimeout > 0) {
+    return Math.min(configuredTimeout, MAX_RENDER_TIMEOUT_MS);
   }
   return DEFAULT_RENDER_TIMEOUT_MS;
 }

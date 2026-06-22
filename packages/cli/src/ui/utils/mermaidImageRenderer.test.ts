@@ -358,6 +358,35 @@ describe('mermaid image renderer', () => {
     expect(result.kind === 'terminal-image' && result.protocol).toBe('iterm2');
   });
 
+  it('falls back to the default render timeout when configured timeout is fractional', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mmdc-'));
+    tempDirs.push(binDir);
+    createFakeMmdc(binDir, [
+      'setTimeout(() => {',
+      '  const fs = require("node:fs");',
+      '  const out = process.argv[process.argv.indexOf("-o") + 1];',
+      `  fs.writeFileSync(out, Buffer.from("${PNG_1X1.toString(
+        'base64',
+      )}", "base64"));`,
+      '}, 20);',
+    ]);
+
+    const result = await renderMermaidImageAsync({
+      source: 'flowchart TD\n  A[Start] --> B[End fractional timeout]',
+      contentWidth: 80,
+      availableTerminalHeight: 20,
+      env: {
+        PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        QWEN_CODE_MERMAID_IMAGE_RENDERING: '1',
+        QWEN_CODE_MERMAID_IMAGE_PROTOCOL: 'kitty',
+        QWEN_CODE_MERMAID_RENDER_TIMEOUT_MS: '0.4',
+      },
+    });
+
+    expect(result.kind).toBe('terminal-image');
+    expect(result.kind === 'terminal-image' && result.protocol).toBe('kitty');
+  });
+
   it('renders Mermaid through chafa when terminal images are unavailable', () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-chafa-'));
     tempDirs.push(binDir);
