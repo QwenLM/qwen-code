@@ -1417,6 +1417,7 @@ export default {
   'Tools:': 'Outils :',
   'Parameters:': 'Paramètres :',
   'Prompts:': 'Invites :',
+  'Resources:': 'Ressources :',
   Blocked: 'Bloqué',
   '💡 Tips:': '💡 Conseils :',
   Use: 'Utilisez',

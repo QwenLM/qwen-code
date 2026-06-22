@@ -26,6 +26,9 @@ import {
   ToolConfirmationOutcome,
   IdeClient,
   type SessionListItem,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  MCPServerStatus,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -414,6 +417,43 @@ export const useSlashCommandProcessor = (
         const ideClient = await IdeClient.getInstance();
         ideClient.removeStatusChangeListener(listener);
       })();
+    };
+  }, [config, reloadCommands]);
+
+  // MCP discovery is progressive: it runs in the background after the UI is
+  // already interactive, so a server's prompts (prompts/list) are not in the
+  // registry when the command loaders first run. Without this, an MCP prompt
+  // never surfaces as a `/<prompt>` command until some unrelated reload (IDE
+  // status / skill change) happens to fire — the `/mcp` dialog shows the
+  // prompt count while the slash menu stays empty. Rebuild the command tree
+  // when a server finishes connecting; debounce so a burst of servers
+  // connecting at startup triggers a single rebuild.
+  useEffect(() => {
+    if (!config) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const listener = (
+      _serverName: string,
+      status: MCPServerStatus | undefined,
+    ) => {
+      if (status !== MCPServerStatus.CONNECTED) {
+        return;
+      }
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        reloadCommands();
+      }, 250);
+    };
+    addMCPStatusChangeListener(listener);
+    return () => {
+      removeMCPStatusChangeListener(listener);
+      if (timer) {
+        clearTimeout(timer);
+      }
     };
   }, [config, reloadCommands]);
 

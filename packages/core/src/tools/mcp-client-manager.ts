@@ -1494,6 +1494,7 @@ export class McpClientManager {
     try {
       const sessionId = this.cliConfig.getSessionId();
       const promptRegistry = this.cliConfig.getPromptRegistry();
+      const resourceRegistry = this.cliConfig.getResourceRegistry();
       const servers = populateMcpServerCommand(
         this.cliConfig.getMcpServers() || {},
         this.cliConfig.getMcpServerCommand(),
@@ -1573,6 +1574,7 @@ export class McpClientManager {
               sessionId,
               this.toolRegistry,
               promptRegistry,
+              resourceRegistry,
             );
             //
             // subscribe to entry-level events so a `'failed'` event
@@ -2840,12 +2842,14 @@ export class McpClientManager {
         // Pool mode: acquire through the shared pool
         const sessionId = this.cliConfig.getSessionId();
         const promptRegistry = this.cliConfig.getPromptRegistry();
+        const resourceRegistry = this.cliConfig.getResourceRegistry();
         const conn = await this.pool.acquire(
           name,
           config,
           sessionId,
           this.toolRegistry,
           promptRegistry,
+          resourceRegistry,
         );
         this.pooledConnections.set(name, conn);
         toolCount = conn.toolsSnapshot.length;
