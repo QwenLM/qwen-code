@@ -291,6 +291,7 @@ describe('HistoryReplayer', () => {
           },
         }),
       );
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
     });
 
     it('should use function call id as callId when available', async () => {
@@ -369,6 +370,38 @@ describe('HistoryReplayer', () => {
       expect(sentUpdateContexts[1]).toEqual({
         activeRecordId: record.uuid,
         activeRecordTimestamp: record.timestamp,
+      });
+    });
+
+    it('should not synthesize missing-result failures for calls without source ids', async () => {
+      const records: ChatRecord[] = [
+        {
+          ...createAssistantRecord(''),
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { path: 'test.ts' },
+                },
+              },
+            ],
+          },
+        },
+        createToolResultRecord('read_file', 'File contents here'),
+      ];
+
+      await replayer.replay(records);
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'tool_call_update',
+      ]);
+      expect(updates[1]).toMatchObject({
+        toolCallId: 'call-123',
+        status: 'completed',
       });
     });
 

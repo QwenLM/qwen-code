@@ -207,7 +207,8 @@ export class HistoryReplayer {
       // Function call (tool start)
       if ('functionCall' in part && part.functionCall) {
         const functionName = part.functionCall.name ?? '';
-        const callId = part.functionCall.id ?? `${functionName}-${Date.now()}`;
+        const sourceCallId = part.functionCall.id;
+        const callId = sourceCallId ?? `${functionName}-${Date.now()}`;
 
         const emitted = await this.toolCallEmitter.emitStart({
           toolName: functionName,
@@ -217,7 +218,7 @@ export class HistoryReplayer {
           timestamp,
         });
 
-        if (emitted && role === 'assistant' && recordId) {
+        if (emitted && role === 'assistant' && recordId && sourceCallId) {
           this.pendingReplayToolCalls.set(callId, {
             callId,
             toolName: functionName,
