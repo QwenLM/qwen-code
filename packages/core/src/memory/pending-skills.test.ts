@@ -44,6 +44,32 @@ describe('pendingSkills', () => {
     ).toBe(true);
   });
 
+  it('does NOT stage a pre-existing skill the agent edited in place', async () => {
+    const file = await makeSkill(root, 'epsilon');
+    const pending = await stageSkillDirs(
+      [file],
+      root,
+      new Set(['auto-skill-epsilon']),
+    );
+    expect(pending).toHaveLength(0);
+    // The already-confirmed skill stays live in the skills root, untouched —
+    // a later Discard can never delete it.
+    await expect(fs.access(file)).resolves.toBeUndefined();
+  });
+
+  it('stages new skills while leaving pre-existing edited ones in place', async () => {
+    const newFile = await makeSkill(root, 'new-one');
+    const editedFile = await makeSkill(root, 'old-one');
+    const pending = await stageSkillDirs(
+      [newFile, editedFile],
+      root,
+      new Set(['auto-skill-old-one']),
+    );
+    expect(pending.map((p) => p.name)).toEqual(['auto-skill-new-one']);
+    await expect(fs.access(editedFile)).resolves.toBeUndefined(); // stays live
+    await expect(fs.access(newFile)).rejects.toThrow(); // moved to pending
+  });
+
   it('accept moves a staged dir back into skills root', async () => {
     const file = await makeSkill(root, 'beta');
     const [p] = await stageSkillDirs([file], root);

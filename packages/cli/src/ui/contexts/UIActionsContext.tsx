@@ -24,7 +24,6 @@ export interface UIActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
   openMemoryDialog: () => void;
-  openSkillReviewDialog: () => void;
   closeSkillReviewDialog: () => void;
   acceptPendingSkill: (skillName: string) => void;
   rejectPendingSkill: (skillName: string) => void;

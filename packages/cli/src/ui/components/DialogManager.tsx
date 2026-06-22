@@ -548,6 +548,7 @@ export const DialogManager = ({
   if (uiState.isSkillReviewDialogOpen && uiState.skillReviewPending) {
     return (
       <SkillReviewDialog
+        key={uiState.skillReviewPending.taskId}
         skills={uiState.skillReviewPending.skills}
         onAccept={uiActions.acceptPendingSkill}
         onReject={uiActions.rejectPendingSkill}

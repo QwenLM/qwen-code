@@ -75,7 +75,10 @@ import {
 } from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
-import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
+import {
+  runSkillReviewByAgent,
+  listExistingSkillDirNames,
+} from './skillReviewAgentPlanner.js';
 import {
   stageSkillDirs,
   acceptPendingSkill,
@@ -885,6 +888,13 @@ export class MemoryManager {
         return record;
       }
 
+      // Snapshot existing skill dirs BEFORE the agent runs so staging can tell
+      // newly-created skills from in-place edits of already-confirmed ones
+      // (only new skills should enter the confirmation flow).
+      const preExistingSkillDirs = params.confirmBeforePersist
+        ? new Set(await listExistingSkillDirNames(params.projectRoot))
+        : undefined;
+
       const result = await runSkillReviewByAgent({
         config: params.config!,
         projectRoot: params.projectRoot,
@@ -897,6 +907,7 @@ export class MemoryManager {
         const pending = await stageSkillDirs(
           result.touchedSkillFiles,
           params.projectRoot,
+          preExistingSkillDirs,
         );
         this.update(record, {
           status: 'completed',
@@ -1092,15 +1103,32 @@ export class MemoryManager {
   ): Promise<void> {
     const record = this.tasks.get(taskId);
     if (!record) return;
-    const list = (record.metadata?.['pendingSkills'] as PendingSkill[]) ?? [];
-    const target = list.find((p) => p.name === skillName);
+    const target = (
+      (record.metadata?.['pendingSkills'] as PendingSkill[]) ?? []
+    ).find((p) => p.name === skillName);
     if (!target) return;
-    if (action === 'accept') {
-      await acceptPendingSkill(target);
-    } else {
-      await rejectPendingSkill(target);
+    try {
+      if (action === 'accept') {
+        await acceptPendingSkill(target);
+      } else {
+        await rejectPendingSkill(target);
+      }
+    } catch (error) {
+      // Leave the skill in pendingSkills so the user can retry, and surface the
+      // failure instead of silently dropping it.
+      debugLogger.warn(
+        `Failed to ${action} pending skill "${skillName}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      throw error;
     }
-    const remaining = list.filter((p) => p.name !== skillName);
+    // Re-read pendingSkills AFTER the await: concurrent Keep-all/Discard-all
+    // calls each remove only their own entry. read+filter+update runs with no
+    // intervening await, so it is atomic under the single-threaded event loop.
+    const remaining = (
+      (record.metadata?.['pendingSkills'] as PendingSkill[]) ?? []
+    ).filter((p) => p.name !== skillName);
     this.update(record, { metadata: { pendingSkills: remaining } });
   }
 

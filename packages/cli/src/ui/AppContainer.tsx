@@ -1184,9 +1184,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
   const [skillReviewPending, setSkillReviewPending] =
     useState<UIState['skillReviewPending']>(null);
-  const openSkillReviewDialog = useCallback(() => {
-    setIsSkillReviewDialogOpen(true);
-  }, []);
   // Tracks the pending batch the user dismissed via Esc ("decide later") so
   // the idle effect doesn't immediately reopen the dialog on the next idle
   // transition. Auto-open resumes when a new batch (different taskId) arrives.
@@ -1202,7 +1199,11 @@ export const AppContainer = (props: AppContainerProps) => {
       if (!skillReviewPending) return;
       void config
         .getMemoryManager()
-        .acceptPendingSkillFromTask(skillReviewPending.taskId, skillName);
+        .acceptPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
     },
     [config, skillReviewPending],
   );
@@ -1211,7 +1212,11 @@ export const AppContainer = (props: AppContainerProps) => {
       if (!skillReviewPending) return;
       void config
         .getMemoryManager()
-        .rejectPendingSkillFromTask(skillReviewPending.taskId, skillName);
+        .rejectPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
     },
     [config, skillReviewPending],
   );
@@ -1220,6 +1225,10 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     const mgr = config.getMemoryManager();
     const projectRoot = config.getProjectRoot();
+    // Skip the state update (and the re-render of every UIState consumer) when
+    // the pending set hasn't actually changed — skill-review notifications fire
+    // for unrelated transitions too.
+    let lastSig = '';
     const refresh = () => {
       const tasks = mgr.listTasksByType('skill-review', projectRoot);
       const withPending = tasks.find((tk) => {
@@ -1227,13 +1236,21 @@ export const AppContainer = (props: AppContainerProps) => {
         return Array.isArray(p) && p.length > 0;
       });
       if (!withPending) {
-        setSkillReviewPending(null);
+        if (lastSig !== '') {
+          lastSig = '';
+          setSkillReviewPending(null);
+        }
         return;
       }
       const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
         name: string;
         description: string;
       }>;
+      const sig = `${withPending.id}|${pendingSkills
+        .map((p) => p.name)
+        .join(' ')}`;
+      if (sig === lastSig) return;
+      lastSig = sig;
       setSkillReviewPending({
         taskId: withPending.id,
         skills: pendingSkills.map((p) => ({
@@ -3742,7 +3759,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
-      openSkillReviewDialog,
       closeSkillReviewDialog,
       acceptPendingSkill,
       rejectPendingSkill,
@@ -3832,7 +3848,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
-      openSkillReviewDialog,
       closeSkillReviewDialog,
       acceptPendingSkill,
       rejectPendingSkill,
