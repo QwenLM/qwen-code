@@ -859,7 +859,8 @@ export type ServeExtensionInstallType =
   | 'local'
   | 'link'
   | 'github-release'
-  | 'npm';
+  | 'npm'
+  | 'archive-url';
 
 export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
@@ -1018,7 +1019,7 @@ export function createIdleWorkspaceProvidersStatus(
  * tests, embedded callers that don't need daemon-host cells). Single
  * construction site so future optional-field additions to
  * `ServeWorkspaceEnvStatus` only need updating in one place — the
- * production builder in `cli/src/serve/envSnapshot.ts buildEnvStatusFromProcess`
+ * production builder in `cli/src/serve/env-snapshot.ts buildEnvStatusFromProcess`
  * and this helper would otherwise diverge silently (TS won't flag a
  * missing optional field).
  *

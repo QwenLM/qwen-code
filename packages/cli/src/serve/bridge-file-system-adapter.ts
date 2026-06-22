@@ -59,7 +59,7 @@ import type { BridgeFileSystem } from '@qwen-code/acp-bridge';
 import type {
   WorkspaceFileSystemFactory,
   RequestContext,
-} from './fs/workspaceFileSystem.js';
+} from './fs/workspace-file-system.js';
 
 /** Route label used in audit events for ACP-triggered fs operations. */
 const ACP_WRITE_ROUTE = 'ACP writeTextFile';

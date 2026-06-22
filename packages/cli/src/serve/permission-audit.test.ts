@@ -9,7 +9,7 @@ import {
   createPermissionAuditPublisher,
   DEFAULT_PERMISSION_AUDIT_RING_SIZE,
   PermissionAuditRing,
-} from './permissionAudit.js';
+} from './permission-audit.js';
 import type {
   PermissionRequestRecord,
   PermissionVote,

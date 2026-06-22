@@ -13,7 +13,7 @@ import {
   InvalidPolicyConfigError,
   runQwenServe,
   validatePolicyConfig,
-} from './runQwenServe.js';
+} from './run-qwen-serve.js';
 import type { HttpAcpBridge } from './acpSessionBridge.js';
 
 /**

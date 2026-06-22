@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createRateLimiter, createKeyExtractor } from './rateLimit.js';
+import { createRateLimiter, createKeyExtractor } from './rate-limit.js';
 import type { Request, Response } from 'express';
 
 function mockReq(overrides: Record<string, unknown> = {}): Request {

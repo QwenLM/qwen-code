@@ -30,8 +30,8 @@ import {
   QwenOAuthPollError,
   type IQwenOAuth2Client,
 } from '@qwen-code/qwen-code-core';
-import { QwenOAuthDeviceFlowProvider } from './qwenDeviceFlowProvider.js';
-import { brandSecret } from './deviceFlow.js';
+import { QwenOAuthDeviceFlowProvider } from './qwen-device-flow-provider.js';
+import { brandSecret } from './device-flow.js';
 
 function fakeClient(
   overrides: Partial<IQwenOAuth2Client> = {},

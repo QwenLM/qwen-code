@@ -15,7 +15,7 @@ import {
   reduceDaemonEventToTuiUpdates,
   type DaemonTuiEvent,
   type DaemonTuiSessionClient,
-} from './DaemonTuiAdapter.js';
+} from './daemon-tui-adapter.js';
 import { ToolCallStatus } from '../types.js';
 
 class EventQueue implements AsyncGenerator<DaemonTuiEvent> {

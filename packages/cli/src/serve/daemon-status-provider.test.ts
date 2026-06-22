@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createDaemonStatusProvider } from './daemonStatusProvider.js';
+import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import type {
   DaemonWorkspaceServiceDeps,

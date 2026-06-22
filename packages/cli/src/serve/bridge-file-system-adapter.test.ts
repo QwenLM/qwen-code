@@ -33,11 +33,11 @@ import type {
   ReadTextFileRequest,
   WriteTextFileRequest,
 } from '@agentclientprotocol/sdk';
-import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
+import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import {
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,
-} from './fs/workspaceFileSystem.js';
+} from './fs/workspace-file-system.js';
 
 describe('createBridgeFileSystemAdapter', () => {
   let tmpDir: string;
@@ -136,7 +136,7 @@ describe('createBridgeFileSystemAdapter', () => {
     // Symlink-rejection posture (BridgeFileSystem contract divergence
     // from the pre-F1 inline proxy) is enforced by `writeTextOverwrite`
     // and verified at the lower layer in
-    // `workspaceFileSystem.test.ts > writeTextOverwrite rejects symlink
+    // `workspace-file-system.test.ts > writeTextOverwrite rejects symlink
     // targets planted post-resolve (symlink_escape)`. Re-testing at the
     // adapter layer would only re-exercise the same code path; the
     // adapter contract is "delegate to writeTextOverwrite", and the

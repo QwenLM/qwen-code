@@ -13,7 +13,7 @@
  *
  * Lift origin (#4175 PR 22b/2): the inline `buildDaemonPreflightCells`
  * function moved here from `httpAcpBridge.ts`; `buildEnvStatusFromProcess`
- * stays in `envSnapshot.ts` and is wrapped here. Mode A consumers can
+ * stays in `env-snapshot.ts` and is wrapped here. Mode A consumers can
  * omit this provider entirely — the bridge falls back to idle placeholders.
  */
 
@@ -27,7 +27,7 @@ import {
   type ServeWorkspaceEnvStatus,
 } from '@qwen-code/acp-bridge';
 import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
-import { buildEnvStatusFromProcess } from './envSnapshot.js';
+import { buildEnvStatusFromProcess } from './env-snapshot.js';
 
 const REQUIRED_NODE_MAJOR = 22;
 
