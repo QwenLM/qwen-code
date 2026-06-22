@@ -1376,6 +1376,7 @@ export default {
   'Tools:': 'Ferramentas:',
   'Parameters:': 'Parâmetros:',
   'Prompts:': 'Prompts:',
+  'Resources:': 'Recursos:',
   Blocked: 'Bloqueado',
   '💡 Tips:': '💡 Dicas:',
   'to show server and tool descriptions':

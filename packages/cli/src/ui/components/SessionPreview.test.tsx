@@ -35,7 +35,11 @@ function mockService(resolved: unknown) {
   } as never;
 }
 
-function fakeResumedData() {
+function fakeResumedData(
+  assistantParts: Array<{ text: string; thought?: boolean }> = [
+    { text: 'Hi from assistant REPLY-MARKER' },
+  ],
+) {
   return {
     conversation: {
       sessionId: 's1',
@@ -66,7 +70,7 @@ function fakeResumedData() {
           version: 'test',
           message: {
             role: 'model',
-            parts: [{ text: 'Hi from assistant REPLY-MARKER' }],
+            parts: assistantParts,
           },
         },
       ],
@@ -110,6 +114,39 @@ describe('SessionPreview', () => {
     const frame = lastFrame() ?? '';
     expect(frame).toContain('PREVIEW-MARKER');
     expect(frame).toContain('REPLY-MARKER');
+  });
+
+  it('renders full resumed thinking content after load', async () => {
+    const thinkingText = Array.from(
+      { length: 40 },
+      (_, index) => `RESUMED-THINKING-LINE-${index + 1}`,
+    ).join('\n');
+    const svc = mockService(
+      fakeResumedData([
+        { text: thinkingText, thought: true },
+        { text: 'FINAL-ANSWER-MARKER' },
+      ]),
+    );
+    const { lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <SessionPreview
+          sessionService={svc}
+          sessionId="s1"
+          sessionTitle="My session"
+          onExit={vi.fn()}
+          onResume={vi.fn()}
+        />
+      </KeypressProvider>,
+    );
+    await wait(100);
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Thinking…');
+    expect(frame).toContain('RESUMED-THINKING-LINE-1');
+    expect(frame).toContain('RESUMED-THINKING-LINE-40');
+    expect(frame).toContain('FINAL-ANSWER-MARKER');
+    expect(frame.indexOf('My session')).toBeLessThan(
+      frame.indexOf('RESUMED-THINKING-LINE-1'),
+    );
   });
 
   it('renders footer metadata (messageCount · time · branch)', async () => {

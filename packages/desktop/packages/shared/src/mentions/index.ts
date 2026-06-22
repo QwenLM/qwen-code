@@ -18,6 +18,19 @@ function joinPath(base: string, relative: string): string {
   return base.endsWith(sep) ? base + relative : base + sep + relative
 }
 
+function isAbsoluteMentionPath(path: string): boolean {
+  return (
+    path.startsWith('/') ||
+    path.startsWith('~') ||
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    path.startsWith('\\\\')
+  )
+}
+
+function getPathBasename(path: string): string {
+  return path.split(/[\\/]/).pop() || path
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -196,17 +209,17 @@ export function resolveSourceMentions(text: string): string {
 export function resolveFileMentions(text: string, workingDirectory: string): string {
   return text
     .replace(/\[file:([^\]]+)\]/g, (_match, filePath: string) => {
-      const resolved = filePath.startsWith('/') || filePath.startsWith('~')
+      const resolved = isAbsoluteMentionPath(filePath)
         ? filePath
         : joinPath(workingDirectory, filePath)
-      const name = filePath.split('/').pop() || filePath
+      const name = getPathBasename(filePath)
       return `[Mentioned file: ${name} (at ${resolved})]`
     })
     .replace(/\[folder:([^\]]+)\]/g, (_match, folderPath: string) => {
-      const resolved = folderPath.startsWith('/') || folderPath.startsWith('~')
+      const resolved = isAbsoluteMentionPath(folderPath)
         ? folderPath
         : joinPath(workingDirectory, folderPath)
-      const name = folderPath.split('/').pop() || folderPath
+      const name = getPathBasename(folderPath)
       return `[Mentioned folder: ${name} (at ${resolved})]`
     })
 }

@@ -6,8 +6,12 @@
 
 import type { MCPServerConfig } from '../config/config.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DiscoveredMCPPrompt } from './mcp-client.js';
+import type {
+  DiscoveredMCPPrompt,
+  DiscoveredMCPResource,
+} from './mcp-client.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
 import type { ToolRegistry } from './tool-registry.js';
 
@@ -162,6 +166,7 @@ export class SessionMcpView {
   constructor(
     private readonly sessionToolRegistry: ToolRegistry,
     private readonly sessionPromptRegistry: PromptRegistry,
+    private readonly sessionResourceRegistry: ResourceRegistry,
     readonly sessionId: string,
     readonly serverName: string,
     private cfg: MCPServerConfig,
@@ -257,6 +262,51 @@ export class SessionMcpView {
   }
 
   /**
+   * Replace this session's registered resources for `serverName` with
+   * `snapshot`. Idempotent (removes prior registration first), mirroring
+   * `applyPrompts` / `applyTools` so a hot-changed or reconnected server
+   * propagates correctly.
+   *
+   * Unlike `applyTools` / `applyPrompts`, resources are NOT run through the
+   * `includeTools` / `excludeTools` filter: those knobs match tool (and
+   * prompt) NAMES, whereas a resource's identity is its URI. Filtering URIs
+   * by a tool-name allow/deny list is semantically meaningless and would
+   * only ever drop a resource whose URI coincidentally equalled a filtered
+   * tool name. The full set is fanned out to every session.
+   *
+   * An EMPTY snapshot is a no-op (does not clear): `discoverAndReturn` /
+   * `listMcpResources` swallow a transient `resources/list` failure to `[]`,
+   * so on a pool restart the snapshot may be empty because the list call
+   * failed, not because the server has no resources. Wiping the session's
+   * resources on every failed re-read would be silent data loss. This mirrors
+   * the `resources.length > 0` guard in the non-pool `McpClient.discover()`.
+   * (`applyTools` / `applyPrompts` keep their pre-existing clear-on-empty
+   * behavior — the transient-failure exposure there is out of scope for the
+   * resource feature this PR adds.) Trade-off: a server that legitimately
+   * drops to zero resources keeps the prior set until a non-empty snapshot.
+   */
+  applyResources(snapshot: readonly DiscoveredMCPResource[]): void {
+    if (snapshot.length === 0) {
+      return;
+    }
+    this.sessionResourceRegistry.removeResourcesByServer(this.serverName);
+    for (const resource of snapshot) {
+      try {
+        this.sessionResourceRegistry.registerResource(resource);
+      } catch (err) {
+        debugLogger.error(
+          `SessionMcpView[${this.sessionId}/${this.serverName}] failed to register resource ${resource.uri}: ${String(
+            err instanceof Error ? err.message : err,
+          )}`,
+        );
+      }
+    }
+    debugLogger.debug(
+      `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} resources`,
+    );
+  }
+
+  /**
    * Update the session's view of this server's config (e.g. when
    * `/mcp` tweaks `includeTools` at runtime). Re-apply uses the new
    * filter against the most recent snapshot.
@@ -284,6 +334,7 @@ export class SessionMcpView {
   teardown(): void {
     this.sessionToolRegistry.removeMcpToolsByServer(this.serverName);
     this.sessionPromptRegistry.removePromptsByServer(this.serverName);
+    this.sessionResourceRegistry.removeResourcesByServer(this.serverName);
     debugLogger.debug(
       `SessionMcpView[${this.sessionId}/${this.serverName}] torn down`,
     );

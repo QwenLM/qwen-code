@@ -1782,6 +1782,7 @@ export default {
   'Tools:': 'Tools:',
   'Parameters:': 'Parameters:',
   'Prompts:': 'Prompts:',
+  'Resources:': 'Resources:',
   Blocked: 'Blocked',
   '💡 Tips:': '💡 Tips:',
   Use: 'Use',
