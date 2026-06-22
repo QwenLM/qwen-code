@@ -33,11 +33,11 @@ describe('V4ToV5Migration', () => {
       ).toBe(false);
     });
 
-    it('returns false for V4 settings without modelProviders', () => {
-      expect(migration.shouldMigrate({ $version: 4 })).toBe(false);
+    it('returns true for V4 settings without modelProviders', () => {
+      expect(migration.shouldMigrate({ $version: 4 })).toBe(true);
     });
 
-    it('returns false for V4 settings with already-object modelProviders', () => {
+    it('returns true for V4 settings with already-object modelProviders', () => {
       expect(
         migration.shouldMigrate({
           $version: 4,
@@ -45,7 +45,7 @@ describe('V4ToV5Migration', () => {
             openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
           },
         }),
-      ).toBe(false);
+      ).toBe(true);
     });
 
     it('returns false for non-object input', () => {
@@ -89,6 +89,19 @@ describe('V4ToV5Migration', () => {
         },
       });
       expect(settings['$version']).toBe(5);
+      expect(warnings).toEqual([]);
+    });
+
+    it('bumps V4 settings without modelProviders to V5', () => {
+      const { settings, warnings } = migration.migrate(
+        { $version: 4, custom: true },
+        'user',
+      ) as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(settings).toEqual({ $version: 5, custom: true });
       expect(warnings).toEqual([]);
     });
 
