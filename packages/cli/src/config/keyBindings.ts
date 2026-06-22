@@ -77,8 +77,8 @@ export enum Command {
   EXPAND_SUGGESTION = 'expandSuggestion',
   COLLAPSE_SUGGESTION = 'collapseSuggestion',
 
-  // Thinking viewer
-  OPEN_THINKING_VIEWER = 'openThinkingViewer',
+  // Thinking expansion
+  TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
 
   // Scroll commands
   SCROLL_UP = 'scrollUp',
@@ -240,8 +240,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
 
-  // Thinking viewer
-  [Command.OPEN_THINKING_VIEWER]: [{ key: 't', meta: true }],
+  // Thinking expansion
+  [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

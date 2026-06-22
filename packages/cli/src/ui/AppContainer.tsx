@@ -3131,7 +3131,7 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Alt+T: toggle inline expansion of thinking blocks.
-      if (keyMatchers[Command.OPEN_THINKING_VIEWER](key)) {
+      if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
         return;

@@ -23,6 +23,7 @@ import {
 } from '../../themes/color-utils.js';
 import { t } from '../../../i18n/index.js';
 import { getCachedStringWidth } from '../../utils/textUtils.js';
+import { formatDuration } from '../../utils/displayUtils.js';
 
 const isUtf8 = /utf-?8/i.test(
   process.env['LANG'] || process.env['LC_ALL'] || '',
@@ -364,16 +365,6 @@ function tailVisualLines(
   }
   const lines = wrapToVisualLines(text.slice(sliceStart), width);
   return lines.slice(-maxLines).join('\n');
-}
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
-  }
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
 
 export const ThinkMessage: React.FC<ThinkMessageProps> = ({

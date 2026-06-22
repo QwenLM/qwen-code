@@ -18,6 +18,7 @@ import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { CompactModeProvider } from '../contexts/CompactModeContext.js';
+import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -395,6 +396,26 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Thought for');
     expect(output).toContain('alt+t to expand');
     expect(output).not.toContain('Inspecting the repository');
+  });
+
+  it('renders committed thinking expanded when ThoughtExpandedProvider is true', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ThoughtExpandedProvider value={true}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </ThoughtExpandedProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain('alt+t to collapse');
+    expect(output).toContain('Inspecting the repository');
   });
 
   it('keeps committed thinking continuations hidden in compact mode', () => {

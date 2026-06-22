@@ -17,22 +17,13 @@ import { t } from '../../i18n/index.js';
 import { AlternateScreen } from './AlternateScreen.js';
 import type { ThinkingViewerData } from '../contexts/ThinkingViewerContext.js';
 import { THINKING_ICON } from './messages/ConversationMessages.js';
+import { formatDuration } from '../utils/displayUtils.js';
 
 interface ThinkingViewerProps {
   data: ThinkingViewerData;
   onClose: () => void;
   /** When true, Ink already owns the alternate screen (VP mode) — skip escape writes. */
   useAlternateScreen?: boolean;
-}
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
-  }
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
 
 const WHEEL_LINES = 3;
