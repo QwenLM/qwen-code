@@ -45,6 +45,7 @@
     "test:integration:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests",
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests ./fake-openai-server.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
