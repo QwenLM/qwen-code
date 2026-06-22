@@ -2534,6 +2534,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
     isDiffDialogOpen ||
+    isSkillReviewDialogOpen ||
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
@@ -3017,6 +3018,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
     isHelpDialogOpen,
     closeHelpDialog,
+    isSkillReviewDialogOpen,
+    closeSkillReviewDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,
