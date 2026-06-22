@@ -173,6 +173,18 @@ jobs:
         )
       )
     steps:
+      - name: 'Acknowledge triage request'
+        if: "github.event_name == 'issue_comment'"
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          COMMENT_ID: '${{ github.event.comment.id }}'
+        run: |-
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='eyes' > /dev/null ||
+            echo "Failed to add triage acknowledgement reaction; continuing." >&2
+
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
