@@ -241,8 +241,8 @@ export function ModelDialog({
       modelsByAuthTypeMap.get(authType)!.push(model);
     }
 
-    // Fixed order: qwen-oauth first, then others in a stable order
-    const authTypeOrder: AuthType[] = [
+    // Fixed order: qwen-oauth first, then built-in authTypes, then custom authTypes
+    const builtinAuthTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
       AuthType.USE_OPENAI,
       AuthType.USE_ANTHROPIC,
@@ -250,11 +250,22 @@ export function ModelDialog({
       AuthType.USE_VERTEX_AI,
     ];
 
-    // Filter to only include authTypes that have registry models and maintain order
+    // Get all available authTypes
     const availableAuthTypes = new Set(modelsByAuthTypeMap.keys());
-    const orderedAuthTypes = authTypeOrder.filter((t) =>
-      availableAuthTypes.has(t),
-    );
+
+    // Build ordered list: built-in authTypes first (in fixed order), then custom authTypes
+    const orderedAuthTypes: AuthType[] = [];
+    for (const authType of builtinAuthTypeOrder) {
+      if (availableAuthTypes.has(authType)) {
+        orderedAuthTypes.push(authType);
+      }
+    }
+    // Add custom authTypes (not in builtin list)
+    for (const authType of availableAuthTypes) {
+      if (!builtinAuthTypeOrder.includes(authType)) {
+        orderedAuthTypes.push(authType);
+      }
+    }
 
     // Build ordered list: runtime models first, then registry models grouped by authType
     const result: Array<{

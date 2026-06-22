@@ -123,7 +123,7 @@ const lastReloadSnapshot = new Map<string, string>();
 let lastReloadSnapshotSeeded = false;
 
 // Settings version to track migration state
-export const SETTINGS_VERSION = 4;
+export const SETTINGS_VERSION = 5;
 export const SETTINGS_VERSION_KEY = '$version';
 
 /**
@@ -317,10 +317,16 @@ function hasAnyProviderEntries(modelProviders: unknown): boolean {
     return false;
   }
 
-  return Object.values(modelProviders).some(
-    (providerModels) =>
-      Array.isArray(providerModels) && providerModels.length > 0,
-  );
+  return Object.values(modelProviders).some((providerModels) => {
+    if (Array.isArray(providerModels)) {
+      return providerModels.length > 0;
+    }
+    if (isPlainObject(providerModels)) {
+      const models = (providerModels as Record<string, unknown>)['models'];
+      return Array.isArray(models) && models.length > 0;
+    }
+    return false;
+  });
 }
 
 function getModelProvidersOverrideWarnings(

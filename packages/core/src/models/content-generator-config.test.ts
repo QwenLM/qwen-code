@@ -10,7 +10,7 @@ import {
   createRuntimeContentGeneratorView,
   resolveCredentialField,
 } from './content-generator-config.js';
-import { createContentGenerator } from '../core/contentGenerator.js';
+import { createContentGenerator, Protocol } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { Config } from '../config/config.js';
 import type { ResolvedModelConfig } from './types.js';
@@ -24,14 +24,26 @@ vi.mock('../core/contentGenerator.js', async (importOriginal) => {
   };
 });
 
+const DEFAULT_PROTOCOL_LOOKUP = (authType: string): Protocol => {
+  const map: Record<string, Protocol> = {
+    openai: Protocol.OPENAI,
+    anthropic: Protocol.ANTHROPIC,
+    gemini: Protocol.GEMINI,
+    qwen_oauth: Protocol.QWEN_OAUTH,
+  };
+  return map[authType] ?? Protocol.OPENAI;
+};
+
 function createMockConfig(
   parentConfig: ContentGeneratorConfig,
   resolvedModel?: ResolvedModelConfig,
+  protocolOverride?: (authType: string) => Protocol,
 ) {
   return {
     getContentGeneratorConfig: () => parentConfig,
     getModelsConfig: () => ({
       getResolvedModel: vi.fn().mockReturnValue(resolvedModel),
+      getProtocol: protocolOverride ?? DEFAULT_PROTOCOL_LOOKUP,
     }),
   } as unknown as Config;
 }
@@ -43,6 +55,7 @@ describe('buildAgentContentGeneratorConfig', () => {
     apiKey: 'parent-key',
     apiKeyEnvKey: 'PARENT_KEY_ENV',
     baseUrl: 'https://parent.example.com',
+    protocol: Protocol.OPENAI,
     samplingParams: { temperature: 0.7, top_p: 0.9 },
     reasoning: { effort: 'high' as const },
     timeout: 30000,
@@ -61,6 +74,7 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.model).toBe('custom-model');
       expect(result.authType).toBe('openai');
+      expect(result.protocol).toBe(Protocol.OPENAI);
       expect(result.apiKey).toBe('parent-key');
       expect(result.baseUrl).toBe('https://parent.example.com');
       expect(result.apiKeyEnvKey).toBe('PARENT_KEY_ENV');
@@ -84,6 +98,7 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.model).toBe('claude-sonnet');
       expect(result.authType).toBe('anthropic');
+      expect(result.protocol).toBe(Protocol.ANTHROPIC);
       // Generation config cleared
       expect(result.samplingParams).toBeUndefined();
       expect(result.reasoning).toBeUndefined();
@@ -127,6 +142,23 @@ describe('buildAgentContentGeneratorConfig', () => {
       });
 
       expect(result.apiKey).toBe('env-anthropic-key');
+    });
+  });
+
+  describe('cross-provider with custom provider (registry-only protocol)', () => {
+    it('should use registry protocol for custom authType not in static map', () => {
+      const customLookup = (authType: string): Protocol => {
+        if (authType === 'my-custom-provider') return Protocol.ANTHROPIC;
+        return DEFAULT_PROTOCOL_LOOKUP(authType);
+      };
+      const config = createMockConfig(parentConfig, undefined, customLookup);
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'my-custom-provider',
+      });
+
+      expect(result.protocol).toBe(Protocol.ANTHROPIC);
+      expect(result.model).toBe('custom-model');
     });
   });
 

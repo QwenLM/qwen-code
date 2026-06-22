@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType, Protocol } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
@@ -23,14 +23,15 @@ const debugLogger = createDebugLogger('MODEL_REGISTRY');
 export { QWEN_OAUTH_MODELS } from './constants.js';
 
 /**
- * Validates if a string key is a valid AuthType enum value.
+ * Validates if a string key is a valid AuthType.
+ * Since AuthType is now a string type, any non-empty string is valid.
  * @param key - The key to validate
  * @returns The validated AuthType or undefined if invalid
  */
 function validateAuthTypeKey(key: string): AuthType | undefined {
-  // Check if the key is a valid AuthType enum value
-  if (Object.values(AuthType).includes(key as AuthType)) {
-    return key as AuthType;
+  // Any non-empty string is a valid AuthType
+  if (key && key.trim().length > 0) {
+    return key;
   }
 
   // Invalid key
@@ -56,6 +57,7 @@ export function modelRegistryKey(id: string, baseUrl?: string): string {
  */
 export class ModelRegistry {
   private modelsByAuthType: Map<AuthType, Map<string, ResolvedModelConfig>>;
+  private protocolByAuthType = new Map<string, Protocol>();
 
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
@@ -72,16 +74,19 @@ export class ModelRegistry {
     this.modelsByAuthType = new Map();
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
+    this.protocolByAuthType.set(AuthType.QWEN_OAUTH, Protocol.QWEN_OAUTH);
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
 
     // Register user-configured models for other authTypes
     if (modelProvidersConfig) {
-      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
+      for (const [rawKey, providerConfig] of Object.entries(
+        modelProvidersConfig,
+      )) {
         const authType = validateAuthTypeKey(rawKey);
 
         if (!authType) {
           debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
+            `Invalid authType key "${rawKey}" in modelProviders config. Skipping.`,
           );
           continue;
         }
@@ -91,7 +96,8 @@ export class ModelRegistry {
           continue;
         }
 
-        this.registerAuthTypeModels(authType, models);
+        this.protocolByAuthType.set(authType, providerConfig.protocol);
+        this.registerAuthTypeModels(authType, providerConfig.models);
       }
     }
   }
@@ -149,6 +155,14 @@ export class ModelRegistry {
   }
 
   /**
+   * Get all registered authTypes.
+   * Used by getAllConfiguredModels to include custom providers.
+   */
+  getAuthTypes(): AuthType[] {
+    return Array.from(this.modelsByAuthType.keys());
+  }
+
+  /**
    * Get model configuration by authType and modelId.
    * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
    * When baseUrl is omitted, tries the plain id first (backward compatible),
@@ -200,6 +214,14 @@ export class ModelRegistry {
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
     return Array.from(models.values())[0];
+  }
+
+  /**
+   * Get the protocol for an authType.
+   * Returns undefined if the authType is not registered.
+   */
+  getProtocolForAuthType(authType: AuthType): Protocol | undefined {
+    return this.protocolByAuthType.get(authType);
   }
 
   /**
@@ -257,14 +279,23 @@ export class ModelRegistry {
       }
     }
 
+    // Clear existing user-configured protocols (preserve qwen-oauth)
+    for (const authType of this.protocolByAuthType.keys()) {
+      if (authType !== AuthType.QWEN_OAUTH) {
+        this.protocolByAuthType.delete(authType);
+      }
+    }
+
     // Re-register user-configured models for other authTypes
     if (modelProvidersConfig) {
-      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
+      for (const [rawKey, providerConfig] of Object.entries(
+        modelProvidersConfig,
+      )) {
         const authType = validateAuthTypeKey(rawKey);
 
         if (!authType) {
           debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
+            `Invalid authType key "${rawKey}" in modelProviders config. Skipping.`,
           );
           continue;
         }
@@ -274,7 +305,8 @@ export class ModelRegistry {
           continue;
         }
 
-        this.registerAuthTypeModels(authType, models);
+        this.protocolByAuthType.set(authType, providerConfig.protocol);
+        this.registerAuthTypeModels(authType, providerConfig.models);
       }
     }
   }

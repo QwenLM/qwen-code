@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { ModelsConfig } from './modelsConfig.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType, Protocol } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig } from './types.js';
 
@@ -37,32 +37,38 @@ describe('ModelsConfig', () => {
 
   it('should fully rollback state when switchModel fails after applying defaults (authType change)', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'openai-a',
-          name: 'OpenAI A',
-          baseUrl: 'https://api.openai.example.com/v1',
-          envKey: 'OPENAI_API_KEY',
-          generationConfig: {
-            samplingParams: { temperature: 0.2, max_tokens: 123 },
-            timeout: 111,
-            maxRetries: 1,
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'openai-a',
+            name: 'OpenAI A',
+            baseUrl: 'https://api.openai.example.com/v1',
+            envKey: 'OPENAI_API_KEY',
+            generationConfig: {
+              samplingParams: { temperature: 0.2, max_tokens: 123 },
+              timeout: 111,
+              maxRetries: 1,
+            },
           },
-        },
-      ],
-      anthropic: [
-        {
-          id: 'anthropic-b',
-          name: 'Anthropic B',
-          baseUrl: 'https://api.anthropic.example.com/v1',
-          envKey: 'ANTHROPIC_API_KEY',
-          generationConfig: {
-            samplingParams: { temperature: 0.7, max_tokens: 456 },
-            timeout: 222,
-            maxRetries: 2,
+        ],
+      },
+      anthropic: {
+        protocol: Protocol.ANTHROPIC,
+        models: [
+          {
+            id: 'anthropic-b',
+            name: 'Anthropic B',
+            baseUrl: 'https://api.anthropic.example.com/v1',
+            envKey: 'ANTHROPIC_API_KEY',
+            generationConfig: {
+              samplingParams: { temperature: 0.7, max_tokens: 456 },
+              timeout: 222,
+              maxRetries: 2,
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -109,20 +115,23 @@ describe('ModelsConfig', () => {
 
   it('should fully rollback state when switchModel fails after applying defaults', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-a',
-          name: 'Model A',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_A',
-        },
-        {
-          id: 'model-b',
-          name: 'Model B',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_B',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-a',
+            name: 'Model A',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_A',
+          },
+          {
+            id: 'model-b',
+            name: 'Model B',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_B',
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -156,20 +165,23 @@ describe('ModelsConfig', () => {
 
   it('should preserve an existing apiKey when switching between models with the same provider credentials', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-a',
-          name: 'Model A',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_SHARED',
-        },
-        {
-          id: 'model-b',
-          name: 'Model B',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_SHARED',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-a',
+            name: 'Model A',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_SHARED',
+          },
+          {
+            id: 'model-b',
+            name: 'Model B',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_SHARED',
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -196,20 +208,23 @@ describe('ModelsConfig', () => {
 
   it('should not reuse an apiKey when switching to a model with different provider credentials', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-a',
-          name: 'Model A',
-          baseUrl: 'https://api-a.example.com/v1',
-          envKey: 'API_KEY_A',
-        },
-        {
-          id: 'model-b',
-          name: 'Model B',
-          baseUrl: 'https://api-b.example.com/v1',
-          envKey: 'API_KEY_B',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-a',
+            name: 'Model A',
+            baseUrl: 'https://api-a.example.com/v1',
+            envKey: 'API_KEY_A',
+          },
+          {
+            id: 'model-b',
+            name: 'Model B',
+            baseUrl: 'https://api-b.example.com/v1',
+            envKey: 'API_KEY_B',
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -232,19 +247,22 @@ describe('ModelsConfig', () => {
 
   it('should use provider config when modelId exists in registry even after updateCredentials', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-a',
-          name: 'Model A',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_A',
-          generationConfig: {
-            samplingParams: { temperature: 0.1, max_tokens: 123 },
-            timeout: 111,
-            maxRetries: 1,
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-a',
+            name: 'Model A',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_A',
+            generationConfig: {
+              samplingParams: { temperature: 0.1, max_tokens: 123 },
+              timeout: 111,
+              maxRetries: 1,
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     // Simulate settings.model.generationConfig being resolved into ModelsConfig.generationConfig
@@ -300,17 +318,20 @@ describe('ModelsConfig', () => {
     'should preserve $kind baseUrl during same-model auth refresh',
     (baseUrlSource) => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'shared-base-model',
-            name: 'Shared Base Model',
-            baseUrl: 'https://provider-default.example.com/v1',
-            envKey: 'SHARED_BASE_URL_KEY',
-            generationConfig: {
-              timeout: 111,
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'shared-base-model',
+              name: 'Shared Base Model',
+              baseUrl: 'https://provider-default.example.com/v1',
+              envKey: 'SHARED_BASE_URL_KEY',
+              generationConfig: {
+                timeout: 111,
+              },
             },
-          },
-        ],
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -347,19 +368,22 @@ describe('ModelsConfig', () => {
 
   it('should preserve settings generationConfig when modelId does not exist in registry', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'provider-model',
-          name: 'Provider Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_A',
-          generationConfig: {
-            samplingParams: { temperature: 0.1, max_tokens: 123 },
-            timeout: 111,
-            maxRetries: 1,
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'provider-model',
+            name: 'Provider Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_A',
+            generationConfig: {
+              samplingParams: { temperature: 0.1, max_tokens: 123 },
+              timeout: 111,
+              maxRetries: 1,
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     // Simulate settings with a custom model (not in registry)
@@ -412,19 +436,22 @@ describe('ModelsConfig', () => {
 
   it('should clear provider-sourced config when updateCredentials is called after switchModel', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'provider-model',
-          name: 'Provider Model',
-          baseUrl: 'https://provider.example.com/v1',
-          envKey: 'PROVIDER_API_KEY',
-          generationConfig: {
-            samplingParams: { temperature: 0.1, max_tokens: 100 },
-            timeout: 1000,
-            maxRetries: 2,
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'provider-model',
+            name: 'Provider Model',
+            baseUrl: 'https://provider.example.com/v1',
+            envKey: 'PROVIDER_API_KEY',
+            generationConfig: {
+              samplingParams: { temperature: 0.1, max_tokens: 100 },
+              timeout: 1000,
+              maxRetries: 2,
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -480,19 +507,22 @@ describe('ModelsConfig', () => {
 
   it('should preserve non-provider config when updateCredentials clears provider config', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'provider-model',
-          name: 'Provider Model',
-          baseUrl: 'https://provider.example.com/v1',
-          envKey: 'PROVIDER_API_KEY',
-          generationConfig: {
-            samplingParams: { temperature: 0.1, max_tokens: 100 },
-            timeout: 1000,
-            maxRetries: 2,
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'provider-model',
+            name: 'Provider Model',
+            baseUrl: 'https://provider.example.com/v1',
+            envKey: 'PROVIDER_API_KEY',
+            generationConfig: {
+              samplingParams: { temperature: 0.1, max_tokens: 100 },
+              timeout: 1000,
+              maxRetries: 2,
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     // Initialize with settings-sourced config
@@ -555,18 +585,21 @@ describe('ModelsConfig', () => {
 
   it('should apply extra_body and customHeaders from model provider config', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-with-extras',
-          name: 'Model With Extras',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY',
-          generationConfig: {
-            extra_body: { custom_param: 'value', enable_thinking: true },
-            customHeaders: { 'X-Custom-Header': 'header-value' },
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-with-extras',
+            name: 'Model With Extras',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY',
+            generationConfig: {
+              extra_body: { custom_param: 'value', enable_thinking: true },
+              customHeaders: { 'X-Custom-Header': 'header-value' },
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -702,17 +735,20 @@ describe('ModelsConfig', () => {
     delete process.env[envKey];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'qwen3.5-plus',
-          name: 'Test Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-          generationConfig: {
-            samplingParams: { temperature: 0.3 },
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'qwen3.5-plus',
+            name: 'Test Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey,
+            generationConfig: {
+              samplingParams: { temperature: 0.3 },
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     // ModelsConfig initialized with settings-sourced apiKey (as would happen at startup)
@@ -760,14 +796,17 @@ describe('ModelsConfig', () => {
 
     try {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'test-model',
-            name: 'Test Model',
-            baseUrl: 'https://api.example.com/v1',
-            envKey,
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'test-model',
+              name: 'Test Model',
+              baseUrl: 'https://api.example.com/v1',
+              envKey,
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -805,14 +844,17 @@ describe('ModelsConfig', () => {
     delete process.env[envKey];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'provider-model',
-          name: 'Provider Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'provider-model',
+            name: 'Provider Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey,
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -845,20 +887,23 @@ describe('ModelsConfig', () => {
     delete process.env[envKeyB];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-a',
-          name: 'Model A',
-          baseUrl: 'https://api-a.example.com/v1',
-          envKey: envKeyA,
-        },
-        {
-          id: 'model-b',
-          name: 'Model B',
-          baseUrl: 'https://api-b.example.com/v1',
-          envKey: envKeyB,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-a',
+            name: 'Model A',
+            baseUrl: 'https://api-a.example.com/v1',
+            envKey: envKeyA,
+          },
+          {
+            id: 'model-b',
+            name: 'Model B',
+            baseUrl: 'https://api-b.example.com/v1',
+            envKey: envKeyB,
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -906,20 +951,23 @@ describe('ModelsConfig', () => {
     delete process.env[envKeyB];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'provider-a',
-          name: 'Provider A',
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-          envKey: envKeyA,
-        },
-        {
-          id: 'provider-b',
-          name: 'Provider B',
-          baseUrl: 'https://api.openai.com/v1',
-          envKey: envKeyB,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'provider-a',
+            name: 'Provider A',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            envKey: envKeyA,
+          },
+          {
+            id: 'provider-b',
+            name: 'Provider B',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: envKeyB,
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -955,20 +1003,23 @@ describe('ModelsConfig', () => {
     delete process.env[envKeyB];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'cli-provider-a',
-          name: 'CLI Provider A',
-          baseUrl: 'https://api-a.example.com/v1',
-          envKey: envKeyA,
-        },
-        {
-          id: 'cli-provider-b',
-          name: 'CLI Provider B',
-          baseUrl: 'https://api-b.example.com/v1',
-          envKey: envKeyB,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'cli-provider-a',
+            name: 'CLI Provider A',
+            baseUrl: 'https://api-a.example.com/v1',
+            envKey: envKeyA,
+          },
+          {
+            id: 'cli-provider-b',
+            name: 'CLI Provider B',
+            baseUrl: 'https://api-b.example.com/v1',
+            envKey: envKeyB,
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1002,14 +1053,17 @@ describe('ModelsConfig', () => {
     delete process.env[envKey];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'cold-start-model',
-          name: 'Cold Start Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'cold-start-model',
+            name: 'Cold Start Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey,
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1042,14 +1096,17 @@ describe('ModelsConfig', () => {
     delete process.env[newEnvKey];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'hot-reload-model',
-          name: 'Hot Reload Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: oldEnvKey,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'hot-reload-model',
+            name: 'Hot Reload Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: oldEnvKey,
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1081,14 +1138,17 @@ describe('ModelsConfig', () => {
 
     // Simulate hot-reload: update registry with new envKey
     modelsConfig.reloadModelProvidersConfig({
-      openai: [
-        {
-          id: 'hot-reload-model',
-          name: 'Hot Reload Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: newEnvKey,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'hot-reload-model',
+            name: 'Hot Reload Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: newEnvKey,
+          },
+        ],
+      },
     });
 
     // syncAfterAuthRefresh with same authType and modelId
@@ -1108,14 +1168,17 @@ describe('ModelsConfig', () => {
     delete process.env[envKey];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'url-reload-model',
-          name: 'URL Reload Model',
-          baseUrl: 'https://old-api.example.com/v1',
-          envKey,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'url-reload-model',
+            name: 'URL Reload Model',
+            baseUrl: 'https://old-api.example.com/v1',
+            envKey,
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1147,14 +1210,17 @@ describe('ModelsConfig', () => {
 
     // Simulate hot-reload: update registry with new baseUrl
     modelsConfig.reloadModelProvidersConfig({
-      openai: [
-        {
-          id: 'url-reload-model',
-          name: 'URL Reload Model',
-          baseUrl: 'https://new-api.example.com/v1',
-          envKey,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'url-reload-model',
+            name: 'URL Reload Model',
+            baseUrl: 'https://new-api.example.com/v1',
+            envKey,
+          },
+        ],
+      },
     });
 
     // syncAfterAuthRefresh with same authType and modelId
@@ -1171,14 +1237,17 @@ describe('ModelsConfig', () => {
     // Hot-reload scenario for a model without envKey: baseUrl changes but
     // modelId stays the same. The old apiKey must NOT be restored.
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'no-envkey-model',
-          name: 'No EnvKey Model',
-          baseUrl: 'https://old-api.example.com/v1',
-          // no envKey
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'no-envkey-model',
+            name: 'No EnvKey Model',
+            baseUrl: 'https://old-api.example.com/v1',
+            // no envKey
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1209,13 +1278,16 @@ describe('ModelsConfig', () => {
 
     // Simulate hot-reload: update registry with new baseUrl
     modelsConfig.reloadModelProvidersConfig({
-      openai: [
-        {
-          id: 'no-envkey-model',
-          name: 'No EnvKey Model',
-          baseUrl: 'https://new-api.example.com/v1',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'no-envkey-model',
+            name: 'No EnvKey Model',
+            baseUrl: 'https://new-api.example.com/v1',
+          },
+        ],
+      },
     });
 
     modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'no-envkey-model');
@@ -1234,14 +1306,17 @@ describe('ModelsConfig', () => {
     delete process.env[providerEnvKey];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'test-model',
-          name: 'Test Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: providerEnvKey,
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'test-model',
+            name: 'Test Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: providerEnvKey,
+          },
+        ],
+      },
     };
 
     // resolveCliGenerationConfig resolved apiKey from OPENAI_API_KEY (layer 3)
@@ -1277,17 +1352,20 @@ describe('ModelsConfig', () => {
     delete process.env[envKey];
 
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'cli-test-model',
-          name: 'CLI Test Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-          generationConfig: {
-            samplingParams: { temperature: 0.5 },
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'cli-test-model',
+            name: 'CLI Test Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey,
+            generationConfig: {
+              samplingParams: { temperature: 0.5 },
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1324,14 +1402,17 @@ describe('ModelsConfig', () => {
 
   it('should maintain consistency between currentModelId and _generationConfig.model after initialization', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'test-model',
-          name: 'Test Model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'TEST_API_KEY',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'test-model',
+            name: 'Test Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'TEST_API_KEY',
+          },
+        ],
+      },
     };
 
     // Test case 1: generationConfig.model provided with other config
@@ -1369,14 +1450,17 @@ describe('ModelsConfig', () => {
 
   it('should maintain consistency between currentModelId and _generationConfig.model during syncAfterAuthRefresh', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-a',
-          name: 'Model A',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_A',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-a',
+            name: 'Model A',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_A',
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1400,20 +1484,23 @@ describe('ModelsConfig', () => {
 
   it('should use explicit provider baseUrl when syncing after provider install', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'shared-model',
-          name: 'Shared Model (old)',
-          baseUrl: 'https://old.example.com/v1',
-          envKey: 'OLD_API_KEY',
-        },
-        {
-          id: 'shared-model',
-          name: 'Shared Model (new)',
-          baseUrl: 'https://new.example.com/v1',
-          envKey: 'NEW_API_KEY',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'shared-model',
+            name: 'Shared Model (old)',
+            baseUrl: 'https://old.example.com/v1',
+            envKey: 'OLD_API_KEY',
+          },
+          {
+            id: 'shared-model',
+            name: 'Shared Model (new)',
+            baseUrl: 'https://new.example.com/v1',
+            envKey: 'NEW_API_KEY',
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1441,14 +1528,17 @@ describe('ModelsConfig', () => {
 
   it('should maintain consistency between currentModelId and _generationConfig.model during setModel', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'model-a',
-          name: 'Model A',
-          baseUrl: 'https://api.example.com/v1',
-          envKey: 'API_KEY_A',
-        },
-      ],
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'model-a',
+            name: 'Model A',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_A',
+          },
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1466,18 +1556,21 @@ describe('ModelsConfig', () => {
 
   it('recomputes raw model modalities instead of carrying provider multimodal defaults', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
-      openai: [
-        {
-          id: 'qwen3.6-plus',
-          name: 'Qwen 3.6 Plus',
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-          envKey: 'DASHSCOPE_API_KEY',
-          generationConfig: {
-            contextWindowSize: 12345,
-            modalities: { image: true, video: true },
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'qwen3.6-plus',
+            name: 'Qwen 3.6 Plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+            generationConfig: {
+              contextWindowSize: 12345,
+              modalities: { image: true, video: true },
+            },
           },
-        },
-      ],
+        ],
+      },
     };
 
     const modelsConfig = new ModelsConfig({
@@ -1600,36 +1693,45 @@ describe('ModelsConfig', () => {
   describe('getAllConfiguredModels', () => {
     it('should return all models across all authTypes and put qwen-oauth first', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'openai-model-1',
-            name: 'OpenAI Model 1',
-            baseUrl: 'https://api.openai.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-          {
-            id: 'openai-model-2',
-            name: 'OpenAI Model 2',
-            baseUrl: 'https://api.openai.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-        ],
-        anthropic: [
-          {
-            id: 'anthropic-model-1',
-            name: 'Anthropic Model 1',
-            baseUrl: 'https://api.anthropic.com/v1',
-            envKey: 'ANTHROPIC_API_KEY',
-          },
-        ],
-        gemini: [
-          {
-            id: 'gemini-model-1',
-            name: 'Gemini Model 1',
-            baseUrl: 'https://generativelanguage.googleapis.com/v1',
-            envKey: 'GEMINI_API_KEY',
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'openai-model-1',
+              name: 'OpenAI Model 1',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+            {
+              id: 'openai-model-2',
+              name: 'OpenAI Model 2',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+        anthropic: {
+          protocol: Protocol.ANTHROPIC,
+          models: [
+            {
+              id: 'anthropic-model-1',
+              name: 'Anthropic Model 1',
+              baseUrl: 'https://api.anthropic.com/v1',
+              envKey: 'ANTHROPIC_API_KEY',
+            },
+          ],
+        },
+        gemini: {
+          protocol: Protocol.GEMINI,
+          models: [
+            {
+              id: 'gemini-model-1',
+              name: 'Gemini Model 1',
+              baseUrl: 'https://generativelanguage.googleapis.com/v1',
+              envKey: 'GEMINI_API_KEY',
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -1698,18 +1800,21 @@ describe('ModelsConfig', () => {
 
     it('should return models with correct structure', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'test-model',
-            name: 'Test Model',
-            description: 'A test model',
-            baseUrl: 'https://api.example.com/v1',
-            envKey: 'TEST_API_KEY',
-            capabilities: {
-              vision: true,
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'test-model',
+              name: 'Test Model',
+              description: 'A test model',
+              baseUrl: 'https://api.example.com/v1',
+              envKey: 'TEST_API_KEY',
+              capabilities: {
+                vision: true,
+              },
             },
-          },
-        ],
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -1730,22 +1835,28 @@ describe('ModelsConfig', () => {
 
     it('should support filtering by authTypes and still put qwen-oauth first when included', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'openai-model-1',
-            name: 'OpenAI Model 1',
-            baseUrl: 'https://api.openai.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-        ],
-        anthropic: [
-          {
-            id: 'anthropic-model-1',
-            name: 'Anthropic Model 1',
-            baseUrl: 'https://api.anthropic.com/v1',
-            envKey: 'ANTHROPIC_API_KEY',
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'openai-model-1',
+              name: 'OpenAI Model 1',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+        anthropic: {
+          protocol: Protocol.ANTHROPIC,
+          models: [
+            {
+              id: 'anthropic-model-1',
+              name: 'Anthropic Model 1',
+              baseUrl: 'https://api.anthropic.com/v1',
+              envKey: 'ANTHROPIC_API_KEY',
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -1836,14 +1947,17 @@ describe('ModelsConfig', () => {
 
     it('should not capture registry models as runtime', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4-turbo',
-            name: 'GPT-4 Turbo',
-            baseUrl: 'https://api.openai.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'gpt-4-turbo',
+              name: 'GPT-4 Turbo',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -1964,14 +2078,17 @@ describe('ModelsConfig', () => {
 
     it('should return runtime option first in getAllConfiguredModels', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'registry-model',
-            name: 'Registry Model',
-            baseUrl: 'https://api.openai.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'registry-model',
+              name: 'Registry Model',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -2186,7 +2303,10 @@ describe('ModelsConfig', () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'gpt-4', name: 'GPT-4' }],
+          },
         },
       });
 
@@ -2196,7 +2316,10 @@ describe('ModelsConfig', () => {
 
       // Reload with new config
       modelsConfig.reloadModelProvidersConfig({
-        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        },
       });
 
       // After reload, old model should not exist
@@ -2212,10 +2335,13 @@ describe('ModelsConfig', () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: [
-            { id: 'gpt-4', name: 'GPT-4' },
-            { id: 'gpt-3.5', name: 'GPT-3.5' },
-          ],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [
+              { id: 'gpt-4', name: 'GPT-4' },
+              { id: 'gpt-3.5', name: 'GPT-3.5' },
+            ],
+          },
         },
       });
 
@@ -2224,10 +2350,13 @@ describe('ModelsConfig', () => {
 
       // Reload with config that still includes gpt-4
       modelsConfig.reloadModelProvidersConfig({
-        openai: [
-          { id: 'gpt-4', name: 'GPT-4 Updated' },
-          { id: 'new-model', name: 'New Model' },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            { id: 'gpt-4', name: 'GPT-4 Updated' },
+            { id: 'new-model', name: 'New Model' },
+          ],
+        },
       });
 
       // Current model should still be available
@@ -2240,7 +2369,10 @@ describe('ModelsConfig', () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'gpt-4', name: 'GPT-4' }],
+          },
         },
       });
 
@@ -2250,8 +2382,14 @@ describe('ModelsConfig', () => {
 
       // Reload with different config
       modelsConfig.reloadModelProvidersConfig({
-        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
-        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        },
+        gemini: {
+          protocol: Protocol.GEMINI,
+          models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
       });
 
       const updatedModels = modelsConfig.getAllConfiguredModels();
@@ -2264,8 +2402,14 @@ describe('ModelsConfig', () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
-          gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'gpt-4', name: 'GPT-4' }],
+          },
+          gemini: {
+            protocol: Protocol.GEMINI,
+            models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+          },
         },
       });
 
@@ -2286,7 +2430,10 @@ describe('ModelsConfig', () => {
     it('should preserve qwen-oauth models after reload', () => {
       const modelsConfig = new ModelsConfig({
         modelProvidersConfig: {
-          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'gpt-4', name: 'GPT-4' }],
+          },
         },
       });
 
@@ -2295,7 +2442,10 @@ describe('ModelsConfig', () => {
         .filter((m) => m.authType === 'qwen-oauth');
 
       modelsConfig.reloadModelProvidersConfig({
-        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        gemini: {
+          protocol: Protocol.GEMINI,
+          models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
       });
 
       // qwen-oauth models should still exist
@@ -2308,7 +2458,10 @@ describe('ModelsConfig', () => {
     it('should handle reload with undefined config', () => {
       const modelsConfig = new ModelsConfig({
         modelProvidersConfig: {
-          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [{ id: 'gpt-4', name: 'GPT-4' }],
+          },
         },
       });
 
@@ -2333,7 +2486,10 @@ describe('ModelsConfig', () => {
 
       // First reload
       modelsConfig.reloadModelProvidersConfig({
-        openai: [{ id: 'model-v1', name: 'Model V1' }],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [{ id: 'model-v1', name: 'Model V1' }],
+        },
       });
       expect(
         modelsConfig.getAllConfiguredModels().some((m) => m.id === 'model-v1'),
@@ -2341,7 +2497,10 @@ describe('ModelsConfig', () => {
 
       // Second reload
       modelsConfig.reloadModelProvidersConfig({
-        openai: [{ id: 'model-v2', name: 'Model V2' }],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [{ id: 'model-v2', name: 'Model V2' }],
+        },
       });
       expect(
         modelsConfig.getAllConfiguredModels().some((m) => m.id === 'model-v1'),
@@ -2361,19 +2520,34 @@ describe('ModelsConfig', () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: [
-            { id: 'gpt-4', name: 'GPT-4' },
-            { id: 'gpt-3.5', name: 'GPT-3.5' },
-          ],
-          gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [
+              { id: 'gpt-4', name: 'GPT-4' },
+              { id: 'gpt-3.5', name: 'GPT-3.5' },
+            ],
+          },
+          gemini: {
+            protocol: Protocol.GEMINI,
+            models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+          },
         },
       });
 
       // Reload with completely different config
       modelsConfig.reloadModelProvidersConfig({
-        openai: [{ id: 'new-openai', name: 'New OpenAI' }],
-        anthropic: [{ id: 'claude', name: 'Claude' }],
-        gemini: [{ id: 'gemini-ultra', name: 'Gemini Ultra' }],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [{ id: 'new-openai', name: 'New OpenAI' }],
+        },
+        anthropic: {
+          protocol: Protocol.ANTHROPIC,
+          models: [{ id: 'claude', name: 'Claude' }],
+        },
+        gemini: {
+          protocol: Protocol.GEMINI,
+          models: [{ id: 'gemini-ultra', name: 'Gemini Ultra' }],
+        },
       });
 
       const allModels = modelsConfig.getAllConfiguredModels();
@@ -2393,14 +2567,17 @@ describe('ModelsConfig', () => {
   describe('max_tokens in modelsConfig', () => {
     it('should not auto-fill max_tokens when samplingParams is undefined', async () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4',
-            name: 'GPT-4',
-            baseUrl: 'https://api.openai.example.com/v1',
-            // No generationConfig.samplingParams defined
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'gpt-4',
+              name: 'GPT-4',
+              baseUrl: 'https://api.openai.example.com/v1',
+              // No generationConfig.samplingParams defined
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -2416,16 +2593,19 @@ describe('ModelsConfig', () => {
 
     it('should not auto-fill max_tokens when samplingParams exists but max_tokens is missing', async () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4',
-            name: 'GPT-4',
-            baseUrl: 'https://api.openai.example.com/v1',
-            generationConfig: {
-              samplingParams: { temperature: 0.7 }, // max_tokens not defined
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'gpt-4',
+              name: 'GPT-4',
+              baseUrl: 'https://api.openai.example.com/v1',
+              generationConfig: {
+                samplingParams: { temperature: 0.7 }, // max_tokens not defined
+              },
             },
-          },
-        ],
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -2446,16 +2626,19 @@ describe('ModelsConfig', () => {
 
     it('should not override existing max_tokens from modelProviders', async () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4',
-            name: 'GPT-4',
-            baseUrl: 'https://api.openai.example.com/v1',
-            generationConfig: {
-              samplingParams: { temperature: 0.7, max_tokens: 4096 },
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'gpt-4',
+              name: 'GPT-4',
+              baseUrl: 'https://api.openai.example.com/v1',
+              generationConfig: {
+                samplingParams: { temperature: 0.7, max_tokens: 4096 },
+              },
             },
-          },
-        ],
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -2476,20 +2659,26 @@ describe('ModelsConfig', () => {
 
     it('should not auto-fill max_tokens for different model families', async () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        anthropic: [
-          {
-            id: 'claude-3-opus',
-            name: 'Claude 3 Opus',
-            baseUrl: 'https://api.anthropic.example.com/v1',
-          },
-        ],
-        gemini: [
-          {
-            id: 'gemini-pro',
-            name: 'Gemini Pro',
-            baseUrl: 'https://api.gemini.example.com/v1',
-          },
-        ],
+        anthropic: {
+          protocol: Protocol.ANTHROPIC,
+          models: [
+            {
+              id: 'claude-3-opus',
+              name: 'Claude 3 Opus',
+              baseUrl: 'https://api.anthropic.example.com/v1',
+            },
+          ],
+        },
+        gemini: {
+          protocol: Protocol.GEMINI,
+          models: [
+            {
+              id: 'gemini-pro',
+              name: 'Gemini Pro',
+              baseUrl: 'https://api.gemini.example.com/v1',
+            },
+          ],
+        },
       };
 
       // Test Claude model without provider max_tokens
@@ -2519,14 +2708,17 @@ describe('ModelsConfig', () => {
   describe('getModelDisplayName', () => {
     it('should return resolved.name when model is found in registry', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4o',
-            name: 'GPT-4o',
-            baseUrl: 'https://api.openai.example.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -2546,14 +2738,17 @@ describe('ModelsConfig', () => {
 
     it('should return raw modelId when model is not found in registry', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4o',
-            name: 'GPT-4o',
-            baseUrl: 'https://api.openai.example.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -2569,14 +2764,17 @@ describe('ModelsConfig', () => {
 
     it('should return raw modelId when model.name equals model.id', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'coder-model',
-            name: 'coder-model',
-            baseUrl: 'https://api.openai.example.com/v1',
-            envKey: 'OPENAI_API_KEY',
-          },
-        ],
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [
+            {
+              id: 'coder-model',
+              name: 'coder-model',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
       };
 
       const modelsConfig = new ModelsConfig({
@@ -2589,5 +2787,40 @@ describe('ModelsConfig', () => {
         'coder-model',
       );
     });
+  });
+});
+
+describe('getGenerationConfig protocol fallback', () => {
+  it('should resolve protocol for env-var users without modelProviders', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+    });
+
+    const config = modelsConfig.getGenerationConfig();
+    expect(config.protocol).toBe(Protocol.OPENAI);
+  });
+
+  it('should resolve protocol for anthropic env-var users', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_ANTHROPIC,
+    });
+
+    const config = modelsConfig.getGenerationConfig();
+    expect(config.protocol).toBe(Protocol.ANTHROPIC);
+  });
+
+  it('should prefer registry protocol over fallback', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: {
+          protocol: Protocol.OPENAI,
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+      },
+    });
+
+    const config = modelsConfig.getGenerationConfig();
+    expect(config.protocol).toBe(Protocol.OPENAI);
   });
 });
