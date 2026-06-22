@@ -302,6 +302,11 @@ function copyNativeAddon(packageRoot, target) {
   const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
   const prebuildSrc = path.join(addonSrc, 'prebuilds', prebuildDirName);
   if (!fs.existsSync(prebuildSrc)) {
+    if (process.env.QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1') {
+      fail(
+        `Required audio-capture prebuild is missing for ${prebuildDirName}: ${prebuildSrc}`,
+      );
+    }
     // No prebuild for this target (e.g. a local build without the release
     // artifacts). Ship without the addon: voice degrades to the SoX/arecord
     // fallback, streaming is unavailable. The release pipeline downloads

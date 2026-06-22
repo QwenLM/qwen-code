@@ -407,6 +407,7 @@ jobs:
       - name: 'Build Standalone Archives'
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
       - name: 'Publish @qwen-code/audio-capture'
