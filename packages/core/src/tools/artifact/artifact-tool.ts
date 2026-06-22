@@ -43,7 +43,7 @@ export interface ArtifactToolParams {
   title?: string;
 }
 
-const DESCRIPTION = `Publishes a self-contained HTML page as an interactive Artifact and opens it in the browser (returning a shareable link when a remote host is configured). Use it to turn session output into a durable, interactive page — a PR walkthrough, an architecture tour, a project dashboard.
+const DESCRIPTION = `Publishes a self-contained HTML page as an interactive Artifact, optionally opens it in the browser depending on settings, and returns a shareable link when a remote host is configured. Use it to turn session output into a durable, interactive page — a PR walkthrough, an architecture tour, a project dashboard.
 
 Workflow:
 - Write the page to a file first (via Write/Edit), then call Artifact with that file's absolute path.
@@ -54,7 +54,7 @@ Workflow:
 
 To update an artifact, call Artifact again with the SAME file path: it redeploys to the same URL. A different path creates a separate Artifact.
 
-Set QWEN_ARTIFACT_NO_AUTO_OPEN=1 to publish without launching a browser.`;
+Set artifact.autoOpen=false in settings.json, or QWEN_ARTIFACT_NO_AUTO_OPEN=1, to publish without launching a browser.`;
 
 const debugLogger = createDebugLogger('artifact');
 
@@ -62,6 +62,8 @@ class ArtifactToolInvocation extends BaseToolInvocation<
   ArtifactToolParams,
   ToolResult
 > {
+  private readonly shouldAutoOpen: boolean;
+
   constructor(
     private readonly config: Config,
     private readonly publisher: ArtifactPublisher,
@@ -69,6 +71,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     params: ArtifactToolParams,
   ) {
     super(params);
+    this.shouldAutoOpen = config.shouldAutoOpenArtifact();
   }
 
   override getDescription(): string {
@@ -79,7 +82,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     return `Publishing artifact from ${shortenPath(relativePath)}`;
   }
 
-  /** Publishing writes outside the project and opens a browser — always ask. */
+  /** Publishing writes outside the project and may open a browser — always ask. */
   override getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('ask');
   }
@@ -92,7 +95,9 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     const details: ToolInfoConfirmationDetails = {
       type: 'info',
       title: 'Publish Artifact',
-      prompt: `Publish ${shortenPath(relativePath)} as an interactive Artifact and open it in your browser.`,
+      prompt: `Publish ${shortenPath(relativePath)} as an interactive Artifact${
+        this.shouldAutoOpen ? ' and open it in your browser' : ''
+      }.`,
       onConfirm: async () => {
         // Persistence handled by coreToolScheduler via PM rules.
       },
@@ -174,7 +179,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
 
     // Open in the browser unless disabled. Best-effort: never fail the publish
     // because the browser could not be launched.
-    if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] !== '1') {
+    if (this.shouldAutoOpen) {
       try {
         await this.openUrl(url, {
           allowFile: true,
