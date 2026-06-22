@@ -23,6 +23,7 @@ const LABEL_WIDTH = 15;
 
 type ServerAction =
   | 'view-tools'
+  | 'view-resources'
   | 'reconnect'
   | 'toggle-disable'
   | 'authenticate'
@@ -31,6 +32,7 @@ type ServerAction =
 export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   server,
   onViewTools,
+  onViewResources,
   onReconnect,
   onDisable,
   onAuthenticate,
@@ -69,6 +71,15 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
         key: 'view-tools',
         label: t('View tools'),
         value: 'view-tools',
+      });
+    }
+
+    // 只在服务器未禁用且有资源时显示"查看资源"选项
+    if (!server.isDisabled && (server.resourceCount ?? 0) > 0) {
+      result.push({
+        key: 'view-resources',
+        label: t('View resources'),
+        value: 'view-resources',
       });
     }
 
@@ -263,6 +274,9 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
             switch (value) {
               case 'view-tools':
                 onViewTools();
+                break;
+              case 'view-resources':
+                onViewResources?.();
                 break;
               case 'reconnect':
                 onReconnect?.();
