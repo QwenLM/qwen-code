@@ -119,6 +119,26 @@ function specToModelConfig(
   };
 }
 
+function applyProviderCustomHeaders(
+  models: ProviderModelConfig[],
+  config: ProviderConfig,
+): ProviderModelConfig[] {
+  if (!config.customHeaders) return models;
+  return models.map((model) => {
+    const existing = model.generationConfig ?? {};
+    return {
+      ...model,
+      generationConfig: {
+        ...existing,
+        customHeaders: {
+          ...(config.customHeaders as Record<string, string>),
+          ...(existing.customHeaders as Record<string, string> | undefined),
+        },
+      },
+    };
+  });
+}
+
 function buildModelConfigs(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
@@ -126,17 +146,17 @@ function buildModelConfigs(
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
 
+  let models: ProviderModelConfig[];
+
   // Fixed ModelSpec[] (not editable) — use specs directly
   if (config.models && !config.modelsEditable) {
-    return config.models.map((spec) =>
+    models = config.models.map((spec) =>
       specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
     );
-  }
-
-  // Editable ModelSpec[] — look up per-model metadata for known IDs
-  if (config.models && config.modelsEditable) {
+  } else if (config.models && config.modelsEditable) {
+    // Editable ModelSpec[] — look up per-model metadata for known IDs
     const specMap = new Map(config.models.map((s) => [s.id, s]));
-    return inputs.modelIds.map((id) => {
+    models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id);
       if (spec) {
         return specToModelConfig(spec, prefix, inputs.baseUrl, envKey);
@@ -150,23 +170,23 @@ function buildModelConfigs(
         ...(genConfig ? { generationConfig: genConfig } : {}),
       };
     });
+  } else {
+    // No predefined models (custom provider) — use advancedConfig
+    const advCfg = inputs.advancedConfig;
+    const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
+    models = inputs.modelIds.map((id) => {
+      const genConfig = buildAdvancedGenerationConfig(advCfg);
+      return {
+        id,
+        name: displayName(id),
+        baseUrl: inputs.baseUrl,
+        envKey,
+        ...(genConfig ? { generationConfig: genConfig } : {}),
+      };
+    });
   }
 
-  // No predefined models (custom provider) — use advancedConfig
-  const advCfg = inputs.advancedConfig;
-
-  const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
-
-  return inputs.modelIds.map((id) => {
-    const genConfig = buildAdvancedGenerationConfig(advCfg);
-    return {
-      id,
-      name: displayName(id),
-      baseUrl: inputs.baseUrl,
-      envKey,
-      ...(genConfig ? { generationConfig: genConfig } : {}),
-    };
-  });
+  return applyProviderCustomHeaders(models, config);
 }
 
 // ---------------------------------------------------------------------------

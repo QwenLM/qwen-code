@@ -126,6 +126,7 @@ export type HistoryItemUser = HistoryItemBase & {
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
