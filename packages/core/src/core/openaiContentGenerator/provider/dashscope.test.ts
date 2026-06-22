@@ -1424,5 +1424,77 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       expect(result).not.toHaveProperty('custom_param');
     });
+
+    it('should default preserve_thinking to true on the request', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-max',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(true);
+    });
+
+    it('should let user extra_body.preserve_thinking override the default', () => {
+      const providerWithOptOut = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: {
+            preserve_thinking: false,
+          },
+        },
+        mockCliConfig,
+      );
+
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-max',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = providerWithOptOut.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(false);
+    });
+
+    it('should default preserve_thinking to true on vision model requests', () => {
+      // qwen3.7-plus is a reasoning model routed through the vision path
+      // (matches VISION_MODEL_PREFIX_PATTERNS); it still needs the flag.
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).vl_high_resolution_images).toBe(true);
+    });
+
+    it('should let user extra_body.preserve_thinking override the default on vision models', () => {
+      const providerWithOptOut = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: {
+            preserve_thinking: false,
+          },
+        },
+        mockCliConfig,
+      );
+
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = providerWithOptOut.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(false);
+    });
   });
 });
