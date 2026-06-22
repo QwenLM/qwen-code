@@ -158,7 +158,7 @@ jobs:
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     if: '${{ !cancelled() }}'
-    runs-on: '${{ matrix.os }}'
+    runs-on: '${{ matrix.runner }}'
     permissions:
       contents: 'read'
       checks: 'write'
@@ -168,12 +168,15 @@ jobs:
       matrix:
         include:
           - os: 'macos-latest'
+            runner: 'macos-latest'
             node-version: '22.x'
             upload-coverage: 'false'
           - os: 'ubuntu-latest'
+            runner: 'ubuntu-latest'
             node-version: '22.x'
             upload-coverage: 'true'
           - os: 'windows-latest'
+            runner: 'windows-2022'
             node-version: '22.x'
             upload-coverage: 'false'
     steps:

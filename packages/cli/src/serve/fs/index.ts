@@ -60,4 +60,4 @@ export {
   type WriteOutcome,
   type WriteTextAtomicOptions,
   type WriteTextAtomicOutcome,
-} from './workspaceFileSystem.js';
+} from './workspace-file-system.js';

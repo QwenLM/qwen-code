@@ -1033,7 +1033,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // Build the mediator before the BridgeClient so the agent's
   // `requestPermission` callback can hand the record straight in.
   // Audit publisher fallback: when the host doesn't supply one
-  // (cli/serve/runQwenServe.ts wraps a real `PermissionAuditRing`
+  // (cli/serve/run-qwen-serve.ts wraps a real `PermissionAuditRing`
   // backed publisher in production), we use the canonical no-op
   // fallback so the mediator can still run for embedded callers /
   // tests without an audit consumer.

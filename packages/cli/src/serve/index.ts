@@ -9,7 +9,7 @@ export {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
-} from './runQwenServe.js';
+} from './run-qwen-serve.js';
 export {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -98,7 +98,7 @@ export {
   ENV_PROXY_VARS,
   ENV_SECRET_VARS,
   buildEnvStatusFromProcess,
-} from './envSnapshot.js';
+} from './env-snapshot.js';
 export {
   bearerAuth,
   createMutationGate,
@@ -139,5 +139,5 @@ export {
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type SubscribeOptions,
-} from './eventBus.js';
-export { createInMemoryChannel } from './inMemoryChannel.js';
+} from './event-bus.js';
+export { createInMemoryChannel } from './in-memory-channel.js';

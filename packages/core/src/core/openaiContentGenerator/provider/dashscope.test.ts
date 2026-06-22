@@ -817,6 +817,227 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
+    // glm-* on DashScope drop array-form content on tool-less ("plain") chat
+    // requests. For glm models with no function-calling context the provider
+    // skips cache control and collapses text content to plain strings, so
+    // side-queries like web_fetch aren't silently emptied. Other models and
+    // tool-bearing requests keep the existing cache-control path untouched.
+    describe('glm array-drop fix (plain-text flatten)', () => {
+      it('should flatten system and user text content to strings for a glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant.' },
+            {
+              role: 'user',
+              content: [{ type: 'text', text: 'Summarize this page.' }],
+            },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        // No cache_control is applied; both messages become plain strings.
+        expect(result.messages[0].content).toBe('You are a helpful assistant.');
+        expect(result.messages[1].content).toBe('Summarize this page.');
+      });
+
+      it('should join multi-part text-only array content with blank lines', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'First block' },
+                { type: 'text', text: 'Second block' },
+              ],
+            },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toBe('First block\n\nSecond block');
+      });
+
+      it('should flatten the streamed last message too for a glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: true,
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toBe('Hello');
+      });
+
+      it('should NOT flatten array content that contains a non-text (media) part', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'What is this?' },
+                {
+                  type: 'image_url',
+                  image_url: { url: 'https://example.com/x.jpg' },
+                },
+              ],
+            },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        // The whole message is left untouched (cannot be a plain string).
+        expect(result.messages[0].content).toEqual([
+          { type: 'text', text: 'What is this?' },
+          {
+            type: 'image_url',
+            image_url: { url: 'https://example.com/x.jpg' },
+          },
+        ]);
+      });
+
+      it('should leave an empty content array unchanged for a glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [{ role: 'user', content: [] }],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toEqual([]);
+      });
+
+      it('should flatten glm content even when cache control is disabled', () => {
+        (
+          mockCliConfig.getContentGeneratorConfig as MockedFunction<
+            typeof mockCliConfig.getContentGeneratorConfig
+          >
+        ).mockReturnValue({
+          model: 'glm-5.2',
+          enableCacheControl: false,
+        });
+
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            { role: 'system', content: [{ type: 'text', text: 'Sys' }] },
+            { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toBe('Sys');
+        expect(result.messages[1].content).toBe('Hi');
+      });
+
+      // Any function-calling signal (a tools field, an assistant tool_call, or a
+      // tool result in history) keeps glm out of the flatten path: cache control
+      // is applied and array content is preserved.
+      const functionCallingCases: Array<{
+        name: string;
+        extraMessages: OpenAI.Chat.ChatCompletionMessageParam[];
+        tools?: OpenAI.Chat.ChatCompletionTool[];
+        userIndex: number;
+      }> = [
+        {
+          name: 'declares tools',
+          extraMessages: [],
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'noop',
+                parameters: { type: 'object', properties: {} },
+              },
+            },
+          ],
+          userIndex: 1,
+        },
+        {
+          name: 'has an assistant turn with tool_calls',
+          extraMessages: [
+            {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'noop', arguments: '{}' },
+                },
+              ],
+            },
+          ],
+          userIndex: 2,
+        },
+        {
+          name: 'has tool-result history',
+          extraMessages: [
+            { role: 'tool', content: 'tool result', tool_call_id: 'call_1' },
+          ],
+          userIndex: 2,
+        },
+      ];
+
+      it.each(functionCallingCases)(
+        'should keep cache control and array content for a glm request that $name',
+        ({ extraMessages, tools, userIndex }) => {
+          const request: OpenAI.Chat.ChatCompletionCreateParams = {
+            model: 'glm-5.2',
+            stream: false,
+            messages: [
+              { role: 'system', content: 'Sys' },
+              ...extraMessages,
+              { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+            ],
+            ...(tools ? { tools } : {}),
+          };
+
+          const result = provider.buildRequest(request, 'test-prompt-id');
+
+          expect(result.messages[0].content).toEqual([
+            { type: 'text', text: 'Sys', cache_control: { type: 'ephemeral' } },
+          ]);
+          expect(Array.isArray(result.messages[userIndex].content)).toBe(true);
+        },
+      );
+
+      it('should NOT flatten content for a non-glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'qwen-max',
+          stream: false,
+          messages: [
+            { role: 'system', content: 'Sys' },
+            { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        // Non-glm: existing behavior — system cached as array, user untouched.
+        expect(result.messages[0].content).toEqual([
+          { type: 'text', text: 'Sys', cache_control: { type: 'ephemeral' } },
+        ]);
+        expect(result.messages[1].content).toEqual([
+          { type: 'text', text: 'Hi' },
+        ]);
+      });
+    });
+
     it('should handle empty messages array', () => {
       const emptyRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen-max',

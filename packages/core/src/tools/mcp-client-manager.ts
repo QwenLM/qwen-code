@@ -285,7 +285,7 @@ function readBudgetFromEnv(): McpBudgetConfig {
       // operator typos
       // like `QWEN_SERVE_MCP_CLIENT_BUDGET=abc` previously fell
       // through silently to "no budget" with zero indication. The
-      // CLI parent (`commands/serve.ts` + `runQwenServe.ts`)
+      // CLI parent (`commands/serve.ts` + `run-qwen-serve.ts`)
       // validates and throws, but the ACP child process — where
       // this function runs — has no such validation. Surface a
       // boot breadcrumb so operators see the misconfiguration in

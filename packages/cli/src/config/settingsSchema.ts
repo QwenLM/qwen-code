@@ -365,6 +365,50 @@ const SETTINGS_SCHEMA = {
         description: 'Enable Vim keybindings',
         showInDialog: true,
       },
+      voice: {
+        type: 'object',
+        label: 'Voice Dictation',
+        category: 'General',
+        requiresRestart: false,
+        default: {},
+        description: 'Voice dictation settings.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Voice Dictation',
+            category: 'General',
+            requiresRestart: false,
+            default: false,
+            description: 'Enable voice dictation in the prompt input.',
+            showInDialog: false,
+          },
+          mode: {
+            type: 'enum',
+            label: 'Voice Dictation Mode',
+            category: 'General',
+            requiresRestart: false,
+            default: 'hold',
+            description:
+              'How push-to-talk behaves: "hold" to talk while held, or "tap" to start and tap (or pause) to stop and submit.',
+            showInDialog: false,
+            options: [
+              { value: 'hold', label: 'Hold to talk' },
+              { value: 'tap', label: 'Tap to toggle' },
+            ],
+          },
+          language: {
+            type: 'string',
+            label: 'Voice Dictation Language',
+            category: 'General',
+            requiresRestart: false,
+            default: '',
+            description:
+              'Preferred spoken language for voice transcription (e.g. "english", "chinese"). Leave empty to auto-detect.',
+            showInDialog: false,
+          },
+        },
+      },
       enableAutoUpdate: {
         type: 'boolean',
         label: 'Enable Auto Update',
@@ -409,7 +453,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: 30,
         description:
-          'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind. Backups older than this are removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session. Other persistent caches will honor the same setting in the future.',
+          'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.',
         showInDialog: true,
       },
       gitCoAuthor: {
@@ -569,6 +613,16 @@ const SETTINGS_SCHEMA = {
           { value: 'text', label: 'Text' },
           { value: 'json', label: 'JSON' },
         ],
+      },
+      showTimestamps: {
+        type: 'boolean',
+        label: 'Show Timestamps',
+        category: 'General',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show [HH:MM:SS] timestamp before each assistant response.',
+        showInDialog: true,
       },
     },
   },
@@ -1134,6 +1188,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  voiceModel: {
+    type: 'string',
+    label: 'Voice Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.',
+    showInDialog: false,
+  },
+
   model: {
     type: 'object',
     label: 'Model',
@@ -1236,7 +1301,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.',
+          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -2155,7 +2220,7 @@ const SETTINGS_SCHEMA = {
           'unreachable quorum. Unset = floor(M/2)+1. ' +
           'Requires daemon restart — read once at boot.',
         showInDialog: false,
-        // runQwenServe.ts validates `Number.isInteger(n) && n >= 1` and
+        // run-qwen-serve.ts validates `Number.isInteger(n) && n >= 1` and
         // refuses to boot otherwise. Override the generated schema so IDE
         // (VSCode, JetBrains via JSON Schema) flags `0`, `-1`, `1.5`
         // BEFORE the user restarts the daemon. The bare `type:'number'`
@@ -2706,6 +2771,16 @@ const SETTINGS_SCHEMA = {
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
         showInDialog: true,
       },
+      artifact: {
+        type: 'boolean',
+        label: 'Enable Artifacts',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. Can also be enabled via QWEN_CODE_ENABLE_ARTIFACT=1, or hard-disabled via QWEN_CODE_DISABLE_ARTIFACT=1.',
+        showInDialog: true,
+      },
       emitToolUseSummaries: {
         type: 'boolean',
         label: 'Tool Use Summaries',
@@ -2715,6 +2790,137 @@ const SETTINGS_SCHEMA = {
         description:
           'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
+      },
+    },
+  },
+
+  artifact: {
+    type: 'object',
+    label: 'Artifacts',
+    category: 'Experimental',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
+    showInDialog: false,
+    properties: {
+      publisher: {
+        type: 'enum',
+        label: 'Artifact Publisher',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: 'local',
+        description:
+          "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload).",
+        showInDialog: false,
+        options: [
+          { value: 'local', label: 'Local (file://)' },
+          { value: 'host', label: 'Host (shareable link)' },
+          { value: 'oss', label: 'Aliyun OSS' },
+        ],
+      },
+      host: {
+        type: 'object',
+        label: 'Artifact Host',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Host-backend config, used when artifact.publisher is "host".',
+        showInDialog: false,
+        properties: {
+          uploadCommand: {
+            type: 'string',
+            label: 'Upload Command',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'Command that uploads the artifact, run with execFile (no shell). {file} = local HTML path, {key} = remote object key. e.g. "aws s3 cp {file} s3://bucket/{key} --content-type text/html".',
+            showInDialog: false,
+          },
+          urlTemplate: {
+            type: 'string',
+            label: 'URL Template',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'Shareable URL template; {key} is substituted. e.g. "https://bucket.example.com/{key}".',
+            showInDialog: false,
+          },
+          keyPrefix: {
+            type: 'string',
+            label: 'Key Prefix',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 'artifacts',
+            description:
+              'Remote key prefix; the object key is "{prefix}/{id}/index.html".',
+            showInDialog: false,
+          },
+        },
+      },
+      oss: {
+        type: 'object',
+        label: 'Artifact OSS',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Native Aliyun OSS backend, used when artifact.publisher is "oss". Credentials are read from OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET (or ALIBABA_CLOUD_*), never from settings.',
+        showInDialog: false,
+        properties: {
+          bucket: {
+            type: 'string',
+            label: 'OSS Bucket',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description: 'OSS bucket name.',
+            showInDialog: false,
+          },
+          endpoint: {
+            type: 'string',
+            label: 'OSS Endpoint',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'OSS endpoint host, e.g. "oss-cn-hangzhou.aliyuncs.com".',
+            showInDialog: false,
+          },
+          keyPrefix: {
+            type: 'string',
+            label: 'Key Prefix',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 'artifacts',
+            description:
+              'Remote key prefix; the object key is "{prefix}/{id}/index.html".',
+            showInDialog: false,
+          },
+          acl: {
+            type: 'string',
+            label: 'Object ACL',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 'public-read',
+            description:
+              'Object ACL applied on upload. "public-read" (default) makes the link shareable.',
+            showInDialog: false,
+          },
+          publicBaseUrl: {
+            type: 'string',
+            label: 'Public Base URL',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: '',
+            description:
+              'Optional CDN / custom-domain base for the returned URL. Upload still goes through endpoint. e.g. "https://cdn.example.com".',
+            showInDialog: false,
+          },
+        },
       },
     },
   },
