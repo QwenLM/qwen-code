@@ -44,8 +44,8 @@ export function parseAcpBaseModelId(value: string): string {
  *   where snapshotId is in format `$runtime|${authType}|${modelId}`
  * - Plain model ID - Returns as-is with no authType
  *
- * If the string ends with `(...)` and `...` is a valid `AuthType`, returns both;
- * otherwise returns the trimmed input as `modelId` only.
+ * If the string ends with `(...)` and `...` is non-empty, returns both;
+ * otherwise (empty parens or no trailing parens) returns the trimmed input as `modelId` only.
  */
 export function parseAcpModelOption(input: string): {
   modelId: string;

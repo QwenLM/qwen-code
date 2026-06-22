@@ -34,9 +34,14 @@ describe('acpModelUtils', () => {
     });
   });
 
-  it('returns trimmed input as modelId when authType is invalid', () => {
+  it('parses modelId and authType for custom authType strings', () => {
     expect(parseAcpModelOption('qwen3(not-a-real-auth)')).toEqual({
-      modelId: 'qwen3(not-a-real-auth)',
+      modelId: 'qwen3',
+      authType: 'not-a-real-auth',
     });
+  });
+
+  it('returns whole input as modelId when trailing parens are empty', () => {
+    expect(parseAcpModelOption('qwen3()')).toEqual({ modelId: 'qwen3()' });
   });
 });
