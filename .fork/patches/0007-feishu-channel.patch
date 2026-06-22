@@ -11,12 +11,14 @@ diff --git a/packages/cli/src/commands/channel/channel-registry.ts b/packages/cl
 index 90df33214..520ed46a2 100644
 --- a/packages/cli/src/commands/channel/channel-registry.ts
 +++ b/packages/cli/src/commands/channel/channel-registry.ts
-@@ -10,7 +10,7 @@ function ensureBuiltins(): Promise<void> {
-         import('@qwen-code/channel-telegram'),
-         import('@qwen-code/channel-weixin'),
-         import('@qwen-code/channel-dingtalk'),
--        import('@qwen-code/channel-feishu'),
-+        import('@alife/dataworks-qwen-code-channel-feishu'),
-       ]);
- 
-       for (const mod of [telegram, weixin, dingtalk, feishu]) {
+@@ -9,6 +9,9 @@ function ensureBuiltins(): Promise<void> {
+         { name: 'telegram', promise: import('@qwen-code/channel-telegram') },
+         { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
+         { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
+-        { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
++        {
++          name: 'feishu',
++          promise: import('@alife/dataworks-qwen-code-channel-feishu'),
++        },
+         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
+       ];

@@ -11,7 +11,7 @@ diff --git a/esbuild.config.js b/esbuild.config.js
 index bc50dc265..2b87c6ce9 100644
 --- a/esbuild.config.js
 +++ b/esbuild.config.js
-@@ -72,22 +72,11 @@ const external = [
+@@ -72,21 +72,10 @@ const external = [
    '@teddyzhu/clipboard-win32-arm64-msvc',
  ];
  
@@ -23,74 +23,74 @@ index bc50dc265..2b87c6ce9 100644
 -// in skill-manager / ripgrepUtils / i18n / extensions/new.
 -const BUNDLE_CHUNK_DIR = 'chunks';
 -
- esbuild
-   .build({
--    entryPoints: { cli: 'packages/cli/index.ts' },
-+    entryPoints: ['packages/cli/index.ts'],
-     bundle: true,
--    outdir: 'dist',
--    entryNames: '[name]',
--    chunkNames: `${BUNDLE_CHUNK_DIR}/[name]-[hash]`,
--    splitting: true,
-+    outfile: 'dist/cli.js',
-     platform: 'node',
-     format: 'esm',
-     target: 'node22',
-@@ -119,29 +108,6 @@ esbuild
-       'process.env.NODE_ENV': JSON.stringify('production'),
-       // Make global available for compatibility
-       global: 'globalThis',
--      // Redirect free __dirname/__filename references to the shim so that
--      // vendored libraries that emit their own `var __dirname` locals don't
--      // collide with our injected bindings when code-splitting is enabled.
--      //
--      // CONTRIBUTOR WARNING: this rewrite applies to *all* source files, so
--      // any bare `__dirname` / `__filename` in our own code resolves to the
--      // shim chunk's on-disk location (i.e. `dist/chunks/`), NOT the source
--      // file's own directory. To get a per-file path, declare a local shadow
--      // at the top of the module:
--      //
--      //   import { fileURLToPath } from 'node:url';
--      //   const __filename = fileURLToPath(import.meta.url);
--      //   const __dirname  = path.dirname(__filename);
--      //
--      // esbuild leaves the local binding alone (it's a declared identifier,
--      // not a free reference). For sibling-asset lookups in modules that may
--      // be hoisted into a shared chunk, prefer
--      // `resolveBundleDir(import.meta.url)` from
--      // `packages/core/src/utils/bundlePaths.ts` — it both produces a
--      // per-file path and strips the chunk segment when the module ends up
--      // under `dist/chunks/`.
--      __dirname: '__qwen_dirname',
--      __filename: '__qwen_filename',
-     },
-     loader: { '.node': 'file' },
-     plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
+ const mainBuild = esbuild.build({
+-  entryPoints: { cli: 'packages/cli/index.ts' },
++  entryPoints: ['packages/cli/index.ts'],
+   bundle: true,
+-  outdir: 'dist',
+-  entryNames: '[name]',
+-  chunkNames: `${BUNDLE_CHUNK_DIR}/[name]-[hash]`,
+-  splitting: true,
++  outfile: 'dist/cli.js',
+   platform: 'node',
+   format: 'esm',
+   target: 'node22',
+@@ -115,27 +104,4 @@ const mainBuild = esbuild.build({
+     'process.env.NODE_ENV': JSON.stringify('production'),
+     // Make global available for compatibility
+     global: 'globalThis',
+-    // Redirect free __dirname/__filename references to the shim so that
+-    // vendored libraries that emit their own `var __dirname` locals don't
+-    // collide with our injected bindings when code-splitting is enabled.
+-    //
+-    // CONTRIBUTOR WARNING: this rewrite applies to *all* source files, so
+-    // any bare `__dirname` / `__filename` in our own code resolves to the
+-    // shim chunk's on-disk location (i.e. `dist/chunks/`), NOT the source
+-    // file's own directory. To get a per-file path, declare a local shadow
+-    // at the top of the module:
+-    //
+-    //   import { fileURLToPath } from 'node:url';
+-    //   const __filename = fileURLToPath(import.meta.url);
+-    //   const __dirname  = path.dirname(__filename);
+-    //
+-    // esbuild leaves the local binding alone (it's a declared identifier,
+-    // not a free reference). For sibling-asset lookups in modules that may
+-    // be hoisted into a shared chunk, prefer
+-    // `resolveBundleDir(import.meta.url)` from
+-    // `packages/core/src/utils/bundlePaths.ts` — it both produces a
+-    // per-file path and strips the chunk segment when the module ends up
+-    // under `dist/chunks/`.
+-    __dirname: '__qwen_dirname',
+-    __filename: '__qwen_filename',
+   },
 diff --git a/scripts/build.js b/scripts/build.js
 index a39534b1f..03dc856e0 100644
 --- a/scripts/build.js
 +++ b/scripts/build.js
-@@ -38,11 +38,10 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
+@@ -38,12 +38,11 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
  // 2. web-templates (embeddable web templates - used by cli)
  // 3. channel-base (base channel infrastructure - used by channel adapters and cli)
  // 4. channel adapters (depend on channel-base)
 -// 5. acp-bridge (depends on core - used by cli)
 -// 6. cli (depends on core, acp-bridge, web-templates, channel packages)
 -// 7. webui (shared UI components - used by vscode companion)
--// 8. sdk (no internal dependencies)
--// 9. vscode-ide-companion (depends on webui)
+-// 8. sdk (build-time devDep on acp-bridge for shared constants)
+-// 9. web-shell (depends on webui and sdk)
+-// 10. vscode-ide-companion (depends on webui)
 +// 5. cli (depends on core, web-templates, channel packages)
 +// 6. webui (shared UI components - used by vscode companion)
 +// 7. sdk (no internal dependencies)
-+// 8. vscode-ide-companion (depends on webui)
++// 8. web-shell (depends on webui and sdk)
++// 9. vscode-ide-companion (depends on webui)
  const buildOrder = [
    'packages/core',
    'packages/web-templates',
-@@ -52,7 +51,6 @@ const buildOrder = [
+@@ -57,8 +56,7 @@ const buildOrder = [
    'packages/channels/dingtalk',
    'packages/channels/feishu',
+   'packages/channels/qqbot',
    'packages/channels/plugin-example',
 -  'packages/acp-bridge',
    'packages/cli',
-   'packages/webui',
-   'packages/sdk-typescript',
+   ...(cliOnly
+     ? []

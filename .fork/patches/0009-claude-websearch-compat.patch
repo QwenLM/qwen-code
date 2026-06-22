@@ -144,12 +144,11 @@ diff --git a/packages/core/src/extension/claude-converter.ts b/packages/core/src
 index 0f8600832..de48ed626 100644
 --- a/packages/core/src/extension/claude-converter.ts
 +++ b/packages/core/src/extension/claude-converter.ts
-@@ -108,7 +108,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
+@@ -128,7 +128,6 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
    Task: 'Task',
-   TodoWrite: 'TodoWrite',
+   TodoWrite: 'TodoList',
    WebFetch: 'WebFetch',
 -  WebSearch: 'None',
-+
    Write: 'WriteFile',
    LS: 'ListFiles',
  };
