@@ -93,6 +93,8 @@ interface HistoryItemDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
+  /** Aggregated text from this thought + its continuation items. */
+  thinkingFullText?: string;
 }
 
 function getHistoryItemMarginTop(item: HistoryItem): number {
@@ -142,6 +144,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
   thoughtExpanded = false,
+  thinkingFullText,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
@@ -158,7 +161,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const isClickableThought =
     !isPending && !thoughtExpanded && itemForDisplay.type === 'gemini_thought';
 
-  const thoughtText = isClickableThought ? itemForDisplay.text : '';
+  const thoughtText = isClickableThought
+    ? thinkingFullText || itemForDisplay.text
+    : '';
   const thoughtDurationMs = isClickableThought
     ? itemForDisplay.durationMs
     : undefined;
