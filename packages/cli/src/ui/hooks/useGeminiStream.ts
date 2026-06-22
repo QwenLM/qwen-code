@@ -1842,7 +1842,18 @@ export const useGeminiStream = (
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
       dualOutput?.finalizeAssistantMessage();
-      if (toolCallRequests.length > 0 && !signal.aborted) {
+      // When a loop was detected, halt without scheduling the calls collected
+      // before the guard fired. The core splice/clear only touches
+      // turn.pendingToolCalls, which the TUI does not execute from — without
+      // this gate the pre-detection (and, for the always-on consecutive guard,
+      // potentially repeated) calls would still run before the halt dialog
+      // appears. Mirrors the non-interactive runner, which returns on
+      // LoopDetected before scheduling.
+      if (
+        toolCallRequests.length > 0 &&
+        !signal.aborted &&
+        !loopDetectedRef.current
+      ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
         const duplicateResponseParts: Part[] = [];
         let duplicatePromptId: string | undefined;
@@ -1960,6 +1971,15 @@ export const useGeminiStream = (
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
+
+      // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
+      // events), so it must reflect only this turn's state. Reset it
+      // unconditionally at entry: if the previous turn detected a loop but threw
+      // before its own post-stream reset, a stuck `true` would otherwise make
+      // every later turn silently drop its tool calls. A ToolResult/btw
+      // continuation never carries a pending loop (a detected loop schedules
+      // nothing), so clearing it here is a no-op for those paths.
+      loopDetectedRef.current = false;
 
       // Reset turn-local ownership trackers at the very top of every
       // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
