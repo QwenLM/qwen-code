@@ -147,8 +147,9 @@ function getAvailableModelIds(context: CommandContext) {
   if (!config) {
     return [];
   }
-  const availableModels = config.getAvailableModels();
-  // Convert AvailableModel[] to string[] on AvailableModel.id
+  const availableModels = config
+    .getAvailableModels()
+    .filter((m) => !m.fastOnly && !m.voiceOnly);
   return availableModels.map((model) => model.id);
 }
 
@@ -239,7 +240,9 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      const availableModels = config.getAllConfiguredModels();
+      const availableModels = config
+        .getAllConfiguredModels()
+        .filter((m) => !m.fastOnly);
       const matches = availableModels.filter((model) => model.id === modelName);
       if (matches.length === 0) {
         return {
@@ -330,9 +333,11 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      const availableModels = selector.authType
-        ? config.getAvailableModelsForAuthType(selector.authType)
-        : config.getAllConfiguredModels();
+      const availableModels = (
+        selector.authType
+          ? config.getAvailableModelsForAuthType(selector.authType)
+          : config.getAllConfiguredModels()
+      ).filter((m) => !m.voiceOnly);
       if (!availableModels.some((model) => model.id === selector.modelId)) {
         return {
           type: 'message',
