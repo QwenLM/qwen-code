@@ -189,11 +189,14 @@ jobs:
             }
 
             echo "🔍 Scanning for ready-for-agent bugs (newest first)..."
+            # ready-for-agent is an explicit triage signal, so tier-1 takes
+            # candidates directly and skips the unattended filter — no need to
+            # fetch comments here (tier-2 below still fetches them for its filter).
             gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
-              --limit 30 --json number,title,body,labels,createdAt,url,comments \
+              --limit 30 --json number,title,body,labels,createdAt,url \
               > "${WORKDIR}/scan.json"
-            jq -c '.[0:10] | map(del(.comments))' \
+            jq -c '.[0:10]' \
               "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
 
             if [[ "$(jq length "${WORKDIR}/candidates.json")" == "0" ]]; then
