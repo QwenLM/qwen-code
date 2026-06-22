@@ -842,6 +842,10 @@ jobs:
           else
             REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
             TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            if [ -z "$REPORT" ] && [ -z "$TRANSCRIPT" ]; then
+              MISSING_ARTIFACTS_NOTE='No report.md or tmux-readable-full.log was found in tmux-results, so detailed report sections are omitted.'
+              echo "::warning::${MISSING_ARTIFACTS_NOTE}"
+            fi
             case "${VERDICT:-}" in
               infra-error)
                 VERDICT_LABEL='infra-error (crash/OOM)'
@@ -864,6 +868,7 @@ jobs:
                 UNKNOWN_VERDICT="$(
                   printf '%s' "${VERDICT:-}" | tr -d '\000' | tr '\r\n' '  ' | head -c 200 | html_escape
                 )"
+                echo "::warning::Unrecognized tmux verdict: ${UNKNOWN_VERDICT}"
                 DESCRIPTION="The tmux test produced an unrecognized verdict (<code>${UNKNOWN_VERDICT}</code>), so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details."
                 ;;
             esac
@@ -871,6 +876,9 @@ jobs:
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
               printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT_LABEL" "$RUN_URL"
               printf '%s\n\n' "$DESCRIPTION"
+              if [ -n "${MISSING_ARTIFACTS_NOTE:-}" ]; then
+                printf '%s\n\n' "$MISSING_ARTIFACTS_NOTE"
+              fi
               emit_block 'E2E test report' "$REPORT" 20000
               emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'

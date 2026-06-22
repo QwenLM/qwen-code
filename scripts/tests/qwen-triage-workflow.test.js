@@ -40,10 +40,10 @@ describe('qwen-triage tmux workflow', () => {
     expect(postStep).toContain('set -o pipefail');
     expect(postStep).toContain('::warning::emit_block failed');
     expect(postStep).toContain(
-      "summary_html=\"$(printf '%s' \"$summary\" | html_escape)\"",
+      'summary_html="$(printf \'%s\' "$summary" | html_escape)"',
     );
     expect(postStep).toContain(
-      "'<details>\\n<summary>%s</summary>\\n\\n<pre><code>\\n' \"$summary_html\"",
+      '\'<details>\\n<summary>%s</summary>\\n\\n<pre><code>\\n\' "$summary_html"',
     );
   });
 
@@ -74,10 +74,15 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(postStep).toContain('produced an unrecognized verdict');
     expect(postStep).toContain('UNKNOWN_VERDICT="$(');
-    expect(postStep).toContain('tr \'\\r\\n\' \'  \'');
+    expect(postStep).toContain('::warning::Unrecognized tmux verdict');
+    expect(postStep).toContain("tr '\\r\\n' '  '");
     expect(postStep).toContain('<code>${UNKNOWN_VERDICT}</code>');
     expect(postStep).toContain('"$VERDICT_LABEL" "$RUN_URL"');
     expect(postStep).toContain('printf \'%s\\n\\n\' "$DESCRIPTION"');
+    expect(postStep).toContain('MISSING_ARTIFACTS_NOTE=');
+    expect(postStep).toContain(
+      'No report.md or tmux-readable-full.log was found in tmux-results',
+    );
   });
 
   it('removes GitHub command files from PR-controlled lifecycle scripts', () => {
