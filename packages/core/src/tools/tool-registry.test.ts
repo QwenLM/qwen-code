@@ -142,6 +142,10 @@ describe('ToolRegistry', () => {
       clear: vi.fn(),
       removePromptsByServer: vi.fn(),
     } as any);
+    vi.spyOn(config, 'getResourceRegistry').mockReturnValue({
+      clear: vi.fn(),
+      removeResourcesByServer: vi.fn(),
+    } as any);
   });
 
   afterEach(() => {

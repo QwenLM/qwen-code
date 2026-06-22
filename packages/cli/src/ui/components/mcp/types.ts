@@ -44,6 +44,8 @@ export interface MCPServerDisplayInfo {
   invalidToolCount?: number;
   /** Prompt数量 */
   promptCount: number;
+  /** Resource数量 */
+  resourceCount: number;
   /** 错误信息 */
   errorMessage?: string;
   /** 是否被禁用（在排除列表中） */

@@ -2599,7 +2599,7 @@ class QwenAgent implements Agent {
     private connection: AgentSideConnection,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
-    // roll back without rebuilding. `runQwenServe.ts` sets this when
+    // roll back without rebuilding. `run-qwen-serve.ts` sets this when
     // `--no-mcp-pool` is passed at daemon startup.
     if (process.env['QWEN_SERVE_NO_MCP_POOL'] === '1') {
       this.mcpPool = undefined;

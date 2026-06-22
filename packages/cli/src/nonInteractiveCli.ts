@@ -126,15 +126,7 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model exceeded the maximum number of tool calls allowed in a single turn',
 };
 
-function emitLoopDetectedMessage(
-  config: Config,
-  loopType: LoopType | undefined,
-): void {
-  // In TEXT mode the adapter swallows LoopDetected, so we print here. In
-  // JSON modes the adapter emits a structured result, which is enough.
-  if (config.getOutputFormat() !== OutputFormat.TEXT) {
-    return;
-  }
+function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
   const detail = reason ? ` (${loopType}: ${reason})` : '';
   // The turn cap runs before the skipLoopDetection gate, so that setting can't
@@ -143,7 +135,21 @@ function emitLoopDetectedMessage(
     loopType === LoopType.TURN_TOOL_CALL_CAP
       ? ' This is an always-on per-turn tool-call cap and cannot be disabled via `model.skipLoopDetection`.'
       : ' Set the `model.skipLoopDetection` setting to true to disable.';
-  process.stderr.write(`Loop detection halted the run${detail}.${hint}\n`);
+  return `Loop detection halted the run${detail}.${hint}`;
+}
+
+function emitLoopDetectedMessage(
+  config: Config,
+  loopType: LoopType | undefined,
+): string {
+  const message = formatLoopDetectedMessage(loopType);
+  // In TEXT mode the adapter swallows LoopDetected, so we print here. In
+  // JSON modes the adapter emits a structured result, which is enough.
+  if (config.getOutputFormat() !== OutputFormat.TEXT) {
+    return message;
+  }
+  process.stderr.write(`${message}\n`);
+  return message;
 }
 
 /**
@@ -796,6 +802,8 @@ export async function runNonInteractive(
       // actually said instead of a static, context-free message.
       let plainTextPreview = '';
       const PLAIN_TEXT_PREVIEW_LIMIT = 200;
+      let loopDetected = false;
+      let loopDetectedMessage = formatLoopDetectedMessage(undefined);
 
       // Shared terminal block for the structured-output success
       // contract. Both the main-turn loop and the drain-turn post-loop
@@ -841,6 +849,33 @@ export async function runNonInteractive(
           structuredResult: structuredSubmission,
         });
         return 0;
+      };
+
+      const emitLoopDetectedResult = (): 1 => {
+        registry.abortAll();
+        flushQueuedNotificationsToSdk(localQueue);
+        finalizeOneShotMonitors();
+
+        if (outputFormat === OutputFormat.TEXT) {
+          return 1;
+        }
+
+        const metrics = uiTelemetryService.getMetrics();
+        const usage = computeUsageFromMetrics(metrics);
+        const stats =
+          outputFormat === OutputFormat.JSON
+            ? uiTelemetryService.getMetrics()
+            : undefined;
+        adapter.emitResult({
+          isError: true,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          errorMessage: loopDetectedMessage,
+          usage,
+          stats,
+        });
+        return 1;
       };
 
       /**
@@ -1206,7 +1241,13 @@ export async function runNonInteractive(
             plainTextPreview += String(event.value).slice(0, remaining);
           }
           if (event.type === GeminiEventType.LoopDetected) {
-            emitLoopDetectedMessage(config, event.value?.loopType);
+            if (!loopDetected) {
+              loopDetectedMessage = emitLoopDetectedMessage(
+                config,
+                event.value?.loopType,
+              );
+            }
+            loopDetected = true;
           }
           if (
             outputFormat === OutputFormat.TEXT &&
@@ -1228,6 +1269,10 @@ export async function runNonInteractive(
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
+
+        if (loopDetected) {
+          return emitLoopDetectedResult();
+        }
 
         if (toolCallRequests.length > 0) {
           // Dispatch the per-turn tool-call batch through the shared
@@ -1429,7 +1474,13 @@ export async function runNonInteractive(
                   itemToolCallRequests.push(event.value);
                 }
                 if (event.type === GeminiEventType.LoopDetected) {
-                  emitLoopDetectedMessage(config, event.value?.loopType);
+                  if (!loopDetected) {
+                    loopDetectedMessage = emitLoopDetectedMessage(
+                      config,
+                      event.value?.loopType,
+                    );
+                  }
+                  loopDetected = true;
                 }
                 if (
                   outputFormat === OutputFormat.TEXT &&
@@ -1449,6 +1500,10 @@ export async function runNonInteractive(
 
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
+
+              if (loopDetected) {
+                return;
+              }
 
               if (itemToolCallRequests.length > 0) {
                 // Same shared dispatch as the main-turn loop. The only
@@ -1488,6 +1543,7 @@ export async function runNonInteractive(
             if (drainPromise) return drainPromise;
             const p = (async () => {
               while (localQueue.length > 0) {
+                if (loopDetected) return;
                 // Stop draining once a queued item's structured_output
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
@@ -1542,6 +1598,12 @@ export async function runNonInteractive(
               });
 
               const checkCronDone = () => {
+                if (loopDetected) {
+                  abortController.signal.removeEventListener('abort', onAbort);
+                  scheduler.stop();
+                  resolve();
+                  return;
+                }
                 // A drain-turn structured_output makes the rest of the
                 // cron schedule moot: we already have a terminal result
                 // and the post-drain emit is about to fire. Stop the
@@ -1603,6 +1665,7 @@ export async function runNonInteractive(
             // through the model, but later monitor output is SDK-only.
             captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
+            if (loopDetected) return emitLoopDetectedResult();
             // A drain-turn structured_output captured the terminal
             // contract — bail out of the holdback loop early and let the
             // post-loop code emit the success result.

@@ -22,6 +22,7 @@ import {
   ApprovalMode,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
+  LoopType,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
@@ -624,6 +625,83 @@ describe('runNonInteractive', () => {
     await runNonInteractive(mockConfig, mockSettings, 'test', 'p1');
 
     expect(stdoutDestroySpy).toHaveBeenCalled();
+  });
+
+  it('returns non-zero and skips pending tool calls after loop detection', async () => {
+    setupMetricsMock();
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-loop-detected',
+      },
+    };
+    const events: ServerGeminiStreamEvent[] = [
+      toolCallEvent,
+      {
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-loop-detected',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    expect(processStdoutSpy).not.toHaveBeenCalled();
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Loop detection halted the run'),
+    );
+  });
+
+  it('marks JSON output as an error when loop detection halts the run', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    const events: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Partial work' },
+      {
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-id-loop-json',
+    );
+
+    expect(exitCode).toBe(1);
+    const outputCalls = processStdoutSpy.mock.calls.filter(
+      (call) => typeof call[0] === 'string',
+    );
+    const lastOutput = outputCalls.at(-1)?.[0];
+    expect(typeof lastOutput).toBe('string');
+    const parsed = JSON.parse(lastOutput as string) as Array<{
+      type?: string;
+      is_error?: boolean;
+      error?: { message?: string };
+    }>;
+    const resultMessage = parsed.find((msg) => msg.type === 'result');
+    expect(resultMessage?.is_error).toBe(true);
+    expect(resultMessage?.error?.message).toContain(
+      'Loop detection halted the run',
+    );
   });
 
   it('should handle a single tool call and respond', async () => {

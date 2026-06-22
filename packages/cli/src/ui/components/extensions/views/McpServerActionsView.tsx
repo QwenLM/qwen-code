@@ -93,6 +93,8 @@ export const McpServerActionsView = ({
       const serverPrompts = (promptRegistry?.getAllPrompts() || []).filter(
         (p) => 'serverName' in p && p.serverName === serverName,
       );
+      const serverResources =
+        config.getResourceRegistry()?.getResourcesByServer(serverName) || [];
 
       let source: 'user' | 'project' | 'extension' = 'user';
       if (serverConfig.extensionName) {
@@ -125,6 +127,7 @@ export const McpServerActionsView = ({
         invalidToolCount: serverTools.filter((x) => !x.name || !x.description)
           .length,
         promptCount: serverPrompts.length,
+        resourceCount: serverResources.length,
         isDisabled: config.isMcpServerDisabled(serverName),
         hasOAuthTokens,
         // Needs (re-)authentication: a 401 during connect, or OAuth declared

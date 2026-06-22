@@ -217,6 +217,28 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
           </Box>
         )}
 
+        {!server.isDisabled && server.promptCount > 0 && (
+          <Box>
+            <Box width={LABEL_WIDTH}>
+              <Text color={theme.text.primary}>{t('Prompts:')}</Text>
+            </Box>
+            <Box>
+              <Text>{server.promptCount}</Text>
+            </Box>
+          </Box>
+        )}
+
+        {!server.isDisabled && server.resourceCount > 0 && (
+          <Box>
+            <Box width={LABEL_WIDTH}>
+              <Text color={theme.text.primary}>{t('Resources:')}</Text>
+            </Box>
+            <Box>
+              <Text>{server.resourceCount}</Text>
+            </Box>
+          </Box>
+        )}
+
         {server.errorMessage && (
           <Box>
             <Box width={LABEL_WIDTH}>

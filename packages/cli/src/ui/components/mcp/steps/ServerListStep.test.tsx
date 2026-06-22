@@ -47,6 +47,7 @@ const server = (name: string): MCPServerDisplayInfo => ({
   config: {},
   toolCount: 0,
   promptCount: 0,
+  resourceCount: 0,
   isDisabled: false,
 });
 

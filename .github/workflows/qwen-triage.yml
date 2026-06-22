@@ -11,8 +11,17 @@ on:
     inputs:
       number:
         description: 'Issue or PR number to triage'
-        required: true
+        required: false
         type: 'number'
+      tmux_pr:
+        description: 'PR number to run tmux real-user testing on (instead of triage)'
+        required: false
+        type: 'number'
+      skip_comment:
+        description: 'Run the tmux test but do not post the result comment on the PR'
+        required: false
+        default: false
+        type: 'boolean'
 
 permissions:
   contents: 'read'
@@ -21,16 +30,27 @@ permissions:
 
 jobs:
   authorize:
-    # Gate PR and /triage-comment triggers on the principal having write+
-    # permission: the PR author for PR events, the commenter for /triage
-    # comments. Replaces the old eligibility checks based on same-repo PRs and
-    # comment author_association, so fork PRs by trusted authors are triaged.
-    # `issues` and `workflow_dispatch` triggers do not need this gate.
+    # Gate the principal on having write+ permission before any agent runs:
+    #   - pull_request_target / `/triage` comment -> gates triage (read-only),
+    #     keyed on the PR author / the commenter respectively.
+    #   - `/tmux` comment / `tmux_pr` dispatch -> gates real-user testing, which
+    #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
+    #     code runs), not the commenter/dispatcher (see principal resolution).
+    # Replaces the old eligibility checks based on same-repo PRs and comment
+    # author_association, so fork PRs by trusted authors are covered.
+    # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
+    # no gate: triage is read-only and dispatch already requires write to
+    # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
+    # dispatcher's, so it IS gated here on the PR author's permission.
     if: |-
       github.repository == 'QwenLM/qwen-code' &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'issue_comment' &&
-        startsWith(github.event.comment.body, '@qwen-code /triage')))
+        (startsWith(github.event.comment.body, '@qwen-code /triage') ||
+         github.event.comment.body == '@qwen-code /tmux' ||
+         startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.tmux_pr != ''))
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -50,11 +70,28 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           COMMENT_USER: '${{ github.event.comment.user.login }}'
+          ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
+          TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
           case "$EVENT_NAME" in
             pull_request_target) principal="$PR_AUTHOR" ;;
-            issue_comment) principal="$COMMENT_USER" ;;
+            issue_comment)
+              # /tmux executes the PR AUTHOR's code, so gate on the author's
+              # permission (whose code runs), not the commenter's. /triage only
+              # reads content, so the commenter's permission gates it.
+              case "$COMMENT_BODY" in
+                '@qwen-code /tmux'|'@qwen-code /tmux '*) principal="$ISSUE_AUTHOR" ;;
+                *) principal="$COMMENT_USER" ;;
+              esac
+              ;;
+            workflow_dispatch)
+              # Only the tmux_pr dispatch reaches authorize. It runs the PR
+              # author's code, so resolve and gate on that author (not the
+              # dispatcher). Empty/unresolvable author fails closed below.
+              principal="$(gh pr view "$TMUX_PR" --repo "$GITHUB_REPOSITORY" --json author --jq '.author.login' 2>/dev/null || true)"
+              ;;
             *) principal="" ;;
           esac
           if [ -z "$principal" ]; then
@@ -124,7 +161,9 @@ jobs:
       always() &&
       github.repository == 'QwenLM/qwen-code' && (
         github.event_name == 'issues' ||
-        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.number != '' &&
+         github.event.inputs.tmux_pr == '') ||
         (
           ((github.event_name == 'pull_request_target' &&
             github.event.pull_request.draft == false) ||
@@ -175,3 +214,632 @@ jobs:
               "sandbox": false
             }
           prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
+
+  # On-demand real-user testing: a write-permission user comments
+  # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and
+  # exercise the affected flow. EXECUTES untrusted PR code, so: gated on the PR
+  # AUTHOR (whose code runs) having write via the authorize job, runs read-only
+  # with NO GitHub token in the agent env, and keeps credentials out of .git.
+  tmux-testing:
+    needs: ['authorize']
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' &&
+      (
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         (github.event.comment.body == '@qwen-code /tmux' ||
+          startsWith(github.event.comment.body, '@qwen-code /tmux ')) &&
+         needs.authorize.outputs.should_run == 'true') ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.tmux_pr != '' &&
+         needs.authorize.outputs.should_run == 'true')
+      )
+    # One real-user test per PR at a time. GitHub evaluates concurrency before
+    # the job `if`, but after `needs`, so keep non-runnable triggers out of the
+    # shared per-PR group. Concurrent authorized /tmux runs would share the same
+    # self-hosted runner workspace and git worktrees and clobber each other, so
+    # serialize them (cancel-in-progress: false lets the in-flight test finish).
+    concurrency:
+      group: >-
+        ${{
+          (
+            ((github.event_name == 'issue_comment' &&
+              github.event.issue.pull_request &&
+              (github.event.comment.body == '@qwen-code /tmux' ||
+               startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
+             (github.event_name == 'workflow_dispatch' &&
+              github.event.inputs.tmux_pr != '')) &&
+            needs.authorize.outputs.should_run == 'true'
+          ) &&
+          format('{0}-tmux-{1}', github.workflow, github.event.issue.number || github.event.inputs.tmux_pr) ||
+          format('{0}-tmux-run-{1}', github.workflow, github.run_id)
+        }}
+      cancel-in-progress: false
+    timeout-minutes: 45
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    # The job checks out and executes PR code. Run the steps in a container so
+    # package scripts/builds cannot persist changes in the self-hosted runner's
+    # host filesystem across workflow runs.
+    container:
+      image: 'node:22-bookworm'
+    permissions:
+      contents: 'read'
+    outputs:
+      pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number || github.event.inputs.tmux_pr }}'
+      # steps.run sets the verdict for an actual test; steps.pr sets 'n/a' when
+      # the PR has no TUI surface. Both empty -> stayed silent (skip case).
+      verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
+      failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
+    steps:
+      - name: 'Install tmux runner tools'
+        run: |-
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq tmux util-linux
+
+          install -d -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+          npm install -g '@qwen-code/qwen-code@latest'
+          qwen --version
+          gh --version
+          tmux -V
+
+      - name: 'Resolve PR and check state'
+        id: 'pr'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
+        run: |-
+          set -euo pipefail
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          # Right after a /tmux comment GitHub may not have computed mergeability
+          # yet (mergeable=UNKNOWN), and refs/pull/N/merge is only current once it
+          # has — so give it a few seconds to settle before deciding, rather than
+          # checking out a stale/missing ref.
+          for attempt in 1 2 3 4 5; do
+            data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable)"
+            mergeable="$(jq -r '.mergeable' <<< "$data")"
+            [ "$mergeable" != "UNKNOWN" ] && break
+            echo "::notice::Mergeability for PR #${PR_NUMBER} not computed yet; retry ${attempt}/5."
+            sleep 3
+          done
+          state="$(jq -r '.state' <<< "$data")"
+          is_draft="$(jq -r '.isDraft' <<< "$data")"
+          # decision drives every step below: skip (nothing to do, stay silent) |
+          # na (no TUI surface to exercise) | run (drive the app).
+          if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
+            echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The checkout below uses refs/pull/N/merge, which GitHub only keeps
+          # current while the PR merges cleanly. For a conflicting PR the ref is
+          # stale or missing, so skip rather than test the wrong tree.
+          if [ "$mergeable" = "CONFLICTING" ]; then
+            echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} has merge conflicts; refs/pull/${PR_NUMBER}/merge is unavailable."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # If mergeability never settled (still UNKNOWN after the retries above),
+          # refs/pull/N/merge may be stale or missing just like the CONFLICTING
+          # case — skip rather than fall through to a checkout that fails and gets
+          # mis-reported as an infrastructure error.
+          if [ "$mergeable" = "UNKNOWN" ]; then
+            echo "::warning::Mergeability for PR #${PR_NUMBER} still UNKNOWN after retries; skipping tmux testing."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')"
+          # Only drive the app for PRs that touch a user-facing/TUI surface;
+          # otherwise a real-user test has nothing to exercise (e.g. CI-only PRs).
+          if printf '%s\n' "$files" | grep -qE 'packages/cli/src/ui/|packages/cli/.*\.tsx$|windowTitle|packages/web-shell/client/'; then
+            echo "decision=run" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::PR #${PR_NUMBER} touches no TUI surface; tmux testing is not applicable."
+            echo "verdict=n/a" >> "$GITHUB_OUTPUT"
+            echo "decision=na" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Clean stale review worktrees'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -uo pipefail
+          [ -e .git ] || exit 0
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          git worktree prune -v || true
+
+      - name: 'Checkout PR merge ref'
+        if: "steps.pr.outputs.decision == 'run'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # Untrusted PR code — keep the token out of .git/config.
+          persist-credentials: false
+          ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
+          fetch-depth: 1
+
+      - name: 'Install and build PR app'
+        id: 'prepare'
+        if: "steps.pr.outputs.decision == 'run'"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |-
+          set -euo pipefail
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          mkdir -p "$RUNNER_TEMP/tmux-results"
+          chown -R node:node "$GITHUB_WORKSPACE"
+          prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
+
+          set +e
+          {
+            printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+            runuser -u node -- npm ci --prefer-offline --no-audit --progress=false
+            install_status=$?
+            if [ "$install_status" -ne 0 ]; then
+              printf '\n%s\n' "npm ci failed with exit code ${install_status}."
+            else
+              printf '\n%s\n' '$ npm run build'
+              runuser -u node -- npm run build
+              build_status=$?
+              if [ "$build_status" -ne 0 ]; then
+                printf '\n%s\n' "npm run build failed with exit code ${build_status}."
+              fi
+            fi
+          } > "$prepare_log" 2>&1
+          set -e
+
+          if [ "${install_status:-0}" -ne 0 ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "failure_phase=install" >> "$GITHUB_OUTPUT"
+            echo "::error::npm ci failed; reporting a tmux fail verdict instead of an infrastructure failure."
+            exit 0
+          fi
+          if [ "${build_status:-0}" -ne 0 ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "failure_phase=build" >> "$GITHUB_OUTPUT"
+            echo "::error::npm run build failed; reporting a tmux fail verdict instead of an infrastructure failure."
+            exit 0
+          fi
+          echo "Install/build completed before tmux testing." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Run tmux real-user testing'
+        if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
+        id: 'run'
+        # NOTE: no GitHub token here — this step runs untrusted PR code. The
+        # real model key is kept out of qwen's environment; qwen talks to a
+        # root-owned loopback proxy with a dummy key instead.
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ steps.pr.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+        run: |-
+          set -euo pipefail
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # Bypass the runner proxy before launching qwen: the proxy cuts the
+          # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
+          # without honoring NO_PROXY. Clear proxy env for qwen itself while
+          # restoring it for child gh/git commands the agent may spawn.
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            if ! command -v node >/dev/null 2>&1; then
+              echo "::error::node is required to parse REVIEW_OPENAI_BASE_URL"
+              exit 1
+            fi
+            openai_host="$(node -e 'console.log(new URL(process.env.REVIEW_OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              echo "::error::Could not parse a hostname from REVIEW_OPENAI_BASE_URL"
+              exit 1
+            fi
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
+          }
+          configure_qwen_network
+
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+
+          start_openai_proxy() {
+            local proxy_port proxy_script
+            proxy_port=8787
+            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.js"
+            cat > "$proxy_script" <<'NODE'
+          const http = require('node:http');
+          const { Readable } = require('node:stream');
+
+          const port = Number(process.argv[2]);
+          const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
+          const apiKey = process.env.REVIEW_OPENAI_API_KEY;
+          if (!baseUrl || !apiKey || !Number.isInteger(port)) {
+            console.error('missing proxy configuration');
+            process.exit(1);
+          }
+
+          const base = new URL(baseUrl);
+          const basePath = base.pathname.replace(/\/+$/, '');
+
+          const server = http.createServer(async (req, res) => {
+            if (req.url === '/__health') {
+              res.writeHead(204);
+              res.end();
+              return;
+            }
+
+            try {
+              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+              const target = new URL(base.origin);
+              let path = incoming.pathname;
+              if (
+                basePath &&
+                basePath !== '/' &&
+                path !== basePath &&
+                !path.startsWith(`${basePath}/`)
+              ) {
+                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
+              }
+              target.pathname = path;
+              target.search = incoming.search;
+
+              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
+                res.writeHead(403, { 'content-type': 'text/plain' });
+                res.end('proxy: only POST /chat/completions is allowed\n');
+                return;
+              }
+
+              const headers = new Headers(req.headers);
+              headers.delete('host');
+              headers.delete('content-length');
+              headers.set('authorization', `Bearer ${apiKey}`);
+
+              const init = {
+                method: req.method,
+                headers,
+              };
+              if (req.method !== 'GET' && req.method !== 'HEAD') {
+                init.body = req;
+                init.duplex = 'half';
+              }
+
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 120_000);
+              let upstream;
+              try {
+                upstream = await fetch(target, { ...init, signal: controller.signal });
+              } catch (error) {
+                if (error instanceof Error && error.name === 'AbortError') {
+                  res.writeHead(504, { 'content-type': 'text/plain' });
+                  res.end('proxy error: upstream request timed out\n');
+                  return;
+                }
+                throw error;
+              } finally {
+                clearTimeout(timer);
+              }
+              const responseHeaders = {};
+              upstream.headers.forEach((value, key) => {
+                const lower = key.toLowerCase();
+                if (lower !== 'content-encoding' && lower !== 'content-length') {
+                  responseHeaders[key] = value;
+                }
+              });
+              res.writeHead(upstream.status, responseHeaders);
+              if (upstream.body) {
+                Readable.fromWeb(upstream.body).pipe(res);
+              } else {
+                res.end();
+              }
+            } catch (error) {
+              res.writeHead(502, { 'content-type': 'text/plain' });
+              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
+            }
+          });
+
+          server.listen(port, '127.0.0.1');
+          NODE
+
+            REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
+              REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
+              node "$proxy_script" "$proxy_port" &
+            OPENAI_PROXY_PID=$!
+            trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
+
+            for _ in 1 2 3 4 5; do
+              if curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
+                break
+              fi
+              if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
+                echo "::error::OpenAI proxy exited before becoming ready"
+                exit 1
+              fi
+              sleep 1
+            done
+            if ! curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
+              echo "::error::OpenAI proxy did not become ready"
+              exit 1
+            fi
+
+            LOCAL_OPENAI_BASE_URL="$(
+              REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" node -e '
+                const base = new URL(process.env.REVIEW_OPENAI_BASE_URL);
+                const path = base.pathname.replace(/\/+$/, "");
+                console.log("http://127.0.0.1:" + process.argv[1] + (path && path !== "/" ? path : ""));
+              ' "$proxy_port"
+            )"
+            export LOCAL_OPENAI_BASE_URL
+            unset REVIEW_OPENAI_API_KEY
+            echo "openai_proxy=enabled (${LOCAL_OPENAI_BASE_URL})"
+          }
+          start_openai_proxy
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          mkdir -p "$RUNNER_TEMP/tmux-results"
+          chown -R node:node "$GITHUB_WORKSPACE" "$RUNNER_TEMP/tmux-results"
+          QWEN_ENV=(
+            "HOME=/home/node"
+            "USER=node"
+            "SHELL=/bin/bash"
+            "PATH=$PATH"
+            "TERM=${TERM:-xterm-256color}"
+            "LANG=${LANG:-C.UTF-8}"
+            "CI=${CI:-true}"
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            "GITHUB_TOKEN="
+            "GH_TOKEN="
+            "OPENAI_API_KEY=qwen-loopback-proxy"
+            "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
+            "NO_PROXY=${NO_PROXY:-}"
+            "no_proxy=${no_proxy:-}"
+            "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}"
+            "QWEN_CI_https_proxy=${QWEN_CI_https_proxy:-}"
+            "QWEN_CI_HTTP_PROXY=${QWEN_CI_HTTP_PROXY:-}"
+            "QWEN_CI_http_proxy=${QWEN_CI_http_proxy:-}"
+            "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
+            "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
+          )
+
+          set +e
+          timeout --kill-after=10s 20m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
+            --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/tmux-results/output.jsonl"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          # Collect the skill's narrative artifacts (report.md, readable logs)
+          # from the workspace tmp/ into the upload dir.
+          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec cp -r {} "$RUNNER_TEMP/tmux-results/" \; 2>/dev/null || true
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            VERDICT='timeout'
+          elif [ "$EXIT_CODE" -eq 137 ] || [ "$EXIT_CODE" -eq 139 ]; then
+            # Killed by a signal (SIGKILL 137 / SIGSEGV 139): OOM, a crash, or a
+            # timeout that ignored SIGTERM and got force-killed past --kill-after.
+            # None of these are a test outcome, so keep them distinct from a
+            # genuine 'fail' rather than letting the verdict mislead.
+            VERDICT='infra-error'
+            echo "::error::qwen killed by signal (exit $EXIT_CODE) — OOM, crash, or forced timeout, not a test failure."
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            VERDICT='fail'
+          else
+            VERDICT='pass'
+          fi
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "tmux verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Upload tmux results'
+        if: "always() && steps.pr.outputs.decision == 'run'"
+        # Don't let a missing/empty results dir (qwen crashed before writing any)
+        # fail the job and mask the original error, mirroring the download step.
+        continue-on-error: true
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
+        with:
+          name: 'tmux-results-${{ steps.pr.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/tmux-results/'
+          retention-days: 7
+
+      - name: 'Clean up runner workspace'
+        # Mirror the stale-worktree cleanup at the start of the job, but at the
+        # end and on every outcome. Without it the checked-out PR tree, the
+        # skill's tmp/*-tmux-* dirs, and any worktrees accumulate on the
+        # persistent self-hosted runner across runs.
+        if: "always() && steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -uo pipefail
+          [ -e .git ] || exit 0
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          git worktree prune -v || true
+
+  # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
+  # with the write PAT and never checks out PR code, so the write credential is
+  # isolated from the untrusted-code execution in tmux-testing above.
+  publish-tmux:
+    needs: ['tmux-testing']
+    # Post when there is a real test verdict to report (not the no-TUI 'n/a'),
+    # OR when tmux-testing failed for infrastructure reasons (checkout/runner/
+    # setup error) so the requester gets an explicit signal instead of a silent
+    # void. Only the empty-verdict success cases — PR closed/draft/conflicting,
+    # mergeability still UNKNOWN, or no TUI surface — stay silent.
+    if: >-
+      always() && github.event.inputs.skip_comment != 'true' &&
+      (needs.tmux-testing.result == 'failure' ||
+       needs.tmux-testing.result == 'cancelled' ||
+       (needs.tmux-testing.result == 'success' &&
+        needs.tmux-testing.outputs.verdict != '' &&
+        needs.tmux-testing.outputs.verdict != 'n/a'))
+    runs-on: 'ubuntu-latest'
+    permissions:
+      pull-requests: 'write'
+    steps:
+      - name: 'Download tmux results'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'tmux-results-${{ needs.tmux-testing.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: 'tmux-results'
+        continue-on-error: true
+
+      - name: 'Post tmux result comment'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.tmux-testing.outputs.pr_number }}'
+          VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
+          PREPARE_FAILURE_PHASE: '${{ needs.tmux-testing.outputs.failure_phase }}'
+          TMUX_RESULT: '${{ needs.tmux-testing.result }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        # shellcheck disable=SC2016
+        run: |-
+          set -euo pipefail
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "::warning::No PR number resolved; cannot post a tmux result comment."
+            exit 0
+          fi
+          BODY_FILE="${RUNNER_TEMP:-/tmp}/tmux-comment.md"
+
+          # Embed a file inside a collapsed <details> as an HTML <pre><code>
+          # block (matches GitHub's own fenced-code rendering, incl. horizontal
+          # scroll for long lines). The content is untrusted PR output, so
+          # HTML-escape &, <, > before embedding. Inside it the escaped text
+          # renders back to literal characters but cannot open a tag, close the
+          # <details>, terminate a code fence, fire @mentions, or be interpreted
+          # as markdown — which a
+          # backtick fence (breakable by a long enough ``` run) cannot guarantee.
+          # Order matters: escape & first so the < / > entities aren't re-escaped.
+          emit_block() {
+            local summary="$1" file="$2" max="$3" content
+            [ -n "$file" ] && [ -f "$file" ] || return 0
+            content="$(head -c "$max" "$file")"
+            if [ "$(wc -c < "$file")" -gt "$max" ]; then
+              content="${content}"$'\n\n...truncated -- full log in the run artifacts.'
+            fi
+            content="${content//&/&amp;}"
+            content="${content//</&lt;}"
+            content="${content//>/&gt;}"
+            printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
+            printf '%s\n' "$content"
+            printf '</code></pre>\n\n</details>\n\n'
+          }
+
+          if [ "${TMUX_RESULT:-}" = "cancelled" ]; then
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The testing job was cancelled before producing a verdict. See the workflow run for details.\n\n'
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          elif [ "${TMUX_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
+            # tmux-testing did not finish (infrastructure error): report it so the
+            # requester is not left with silence.
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The testing job did not complete (checkout, runner, or setup error) and produced no verdict. See the workflow run for details.\n\n'
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
+            PREPARE_LOG="$(find tmux-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
+            case "$PREPARE_FAILURE_PHASE" in
+              install) PREPARE_COMMAND='npm ci' ;;
+              build) PREPARE_COMMAND='npm run build' ;;
+              *) PREPARE_COMMAND="$PREPARE_FAILURE_PHASE" ;;
+            esac
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: fail** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The PR app could not be launched because `%s` failed before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              emit_block 'Install/build log' "$PREPARE_LOG" 20000
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          else
+            REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
+            TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            {
+              printf '%s\n\n' '<!-- qwen-triage:tmux -->'
+              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
+              printf 'Launched the changed app in a real tmux session and exercised the affected flow.\n\n'
+              emit_block 'E2E test report' "$REPORT" 20000
+              emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
+              printf '%s\n' '— _Qwen Code · tmux real-user testing_'
+            } > "$BODY_FILE"
+          fi
+
+          # Dedup: update an existing tmux comment if one is already present.
+          if ! EXISTING="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
+          )"; then
+            echo "::warning::Failed to look up existing tmux comments; will create a new one."
+            EXISTING=""
+          fi
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
+          fi
+          echo "Posted tmux result to PR #${PR_NUMBER} (verdict=${VERDICT})." >> "$GITHUB_STEP_SUMMARY"

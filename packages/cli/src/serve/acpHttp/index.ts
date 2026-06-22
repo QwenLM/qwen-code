@@ -13,7 +13,7 @@ import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
-import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
+import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { AcpDispatcher } from './dispatch.js';
 import {
   ConnectionRegistry,
@@ -21,7 +21,7 @@ import {
 } from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
 import { WsStream } from './wsStream.js';
-import type { RateLimitTier } from '../rateLimit.js';
+import type { RateLimitTier } from '../rate-limit.js';
 import { RPC, error as rpcError, isRequest, parseInbound } from './jsonRpc.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';

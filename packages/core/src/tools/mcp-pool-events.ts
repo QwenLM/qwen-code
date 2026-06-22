@@ -5,7 +5,10 @@
  */
 
 import type { DiscoveredMCPTool } from './mcp-tool.js';
-import type { DiscoveredMCPPrompt } from './mcp-client.js';
+import type {
+  DiscoveredMCPPrompt,
+  DiscoveredMCPResource,
+} from './mcp-client.js';
 
 /**
  * Opaque identifier for a pooled connection, of the form
@@ -52,6 +55,12 @@ export type PoolEvent =
       kind: 'promptsChanged';
       serverName: string;
       snapshot: DiscoveredMCPPrompt[];
+      generation: number;
+    }
+  | {
+      kind: 'resourcesChanged';
+      serverName: string;
+      snapshot: DiscoveredMCPResource[];
       generation: number;
     }
   | {

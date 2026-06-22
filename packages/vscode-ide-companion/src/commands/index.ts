@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import type { DiffManager } from '../diff-manager.js';
 import type { WebViewProvider } from '../webview/providers/WebViewProvider.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
+import { shouldResolveAgainstWorkspace } from '../utils/file-path.js';
 import {
   CHAT_VIEW_ID_SIDEBAR,
   CHAT_VIEW_ID_SECONDARY,
@@ -68,7 +69,7 @@ export function registerNewCommands(
       async (args: { path: string; oldText: string; newText: string }) => {
         try {
           let absolutePath = args.path;
-          if (!args.path.startsWith('/') && !args.path.match(/^[a-zA-Z]:/)) {
+          if (shouldResolveAgainstWorkspace(args.path)) {
             const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
             if (workspaceFolder) {
               absolutePath = vscode.Uri.joinPath(

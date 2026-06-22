@@ -2155,7 +2155,7 @@ const SETTINGS_SCHEMA = {
           'unreachable quorum. Unset = floor(M/2)+1. ' +
           'Requires daemon restart — read once at boot.',
         showInDialog: false,
-        // runQwenServe.ts validates `Number.isInteger(n) && n >= 1` and
+        // run-qwen-serve.ts validates `Number.isInteger(n) && n >= 1` and
         // refuses to boot otherwise. Override the generated schema so IDE
         // (VSCode, JetBrains via JSON Schema) flags `0`, `-1`, `1.5`
         // BEFORE the user restarts the daemon. The bare `type:'number'`

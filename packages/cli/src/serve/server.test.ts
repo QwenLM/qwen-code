@@ -15,10 +15,11 @@ import { trace, type Span } from '@opentelemetry/api';
 import {
   createServeApp,
   detectFromLoopback,
+  listWorkspaceSessionsForResponse,
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
-import { runQwenServe, type RunHandle } from './runQwenServe.js';
+import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import { resolveWebShellDir, isDocumentNavigation } from './webShellStatic.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
@@ -76,7 +77,7 @@ import {
   type AcpSessionBridge,
   type SessionMetadataUpdate,
 } from './acpSessionBridge.js';
-import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+import type { BridgeEvent, SubscribeOptions } from './event-bus.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
@@ -1272,8 +1273,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     publishWorkspaceEvent(_event) {
       // Issue #4175 PR 16 — fakeBridge default is a no-op. Tests that
       // assert on workspace fan-out override this through the dedicated
-      // route-level test files (workspaceMemory.test.ts /
-      // workspaceAgents.test.ts) where the real fan-out behavior is
+      // route-level test files (workspace-memory.test.ts /
+      // workspace-agents.test.ts) where the real fan-out behavior is
       // exercised against a live bridge.
     },
     knownClientIds() {
@@ -1726,9 +1727,13 @@ describe('createServeApp', () => {
     });
 
     it('does not mount the UI when serveWebShell is false', async () => {
-      const app = createServeApp({ ...baseOpts, serveWebShell: false }, undefined, {
-        webShellDir,
-      });
+      const app = createServeApp(
+        { ...baseOpts, serveWebShell: false },
+        undefined,
+        {
+          webShellDir,
+        },
+      );
       const res = await request(app)
         .get('/')
         .set('Host', host)
@@ -1771,7 +1776,12 @@ describe('createServeApp', () => {
       // bearerAuth (401), not receive the shell. Without the /health guard the
       // pre-auth fallback would return index.html instead.
       const app = createServeApp(
-        { ...baseOpts, hostname: '0.0.0.0', token: 'secret', requireAuth: true },
+        {
+          ...baseOpts,
+          hostname: '0.0.0.0',
+          token: 'secret',
+          requireAuth: true,
+        },
         undefined,
         { webShellDir },
       );
@@ -1787,6 +1797,32 @@ describe('createServeApp', () => {
       await fsp.rm(path.join(webShellDir, 'index.html'));
       const res = await request(app).get('/').set('Host', host);
       expect(res.status).toBe(500);
+    });
+
+    it('serves the shell when webShellDir is under a dotfile path (e.g. ~/.nvm)', async () => {
+      // Regression: the send library defaults to dotfiles:'ignore', which
+      // returns 404 for any path containing a segment starting with '.'.
+      // Users who installed qwen via nvm have the package under
+      // ~/.nvm/.../web-shell/index.html.
+      const dotParent = await fsp.mkdtemp(path.join(os.tmpdir(), '.fake-nvm-'));
+      const nestedShellDir = path.join(dotParent, 'web-shell');
+      await fsp.mkdir(nestedShellDir, { recursive: true });
+      await fsp.writeFile(path.join(nestedShellDir, 'index.html'), INDEX_HTML);
+      await fsp.mkdir(path.join(nestedShellDir, 'assets'));
+      await fsp.writeFile(
+        path.join(nestedShellDir, 'assets', 'app.js'),
+        'export const x = 1;\n',
+      );
+      try {
+        const app = createServeApp(baseOpts, undefined, {
+          webShellDir: nestedShellDir,
+        });
+        const res = await request(app).get('/').set('Host', host);
+        expect(res.status).toBe(200);
+        expect(res.text).toContain('<div id="root">');
+      } finally {
+        await fsp.rm(dotParent, { recursive: true, force: true });
+      }
     });
 
     it('isDocumentNavigation recognizes each navigation signal', () => {
@@ -1899,7 +1935,7 @@ describe('createServeApp', () => {
     });
 
     it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
-      // Mirrors the env-var kill switch path: `runQwenServe.ts` infers
+      // Mirrors the env-var kill switch path: `run-qwen-serve.ts` infers
       // `mcpPoolActive: false` when the parent process has
       // `QWEN_SERVE_NO_MCP_POOL=1`. Verify the capability envelope
       // tracks the toggle so SDK clients pre-flighting on the tags
@@ -5070,6 +5106,21 @@ describe('createServeApp', () => {
       await fsp.utimes(filePath, input.mtime, input.mtime);
     }
 
+    async function writeStoredSessions(count: number): Promise<void> {
+      for (let i = 0; i < count; i++) {
+        const timestamp = new Date(
+          Date.UTC(2026, 4, 17, 12, i, 0),
+        ).toISOString();
+        await writeStoredSession({
+          sessionId: `550e8400-e29b-41d4-a716-44665544${String(i).padStart(4, '0')}`,
+          cwd: WS_BOUND,
+          timestamp,
+          prompt: `prompt ${i}`,
+          mtime: new Date(timestamp),
+        });
+      }
+    }
+
     it('returns the list returned by the bridge', async () => {
       // #3803 §02 (commit 0c6e963cd): the route now rejects
       // cross-workspace queries with 400 workspace_mismatch (so
@@ -5457,6 +5508,65 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(1);
+    });
+
+    it('ignores malformed size query values', async () => {
+      await writeStoredSessions(3);
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      for (const malformedSize of ['1abc', '1.5', '1e2', '0x10']) {
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=${malformedSize}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toHaveLength(3);
+        expect(res.body.nextCursor).toBeUndefined();
+      }
+    });
+
+    it('clamps unsafe finite HTTP size values to the max page size', async () => {
+      await writeStoredSessions(21);
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const res = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=9007199254740992`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(21);
+      expect(res.body.nextCursor).toBeUndefined();
+    });
+
+    it('uses the default page size for invalid non-HTTP size values', async () => {
+      for (const invalidSize of [
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+        await fsp.mkdir(runtimeDir, { recursive: true });
+        await writeStoredSessions(21);
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { size: invalidSize },
+        );
+
+        expect(result.sessions).toHaveLength(20);
+        expect(result.nextCursor).toBeDefined();
+      }
     });
 
     it('clamps size=200 to max page size', async () => {
@@ -10326,7 +10436,7 @@ describe('auth device-flow routes', () => {
   // whose `poll` is scripted per-test. Lives at the top of the suite so
   // every `it()` can compose it with the registry.
   function makeFakeProvider(): {
-    provider: import('./auth/deviceFlow.js').DeviceFlowProvider;
+    provider: import('./auth/device-flow.js').DeviceFlowProvider;
     startCount: () => number;
   } {
     let starts = 0;
@@ -10339,10 +10449,10 @@ describe('auth device-flow routes', () => {
             deviceCode:
               // Use the brandSecret helper so the secret follows the same
               // redaction shape the production provider produces.
-              (await import('./auth/deviceFlow.js')).brandSecret(
+              (await import('./auth/device-flow.js')).brandSecret(
                 `device-${starts}`,
               ),
-            pkceVerifier: (await import('./auth/deviceFlow.js')).brandSecret(
+            pkceVerifier: (await import('./auth/device-flow.js')).brandSecret(
               `pkce-${starts}`,
             ),
             userCode: `USER-${starts}`,
@@ -10825,8 +10935,8 @@ describe('auth device-flow routes', () => {
     // must surface as 502 with code:'upstream_error' instead of falling
     // through `sendBridgeError`'s generic 500 path. Build a fake
     // provider whose start always throws.
-    const { UpstreamDeviceFlowError } = await import('./auth/deviceFlow.js');
-    const failingProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+    const { UpstreamDeviceFlowError } = await import('./auth/device-flow.js');
+    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
       providerId: 'qwen-oauth',
       async start() {
         throw new UpstreamDeviceFlowError('mocked upstream outage');
@@ -10854,9 +10964,9 @@ describe('auth device-flow routes', () => {
     // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
     // injected registry with a controlled clock + manual sweeper trigger.
     const { DeviceFlowRegistry, brandSecret } = await import(
-      './auth/deviceFlow.js'
+      './auth/device-flow.js'
     );
-    const fakeProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+    const fakeProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
       providerId: 'qwen-oauth',
       async start() {
         return {
@@ -10957,7 +11067,7 @@ describe('auth device-flow routes', () => {
   it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
     // Inject a fake registry whose `start` always throws the cap error.
     const { TooManyActiveDeviceFlowsError } = await import(
-      './auth/deviceFlow.js'
+      './auth/device-flow.js'
     );
     const fakeRegistry = {
       start: async () => {
@@ -10967,7 +11077,7 @@ describe('auth device-flow routes', () => {
       cancel: () => undefined,
       listPending: () => [],
       dispose: () => {},
-    } as unknown as import('./auth/deviceFlow.js').DeviceFlowRegistry;
+    } as unknown as import('./auth/device-flow.js').DeviceFlowRegistry;
 
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {

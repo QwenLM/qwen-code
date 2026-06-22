@@ -20,6 +20,7 @@ import {
   type FileSearch,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { shouldResolveAgainstWorkspace } from '../../utils/file-path.js';
 
 /**
  * File message handler
@@ -558,7 +559,7 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       // Convert to absolute path if relative
       let absolutePath = path;
-      if (!path.startsWith('/') && !path.match(/^[a-zA-Z]:/)) {
+      if (shouldResolveAgainstWorkspace(path)) {
         // Relative path - resolve against workspace
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (workspaceFolder) {

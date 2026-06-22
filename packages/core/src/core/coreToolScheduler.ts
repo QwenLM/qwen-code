@@ -66,6 +66,7 @@ import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   isAlreadyTruncated,
   persistAndTruncateToolResult,
@@ -2879,11 +2880,10 @@ export class CoreToolScheduler {
     calls: ScheduledToolCall[],
     signal: AbortSignal,
   ): Promise<void> {
-    const parsed = parseInt(
-      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+    const maxConcurrency = parsePositiveIntegerEnv(
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
       10,
     );
-    const maxConcurrency = Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
     const executing = new Set<Promise<void>>();
 
     for (const call of calls) {

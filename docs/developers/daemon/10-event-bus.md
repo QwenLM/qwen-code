@@ -183,7 +183,7 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 
 - Consumed by `packages/acp-bridge/src/bridge.ts` (`BridgeClient.sessionUpdate` / `BridgeClient.extNotification` → `events.publish(...)`).
 - Consumed by `packages/cli/src/serve/server.ts` (SSE route handler → `events.subscribe(...)` then formats `BridgeEvent` to SSE wire frames).
-- Re-export shim: `packages/cli/src/serve/eventBus.ts` → `@qwen-code/acp-bridge/eventBus`.
+- Re-export shim: `packages/cli/src/serve/event-bus.ts` → `@qwen-code/acp-bridge/eventBus`.
 - SDK consumer: `packages/sdk-typescript/src/daemon/sse.ts` (`parseSseStream`), then `asKnownDaemonEvent` (see [`09-event-schema.md`](./09-event-schema.md), [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
 
 ## Configuration

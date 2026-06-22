@@ -102,6 +102,7 @@ import {
   sessionIdContext,
   dedupeToolCallsById,
   getProviderToolCallId,
+  parsePositiveIntegerEnv,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -538,8 +539,14 @@ export interface AvailableCommandsSnapshot {
 export async function buildAvailableCommandsSnapshot(
   config: Config,
   abortSignal: AbortSignal = AbortSignal.timeout(10_000),
+  settings?: LoadedSettings,
 ): Promise<AvailableCommandsSnapshot> {
-  const slashCommands = await getAvailableCommands(config, abortSignal, 'acp');
+  const slashCommands = await getAvailableCommands(
+    config,
+    abortSignal,
+    'acp',
+    settings,
+  );
 
   const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
     const acceptsInput =
@@ -1896,7 +1903,10 @@ ${this.pendingWorktreeNotice}
               usageMetadata = resp.value.usageMetadata;
             }
 
-            if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
+            if (
+              resp.type === StreamEventType.CHUNK &&
+              resp.value.functionCalls
+            ) {
               functionCalls.push(...resp.value.functionCalls);
             }
           }
@@ -1937,7 +1947,10 @@ ${this.pendingWorktreeNotice}
           }
 
           if (errorStatus === 429) {
-            throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+            throw new RequestError(
+              429,
+              'Rate limit exceeded. Try again later.',
+            );
           }
 
           throw error;
@@ -3382,7 +3395,11 @@ ${this.pendingWorktreeNotice}
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
       const { availableCommands, availableSkills, availableSkillDetails } =
-        await buildAvailableCommandsSnapshot(this.config);
+        await buildAvailableCommandsSnapshot(
+          this.config,
+          undefined,
+          this.settings,
+        );
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
@@ -3766,12 +3783,10 @@ ${this.pendingWorktreeNotice}
       onStopAfterPermissionCancel?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const parsed = parseInt(
-        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+      const maxConcurrency = parsePositiveIntegerEnv(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
-      const maxConcurrency =
-        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
       for (let i = 0; i < calls.length; i++) {

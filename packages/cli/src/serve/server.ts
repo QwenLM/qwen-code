@@ -55,16 +55,16 @@ import {
   type DeviceFlowProvider,
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
-} from './auth/deviceFlow.js';
+} from './auth/device-flow.js';
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
-import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
-import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
-import { createDaemonStatusProvider } from './daemonStatusProvider.js';
-import { isServeDebugMode } from './debugMode.js';
+import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
+import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { isServeDebugMode } from './debug-mode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
-import { isLoopbackBind } from './loopbackBinds.js';
+import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
 import {
   buildDaemonStatusResponse,
@@ -104,7 +104,7 @@ import {
   getAdvertisedServeFeatures,
   getServeProtocolVersions,
 } from './capabilities.js';
-import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
+import { SubscriberLimitExceededError, type BridgeEvent } from './event-bus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
@@ -119,26 +119,26 @@ import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './webShellStatic.js';
-import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
-import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
+import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
+import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 import {
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,
 } from './fs/index.js';
-import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
-import { registerWorkspaceFileWriteRoutes } from './routes/workspaceFileWrite.js';
+import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
+import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
-import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
+import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
 import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
 import {
   createRateLimiter,
   setRateLimiter,
   type RateLimiterInstance,
-} from './rateLimit.js';
+} from './rate-limit.js';
 import {
   STATUS_SCHEMA_VERSION,
   type ServeExtensionCapabilities,
@@ -239,10 +239,12 @@ export async function listWorkspaceSessionsForResponse(
   workspaceCwd: string,
   options?: ListWorkspaceSessionsOptions,
 ): Promise<ListWorkspaceSessionsResult> {
-  const pageSize = Math.min(
-    Math.max(options?.size ?? DEFAULT_SESSION_PAGE_SIZE, 1),
-    MAX_SESSION_PAGE_SIZE,
-  );
+  const rawSize = options?.size;
+  const requestedSize =
+    typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
+      ? rawSize
+      : DEFAULT_SESSION_PAGE_SIZE;
+  const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
 
   let numericCursor: number | undefined;
   if (options?.cursor) {
@@ -309,6 +311,16 @@ export async function listWorkspaceSessionsForResponse(
     persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
+}
+
+function parseSessionPageSizeQuery(raw: unknown): number | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!/^[+-]?\d+$/.test(trimmed)) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed)) return undefined;
+  if (Number.isSafeInteger(parsed)) return parsed;
+  return trimmed.startsWith('-') ? 1 : MAX_SESSION_PAGE_SIZE;
 }
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
@@ -1584,7 +1596,7 @@ export function createServeApp(
   // both halves of the policy (matched → CORS headers + pass-through or
   // 204 preflight; unmatched → 403 with the same error envelope as the
   // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
-  // installed. Pattern parsing happens in `runQwenServe.ts` for validation;
+  // installed. Pattern parsing happens in `run-qwen-serve.ts` for validation;
   // here we still keep the wildcard/no-token invariant for embedded
   // callers that construct the app directly.
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -3483,12 +3495,10 @@ export function createServeApp(
         typeof req.query['cursor'] === 'string'
           ? req.query['cursor']
           : undefined;
-      const sizeParam = req.query['size'];
-      const size =
-        typeof sizeParam === 'string' ? parseInt(sizeParam, 10) : undefined;
+      const size = parseSessionPageSizeQuery(req.query['size']);
       const result = await listWorkspaceSessionsForResponse(bridge, key, {
         cursor,
-        size: Number.isFinite(size) ? size : undefined,
+        size,
       });
       res.status(200).json({
         sessions: result.sessions,
@@ -4511,7 +4521,7 @@ export function createServeApp(
         const idleForMs = Date.now() - lastWriteAt;
         if (idleForMs < writerIdleTimeoutMs) return;
         // Reuse the existing `client_evicted` taxonomy from
-        // `eventBus.ts` so SDK reducers branch on the same frame type
+        // `event-bus.ts` so SDK reducers branch on the same frame type
         // they already handle for queue-overflow eviction; the new
         // `reason` slot is the differentiator. Write DIRECTLY here
         // (bypassing `writeWithBackpressure`) because the chain may

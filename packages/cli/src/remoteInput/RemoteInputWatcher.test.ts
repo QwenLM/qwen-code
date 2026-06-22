@@ -114,6 +114,62 @@ describe('RemoteInputWatcher', () => {
     expect(submitted).toEqual(['after-bad-line']);
   });
 
+  it('reads commands written after the input file is truncated', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const submitted: string[] = [];
+    watcher.setSubmitFn((text) => {
+      submitted.push(text);
+    });
+
+    fs.appendFileSync(
+      inputFile,
+      JSON.stringify({ type: 'submit', text: 'before-truncate' }) + '\n',
+    );
+    await watcher.checkForNewInput();
+    const consumedSize = fs.statSync(inputFile).size;
+
+    const afterTruncate = 'after-truncate-with-a-longer-command';
+    fs.writeFileSync(
+      inputFile,
+      JSON.stringify({ type: 'submit', text: afterTruncate }) + '\n',
+    );
+    expect(fs.statSync(inputFile).size).toBeGreaterThan(consumedSize);
+    await watcher.checkForNewInput();
+
+    expect(submitted).toEqual(['before-truncate', afterTruncate]);
+  });
+
+  it('reads commands after truncation rewrites the file to the same size', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const submitted: string[] = [];
+    watcher.setSubmitFn((text) => {
+      submitted.push(text);
+    });
+
+    const beforeTruncate = 'before-truncate';
+    const afterTruncate = 'after--truncate';
+    const fixedMtime = new Date('2026-06-20T00:00:00.000Z');
+    expect(afterTruncate).toHaveLength(beforeTruncate.length);
+
+    fs.appendFileSync(
+      inputFile,
+      JSON.stringify({ type: 'submit', text: beforeTruncate }) + '\n',
+    );
+    fs.utimesSync(inputFile, fixedMtime, fixedMtime);
+    await watcher.checkForNewInput();
+    const consumedSize = fs.statSync(inputFile).size;
+
+    fs.writeFileSync(
+      inputFile,
+      JSON.stringify({ type: 'submit', text: afterTruncate }) + '\n',
+    );
+    fs.utimesSync(inputFile, fixedMtime, fixedMtime);
+    expect(fs.statSync(inputFile).size).toBe(consumedSize);
+    await watcher.checkForNewInput();
+
+    expect(submitted).toEqual([beforeTruncate, afterTruncate]);
+  });
+
   it('stops watching after shutdown', async () => {
     watcher = new RemoteInputWatcher(inputFile);
     const submitted: string[] = [];

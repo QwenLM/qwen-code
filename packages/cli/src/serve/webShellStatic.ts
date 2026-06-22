@@ -11,7 +11,7 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { isServeDebugMode } from './debugMode.js';
+import { isServeDebugMode } from './debug-mode.js';
 
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
@@ -120,24 +120,33 @@ function createSendIndex(webShellDir: string): (res: Response) => void {
         'camera=(), microphone=(), geolocation=(), payment=()',
       )
       .set('Cache-Control', 'no-cache');
-    res.sendFile(indexPath, { cacheControl: false }, (err) => {
-      if (!err) return;
-      // Only 5xx path in the serve app that would otherwise emit nothing —
-      // log it like the sibling /demo handler so an operator can see why the
-      // shell stopped loading (EACCES/ESTALE on a network mount, a perms
-      // change, a partial deploy).
-      writeStderrLine(
-        `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      if (!res.headersSent) {
-        res.status(500).type('text/plain').send('Failed to load Web Shell');
-      } else {
-        // Failed mid-stream (truncated/corrupt index.html): end the
-        // half-written response instead of leaving the client on a 200 with a
-        // partial body.
-        res.end();
-      }
-    });
+    // `dotfiles: 'allow'` is required because the resolved path may pass
+    // through a dotfile directory (e.g. ~/.nvm/.../web-shell/index.html).
+    // The `send` library defaults to 'ignore' which returns a 404 for any
+    // path containing a segment starting with '.', breaking users who
+    // installed qwen via nvm.
+    res.sendFile(
+      indexPath,
+      { cacheControl: false, dotfiles: 'allow' },
+      (err) => {
+        if (!err) return;
+        // Only 5xx path in the serve app that would otherwise emit nothing —
+        // log it like the sibling /demo handler so an operator can see why the
+        // shell stopped loading (EACCES/ESTALE on a network mount, a perms
+        // change, a partial deploy).
+        writeStderrLine(
+          `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        if (!res.headersSent) {
+          res.status(500).type('text/plain').send('Failed to load Web Shell');
+        } else {
+          // Failed mid-stream (truncated/corrupt index.html): end the
+          // half-written response instead of leaving the client on a 200 with a
+          // partial body.
+          res.end();
+        }
+      },
+    );
   };
 }
 

@@ -44,7 +44,8 @@ export async function handleInstall(args: InstallArgs) {
     if (
       installMetadata.type !== 'git' &&
       installMetadata.type !== 'github-release' &&
-      installMetadata.type !== 'npm'
+      installMetadata.type !== 'npm' &&
+      installMetadata.type !== 'archive-url'
     ) {
       if (args.ref || args.autoUpdate) {
         throw new Error(
@@ -55,10 +56,16 @@ export async function handleInstall(args: InstallArgs) {
       }
     }
 
-    if (installMetadata.type === 'npm' && args.ref) {
+    if (
+      (installMetadata.type === 'npm' ||
+        installMetadata.type === 'archive-url') &&
+      args.ref
+    ) {
       throw new Error(
         t(
-          '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).',
+          installMetadata.type === 'npm'
+            ? '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).'
+            : '--ref is not applicable for archive URL extensions.',
         ),
       );
     }
@@ -153,13 +160,13 @@ export async function handleInstall(args: InstallArgs) {
 export const installCommand: CommandModule = {
   command: 'install <source>',
   describe: t(
-    'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
+    'Installs an extension from a git repository URL, local path or archive, archive URL, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
   ),
   builder: (yargs) =>
     yargs
       .positional('source', {
         describe: t(
-          'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
+          'The github URL, local path or archive, archive URL, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
         ),
         type: 'string',
         demandOption: true,
