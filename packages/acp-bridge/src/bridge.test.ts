@@ -34,6 +34,7 @@ import {
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SessionBusyError,
   SessionNotFoundError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
@@ -3046,6 +3047,37 @@ describe('createAcpSessionBridge', () => {
       });
       expect(ok).toEqual({ stopReason: 'end_turn' });
 
+      await bridge.shutdown();
+    });
+
+    it('rejects launchSessionForkAgent while a prompt is active', async () => {
+      let releasePrompt: (() => void) | undefined;
+      const handle = makeChannel({
+        promptImpl: async () =>
+          new Promise<PromptResponse>((resolve) => {
+            releasePrompt = () => resolve({ stopReason: 'end_turn' });
+          }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const active = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'active' }],
+      });
+      await vi.waitFor(() => expect(releasePrompt).toBeDefined());
+
+      await expect(
+        bridge.launchSessionForkAgent(session.sessionId, 'review this'),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+      expect(
+        handle.agent.extMethodCalls.some(
+          (call) => call.method === 'qwen/control/session/fork_agent',
+        ),
+      ).toBe(false);
+
+      releasePrompt!();
+      await expect(active).resolves.toEqual({ stopReason: 'end_turn' });
       await bridge.shutdown();
     });
 

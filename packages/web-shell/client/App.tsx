@@ -2127,7 +2127,9 @@ export function App({
                 );
               })
               .catch((error: unknown) => {
-                reportError(error, t('fork.failed', { reason: '' }));
+                const reason =
+                  error instanceof Error ? error.message : String(error);
+                reportError(error, t('fork.failed', { reason }));
               });
             return true;
           }

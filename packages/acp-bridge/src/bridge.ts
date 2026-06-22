@@ -4368,54 +4368,62 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'Cannot fork while a response or tool call is in progress',
         );
       }
+      return entry.promptQueue.then(async () => {
+        if (entry.pendingPromptCount > 0 || entry.promptActive) {
+          throw new SessionBusyError(
+            sessionId,
+            'Cannot fork while a response or tool call is in progress',
+          );
+        }
 
-      opts.onDiagnosticLine?.(
-        `qwen serve: launchSessionForkAgent requested for session=${sessionId}`,
-        'info',
-      );
+        opts.onDiagnosticLine?.(
+          `qwen serve: launchSessionForkAgent requested for session=${sessionId}`,
+          'info',
+        );
 
-      let response: {
-        description?: string;
-        launched?: boolean;
-      };
-      try {
-        response = (await Promise.race([
-          withTimeout(
-            entry.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
-              {
-                sessionId,
-                directive: trimmed,
-              },
-            ),
-            initTimeoutMs,
-            SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
-          ),
-          getTransportClosedReject(entry),
-        ])) as {
+        let response: {
           description?: string;
           launched?: boolean;
         };
-      } catch (error) {
-        opts.onDiagnosticLine?.(
-          `qwen serve: launchSessionForkAgent failed for session=${sessionId}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          'warn',
-        );
-        throw error;
-      }
+        try {
+          response = (await Promise.race([
+            withTimeout(
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+                {
+                  sessionId,
+                  directive: trimmed,
+                },
+              ),
+              initTimeoutMs,
+              SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+            ),
+            getTransportClosedReject(entry),
+          ])) as {
+            description?: string;
+            launched?: boolean;
+          };
+        } catch (error) {
+          opts.onDiagnosticLine?.(
+            `qwen serve: launchSessionForkAgent failed for session=${sessionId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            'warn',
+          );
+          throw error;
+        }
 
-      const result = {
-        sessionId: entry.sessionId,
-        description: response.description ?? trimmed.slice(0, 60),
-        launched: response.launched === true,
-      };
-      opts.onDiagnosticLine?.(
-        `qwen serve: launchSessionForkAgent completed for session=${sessionId} launched=${result.launched}`,
-        'info',
-      );
-      return result;
+        const result = {
+          sessionId: entry.sessionId,
+          description: response.description ?? trimmed.slice(0, 60),
+          launched: response.launched === true,
+        };
+        opts.onDiagnosticLine?.(
+          `qwen serve: launchSessionForkAgent completed for session=${sessionId} launched=${result.launched}`,
+          'info',
+        );
+        return result;
+      });
     },
 
     async executeShellCommand(

@@ -62,6 +62,7 @@ import {
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -6144,6 +6145,67 @@ describe('createServeApp', () => {
           context: { clientId: 'client-1' },
         },
       ]);
+    });
+
+    it('400 when directive is missing or empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const missing = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('missing_directive');
+
+      const empty = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: '   ' });
+      expect(empty.status).toBe(400);
+      expect(empty.body.code).toBe('missing_directive');
+      expect(bridge.forkCalls).toEqual([]);
+    });
+
+    it('404 when bridge throws SessionNotFoundError', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/missing/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('409 when bridge reports the session is busy', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionBusyError(
+            sessionId,
+            'Cannot fork while a response or tool call is in progress',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_busy',
+        sessionId: 'session-A',
+      });
+      expect(res.headers['retry-after']).toBe('5');
     });
   });
 
