@@ -231,7 +231,7 @@ export * from './agents/workflow-run-registry.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
-export * from './utils/safeMode.js';
+export * from './utils/safe-mode.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
