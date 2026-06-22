@@ -1692,6 +1692,13 @@ describe('standalone release packaging', () => {
   it('requires the native audio prebuild when release packaging opts in', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
 
     try {
       expect(() =>
@@ -1700,9 +1707,9 @@ describe('standalone release packaging', () => {
           [
             'scripts/create-standalone-package.js',
             '--target',
-            'linux-x64',
+            target,
             '--node-archive',
-            createFakeNodeArchive(tmpDir),
+            fakeRuntimeArchive,
             '--out-dir',
             path.join(tmpDir, 'out'),
             '--version',
@@ -1716,7 +1723,7 @@ describe('standalone release packaging', () => {
             stdio: 'pipe',
           },
         ),
-      ).toThrow(/audio-capture prebuild.*linux-x64/);
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
       restoreMinimalDist(createdDist);
@@ -1726,11 +1733,18 @@ describe('standalone release packaging', () => {
   it('requires a native audio prebuild file when release packaging opts in', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
     const prebuildDir = path.join(
       'packages',
       'audio-capture',
       'prebuilds',
-      'linux-x64',
+      prebuildDirName,
     );
     const createdPrebuildDir = !existsSync(prebuildDir);
 
@@ -1743,9 +1757,9 @@ describe('standalone release packaging', () => {
           [
             'scripts/create-standalone-package.js',
             '--target',
-            'linux-x64',
+            target,
             '--node-archive',
-            createFakeNodeArchive(tmpDir),
+            fakeRuntimeArchive,
             '--out-dir',
             path.join(tmpDir, 'out'),
             '--version',
@@ -1759,7 +1773,7 @@ describe('standalone release packaging', () => {
             stdio: 'pipe',
           },
         ),
-      ).toThrow(/audio-capture prebuild.*linux-x64/);
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
     } finally {
       if (createdPrebuildDir) {
         rmSync(prebuildDir, { recursive: true, force: true });
