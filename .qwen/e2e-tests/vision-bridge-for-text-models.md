@@ -23,15 +23,16 @@ export PRIMARY_TEXT_MODEL=deepseek-v3
 export BRIDGE_MODEL=qwen3-vl-plus
 ```
 
-`PRIMARY_TEXT_MODEL` must be text-only. `BRIDGE_MODEL` must be registered in
-`modelProviders` or otherwise resolvable by the provider selected for the
-session. Leave `BRIDGE_MODEL` empty only when the local provider config already
-contains an image-capable model for auto-selection.
+`PRIMARY_TEXT_MODEL` must be text-only. `BRIDGE_MODEL` names an image-capable
+model that is registered in `modelProviders` or otherwise resolvable by the
+provider selected for the session; the implementation auto-selects it from the
+configured models.
 
 ## Fixture
 
-Create a temporary project, runtime directory, workspace settings, and an image
-fixture with a unique marker:
+Create a temporary project, runtime directory, and an image fixture with a
+unique marker. The bridge is enabled by the active model setup: a text-only
+primary model plus an available image-capable model in the configured providers.
 
 ```bash
 ROOT="$(pwd)"
@@ -42,19 +43,7 @@ CAPTURES="$RUN_DIR/captures"
 MARKER="VISION_BRIDGE_E2E_73619"
 
 rm -rf "$RUN_DIR"
-mkdir -p "$PROJECT/.qwen" "$RUNTIME" "$CAPTURES"
-
-cat > "$PROJECT/.qwen/settings.json" <<JSON
-{
-  "visionBridge": {
-    "enabled": true,
-    "model": "${BRIDGE_MODEL}",
-    "maxImages": 2,
-    "timeoutMs": 60000,
-    "showTranscript": true
-  }
-}
-JSON
+mkdir -p "$PROJECT" "$RUNTIME" "$CAPTURES"
 
 python3 - <<'PY'
 from pathlib import Path
@@ -128,23 +117,26 @@ Manual visual checks:
 
 - The conversion notice is visible before or near the final assistant answer.
 - The notice discloses the bridge model and, when available, its endpoint.
-- The generated interpretation is shown when `showTranscript` is true.
+- The generated interpretation is shown in the conversion notice.
 - The assistant answer reflects the marker from the image, not a generic
   unsupported-image response.
 
 ## Negative Control
 
-Disable the bridge in the temporary settings:
+Run the same prompt with an image-capable primary model, for example:
 
 ```bash
-perl -0pi -e 's/"enabled": true/"enabled": false/' "$PROJECT/.qwen/settings.json"
+export PRIMARY_IMAGE_MODEL="${BRIDGE_MODEL}"
+
+tmux kill-session -t qwen-vision-bridge-e2e 2>/dev/null || true
+tmux new-session -d -s qwen-vision-bridge-e2e -x 180 -y 48 \
+  "cd '$PROJECT' && QWEN_RUNTIME_DIR='$RUNTIME' node '$ROOT/dist/cli.js' --auth-type '$PRIMARY_AUTH_TYPE' --model '$PRIMARY_IMAGE_MODEL' --approval-mode yolo"
 ```
 
 Repeat the tmux run. Expected:
 
 - No `Converted 1 image(s) to text via` notice.
-- The turn follows the normal text-only unsupported-image path.
-- The assistant must not infer the marker from the image.
+- The image is handled directly by the primary image-capable model.
 
 ## Evidence To Attach To The PR
 

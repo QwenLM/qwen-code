@@ -735,7 +735,9 @@ describe('BaseLlmClient', () => {
           authType: AuthType.USE_OPENAI,
           baseUrl: 'https://vision.example.com/v1',
         }),
-      ).rejects.toThrow(/missing-vision-model/);
+      ).rejects.toThrow(
+        /missing-vision-model.*authType=openai.*baseUrl=https:\/\/vision\.example\.com\/v1/,
+      );
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
@@ -1016,6 +1018,7 @@ describe('BaseLlmClient', () => {
         'shared-model',
         targetBaseUrl,
       );
+      expect(getResolvedModel).toHaveBeenCalledTimes(1);
       expect(getResolvedModel).not.toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
         'shared-model',
@@ -1031,6 +1034,38 @@ describe('BaseLlmClient', () => {
       expect(retryWithBackoff).toHaveBeenCalledWith(
         expect.any(Function),
         expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
+      );
+    });
+
+    it('calls onDispatch before each generateText dispatch attempt', async () => {
+      const onDispatch = vi.fn();
+      vi.mocked(retryWithBackoff).mockImplementationOnce(async (fn) => {
+        await expect((fn as () => Promise<unknown>)()).rejects.toThrow(
+          'rate limited',
+        );
+        return await (fn as () => Promise<GenerateContentResponse>)();
+      });
+      mockGenerateContent
+        .mockRejectedValueOnce(new Error('rate limited'))
+        .mockResolvedValueOnce(createMockTextResponse('ok'));
+
+      const c = new BaseLlmClient(mockContentGenerator, mockConfig);
+
+      const result = await c.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'say hi' }] }],
+        model: 'test-model',
+        abortSignal: new AbortController().signal,
+        onDispatch,
+      });
+
+      expect(result.text).toBe('ok');
+      expect(onDispatch).toHaveBeenCalledTimes(2);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+      expect(onDispatch.mock.invocationCallOrder[0]).toBeLessThan(
+        mockGenerateContent.mock.invocationCallOrder[0],
+      );
+      expect(onDispatch.mock.invocationCallOrder[1]).toBeLessThan(
+        mockGenerateContent.mock.invocationCallOrder[1],
       );
     });
   });

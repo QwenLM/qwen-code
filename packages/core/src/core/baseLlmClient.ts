@@ -511,7 +511,8 @@ export class BaseLlmClient {
     );
     if (!resolvedModel && hasExplicitProviderHint) {
       throw new Error(
-        `Model "${model}" could not be resolved for the requested provider hint.`,
+        `Model "${model}" could not be resolved for the requested provider hint ` +
+          `(authType=${hint.authType ?? 'none'}, baseUrl=${hint.baseUrl ?? 'none'}).`,
       );
     }
 
@@ -520,6 +521,7 @@ export class BaseLlmClient {
       selector,
       hint.baseUrl,
       hasExplicitProviderHint,
+      resolvedModel,
     );
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
@@ -593,20 +595,11 @@ export class BaseLlmClient {
     selector: ResolvedModelId | undefined,
     baseUrl?: string,
     throwOnCreateFailure = false,
+    resolvedModel?: ResolvedModelConfig,
   ): Promise<ContentGenerator> {
-    const cacheKey = JSON.stringify({
-      authType: selector?.authType,
-      model: selector?.modelId ?? model,
-      baseUrl,
-    });
+    const cacheKey = `${selector?.authType ?? ''}:${selector?.modelId ?? model}:${baseUrl ?? ''}`;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
-
-    const resolvedModel = this.resolveModelAcrossAuthTypes(
-      model,
-      selector,
-      baseUrl,
-    );
 
     if (!resolvedModel) {
       const message = `Model "${model}" not found in registry across all authTypes.`;

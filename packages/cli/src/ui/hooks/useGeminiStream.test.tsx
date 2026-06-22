@@ -509,6 +509,29 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('does not query bridge config for text-only messages', async () => {
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: vi.fn(() => ({})),
+        getDefaultVisionBridgeModel: vi.fn(() => ({ id: 'vision-model' })),
+      });
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'describe without images' }],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('describe without images');
+      });
+
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockConfig.getEffectiveInputModalities).not.toHaveBeenCalled();
+      expect(mockConfig.getDefaultVisionBridgeModel).not.toHaveBeenCalled();
+    });
+
     it('keeps the turn alive with text plus a note when the bridge fails', async () => {
       enableBridge();
       mockRunVisionBridge.mockResolvedValue({
@@ -545,6 +568,50 @@ describe('useGeminiStream', () => {
           text: expect.stringContaining(
             'Your image and prompt/context were sent to vm (vision.example.com).',
           ),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('does not expose raw provider errors in the bridge failure notice', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [
+          { text: 'describe' },
+          {
+            text: '[Vision bridge could not interpret the attached image(s): the vision model request failed.]',
+          },
+        ],
+        imageCount: 1,
+        convertedCount: 0,
+        omittedCount: 0,
+        omittedInvalidCount: 0,
+        omittedCappedCount: 0,
+        modelId: 'vm',
+        modelEndpoint: 'vision.example.com',
+        egressOccurred: true,
+        error: '401 from https://signed.example.com?token=secret',
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.not.stringContaining('token=secret'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('vision model request failed'),
         }),
         expect.any(Number),
       );
@@ -1068,6 +1135,9 @@ describe('useGeminiStream', () => {
     Object.assign(mockConfig, {
       getEffectiveInputModalities: () => ({}),
       getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      getChatRecordingService: vi.fn(() => ({
+        recordMidTurnUserMessage: vi.fn(),
+      })),
     });
     mockRunVisionBridge.mockResolvedValue({
       applied: true,
@@ -1185,6 +1255,7 @@ describe('useGeminiStream', () => {
       config: mockConfig,
       parts: [resolvedTextPart, resolvedImagePart],
       signal: expect.any(AbortSignal),
+      maxImages: 4,
     });
     expect(mockAddItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1220,6 +1291,276 @@ describe('useGeminiStream', () => {
       'prompt-id-midturn-image',
       { type: SendMessageType.ToolResult },
     );
+  });
+
+  it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
+    const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
+    const resolvedImagePart: Part = {
+      inlineData: {
+        mimeType: 'image/png',
+        data: 'iVBORw0KGgo=',
+      },
+    };
+    const resolvedTextPart: Part = {
+      text: 'inspect @/tmp/screenshot.png and summarize',
+    };
+    const recordMidTurnUserMessage = vi.fn();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      getChatRecordingService: vi.fn(() => ({
+        recordMidTurnUserMessage: vi.fn(),
+      })),
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: false,
+      status: 'failed',
+      imageCount: 1,
+      convertedCount: 0,
+      omittedCount: 0,
+      omittedInvalidCount: 0,
+      omittedCappedCount: 0,
+      modelId: 'vm',
+      egressOccurred: true,
+      error: 'provider failed',
+    });
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedImagePart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
+    >);
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-bridge-fail',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.(completedToolCalls);
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
+    expect(sent).not.toContain('inlineData');
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [
+        {
+          text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
+        },
+      ],
+      queuedPrompt,
+    );
+  });
+
+  it('shares the bridge image budget across mid-turn messages in one drain', async () => {
+    const queuedPrompts = ['inspect @/tmp/one.png', 'inspect @/tmp/two.png'];
+    const imageParts = Array.from({ length: 5 }, (_, index): Part => ({
+      inlineData: {
+        mimeType: 'image/png',
+        data: `image-${index}`,
+      },
+    }));
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    mockRunVisionBridge
+      .mockResolvedValueOnce({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[first bridge transcript]' }],
+        transcript: '[first bridge transcript]',
+        imageCount: 4,
+        convertedCount: 4,
+        omittedCount: 0,
+        omittedInvalidCount: 0,
+        omittedCappedCount: 0,
+        modelId: 'vm',
+      })
+      .mockResolvedValueOnce({
+        applied: true,
+        status: 'failed',
+        parts: [
+          { text: 'inspect @/tmp/two.png' },
+          {
+            text: '[Vision bridge could not interpret the attached image(s): image conversion budget was exhausted.]',
+          },
+        ],
+        imageCount: 1,
+        convertedCount: 0,
+        omittedCount: 1,
+        omittedInvalidCount: 0,
+        omittedCappedCount: 1,
+        modelId: 'vm',
+      });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValueOnce({
+        processedQuery: [{ text: queuedPrompts[0] }, ...imageParts.slice(0, 4)],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
+      >)
+      .mockResolvedValueOnce({
+        processedQuery: [{ text: queuedPrompts[1] }, imageParts[4]],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
+      >);
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-budget',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call1',
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue(queuedPrompts),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.(completedToolCalls);
+    });
+
+    await waitFor(() => {
+      expect(mockRunVisionBridge).toHaveBeenCalledTimes(2);
+    });
+    expect(mockRunVisionBridge.mock.calls[0][0]).toMatchObject({
+      maxImages: 4,
+    });
+    expect(mockRunVisionBridge.mock.calls[1][0]).toMatchObject({
+      maxImages: 0,
+    });
   });
 
   it('skips mid-turn @ injection when resolution should not proceed', async () => {

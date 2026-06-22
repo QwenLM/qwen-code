@@ -52,6 +52,8 @@ import {
   getUnsupportedImageFormatWarning,
   runVisionBridge,
   hasImageParts,
+  splitImageParts,
+  VISION_BRIDGE_MAX_IMAGES,
   generateToolUseSummary,
   getActiveGoal,
   activeGoalEquals,
@@ -133,6 +135,10 @@ function truncateVisionBridgeTranscript(transcript: string): string {
     .trimEnd()}\n[Transcript truncated]`;
 }
 
+function stripVisionBridgeImages(parts: PartListUnion): Part[] {
+  return splitImageParts(parts).nonImageParts;
+}
+
 /**
  * Build the user-facing notice shown when the vision bridge runs. On success it
  * states which model was used, how many images were converted (and omitted),
@@ -153,12 +159,16 @@ function formatVisionBridgeNotice(result: VisionBridgeResult): string {
     const egress = result.egressOccurred
       ? ` Your image and prompt/context were sent to ${target}.`
       : '';
-    return `⚠ Vision bridge (${modelName}) failed: ${
-      result.error ?? 'unknown error'
-    }.${egress} The image was not interpreted.`;
+    const reason = result.egressOccurred
+      ? 'the vision model request failed'
+      : 'the vision bridge could not run';
+    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egress} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
-    return `🔎 Vision bridge cancelled. Your image and prompt/context were sent to ${target}.`;
+    const egress = result.egressOccurred
+      ? ` Your image and prompt/context were sent to ${target}.`
+      : '';
+    return `🔎 Vision bridge cancelled.${egress}`;
   }
   const omittedReasons = formatOmittedReasons(
     result.omittedInvalidCount,
@@ -844,16 +854,19 @@ export const useGeminiStream = (
       parts: PartListUnion | null,
       timestamp: number,
       signal: AbortSignal,
-    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
-      const effectiveInputModalities = config.getEffectiveInputModalities?.();
-      const visionBridgeModel = config.getDefaultVisionBridgeModel?.();
+      maxImages = VISION_BRIDGE_MAX_IMAGES,
+    ): Promise<{
+      parts: PartListUnion | null;
+      shouldProceed: boolean;
+      convertedCount: number;
+    }> => {
       if (
-        visionBridgeModel === undefined ||
         parts === null ||
         !hasImageParts(parts) ||
-        effectiveInputModalities?.image === true
+        config.getEffectiveInputModalities?.()?.image === true ||
+        config.getDefaultVisionBridgeModel?.() === undefined
       ) {
-        return { parts, shouldProceed: true };
+        return { parts, shouldProceed: true, convertedCount: 0 };
       }
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
@@ -861,6 +874,7 @@ export const useGeminiStream = (
         config,
         parts,
         signal,
+        maxImages,
       });
       debugLogger.debug(
         `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
@@ -880,17 +894,40 @@ export const useGeminiStream = (
         );
       }
       if (signal.aborted) {
-        return { parts: null, shouldProceed: false };
+        return {
+          parts: null,
+          shouldProceed: false,
+          convertedCount: bridgeResult.convertedCount,
+        };
       }
       if (bridgeResult.applied && bridgeResult.parts != null) {
-        return { parts: bridgeResult.parts, shouldProceed: true };
+        return {
+          parts: bridgeResult.parts,
+          shouldProceed: true,
+          convertedCount: bridgeResult.convertedCount,
+        };
       }
       if (bridgeResult.status === 'failed') {
         // Defensive fallback for legacy/invalid failed results without
         // transformed text. Current failures include a no-image note.
-        return { parts: null, shouldProceed: false };
+        const fallbackParts = stripVisionBridgeImages(parts);
+        return fallbackParts.length > 0
+          ? {
+              parts: fallbackParts,
+              shouldProceed: true,
+              convertedCount: bridgeResult.convertedCount,
+            }
+          : {
+              parts: null,
+              shouldProceed: false,
+              convertedCount: bridgeResult.convertedCount,
+            };
       }
-      return { parts, shouldProceed: true };
+      return {
+        parts,
+        shouldProceed: true,
+        convertedCount: bridgeResult.convertedCount,
+      };
     },
     [addItem, config],
   );
@@ -2791,6 +2828,7 @@ export const useGeminiStream = (
         if (shouldTrackMidTurnAbort) {
           auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
+        let remainingBridgeImages = VISION_BRIDGE_MAX_IMAGES;
         try {
           for (let index = 0; index < drained.length; index += 1) {
             if (midTurnAbort.signal.aborted) {
@@ -2836,7 +2874,7 @@ export const useGeminiStream = (
                   );
                 }
                 if (atCommandResult.recording) {
-                  config.getChatRecordingService()?.recordAtCommand?.({
+                  config.getChatRecordingService?.()?.recordAtCommand?.({
                     filesRead: atCommandResult.recording.filesRead,
                     status: atCommandResult.recording.status,
                     ...(atCommandResult.recording.message
@@ -2875,6 +2913,11 @@ export const useGeminiStream = (
               resolvedMidTurnQuery,
               midTurnTimestamp + index,
               midTurnAbort.signal,
+              remainingBridgeImages,
+            );
+            remainingBridgeImages = Math.max(
+              0,
+              remainingBridgeImages - bridgeResult.convertedCount,
             );
             if (!bridgeResult.shouldProceed) {
               if (midTurnAbort.signal.aborted) {
@@ -2902,7 +2945,7 @@ export const useGeminiStream = (
             }
             responsesToSend.push(...midTurnUserMessageParts);
             config
-              .getChatRecordingService()
+              .getChatRecordingService?.()
               ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
             addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
           }

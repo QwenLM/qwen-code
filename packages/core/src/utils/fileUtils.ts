@@ -881,11 +881,29 @@ function unsupportedModalityMessage(
  * @param options Optional read behavior controls.
  * @returns ProcessedFileReadResult object.
  */
+export function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  options?: ProcessSingleFileContentOptions,
+): Promise<ProcessedFileReadResult>;
+export function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  offset?: number,
+  limit?: number,
+  pages?: string,
+): Promise<ProcessedFileReadResult>;
 export async function processSingleFileContent(
   filePath: string,
   config: Config,
-  options: ProcessSingleFileContentOptions = {},
+  optionsOrOffset: ProcessSingleFileContentOptions | number = {},
+  legacyLimit?: number,
+  legacyPages?: string,
 ): Promise<ProcessedFileReadResult> {
+  const options =
+    typeof optionsOrOffset === 'number'
+      ? { offset: optionsOrOffset, limit: legacyLimit, pages: legacyPages }
+      : optionsOrOffset;
   const { offset, limit, pages, preserveUnsupportedImage = false } = options;
   const rootDirectory = config.getTargetDir();
   try {

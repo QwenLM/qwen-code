@@ -106,6 +106,32 @@ describe('runVisionBridge', () => {
     expect(result.modelEndpoint).toBe('dashscope.aliyuncs.com');
   });
 
+  it('resolves the endpoint host from configured models when the selection omits baseUrl', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    const configWithModels = {
+      getDefaultVisionBridgeModel: () => ({
+        id: 'qwen3-vl-plus',
+        authType: 'openai',
+      }),
+      getAllConfiguredModels: () => [
+        {
+          id: 'qwen3-vl-plus',
+          authType: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+      ],
+    } as unknown as Config;
+
+    const result = await runVisionBridge({
+      config: configWithModels,
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.modelEndpoint).toBe('api.openai.com');
+  });
+
   it('does not expose raw invalid endpoint URLs in the egress host', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
     const configWithBadEndpoint = {
@@ -172,6 +198,7 @@ describe('runVisionBridge', () => {
     });
     const joined = textOf(result.parts);
     expect(joined).toContain('A login form');
+    expect(joined).toContain('omitted an unterminated think block');
     expect(joined).not.toContain('reason forever');
   });
 
@@ -382,6 +409,23 @@ describe('runVisionBridge', () => {
     expect(sent).toContain('FIRST');
     expect(sent).toContain('FOURTH');
     expect(sent).not.toContain('FIFTH');
+  });
+
+  it('honors a caller-provided image conversion limit', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    const result = await runVisionBridge({
+      config,
+      parts: ['look', image('FIRST'), image('SECOND'), image('THIRD')],
+      signal: signal(),
+      maxImages: 2,
+    });
+
+    expect(result.convertedCount).toBe(2);
+    expect(result.omittedCappedCount).toBe(1);
+    const sent = JSON.stringify(mockSideQuery.mock.calls[0][1].contents);
+    expect(sent).toContain('FIRST');
+    expect(sent).toContain('SECOND');
+    expect(sent).not.toContain('THIRD');
   });
 
   it('attributes omitted images to invalid vs capped reasons', async () => {

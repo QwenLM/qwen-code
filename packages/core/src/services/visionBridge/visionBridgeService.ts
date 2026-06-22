@@ -6,8 +6,7 @@
 
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { Config } from '../../config/config.js';
-import type { AuthType } from '../../core/contentGenerator.js';
-import { type InputModalities } from '../../core/contentGenerator.js';
+import type { AuthType, InputModalities } from '../../core/contentGenerator.js';
 import { defaultModalities } from '../../core/modalityDefaults.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runSideQuery } from '../../utils/sideQuery.js';
@@ -162,7 +161,7 @@ export function selectVisionBridgeModel(
   return toSelection(sortedCandidates[0]);
 }
 
-const VISION_BRIDGE_MAX_IMAGES = 4;
+export const VISION_BRIDGE_MAX_IMAGES = 4;
 const VISION_BRIDGE_TIMEOUT_MS = 30_000;
 
 /**
@@ -284,6 +283,9 @@ function stripThinkTags(text: string): string {
   }
   if (depth === 0) {
     out += text.slice(cursor);
+  } else {
+    debugLogger.warn('unterminated <think> tag in bridge output');
+    out += '\n[Vision bridge omitted an unterminated think block.]';
   }
   return out.trim();
 }
@@ -372,8 +374,13 @@ export async function runVisionBridge(params: {
   config: Config;
   parts: PartListUnion;
   signal: AbortSignal;
+  maxImages?: number;
 }): Promise<VisionBridgeResult> {
   const { config, parts, signal } = params;
+  const maxImages =
+    typeof params.maxImages === 'number' && Number.isFinite(params.maxImages)
+      ? Math.max(0, Math.trunc(params.maxImages))
+      : VISION_BRIDGE_MAX_IMAGES;
   const { imageParts, nonImageParts } = splitImageParts(parts);
 
   if (imageParts.length === 0) {
@@ -392,7 +399,7 @@ export async function runVisionBridge(params: {
   const validImages = imageParts.filter(
     (part) => validateImagePart(part) === null,
   );
-  const toConvert = validImages.slice(0, VISION_BRIDGE_MAX_IMAGES);
+  const toConvert = validImages.slice(0, maxImages);
   const omitted: OmittedBreakdown = {
     invalid: imageParts.length - validImages.length,
     capped: validImages.length - toConvert.length,
@@ -423,7 +430,9 @@ export async function runVisionBridge(params: {
 
   if (toConvert.length === 0) {
     return failure(
-      'no usable image could be read',
+      validImages.length > 0
+        ? 'image conversion budget was exhausted'
+        : 'no usable image could be read',
       nonImageParts,
       imageParts.length,
       omitted,
