@@ -1507,6 +1507,9 @@ export class WorkflowOrchestrator {
 async function settleToNullArray(
   thunks: Array<() => Promise<unknown>>,
   signal?: AbortSignal,
+  // P5 R3 Gap-3: which fan-out primitive is calling, for the budget-drop
+  // summary log. Defaults to 'parallel'.
+  kind: 'parallel' | 'pipeline' = 'parallel',
 ): Promise<unknown[]> {
   const settled = await Promise.allSettled(
     thunks.map((t) => Promise.resolve().then(t)),
@@ -1530,13 +1533,32 @@ async function settleToNullArray(
   // return — all of which surface as the same `null` to the script by
   // design. The log line is the only operator-side signal of which path
   // fired; the contract to the script stays opaque.
-  return settled.map((r, i) => {
+  //
+  // P5 R3 Gap-3: budget-exhausted drops are counted separately and
+  // summarized so an operator can distinguish "N slots dropped because the
+  // token budget was hit" (expected, capacity-shaped) from arbitrary
+  // dispatch failures. Duck-type on the error name because the rejection
+  // reason may be a cross-realm Error whose `instanceof` is unreliable.
+  let budgetDropped = 0;
+  const result = settled.map((r, i) => {
     if (r.status === 'fulfilled') return r.value;
-    debugLogger.warn(
-      `Workflow thunk at index ${i} rejected: ${String((r.reason as { message?: unknown })?.message ?? r.reason)}`,
-    );
+    const reason = r.reason as { name?: unknown; message?: unknown };
+    if (reason?.name === 'WorkflowBudgetExceededError') {
+      budgetDropped += 1;
+    } else {
+      debugLogger.warn(
+        `Workflow thunk at index ${i} rejected: ${String(reason?.message ?? r.reason)}`,
+      );
+    }
     return null;
   });
+  if (budgetDropped > 0) {
+    debugLogger.warn(
+      `${kind}: ${budgetDropped} slot${budgetDropped === 1 ? '' : 's'} ` +
+        `dropped — token budget exceeded.`,
+    );
+  }
+  return result;
 }
 
 /**
@@ -1615,7 +1637,7 @@ function makePipelineImpl(
     const chains = items.map(
       (item, idx) => () => runPipelineChain(item, idx, stages),
     );
-    return settleToNullArray(chains, signal);
+    return settleToNullArray(chains, signal, 'pipeline');
   };
 }
 
