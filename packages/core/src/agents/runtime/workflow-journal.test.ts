@@ -42,7 +42,8 @@ describe('canonicalizeAgentOpts', () => {
   it('drops function-valued opts', () => {
     const c = canonicalizeAgentOpts({
       model: 'm',
-      // @ts-expect-error — testing the runtime function-strip
+      // A function is structurally an `object`, so this needs no type
+      // suppression — the test asserts the *runtime* strip of callable values.
       schema: () => {},
     });
     expect(c).toBe(JSON.stringify({ model: 'm' }));
