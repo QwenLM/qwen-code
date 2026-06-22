@@ -43,7 +43,8 @@ jobs:
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' }}"
-    runs-on: 'ubuntu-latest'
+    # Gate runs on ECS for in-repo PRs too, else a busy hosted pool delays it and blocks the ECS-bound jobs. The kill-switch is read here, so flipping it reverts everything to hosted.
+    runs-on: ${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "linux", "x64", "ecs-qwen"]') || fromJSON('["ubuntu-latest"]') }}
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
