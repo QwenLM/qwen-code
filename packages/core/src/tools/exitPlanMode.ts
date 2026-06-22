@@ -22,7 +22,6 @@ import {
   formatBlockedResponse,
   formatNeedsUserResponse,
   formatCapEscalationResponse,
-  formatUnavailableResponse,
   formatApprovedNotes,
 } from '../plan-gate/planApprovalGate.js';
 import type { EvidenceBundle } from '../plan-gate/types.js';
@@ -45,6 +44,7 @@ IMPORTANT: Only use this tool when the task requires planning the implementation
 ## Before Using This Tool
 Ensure your plan is complete and unambiguous:
 - If you have unresolved questions about requirements or approach, use AskUserQuestion first (in earlier phases)
+- The plan parameter MUST contain your actual plan content — empty strings will be rejected
 - Once your plan is finalized, use THIS tool to request approval
 
 **Important:** Do NOT use AskUserQuestion to ask "Is this plan okay?" or "Should I proceed?" - that's exactly what THIS tool does. ExitPlanMode inherently requests user approval of your plan.
@@ -64,7 +64,7 @@ const exitPlanModeToolSchemaData: FunctionDeclaration = {
       plan: {
         type: 'string',
         description:
-          'The plan you came up with, that you want to run by the user for approval. Supports markdown. The plan should be pretty concise.',
+          'The plan you came up with, that you want to run by the user for approval. Supports markdown. The plan should be pretty concise. Must contain your actual plan content — empty strings will be rejected.',
       },
       originalRequest: {
         type: 'string',
@@ -294,16 +294,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            const llmContent = formatUnavailableResponse(decision);
-            const message = `Plan gate: unavailable - ${decision.reason}`;
-            return {
-              llmContent,
-              returnDisplay: this.buildRejectedGateDisplay(
-                message,
-                plan,
-                llmContent,
-              ),
-            };
+            // Gate is broken — fall back to DEFAULT mode so the user
+            // gets a real confirmation dialog on the next action,
+            // instead of trapping in plan mode with no escape hatch.
+            debugLogger.warn(
+              `Gate unavailable, falling back to DEFAULT mode: ${decision.reason}`,
+            );
+            return this.fallbackToUserDecision(plan);
           }
           default: {
             const _exhaustive: never = decision;
@@ -404,6 +401,36 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       },
     };
   }
+
+  /**
+   * Gate unavailable fallback — switch to DEFAULT mode so the next
+   * action triggers a real user confirmation dialog. This breaks the
+   * gate trap while forcing the model to present the plan for approval
+   * rather than auto-executing in AUTO/YOLO.
+   */
+  private fallbackToUserDecision(plan: string): ToolResult {
+    this.setApprovalModeSafely(ApprovalMode.DEFAULT);
+
+    // Save plan so it's on disk even if the model proceeds.
+    try {
+      this.config.savePlan(plan);
+    } catch (error) {
+      debugLogger.warn(
+        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    return {
+      llmContent:
+        'Gate is unavailable and cannot review the plan. Ask the user whether to execute this plan or stay in plan mode to revise it.',
+      returnDisplay: {
+        type: 'plan_summary',
+        message:
+          'Plan gate is unavailable. The plan has been saved — please confirm whether to execute it.',
+        plan,
+      },
+    };
+  }
 }
 
 export class ExitPlanModeTool extends BaseDeclarativeTool<
@@ -424,9 +451,10 @@ export class ExitPlanModeTool extends BaseDeclarativeTool<
       >,
       true, // isOutputMarkdown
       false, // canUpdateOutput
-      true, // shouldDefer — only used when leaving plan mode
-      false, // alwaysLoad
-      'plan mode exit approve',
+      true, // shouldDefer
+      // alwaysLoad: plan mode tells the model to call exit_plan_mode directly,
+      // so its schema must always be declared, not deferred (issue #5210).
+      true, // alwaysLoad
     );
   }
 

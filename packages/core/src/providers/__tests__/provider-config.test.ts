@@ -594,6 +594,25 @@ describe('resolveBaseUrl edge cases', () => {
       'https://api.user.com/v1',
     );
   });
+
+  it('matches BaseUrlOption trailing-slash variants', () => {
+    const config = makeConfig({
+      baseUrl: [
+        { id: 'a', label: 'A', url: 'https://a.com/v1' },
+        { id: 'b', label: 'B', url: 'https://b.com/v1' },
+        { id: 'c', label: 'C', url: 'https://c.com/v1/' },
+      ],
+    });
+    expect(resolveBaseUrlSrc(config, 'https://b.com/v1/')).toBe(
+      'https://b.com/v1',
+    );
+    expect(resolveBaseUrlSrc(config, 'https://a.com/v1///')).toBe(
+      'https://a.com/v1',
+    );
+    expect(resolveBaseUrlSrc(config, 'https://c.com/v1')).toBe(
+      'https://c.com/v1/',
+    );
+  });
 });
 
 describe('providerMatchesCredentials with function envKey (custom provider)', () => {

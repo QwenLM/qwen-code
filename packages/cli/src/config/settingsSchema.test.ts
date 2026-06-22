@@ -120,6 +120,14 @@ describe('SettingsSchema', () => {
       );
     });
 
+    it('should define tools.sandbox schema override as boolean or string', () => {
+      expect(
+        getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');
@@ -201,6 +209,10 @@ describe('SettingsSchema', () => {
         true,
       );
       expect(
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond
+          .showInDialog,
+      ).toBe(true);
+      expect(
         getSettingsSchema().privacy.properties.usageStatisticsEnabled
           .showInDialog,
       ).toBe(true);
@@ -256,6 +268,16 @@ describe('SettingsSchema', () => {
       expect(useTerminalBuffer.requiresRestart).toBe(false);
     });
 
+    it('should expose response tokens/sec as an opt-in UI setting', () => {
+      const responseTokensPerSecond =
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond;
+      expect(responseTokensPerSecond).toBeDefined();
+      expect(responseTokensPerSecond.type).toBe('boolean');
+      expect(responseTokensPerSecond.default).toBe(false);
+      expect(responseTokensPerSecond.showInDialog).toBe(true);
+      expect(responseTokensPerSecond.requiresRestart).toBe(true);
+    });
+
     it('should infer Settings type correctly', () => {
       // This test ensures that the Settings type is properly inferred from the schema
       const settings: Settings = {
@@ -289,6 +311,27 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().context?.properties.includeDirectories.default,
       ).toEqual([]);
+    });
+
+    it('should define context.fileName schema override as string or string array', () => {
+      expect(
+        getSettingsSchema().context?.properties.fileName.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+      });
+    });
+
+    it('should define context.importFormat as tree or flat', () => {
+      const importFormat = getSettingsSchema().context?.properties.importFormat;
+
+      expect(importFormat.type).toBe('enum');
+      expect(importFormat.options).toEqual([
+        { value: 'tree', label: 'Tree' },
+        { value: 'flat', label: 'Flat' },
+      ]);
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {
@@ -355,6 +398,17 @@ describe('SettingsSchema', () => {
         getSettingsSchema().general.properties.debugKeystrokeLogging
           .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
+    });
+
+    it('should define advanced.dnsResolutionOrder as ipv4first or verbatim', () => {
+      const dnsResolutionOrder =
+        getSettingsSchema().advanced.properties.dnsResolutionOrder;
+
+      expect(dnsResolutionOrder.type).toBe('enum');
+      expect(dnsResolutionOrder.options).toEqual([
+        { value: 'ipv4first', label: 'IPv4 First' },
+        { value: 'verbatim', label: 'Verbatim' },
+      ]);
     });
   });
 });

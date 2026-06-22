@@ -210,8 +210,7 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     clearScheduledInterval: () => {},
   });
   const bridge = {
-    getDaemonStatusSnapshot: () =>
-      input.bridgeSnapshot ?? BASE_BRIDGE_SNAPSHOT,
+    getDaemonStatusSnapshot: () => input.bridgeSnapshot ?? BASE_BRIDGE_SNAPSHOT,
     getWorkspaceToolsStatus: async () =>
       input.toolsStatus ?? okStatus({ tools: [] }),
   } as unknown as AcpSessionBridge;

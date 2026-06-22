@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-telegram",
-  "version": "0.18.1",
+  "version": "0.18.5",
   "description": "Telegram channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc --build"
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
   },
   "dependencies": {
     "@qwen-code/channel-base": "file:../base",

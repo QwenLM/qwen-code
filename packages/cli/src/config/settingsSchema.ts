@@ -698,10 +698,10 @@ const SETTINGS_SCHEMA = {
         label: 'Show Status in Title',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
-          'Show Qwen Code status and thoughts in the terminal window title',
-        showInDialog: false,
+          'Show Qwen Code session name and status in the terminal window title',
+        showInDialog: true,
       },
       hideTips: {
         type: 'boolean',
@@ -711,6 +711,27 @@ const SETTINGS_SCHEMA = {
         default: false,
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
+      },
+      history: {
+        type: 'object',
+        label: 'History',
+        category: 'UI',
+        requiresRestart: false,
+        default: {},
+        description: 'History display settings.',
+        showInDialog: false,
+        properties: {
+          collapseOnResume: {
+            type: 'boolean',
+            label: 'Collapse On Resume',
+            category: 'UI',
+            requiresRestart: false,
+            default: false,
+            description:
+              'Whether to collapse history by default when resuming a session.',
+            showInDialog: false,
+          },
+        },
       },
       showLineNumbers: {
         type: 'boolean',
@@ -753,6 +774,16 @@ const SETTINGS_SCHEMA = {
         description: 'Custom witty phrases to display during loading.',
         showInDialog: false,
       },
+      showResponseTokensPerSecond: {
+        type: 'boolean',
+        label: 'Show Response Tokens Per Second',
+        category: 'UI',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Show a live tokens/sec estimate next to the response token counter while the model is streaming. Takes effect in the next session.',
+        showInDialog: true,
+      },
       enableWelcomeBack: {
         type: 'boolean',
         label: 'Show Welcome Back Dialog',
@@ -778,9 +809,9 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Follow-up Suggestions',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
-          'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
+          'Show context-aware follow-up suggestions after task completion. Press Tab, Right Arrow, or Enter to accept into the input buffer.',
         showInDialog: true,
       },
       enableCacheSharing: {
@@ -1121,6 +1152,16 @@ const SETTINGS_SCHEMA = {
         description: 'The model to use for conversations.',
         showInDialog: false,
       },
+      baseUrl: {
+        type: 'string',
+        label: 'Model Base URL',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.',
+        showInDialog: false,
+      },
       maxSessionTurns: {
         type: 'number',
         label: 'Max Session Turns',
@@ -1176,6 +1217,16 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description: 'Skip the next speaker check.',
+        showInDialog: false,
+      },
+      skipWorkflowUsageWarning: {
+        type: 'boolean',
+        label: 'Skip Workflow Usage Warning',
+        category: 'Model',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.',
         showInDialog: false,
       },
       skipLoopDetection: {
@@ -1267,6 +1318,21 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          toolResultContentFormat: {
+            type: 'enum',
+            label: 'Tool Result Content Format',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: 'parts',
+            description:
+              'Controls how text-only tool results are serialized in OpenAI-compatible requests. Use "parts" for the default content-part array shape. Use "string" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+            options: [
+              { value: 'parts', label: 'Content Parts (Default)' },
+              { value: 'string', label: 'String' },
+            ],
+          },
           schemaCompliance: {
             type: 'enum',
             label: 'Tool Schema Compliance',
@@ -1332,17 +1398,27 @@ const SETTINGS_SCHEMA = {
         category: 'Context',
         requiresRestart: false,
         default: undefined as string | string[] | undefined,
-        description: 'The name of the context file.',
+        description: 'The name of the context file or files.',
         showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
       },
       importFormat: {
-        type: 'string',
+        type: 'enum',
         label: 'Memory Import Format',
         category: 'Context',
         requiresRestart: false,
         default: undefined as MemoryImportFormat | undefined,
         description: 'The format to use when importing memory.',
         showInDialog: false,
+        options: [
+          { value: 'tree', label: 'Tree' },
+          { value: 'flat', label: 'Flat' },
+        ],
       },
       includeDirectories: {
         type: 'array',
@@ -1777,6 +1853,9 @@ const SETTINGS_SCHEMA = {
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
         showInDialog: false,
+        jsonSchemaOverride: {
+          anyOf: [{ type: 'boolean' }, { type: 'string' }],
+        },
       },
       sandboxImage: {
         type: 'string',
@@ -2256,13 +2335,17 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       dnsResolutionOrder: {
-        type: 'string',
+        type: 'enum',
         label: 'DNS Resolution Order',
         category: 'Advanced',
         requiresRestart: true,
         default: undefined as DnsResolutionOrder | undefined,
         description: 'The DNS resolution order.',
         showInDialog: false,
+        options: [
+          { value: 'ipv4first', label: 'IPv4 First' },
+          { value: 'verbatim', label: 'Verbatim' },
+        ],
       },
       excludedEnvVars: {
         type: 'array',

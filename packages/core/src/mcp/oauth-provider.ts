@@ -80,6 +80,34 @@ export interface OAuthTokenResponse {
   scope?: string;
 }
 
+function parseExpiresIn(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  const seconds =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value.trim())
+        ? Number(value.trim())
+        : NaN;
+
+  if (!Number.isSafeInteger(seconds) || seconds < 0) {
+    throw new Error(`Invalid expires_in value: ${String(value)}`);
+  }
+
+  return seconds;
+}
+
+function normalizeTokenResponse(
+  response: OAuthTokenResponse,
+): OAuthTokenResponse {
+  return {
+    ...response,
+    expires_in: parseExpiresIn(response.expires_in),
+  };
+}
+
 /**
  * Dynamic client registration request.
  */
@@ -496,8 +524,16 @@ export class MCPOAuthProvider {
 
     // Try to parse as JSON first, fall back to form-urlencoded
     try {
-      return JSON.parse(responseText) as OAuthTokenResponse;
-    } catch {
+      return normalizeTokenResponse(
+        JSON.parse(responseText) as OAuthTokenResponse,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('Invalid expires_in value')
+      ) {
+        throw error;
+      }
       // Parse form-urlencoded response
       const tokenParams = new URLSearchParams(responseText);
       const accessToken = tokenParams.get('access_token');
@@ -518,7 +554,7 @@ export class MCPOAuthProvider {
       return {
         access_token: accessToken,
         token_type: tokenType,
-        expires_in: expiresIn ? parseInt(expiresIn, 10) : undefined,
+        expires_in: parseExpiresIn(expiresIn),
         refresh_token: refreshToken || undefined,
         scope: scope || undefined,
       } as OAuthTokenResponse;
@@ -618,8 +654,16 @@ export class MCPOAuthProvider {
 
     // Try to parse as JSON first, fall back to form-urlencoded
     try {
-      return JSON.parse(responseText) as OAuthTokenResponse;
-    } catch {
+      return normalizeTokenResponse(
+        JSON.parse(responseText) as OAuthTokenResponse,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('Invalid expires_in value')
+      ) {
+        throw error;
+      }
       // Parse form-urlencoded response
       const tokenParams = new URLSearchParams(responseText);
       const accessToken = tokenParams.get('access_token');
@@ -640,7 +684,7 @@ export class MCPOAuthProvider {
       return {
         access_token: accessToken,
         token_type: tokenType,
-        expires_in: expiresIn ? parseInt(expiresIn, 10) : undefined,
+        expires_in: parseExpiresIn(expiresIn),
         refresh_token: refreshToken || undefined,
         scope: scope || undefined,
       } as OAuthTokenResponse;
@@ -866,8 +910,9 @@ export class MCPOAuthProvider {
       scope: tokenResponse.scope,
     };
 
-    if (tokenResponse.expires_in) {
-      token.expiresAt = Date.now() + tokenResponse.expires_in * 1000;
+    const expiresIn = parseExpiresIn(tokenResponse.expires_in);
+    if (expiresIn !== undefined) {
+      token.expiresAt = Date.now() + expiresIn * 1000;
     }
 
     // Save token
@@ -958,8 +1003,9 @@ export class MCPOAuthProvider {
           scope: newTokenResponse.scope || token.scope,
         };
 
-        if (newTokenResponse.expires_in) {
-          newToken.expiresAt = Date.now() + newTokenResponse.expires_in * 1000;
+        const expiresIn = parseExpiresIn(newTokenResponse.expires_in);
+        if (expiresIn !== undefined) {
+          newToken.expiresAt = Date.now() + expiresIn * 1000;
         }
 
         await this.tokenStorage.saveToken(

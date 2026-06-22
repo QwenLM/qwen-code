@@ -923,6 +923,26 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers loop_wakeup when cron is enabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: true });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.LOOP_WAKEUP);
+    });
+
+    it('does not register loop_wakeup when cron is disabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: false });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
@@ -983,6 +1003,38 @@ describe('Server Config (config.ts)', () => {
         excludedMcpServers: ['off'],
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('isMcpServerDisabled consults extension preferences only for the contributing extension', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        // baseParams pins overrideExtensions to []; lift it so the mocked
+        // loaded extension is visible to getActiveExtensions().
+        overrideExtensions: undefined,
+        // A user-configured server that shadows the extension's same-named one.
+        mcpServers: { foo: new MCPServerConfig() },
+      } as ConfigParameters);
+      const manager = config.getExtensionManager();
+      vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([
+        {
+          name: 'my-ext',
+          isActive: true,
+          config: { name: 'my-ext', mcpServers: { bar: {}, foo: {} } },
+        } as unknown as ReturnType<typeof manager.getLoadedExtensions>[number],
+      ]);
+      vi.spyOn(manager, 'getDisabledMcpServers').mockImplementation(
+        (extensionName: string) =>
+          extensionName === 'my-ext' ? ['bar', 'foo'] : [],
+      );
+      // `bar` is contributed by the extension and disabled in its preferences.
+      expect(config.isMcpServerDisabled('bar')).toBe(true);
+      // `foo` is shadowed by the user config (no extensionName on the merged
+      // entry), so the extension's disable record must not affect it.
+      expect(config.isMcpServerDisabled('foo')).toBe(false);
+      // The global exclusion list still applies to anything.
+      config.setExcludedMcpServers(['foo']);
+      expect(config.isMcpServerDisabled('foo')).toBe(true);
     });
 
     it('getFailedMcpServerNames skips pending approval servers', () => {
@@ -1239,33 +1291,27 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
-    it('returns a bare fast model selector when the model is configured under another auth type', () => {
+    it('returns undefined for bare Qwen OAuth fast models under active OpenAI auth', async () => {
       const config = new Config({
         ...baseParams,
-        authType: AuthType.USE_ANTHROPIC,
-        model: 'claude-opus-4-7',
-        fastModel: 'deepseek-v4-flash',
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'coder-model',
         modelProvidersConfig: {
           [AuthType.USE_OPENAI]: [
             {
-              id: 'deepseek-v4-flash',
-              name: 'deepseek-v4-flash',
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
               baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
               envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'claude-opus-4-7',
-              name: 'claude-opus-4-7',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
             },
           ],
         },
       });
 
-      expect(config.getFastModel()).toBe('deepseek-v4-flash');
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getFastModel()).toBeUndefined();
     });
 
     it('returns an authType-qualified fast model selector', () => {
@@ -1295,6 +1341,56 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBe('openai:shared-model');
+    });
+
+    it('preserves authType-qualified fast model selectors across auth types', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'qwen-oauth:coder-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe('qwen-oauth:coder-model');
+    });
+
+    it('resolves a bare fast model under the current auth type', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'fast-model',
+              name: 'fast-model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getFastModel()).toBe('fast-model');
     });
 
     it('keeps authType-qualified selectors when the auth type matches the current auth type', () => {
@@ -1349,7 +1445,7 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:runtime-fast-model');
     });
 
-    it('returns undefined when the fast model is not configured for any auth type', () => {
+    it('returns undefined when no active auth type is available for a bare fast model', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -1366,6 +1462,29 @@ describe('Server Config (config.ts)', () => {
           ],
         },
       });
+
+      expect(config.getFastModel()).toBeUndefined();
+    });
+
+    it('returns undefined when the fast model is not configured for the current auth type', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'missing-fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(AuthType.USE_ANTHROPIC);
 
       expect(config.getFastModel()).toBeUndefined();
     });
@@ -2569,6 +2688,21 @@ describe('Server Config (config.ts)', () => {
       };
       const config = new Config(paramsWithUndefinedBuiltinRipgrep);
       expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+  });
+
+  describe('Response tokens/sec display configuration', () => {
+    it('should default to false when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getShowResponseTokensPerSecond()).toBe(false);
+    });
+
+    it('should set showResponseTokensPerSecond when provided as true', () => {
+      const config = new Config({
+        ...baseParams,
+        showResponseTokensPerSecond: true,
+      });
+      expect(config.getShowResponseTokensPerSecond()).toBe(true);
     });
   });
 
@@ -4071,6 +4205,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['toolResultContentFormat']: 'string',
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -4080,6 +4215,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        toolResultContentFormat: { kind: 'settings' },
       },
     });
 
@@ -4099,6 +4235,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['toolResultContentFormat']).toBe('string');
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -4108,6 +4245,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['toolResultContentFormat']?.kind).toBe('settings');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {

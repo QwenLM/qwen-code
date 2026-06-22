@@ -322,6 +322,22 @@ export interface DaemonWorkspaceEventSignals {
   toolsVersion: number;
   settingsVersion: number;
   mcpVersion: number;
+  extensionsVersion: number;
+  lastExtensionChange?: {
+    status?:
+      | 'installed'
+      | 'enabled'
+      | 'disabled'
+      | 'updated'
+      | 'uninstalled'
+      | 'failed';
+    source?: string;
+    name?: string;
+    version?: string;
+    error?: string;
+    refreshed: number;
+    failed: number;
+  };
   initVersion: number;
   authVersion: number;
 }
@@ -331,9 +347,11 @@ export interface ActivePrompt {
   promptId?: string;
   resolve?: (result: PromptResult) => void;
   reject?: (error: unknown) => void;
-  pendingResult?: PromptResult;
-  pendingError?: unknown;
 }
+
+export type SettledPrompt =
+  | { status: 'resolved'; result: PromptResult }
+  | { status: 'rejected'; error: unknown };
 
 export interface PendingSessionLoad {
   id: number;

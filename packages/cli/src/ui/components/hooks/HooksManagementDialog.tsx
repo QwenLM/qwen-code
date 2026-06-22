@@ -369,7 +369,7 @@ export function HooksManagementDialog({
                     {
                       config: hookConfig,
                       source: HooksConfigSource.Extensions,
-                      sourceDisplay: extension.name,
+                      sourceDisplay: extension.displayName ?? extension.name,
                       sourcePath: extension.path,
                       enabled: true,
                     },

@@ -1,13 +1,13 @@
 import type { ACPToolCall } from '../../adapters/types';
 
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
+export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',
@@ -27,6 +27,13 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   tool_search: 'ToolSearch',
   enter_worktree: 'EnterWorktree',
   exit_worktree: 'ExitWorktree',
+  enter_plan_mode: 'EnterPlanMode',
+  task_create: 'TaskCreate',
+  task_update: 'TaskUpdate',
+  task_list: 'TaskList',
+  team_create: 'TeamCreate',
+  team_delete: 'TeamDelete',
+  workflow: 'Workflow',
   web_search: 'WebSearch',
   bash: 'Shell',
   shell: 'Shell Command',
@@ -37,6 +44,21 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
 
 export function formatToolDisplayName(toolName: string): string {
   return TOOL_DISPLAY_NAMES[toolName] ?? toolName;
+}
+
+/**
+ * Locale-aware tool display name for chat-stream badges. Looks up the
+ * `toolName.<wire_name>` i18n key; when the active language has no entry the
+ * translator returns the key verbatim, in which case we fall back to the
+ * English {@link formatToolDisplayName}. Pass the `t` from `useI18n()`.
+ */
+export function localizeToolDisplayName(
+  toolName: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const key = `toolName.${toolName}`;
+  const translated = t(key);
+  return translated === key ? formatToolDisplayName(toolName) : translated;
 }
 
 export function isAskUserQuestionToolName(toolName: string): boolean {
@@ -80,10 +102,17 @@ export function extractText(tool: ACPToolCall): string | null {
 export function getToolResultSummary(tool: ACPToolCall): string {
   if (tool.status !== 'completed' && tool.status !== 'failed') return '';
 
+  const name = tool.toolName.toLowerCase();
+  if (name === 'grep_search' || name === 'grep' || name === 'search') {
+    const rawSummary = parseGrepSummary(
+      (extractRawOutputText(tool.rawOutput) ?? '').trim(),
+    );
+    if (rawSummary) return rawSummary;
+  }
+
   const text = extractText(tool);
   if (!text) return '';
 
-  const name = tool.toolName.toLowerCase();
   const lines = text.split('\n');
   const lineCount = lines.length;
 
@@ -107,7 +136,10 @@ export function getToolResultSummary(tool: ACPToolCall): string {
     return truncateText(firstLine, 80);
   }
 
-  if (name === 'grep' || name === 'search') {
+  if (name === 'grep_search' || name === 'grep' || name === 'search') {
+    const summary = parseGrepSummary(text.trim());
+    if (summary) return summary;
+
     const matchCount = lines.filter((l) => l.trim()).length;
     return `${matchCount} result(s)`;
   }
@@ -162,6 +194,12 @@ function getDescriptionFromTitle(
   }
 
   return formatDescriptionPaths(title, workspaceCwd);
+}
+
+function parseGrepSummary(text: string): string | null {
+  if (text === 'No matches found') return text;
+  if (/^Found \d+ match(?:es)?(?: \(truncated\))?$/.test(text)) return text;
+  return null;
 }
 
 function getDescriptionFromArgs(
@@ -378,13 +416,16 @@ export function getAgentDescription(agent: ACPToolCall): string {
   return '';
 }
 
-export function getAgentCurrentToolHint(agent: ACPToolCall): string {
+export function getAgentCurrentToolHint(
+  agent: ACPToolCall,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   if (agent.status !== 'in_progress') return '';
   const subs = agent.subTools;
   if (!subs || subs.length === 0) return '';
   const last = subs[subs.length - 1];
   if (last.status !== 'in_progress' && last.status !== 'pending') return '';
-  let hint = last.toolName;
+  let hint = localizeToolDisplayName(last.toolName ?? '', t);
   if (last.title) {
     const colonIdx = last.title.indexOf(': ');
     hint += ' ' + (colonIdx > 0 ? last.title.slice(colonIdx + 2) : last.title);

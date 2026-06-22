@@ -18,6 +18,16 @@ You can manage extensions at runtime within the interactive CLI using `/extensio
 | `/extensions install <source>`        | Install an extension from a git URL, local path, npm package, or marketplace |
 | `/extensions explore [source]`        | Open extensions source page(Gemini or ClaudeCode) in your browser            |
 
+#### The interactive extension manager
+
+Running `/extensions` (or `/extensions manage`) opens an interactive manager with three tabs. Press `Tab` or the `←`/`→` arrows to switch between them.
+
+- **Discover** — browse plugins from your configured marketplace sources. Type to search, `Enter` to view a plugin's details, and install it (you'll be asked to choose an install scope). Press `Ctrl+R` to re-fetch the listings, and `Esc` to go back.
+- **Installed** — your installed extensions, grouped by scope (**User level**, **Project level**, and favorites). Use `↑`/`↓` to navigate, `Space` to enable/disable an extension, `f` to favorite it, and `Enter` to open its details. MCP servers bundled by an extension appear nested under their parent extension with live connection status; you can enable or disable each server individually from there.
+- **Sources** — manage the marketplace sources that feed the Discover tab. Use `↑`/`↓` to navigate, `Enter` to select a source, and `d` to remove one. These are the same sources managed by the `qwen extensions sources` CLI commands described below.
+
+Changes made here hot-reload immediately, without restarting Qwen Code.
+
 ### CLI Extension Management
 
 You can also manage extensions using `qwen extensions` CLI commands. Note that changes made via CLI commands will be reflected in active CLI sessions on restart.
@@ -132,6 +142,34 @@ qwen extensions install /path/to/your/extension
 ```
 
 Note that we create a copy of the installed extension, so you will need to run `qwen extensions update` to pull in changes from both locally-defined extensions and those on GitHub.
+
+#### Choosing an install scope
+
+By default, an installed extension is enabled globally (user scope). Pass `--scope project` to enable it only for the current workspace:
+
+```bash
+qwen extensions install <source> --scope project
+```
+
+`--scope workspace` is accepted as an alias of `--scope project`. This matches the scope choice offered when installing from the `/extensions manage` Discover tab.
+
+### Managing marketplace sources
+
+Marketplace sources (Claude plugin marketplaces) power the Discover tab in `/extensions manage`. You can manage them from the CLI as well:
+
+```bash
+# Add a marketplace (owner/repo, git URL, https URL to marketplace.json, or local path)
+qwen extensions sources add <source>
+
+# List configured marketplaces
+qwen extensions sources list
+
+# Re-fetch a marketplace's plugin listing
+qwen extensions sources update <name>
+
+# Remove a marketplace
+qwen extensions sources remove <name>
+```
 
 ### Uninstalling an extension
 

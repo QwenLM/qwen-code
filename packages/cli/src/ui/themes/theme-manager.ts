@@ -44,6 +44,16 @@ export interface ThemeDisplay {
 export const DEFAULT_THEME: Theme = QwenDark;
 export const AUTO_THEME_NAME = 'auto';
 
+function isPathWithinDirectory(parent: string, child: string): boolean {
+  const relativePath = path.relative(parent, child);
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith(`..${path.sep}`) &&
+      relativePath !== '..' &&
+      !path.isAbsolute(relativePath))
+  );
+}
+
 class ThemeManager {
   private readonly availableThemes: Theme[];
   private activeTheme: Theme;
@@ -307,7 +317,7 @@ class ThemeManager {
 
       // 2. Perform security check.
       const homeDir = path.resolve(os.homedir());
-      if (!canonicalPath.startsWith(homeDir)) {
+      if (!isPathWithinDirectory(homeDir, canonicalPath)) {
         debugLogger.warn(
           `Theme file at "${themePath}" is outside your home directory. ` +
             `Only load themes from trusted sources.`,

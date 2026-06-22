@@ -18,6 +18,12 @@ import {
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  MAX_READ_BYTES,
+  type ResolvedPath,
+  type WorkspaceFileSystem,
+  type WorkspaceFileSystemFactory,
+} from '../fs/index.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
@@ -329,6 +335,31 @@ const fakeWorkspace = {
   },
 } as unknown as DaemonWorkspaceService;
 
+function makeGlobFsFactory(glob: WorkspaceFileSystem['glob']) {
+  return {
+    forRequest: () =>
+      ({
+        glob,
+      }) as unknown as WorkspaceFileSystem,
+  } satisfies WorkspaceFileSystemFactory;
+}
+
+function resolvedPath(value: string): ResolvedPath {
+  return value as ResolvedPath;
+}
+
+function makeFileFsFactory(
+  overrides: Partial<Record<keyof WorkspaceFileSystem, unknown>>,
+) {
+  return {
+    forRequest: () =>
+      ({
+        resolve: vi.fn(async (input: string) => resolvedPath(`/ws/${input}`)),
+        ...overrides,
+      }) as unknown as WorkspaceFileSystem,
+  } satisfies WorkspaceFileSystemFactory;
+}
+
 // ── SSE client helper ────────────────────────────────────────────────
 async function* readSse(
   res: Response,
@@ -443,6 +474,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   async function restartServer(opts: {
     sessionShellCommandEnabled?: boolean;
     nextBridge?: FakeBridge;
+    fsFactory?: WorkspaceFileSystemFactory;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -453,6 +485,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       boundWorkspace: '/ws',
       workspace: fakeWorkspace,
       enabled: true,
+      fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
     });
     await new Promise<void>((resolve) => {
@@ -2429,6 +2462,211 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
 
+    it('_qwen/file/read forwards valid window parameters', async () => {
+      const readText = vi.fn(async () => ({
+        content: 'hello',
+        meta: { truncated: false },
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readText }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 92,
+        method: '_qwen/file/read',
+        params: { path: 'test.txt', maxBytes: 10, line: 2, limit: 1 },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { path: 'test.txt', content: 'hello', truncated: false },
+      });
+      expect(readText).toHaveBeenCalledWith(resolvedPath('/ws/test.txt'), {
+        maxBytes: 10,
+        line: 2,
+        limit: 1,
+      });
+    });
+
+    it('_qwen/file/read preserves defaults when window parameters are omitted', async () => {
+      const readText = vi.fn(async () => ({
+        content: 'hello',
+        meta: { truncated: false },
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readText }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 92,
+        method: '_qwen/file/read',
+        params: { path: 'test.txt' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { path: 'test.txt', content: 'hello', truncated: false },
+      });
+      expect(readText).toHaveBeenCalledWith(resolvedPath('/ws/test.txt'), {
+        maxBytes: undefined,
+        line: undefined,
+        limit: undefined,
+      });
+    });
+
+    it.each([
+      { maxBytes: 0 },
+      { maxBytes: MAX_READ_BYTES + 1 },
+      { maxBytes: 1.5 },
+      { maxBytes: '1' },
+      { maxBytes: null },
+      { line: 0 },
+      { line: Number.MAX_SAFE_INTEGER + 1 },
+      { line: 1.5 },
+      { line: '2' },
+      { line: null },
+      { limit: 0 },
+      { limit: 2001 },
+      { limit: 1.5 },
+      { limit: '1' },
+      { limit: null },
+    ])('_qwen/file/read rejects invalid window params (%j)', async (params) => {
+      const readText = vi.fn(async () => ({
+        content: 'hello',
+        meta: { truncated: false },
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readText }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 92,
+        method: '_qwen/file/read',
+        params: { path: 'test.txt', ...params },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+      expect(readText).not.toHaveBeenCalled();
+    });
+
+    it('_qwen/file/read_bytes forwards valid window parameters', async () => {
+      const readBytesWindow = vi.fn(async () => ({
+        buffer: Buffer.from('ell'),
+        offset: 1,
+        sizeBytes: 5,
+        returnedBytes: 3,
+        truncated: true,
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readBytesWindow }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 93,
+        method: '_qwen/file/read_bytes',
+        params: { path: 'test.txt', offset: 1, maxBytes: 3 },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          path: 'test.txt',
+          offset: 1,
+          sizeBytes: 5,
+          returnedBytes: 3,
+          truncated: true,
+        },
+      });
+      expect(readBytesWindow).toHaveBeenCalledWith(
+        resolvedPath('/ws/test.txt'),
+        { offset: 1, maxBytes: 3 },
+      );
+    });
+
+    it('_qwen/file/read_bytes preserves defaults when window parameters are omitted', async () => {
+      const readBytesWindow = vi.fn(async () => ({
+        buffer: Buffer.from('hello'),
+        offset: 0,
+        sizeBytes: 5,
+        returnedBytes: 5,
+        truncated: false,
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readBytesWindow }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 93,
+        method: '_qwen/file/read_bytes',
+        params: { path: 'test.txt' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          path: 'test.txt',
+          offset: 0,
+          sizeBytes: 5,
+          returnedBytes: 5,
+          truncated: false,
+        },
+      });
+      expect(readBytesWindow).toHaveBeenCalledWith(
+        resolvedPath('/ws/test.txt'),
+        { offset: undefined, maxBytes: undefined },
+      );
+    });
+
+    it.each([
+      { offset: -1 },
+      { offset: Number.MAX_SAFE_INTEGER + 1 },
+      { offset: 1.5 },
+      { offset: '1' },
+      { offset: null },
+      { maxBytes: 0 },
+      { maxBytes: MAX_READ_BYTES + 1 },
+      { maxBytes: 1.5 },
+      { maxBytes: '1' },
+      { maxBytes: null },
+    ])(
+      '_qwen/file/read_bytes rejects invalid window params (%j)',
+      async (params) => {
+        const readBytesWindow = vi.fn(async () => ({
+          buffer: Buffer.from('hello'),
+          offset: 0,
+          sizeBytes: 5,
+          returnedBytes: 5,
+          truncated: false,
+        }));
+        await restartServer({
+          fsFactory: makeFileFsFactory({ readBytesWindow }),
+        });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 93,
+          method: '_qwen/file/read_bytes',
+          params: { path: 'test.txt', ...params },
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+        expect(readBytesWindow).not.toHaveBeenCalled();
+      },
+    );
+
     it('_qwen/file/write rejects missing content', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -2470,6 +2708,76 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
+
+    it('_qwen/file/glob honors a valid maxResults limit', async () => {
+      const glob = vi.fn(async () => [
+        resolvedPath('a'),
+        resolvedPath('b'),
+        resolvedPath('c'),
+      ]);
+      await restartServer({ fsFactory: makeGlobFsFactory(glob) });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 95,
+        method: '_qwen/file/glob',
+        params: { pattern: '**/*', maxResults: 2 },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          pattern: '**/*',
+          matches: ['a', 'b'],
+          truncated: true,
+        },
+      });
+      expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 3 });
+    });
+
+    it('_qwen/file/glob defaults maxResults when omitted', async () => {
+      const glob = vi.fn(async () => []);
+      await restartServer({ fsFactory: makeGlobFsFactory(glob) });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 95,
+        method: '_qwen/file/glob',
+        params: { pattern: '**/*' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          pattern: '**/*',
+          matches: [],
+          truncated: false,
+        },
+      });
+      expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 5001 });
+    });
+
+    it.each([0, -1, 1.5, 50_001, '2', null])(
+      '_qwen/file/glob rejects invalid maxResults (%s)',
+      async (maxResults) => {
+        const glob = vi.fn(async () => []);
+        await restartServer({ fsFactory: makeGlobFsFactory(glob) });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 95,
+          method: '_qwen/file/glob',
+          params: { pattern: '**/*', maxResults },
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+        expect(glob).not.toHaveBeenCalled();
+      },
+    );
   });
 });
 

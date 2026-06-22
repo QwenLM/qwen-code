@@ -979,6 +979,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     updateOutput?: (output: ToolResultDisplay) => void,
   ): void {
     let pendingConfirmationCallId: string | undefined;
+    const preserveProtocolPayloads = !this.config.isInteractive();
 
     this.eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
@@ -990,7 +991,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         callId: event.callId,
         name: event.name,
         status: 'executing' as const,
-        args: event.args,
+        ...(preserveProtocolPayloads ? { args: event.args } : {}),
         description: event.description,
       };
       this.currentToolCalls!.push(newToolCall);
@@ -1013,7 +1014,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...this.currentToolCalls![toolCallIndex],
           status: event.success ? 'success' : 'failed',
           error: event.error,
-          responseParts: event.responseParts,
+          ...(preserveProtocolPayloads && event.responseParts !== undefined
+            ? { responseParts: event.responseParts }
+            : {}),
+          ...(typeof event.resultDisplay === 'string'
+            ? { resultDisplay: event.resultDisplay }
+            : {}),
         };
 
         // When a tool result arrives for the tool that had a pending

@@ -52,6 +52,7 @@ export type DaemonUiEventType =
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
   | 'workspace.mcp.server_restart_refused'
+  | 'workspace.extensions.changed'
   // Auth flow events (Wave 4 OAuth)
   | 'auth.device_flow.started'
   | 'auth.device_flow.throttled'
@@ -108,9 +109,8 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
 /**
  * Token usage the agent reports for one model round, carried on the daemon's
  * `agent_message_chunk._meta.usage`. A turn issues one of these per model call,
- * so a turn's total is the sum of its rounds. Counts are top-level only —
- * sub-agent (delegated) usage arrives with a `parentToolCallId` and is excluded
- * so a delegated call's tokens are not attributed to the parent turn.
+ * so a turn's total is the sum of its rounds. Sub-agent (delegated) usage is
+ * included in the spawning turn because it is part of that turn's real cost.
  */
 export interface DaemonTurnUsage {
   inputTokens: number;
@@ -131,7 +131,7 @@ export interface DaemonTurnUsage {
 export interface DaemonUiAssistantUsageEvent extends DaemonUiEventBase {
   type: 'assistant.usage';
   usage: DaemonTurnUsage;
-  /** Set when the usage belongs to a sub-agent round; excluded from turn totals. */
+  /** Set when the usage belongs to a sub-agent round; folded into the parent turn total. */
   parentToolCallId?: string;
 }
 
@@ -432,6 +432,23 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
 }
 
+export interface DaemonUiExtensionsChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.extensions.changed';
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Auth device-flow events (Wave 4 OAuth, RFC 8628)
  * ──────────────────────────────────────────────────────────────────────── */
@@ -514,6 +531,7 @@ export type DaemonUiEvent =
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent
   | DaemonUiMcpServerRestartRefusedEvent
+  | DaemonUiExtensionsChangedEvent
   // Auth device-flow events
   | DaemonUiAuthDeviceFlowEvent;
 

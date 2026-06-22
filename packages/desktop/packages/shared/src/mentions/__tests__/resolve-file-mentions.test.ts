@@ -8,6 +8,7 @@ import { describe, it, expect } from 'bun:test'
 import { resolveFileMentions } from '../index.ts'
 
 const WORK_DIR = '/Users/me/project'
+const WINDOWS_WORK_DIR = 'C:\\Users\\me\\workspace'
 
 describe('resolveFileMentions', () => {
   describe('file mentions', () => {
@@ -24,6 +25,33 @@ describe('resolveFileMentions', () => {
     it('wraps home-relative file path in semantic marker', () => {
       expect(resolveFileMentions('[file:~/docs/notes.md] read this', WORK_DIR))
         .toBe('[Mentioned file: notes.md (at ~/docs/notes.md)] read this')
+    })
+
+    it('wraps Windows absolute file path in semantic marker', () => {
+      expect(
+        resolveFileMentions(
+          '[file:C:\\Users\\me\\project\\README.md] check this',
+          WINDOWS_WORK_DIR
+        )
+      ).toBe('[Mentioned file: README.md (at C:\\Users\\me\\project\\README.md)] check this')
+    })
+
+    it('wraps Windows forward-slash absolute file path in semantic marker', () => {
+      expect(
+        resolveFileMentions(
+          '[file:C:/Users/me/project/README.md] check this',
+          WINDOWS_WORK_DIR
+        )
+      ).toBe('[Mentioned file: README.md (at C:/Users/me/project/README.md)] check this')
+    })
+
+    it('wraps Windows UNC file path in semantic marker', () => {
+      expect(
+        resolveFileMentions(
+          '[file:\\\\server\\share\\project\\README.md] check this',
+          WINDOWS_WORK_DIR
+        )
+      ).toBe('[Mentioned file: README.md (at \\\\server\\share\\project\\README.md)] check this')
     })
 
     it('handles file at root of working directory', () => {
@@ -54,6 +82,15 @@ describe('resolveFileMentions', () => {
     it('wraps absolute folder path in semantic marker', () => {
       expect(resolveFileMentions('[folder:/tmp/output] list files', WORK_DIR))
         .toBe('[Mentioned folder: output (at /tmp/output)] list files')
+    })
+
+    it('wraps Windows absolute folder path in semantic marker', () => {
+      expect(
+        resolveFileMentions(
+          '[folder:C:\\Users\\me\\project\\src] explore',
+          WINDOWS_WORK_DIR
+        )
+      ).toBe('[Mentioned folder: src (at C:\\Users\\me\\project\\src)] explore')
     })
   })
 

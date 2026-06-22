@@ -10,6 +10,16 @@ import type {
   DaemonMcpTransport,
   PermissionOutcome,
 } from './types.js';
+// Single source of truth: the daemon publisher owns the wire literal in
+// acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
+// validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
+// share the exact same value — a rename can't silently break browser-side dedup.
+// The build-time devDep on acp-bridge inlines the value into the published bundle
+// (same lightweight mechanism as `@qwen-code/acp-bridge/mcpTimeouts`). A `const`
+// keeps its literal type, so it still narrows in `switch (event.type)` and works
+// as a `typeof`-d type argument.
+import { MID_TURN_MESSAGE_INJECTED_EVENT } from '@qwen-code/acp-bridge/daemonEventTypes';
+export { MID_TURN_MESSAGE_INJECTED_EVENT };
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
@@ -21,7 +31,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
-  'mid_turn_message_injected',
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -73,6 +83,10 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // `DELETE /workspace/mcp/servers/:name` when an entry was actually
   // removed. Idempotent skip ('not_present') does NOT emit.
   'mcp_server_removed',
+  // Extensions lifecycle events. Fired by background extension install/refresh
+  // work. Carries refreshed/failed session counts, and may include install
+  // success/failure details.
+  'extensions_changed',
   // Multi-client permission coordination events.
   // `permission_partial_vote` only fires under `consensus` policy;
   // `permission_forbidden` fires under `designated` (originator
@@ -728,6 +742,28 @@ export type DaemonMcpServerRemovedEvent = DaemonEventEnvelope<
   DaemonMcpServerRemovedData
 >;
 
+export interface DaemonExtensionsChangedData {
+  readonly refreshed: number;
+  readonly failed: number;
+  readonly status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  readonly source?: string;
+  readonly name?: string;
+  readonly version?: string;
+  readonly error?: string;
+  [key: string]: unknown;
+}
+
+export type DaemonExtensionsChangedEvent = DaemonEventEnvelope<
+  'extensions_changed',
+  DaemonExtensionsChangedData
+>;
+
 export interface DaemonSessionSnapshotData {
   sessionId: string;
   currentModelId: string | null;
@@ -779,7 +815,7 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   DaemonSessionMetadataUpdatedData
 >;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
-  'mid_turn_message_injected',
+  typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
 >;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
@@ -958,7 +994,8 @@ export type DaemonMcpGuardrailEvent =
  */
 export type DaemonWorkspaceMutationEvent =
   | DaemonMemoryChangedEvent
-  | DaemonAgentChangedEvent;
+  | DaemonAgentChangedEvent
+  | DaemonExtensionsChangedEvent;
 
 /**
  * Daemon assist push events — non-terminal UX hints emitted by the ACP
@@ -1360,7 +1397,7 @@ export function asKnownDaemonEvent(
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
         : undefined;
-    case 'mid_turn_message_injected':
+    case MID_TURN_MESSAGE_INJECTED_EVENT:
       return isMidTurnMessageInjectedData(event.data)
         ? (event as DaemonMidTurnMessageInjectedEvent)
         : undefined;
@@ -1458,6 +1495,10 @@ export function asKnownDaemonEvent(
     case 'mcp_server_removed':
       return isMcpServerRemovedData(event.data)
         ? (event as DaemonMcpServerRemovedEvent)
+        : undefined;
+    case 'extensions_changed':
+      return isExtensionsChangedData(event.data)
+        ? (event as DaemonExtensionsChangedEvent)
         : undefined;
     case 'turn_complete':
       return isTurnCompleteData(event.data)
@@ -1850,7 +1891,8 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'settings_reloaded':
-    case 'mid_turn_message_injected':
+    case 'extensions_changed':
+    case MID_TURN_MESSAGE_INJECTED_EVENT:
       return base;
     case 'session_rewound':
       return {
@@ -2621,6 +2663,38 @@ function isMcpServerRemovedData(
   if (!isNonEmptyString(value['name'])) return false;
   if (typeof value['wasShadowingSettings'] !== 'boolean') return false;
   if (!isNonEmptyString(value['originatorClientId'])) return false;
+  return true;
+}
+
+function isExtensionsChangedData(
+  value: unknown,
+): value is DaemonExtensionsChangedData {
+  if (!isRecord(value)) return false;
+  if (typeof value['refreshed'] !== 'number') return false;
+  if (typeof value['failed'] !== 'number') return false;
+  if (
+    value['status'] !== undefined &&
+    value['status'] !== 'installed' &&
+    value['status'] !== 'enabled' &&
+    value['status'] !== 'disabled' &&
+    value['status'] !== 'updated' &&
+    value['status'] !== 'uninstalled' &&
+    value['status'] !== 'failed'
+  ) {
+    return false;
+  }
+  if (value['source'] !== undefined && typeof value['source'] !== 'string') {
+    return false;
+  }
+  if (value['name'] !== undefined && typeof value['name'] !== 'string') {
+    return false;
+  }
+  if (value['version'] !== undefined && typeof value['version'] !== 'string') {
+    return false;
+  }
+  if (value['error'] !== undefined && typeof value['error'] !== 'string') {
+    return false;
+  }
   return true;
 }
 

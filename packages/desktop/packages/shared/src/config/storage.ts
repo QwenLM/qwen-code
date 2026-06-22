@@ -14,7 +14,7 @@ import {
   createWorkspaceAtPath,
   isValidWorkspace,
 } from '../workspaces/storage.ts';
-import { findIconFile } from '../utils/icon.ts';
+import { findIconFile, isIconUrl } from '../utils/icon.ts';
 import { extractWorkspaceSlugFromPath } from '../utils/workspace-slug.ts';
 import { initializeDocs } from '../docs/index.ts';
 import { expandPath, toPortablePath, getBundledAssetsDir } from '../utils/paths.ts';
@@ -869,7 +869,7 @@ export function getWorkspaces(): Workspace[] {
     // If workspace has a stored iconUrl that's a remote URL, use it
     // Otherwise check for local icon file
     let iconUrl = w.iconUrl;
-    if (!iconUrl || (!iconUrl.startsWith('http://') && !iconUrl.startsWith('https://'))) {
+    if (!iconUrl || !isIconUrl(iconUrl)) {
       const localIcon = findWorkspaceIcon(w.rootPath);
       if (localIcon) {
         // Convert absolute path to file:// URL for Electron renderer

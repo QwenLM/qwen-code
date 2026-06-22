@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { afterEach, describe, expect, it, beforeEach, vi } from 'vitest';
 
 describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
   beforeEach(() => {
@@ -92,5 +92,107 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     });
     const mod = await import('./daemon');
     expect(mod.getDaemonBaseUrl()).toBe('');
+  });
+});
+
+describe('getDaemonToken', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  function setupToken(search: string, hash: string) {
+    Object.defineProperty(window, 'location', {
+      value: { search, hash, href: `http://localhost:4170/${search}${hash}` },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  it('reads the token from the URL fragment', async () => {
+    setupToken('', '#token=frag-secret');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('frag-secret');
+  });
+
+  it('falls back to the query parameter', async () => {
+    setupToken('?token=query-secret', '');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('query-secret');
+  });
+
+  it('prefers the fragment over the query parameter', async () => {
+    setupToken('?token=query-secret', '#token=frag-secret');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('frag-secret');
+  });
+
+  it('returns undefined when neither is present', async () => {
+    setupToken('', '');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBeUndefined();
+  });
+});
+
+describe('removeDaemonTokenFromUrl', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    // The function is a no-op under import.meta.env.DEV; exercise the
+    // production-build path where it actually strips the token.
+    vi.stubEnv('DEV', false);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function setupHref(href: string) {
+    const replaceState = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { href },
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(window, 'history', {
+      value: { replaceState },
+      writable: true,
+      configurable: true,
+    });
+    return replaceState;
+  }
+
+  it('strips the token from the fragment', async () => {
+    const replaceState = setupHref('http://localhost:4170/#token=secret');
+    const mod = await import('./daemon');
+    mod.removeDaemonTokenFromUrl();
+    expect(replaceState).toHaveBeenCalledTimes(1);
+    const next = new URL(String(replaceState.mock.calls[0][2]));
+    expect(next.hash).toBe('');
+    expect(next.href).not.toContain('token=secret');
+  });
+
+  it('strips the token from the query', async () => {
+    const replaceState = setupHref('http://localhost:4170/?token=secret');
+    const mod = await import('./daemon');
+    mod.removeDaemonTokenFromUrl();
+    const next = new URL(String(replaceState.mock.calls[0][2]));
+    expect(next.searchParams.has('token')).toBe(false);
+  });
+
+  it('preserves non-token fragment params', async () => {
+    const replaceState = setupHref(
+      'http://localhost:4170/#token=secret&session=abc',
+    );
+    const mod = await import('./daemon');
+    mod.removeDaemonTokenFromUrl();
+    const next = new URL(String(replaceState.mock.calls[0][2]));
+    expect(next.hash).toBe('#session=abc');
+    expect(next.hash).not.toContain('token');
+  });
+
+  it('is a no-op when no token is present', async () => {
+    const replaceState = setupHref('http://localhost:4170/#session=abc');
+    const mod = await import('./daemon');
+    mod.removeDaemonTokenFromUrl();
+    expect(replaceState).not.toHaveBeenCalled();
   });
 });

@@ -2275,7 +2275,36 @@ describe('loadCliConfig with --mcp-config', () => {
 });
 
 describe('loadCliConfig model selection', () => {
-  it.skip('selects a model from settings.json if provided', async () => {
+  const originalArgv = process.argv;
+  const authEnvKeys = [
+    'QWEN_OAUTH',
+    'OPENAI_API_KEY',
+    'OPENAI_MODEL',
+    'OPENAI_BASE_URL',
+    'QWEN_MODEL',
+    'GEMINI_API_KEY',
+    'GEMINI_MODEL',
+    'GOOGLE_API_KEY',
+    'GOOGLE_MODEL',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_BASE_URL',
+  ] as const;
+
+  beforeEach(() => {
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    for (const key of authEnvKeys) {
+      vi.stubEnv(key, undefined);
+    }
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('selects a model from settings.json if provided', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
@@ -2292,7 +2321,7 @@ describe('loadCliConfig model selection', () => {
     expect(config.getModel()).toBe('qwen3-coder-plus');
   });
 
-  it.skip('uses the default gemini model if nothing is set', async () => {
+  it('uses the default Qwen model if nothing is set', async () => {
     process.argv = ['node', 'script.js']; // No model set.
     const argv = await parseArguments();
     const config = await loadCliConfig(

@@ -172,8 +172,10 @@ export const useAuthCommand = (
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
-          syncAuthState: (authType, modelId) =>
-            config.getModelsConfig().syncAfterAuthRefresh(authType, modelId),
+          syncAuthState: (authType, modelId, baseUrl) =>
+            config
+              .getModelsConfig()
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
 

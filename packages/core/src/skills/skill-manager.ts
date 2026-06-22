@@ -962,7 +962,7 @@ export class SkillManager {
           }
           skills.push({
             ...skill,
-            extensionName: extension.name,
+            extensionName: extension.displayName ?? extension.name,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.

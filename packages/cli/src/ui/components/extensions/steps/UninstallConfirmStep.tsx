@@ -5,16 +5,21 @@
  */
 
 import { Box, Text } from 'ink';
-import { type Extension } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  type Extension,
+  createDebugLogger,
+  getExtensionDisplayName,
+} from '@qwen-code/qwen-code-core';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { t } from '../../../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 
 interface UninstallConfirmStepProps {
   selectedExtension: Extension | null;
   onConfirm: (extension: Extension) => Promise<void>;
   onNavigateBack: () => void;
+  /** Whether this step should respond to keyboard input (default true). */
+  isActive?: boolean;
 }
 
 const debugLogger = createDebugLogger('EXTENSION_UNINSTALL_STEP');
@@ -23,6 +28,7 @@ export function UninstallConfirmStep({
   selectedExtension,
   onConfirm,
   onNavigateBack,
+  isActive = true,
 }: UninstallConfirmStepProps) {
   useKeypress(
     async (key) => {
@@ -39,7 +45,7 @@ export function UninstallConfirmStep({
         onNavigateBack();
       }
     },
-    { isActive: true },
+    { isActive },
   );
 
   if (!selectedExtension) {
@@ -54,11 +60,11 @@ export function UninstallConfirmStep({
     <Box flexDirection="column" gap={1}>
       <Text color={theme.status.error}>
         {t('Are you sure you want to uninstall extension "{{name}}"?', {
-          name: selectedExtension.name,
+          name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
         })}
       </Text>
-      <Text color={theme.text.secondary}>
-        {t('This action cannot be undone.')}
+      <Text color={theme.status.error}>
+        {t('Note: Uninstall permanently removes this extension.')}
       </Text>
     </Box>
   );

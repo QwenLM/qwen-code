@@ -26,6 +26,7 @@ import {
   ToolConfirmationOutcome,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   ToolErrorType,
 } from '../index.js';
 import * as path from 'node:path';
@@ -33,7 +34,11 @@ import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
-import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
+import type {
+  ExecutingToolCall,
+  ToolCall,
+  WaitingToolCall,
+} from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
   convertToFunctionResponse,
@@ -1601,6 +1606,7 @@ describe('CoreToolScheduler', () => {
       'auto-denied',
       'classifier_blocked',
       abortController.signal,
+      'auto-denied',
     );
     expect(execute).not.toHaveBeenCalled();
     const completedCalls = onAllToolCallsComplete.mock
@@ -1725,6 +1731,7 @@ describe('CoreToolScheduler', () => {
       'auto-unavailable',
       'classifier_unavailable',
       abortController.signal,
+      'auto-unavailable',
     );
     expect(execute).not.toHaveBeenCalled();
   });
@@ -3728,6 +3735,122 @@ describe('CoreToolScheduler edit cancellation', () => {
 });
 
 describe('CoreToolScheduler YOLO mode', () => {
+  const runLongDisplayTool = async (
+    longDisplay: string,
+    isInteractive: boolean,
+  ) => {
+    const executeFn = vi.fn().mockResolvedValue({
+      llmContent: 'Tool executed',
+      returnDisplay: longDisplay,
+    });
+    const mockTool = new MockTool({
+      name: 'mockTool',
+      execute: executeFn,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const declarativeTool = mockTool;
+
+    const mockToolRegistry = {
+      getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
+      getToolByName: () => declarativeTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => declarativeTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      getTruncateToolOutputThreshold: () => 100_000,
+      getTruncateToolOutputLines: () => 10_000,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => isInteractive,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      return completedCall.response.resultDisplay as string;
+    }
+    return undefined;
+  };
+
+  it('compacts completed resultDisplay before retaining interactive scheduler state', async () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    const retainedDisplay = await runLongDisplayTool(longDisplay, true);
+
+    expect(retainedDisplay?.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(retainedDisplay).toContain('head-');
+    expect(retainedDisplay).toContain('-tail');
+    expect(retainedDisplay).toContain('truncated from');
+  });
+
+  it('preserves completed resultDisplay in non-interactive scheduler responses', async () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    await expect(runLongDisplayTool(longDisplay, false)).resolves.toBe(
+      longDisplay,
+    );
+  });
+
   it('should execute tool requiring confirmation directly without waiting', async () => {
     // Arrange
     const executeFn = vi.fn().mockResolvedValue({
@@ -3929,6 +4052,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalWidth: 90,
         terminalHeight: 30,
       }),
+      isInteractive: () => true,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -3993,6 +4117,146 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     // #4302 review: cancelled: true so the exec sub-span ends UNSET (not
     // ERROR) — matches setToolSpanCancelled on the parent tool span.
     expect(execSpanRecord?.endMetadata?.cancelled).toBe(true);
+  });
+
+  it('compacts live output only before retaining it in scheduler state', async () => {
+    const longOutput = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    class StreamingInvocation extends BaseToolInvocation<
+      { id: string },
+      ToolResult
+    > {
+      getDescription(): string {
+        return `Streaming tool ${this.params.id}`;
+      }
+
+      async execute(
+        signal: AbortSignal,
+        updateOutput?: (output: ToolResultDisplay) => void,
+      ): Promise<ToolResult> {
+        updateOutput?.(longOutput);
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }
+    }
+
+    class StreamingTool extends BaseDeclarativeTool<
+      { id: string },
+      ToolResult
+    > {
+      constructor() {
+        super(
+          'stream-tool',
+          'Stream Tool',
+          'Emits live output and waits for abort',
+          Kind.Other,
+          {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+          true,
+          true,
+        );
+      }
+      protected createInvocation(params: { id: string }) {
+        return new StreamingInvocation(params);
+      }
+    }
+
+    const tool = new StreamingTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const outputUpdateHandler = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      isInteractive: () => true,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      outputUpdateHandler,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    const schedulePromise = scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'stream-tool',
+          args: { id: 'x' },
+          isClientInitiated: true,
+          prompt_id: 'prompt-stream',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(outputUpdateHandler).toHaveBeenCalled();
+    });
+
+    expect(outputUpdateHandler.mock.calls[0][1]).toBe(longOutput);
+
+    const liveOutputUpdate = onToolCallsUpdate.mock.calls
+      .map((call) => call[0][0] as ToolCall)
+      .find(
+        (call): call is ExecutingToolCall =>
+          call.status === 'executing' && call.liveOutput !== undefined,
+      );
+    const retainedOutput = liveOutputUpdate?.liveOutput as string;
+    expect(retainedOutput.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(retainedOutput).toContain('head-');
+    expect(retainedOutput).toContain('-tail');
+    expect(retainedOutput).toContain('truncated from');
+
+    abortController.abort();
+    await schedulePromise;
   });
 });
 
@@ -4570,6 +4834,7 @@ describe('CoreToolScheduler request queueing', () => {
       'pending-protected-write',
       'classifier_blocked',
       expect.any(AbortSignal),
+      'pending-protected-write',
     );
     const statuses = onToolCallsUpdate.mock.calls
       .flatMap((call) => call[0] as ToolCall[])
@@ -8309,6 +8574,70 @@ describe('Fire hook functions integration', () => {
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
     });
 
+    it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2abc';
+      const executionLog: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const agentTool = new MockTool({
+        name: 'agent',
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`start:${id}`);
+          await gate;
+          executionLog.push(`end:${id}`);
+          return {
+            llmContent: `Agent ${id} done`,
+            returnDisplay: `Agent ${id} done`,
+          };
+        },
+      });
+
+      const tools = new Map([['agent', agentTool]]);
+      const scheduler = createScheduler(tools, vi.fn(), vi.fn());
+      const abortController = new AbortController();
+      const schedulePromise = scheduler.schedule(
+        [
+          {
+            callId: '1',
+            name: 'agent',
+            args: { id: 'A' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          {
+            callId: '2',
+            name: 'agent',
+            args: { id: 'B' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+          {
+            callId: '3',
+            name: 'agent',
+            args: { id: 'C' },
+            isClientInitiated: false,
+            prompt_id: 'p1',
+          },
+        ],
+        abortController.signal,
+      );
+
+      try {
+        await vi.waitFor(() => {
+          expect(
+            executionLog.filter((e) => e.startsWith('start:')),
+          ).toHaveLength(3);
+        });
+      } finally {
+        release();
+        await schedulePromise;
+      }
+    });
+
     it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {
       const executionLog: string[] = [];
 
@@ -9246,9 +9575,9 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const tool = new StrictStringTool();
     const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
 
-    // Turn 1: bad params (value is number, not string)
+    // Turn 1: bad params (value is object, not string — not coercible by fixStringValues)
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     let msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9257,7 +9586,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 2: same bad params
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9265,7 +9594,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 3: same bad params — should trigger directive
     await scheduler.schedule(
-      [makeRequest('c3', 'strictStringTool', { value: 123 })],
+      [makeRequest('c3', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9277,7 +9606,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
 
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 }, true)],
+      [makeRequest('c1', 'strictStringTool', { value: {} }, true)],
       new AbortController().signal,
     );
     let msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9285,7 +9614,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
 
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9293,7 +9622,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
 
     await scheduler.schedule(
-      [makeRequest('c3', 'strictStringTool', { value: 123 }, true)],
+      [makeRequest('c3', 'strictStringTool', { value: {} }, true)],
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9307,11 +9636,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 1-2: tool fails twice
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -9324,7 +9653,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Turn 4: back to tool — should be count 1 again (no directive)
     await scheduler.schedule(
-      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     const msg = getLastErrorMessage(onToolCallsUpdate);
@@ -9338,11 +9667,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Two validation failures with the same error.
     await scheduler.schedule(
-      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      [makeRequest('c2', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -9354,11 +9683,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Two more failures — count should restart at 1, not jump to 3+.
     await scheduler.schedule(
-      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('c5', 'strictStringTool', { value: 123 })],
+      [makeRequest('c5', 'strictStringTool', { value: {} })],
       new AbortController().signal,
     );
 
@@ -9485,18 +9814,18 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
     // Tool A fails twice, accumulating a retry count of 2.
     await scheduler.schedule(
-      [makeRequest('a1', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a1', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
     await scheduler.schedule(
-      [makeRequest('a2', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a2', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
 
     // Now a batch for tool B only — tool A's counter must be pruned because
     // A is not present in this batch.
     await scheduler.schedule(
-      [makeRequest('b1', StrictToolAlt.Name, { other: 456 })],
+      [makeRequest('b1', StrictToolAlt.Name, { other: {} })],
       new AbortController().signal,
     );
 
@@ -9505,7 +9834,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     // Under per-tool pruning the counter starts fresh at 1 and no directive
     // should be emitted.
     await scheduler.schedule(
-      [makeRequest('a3', StrictStringTool.Name, { value: 123 })],
+      [makeRequest('a3', StrictStringTool.Name, { value: {} })],
       new AbortController().signal,
     );
     const msg = getLastErrorMessage(onToolCallsUpdate);

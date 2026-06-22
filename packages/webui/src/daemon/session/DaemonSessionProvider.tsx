@@ -30,7 +30,7 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions } from './actions.js';
+import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
 import {
   detachDaemonClient,
   getStableClientId,
@@ -77,6 +77,7 @@ import type {
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
+  SettledPrompt,
 } from './types.js';
 
 export type {
@@ -141,6 +142,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   toolsVersion: 0,
   settingsVersion: 0,
   mcpVersion: 0,
+  extensionsVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -199,6 +201,7 @@ export function DaemonSessionProvider({
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
+  const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
   const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
     undefined,
   );
@@ -625,6 +628,7 @@ export function DaemonSessionProvider({
             for (const replayEvent of replayEvents) {
               settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
+                settledPromptsRef.current,
                 activeSession.sessionId,
                 replayEvent,
                 store,
@@ -633,7 +637,7 @@ export function DaemonSessionProvider({
                 { requireBoundPromptId: true },
               );
             }
-            // If replay has events but no terminal signal
+            // If replay has a user message but no terminal signal
             // (turn_complete/turn_error/prompt_cancelled), the turn was
             // likely still in progress — seed promptStatus so the loading
             // indicator shows immediately instead of flickering.
@@ -643,7 +647,8 @@ export function DaemonSessionProvider({
                 e.type === 'turn_error' ||
                 e.type === 'prompt_cancelled',
             );
-            if (replayEvents.length > 0 && !hasTurnTerminalEvent) {
+            const hasReplayUserMessage = replayEvents.some(isUserMessageEvent);
+            if (hasReplayUserMessage && !hasTurnTerminalEvent) {
               setPromptStatus((s) => (s === 'idle' ? 'waiting' : s));
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
@@ -752,6 +757,7 @@ export function DaemonSessionProvider({
                   for (const replayEvent of replaySourceEvents) {
                     settleActivePromptFromTurnEvent(
                       activePromptsRef.current,
+                      settledPromptsRef.current,
                       activeSession.sessionId,
                       replayEvent,
                       store,
@@ -772,6 +778,7 @@ export function DaemonSessionProvider({
               }
               const activePromptSettled = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
+                settledPromptsRef.current,
                 activeSession.sessionId,
                 event,
                 store,
@@ -1122,6 +1129,7 @@ export function DaemonSessionProvider({
         store,
         sessionRef,
         activePromptsRef,
+        settledPromptsRef,
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
@@ -1157,6 +1165,7 @@ export function DaemonSessionProvider({
 
 function settleActivePromptFromTurnEvent(
   activePrompts: Map<string, ActivePrompt>,
+  settledPrompts: Map<string, SettledPrompt>,
   sessionId: string,
   event: DaemonEvent,
   store: DaemonTranscriptStore,
@@ -1189,10 +1198,10 @@ function settleActivePromptFromTurnEvent(
       activePrompts.delete(sessionId);
       active.resolve(result);
     } else {
-      activePrompts.set(sessionId, {
-        ...active,
-        promptId,
-        pendingResult: result,
+      activePrompts.delete(sessionId);
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
+        status: 'resolved',
+        result,
       });
     }
   } catch (error) {
@@ -1202,10 +1211,10 @@ function settleActivePromptFromTurnEvent(
       activePrompts.delete(sessionId);
       active.reject(error);
     } else {
-      activePrompts.set(sessionId, {
-        ...active,
-        promptId,
-        pendingError: error,
+      activePrompts.delete(sessionId);
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
+        status: 'rejected',
+        error,
       });
     }
   }
@@ -1214,6 +1223,15 @@ function settleActivePromptFromTurnEvent(
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
   return event.type === 'turn_complete';
+}
+
+function isUserMessageEvent(event: DaemonEvent): boolean {
+  if (event.type !== 'session_update') return false;
+  const data = event.data as
+    | { update?: { sessionUpdate?: unknown } }
+    | null
+    | undefined;
+  return data?.update?.sessionUpdate === 'user_message_chunk';
 }
 
 function normalizeAndFilterEvent(
@@ -1561,7 +1579,7 @@ function getNumber(
 }
 
 function bumpWorkspaceEventSignals(
-  events: ReadonlyArray<{ type: string }>,
+  events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
 ): void {
   let memory = 0;
@@ -1569,6 +1587,10 @@ function bumpWorkspaceEventSignals(
   let tools = 0;
   let settings = 0;
   let mcp = 0;
+  let extensions = 0;
+  let lastExtensionChange:
+    | DaemonWorkspaceEventSignals['lastExtensionChange']
+    | undefined;
   let init = 0;
   let auth = 0;
 
@@ -1592,6 +1614,18 @@ function bumpWorkspaceEventSignals(
       case 'workspace.mcp.server_restart_refused':
         mcp += 1;
         break;
+      case 'workspace.extensions.changed':
+        extensions += 1;
+        lastExtensionChange = {
+          ...(event.status ? { status: event.status } : {}),
+          ...(event.source ? { source: event.source } : {}),
+          ...(event.name ? { name: event.name } : {}),
+          ...(event.version ? { version: event.version } : {}),
+          ...(event.error ? { error: event.error } : {}),
+          refreshed: event.refreshed,
+          failed: event.failed,
+        };
+        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -1607,7 +1641,8 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + settings + mcp + init + auth === 0) return;
+  if (memory + agents + tools + settings + mcp + extensions + init + auth === 0)
+    return;
 
   setSignals((current) => ({
     memoryVersion: current.memoryVersion + memory,
@@ -1615,6 +1650,8 @@ function bumpWorkspaceEventSignals(
     toolsVersion: current.toolsVersion + tools,
     settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
+    extensionsVersion: current.extensionsVersion + extensions,
+    ...(lastExtensionChange ? { lastExtensionChange } : {}),
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,
   }));

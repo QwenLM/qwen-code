@@ -109,8 +109,8 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -119,7 +119,6 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
@@ -238,6 +237,22 @@ export interface BridgeDaemonStatusSnapshot {
   channelLive: boolean;
   permissionPolicy: PermissionPolicy;
   sessions: BridgeDaemonSessionDiagnostic[];
+}
+
+export interface BridgeExtensionsChangedData {
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
 }
 
 export interface AcpSessionBridge {
@@ -473,6 +488,20 @@ export interface AcpSessionBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
+   * Broadcast extension refresh to all active sessions and emit an
+   * `extensions_changed` workspace event when complete.
+   */
+  refreshExtensionsForAllSessions(
+    data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+  ): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
+
+  /** Emit an extension lifecycle event without refreshing sessions. */
+  broadcastExtensionsChanged(data: BridgeExtensionsChangedData): void;
+
+  /**
    * Switch the active model service for a session. Throws
    * `SessionNotFoundError` for unknown ids.
    */
@@ -699,6 +728,23 @@ export interface AcpSessionBridge {
    * session count.
    */
   isChannelLive(): boolean;
+
+  /** Number of sessions with an active prompt (promptActive === true). */
+  readonly activePromptCount: number;
+
+  /**
+   * Epoch-ms timestamp of the last "activity" event (prompt start/end,
+   * session spawn/restore). `null` when the daemon has never processed
+   * any activity since boot.
+   */
+  readonly lastActivityAt: number | null;
+
+  /**
+   * Milliseconds since the last activity event (`Date.now() - lastActivityAt`).
+   * `null` when no activity has occurred since boot. Computed atomically to
+   * avoid race windows between reading `lastActivityAt` and `Date.now()`.
+   */
+  readonly idleSinceMs: number | null;
 
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;

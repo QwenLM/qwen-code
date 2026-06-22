@@ -5,13 +5,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import * as https from 'node:https';
-import * as http from 'node:http';
 import * as tar from 'tar';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { ExtensionUpdateState } from './extensionManager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
+import { clientForUrl } from './http-client.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
 
@@ -179,9 +178,6 @@ function getNpmAuthToken(registryUrl: string): string | undefined {
   return undefined;
 }
 
-/**
- * Fetch JSON from a URL, handling both https and http.
- */
 function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -190,7 +186,7 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = url.startsWith('https://') ? https : http;
+  const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
     client
@@ -242,7 +238,7 @@ function downloadNpmFile(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = url.startsWith('https://') ? https : http;
+  const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
     client

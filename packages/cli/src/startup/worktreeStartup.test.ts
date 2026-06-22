@@ -14,7 +14,16 @@ import * as path from 'node:path';
 import {
   setupStartupWorktree,
   buildStartupWorktreeNotice,
+  persistStartupWorktreeSidecar,
 } from './worktreeStartup.js';
+import {
+  readWorktreeSessionMarker,
+  SessionService,
+  Storage,
+  writeRuntimeStatus,
+  writeWorktreeSessionMarker,
+} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 
 const exec = promisify(execFile);
 
@@ -352,6 +361,130 @@ describe('setupStartupWorktree', () => {
         /nested|inside another worktree/,
       );
     }
+  });
+});
+
+describe('persistStartupWorktreeSidecar', () => {
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  let prevCwd: string;
+  let tempRepo: string | null = null;
+  let runtimeDir: string | null = null;
+
+  beforeEach(async () => {
+    prevCwd = process.cwd();
+    runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-runtime-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    process.chdir(prevCwd);
+    Storage.setRuntimeBaseDir(null);
+    if (tempRepo) {
+      await fs.rm(tempRepo, { recursive: true, force: true });
+      tempRepo = null;
+    }
+    if (runtimeDir) {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+      runtimeDir = null;
+    }
+  });
+
+  function makeConfig(targetDir: string, sessionId: string): Config {
+    const sessionService = new SessionService(targetDir);
+    return {
+      getSessionId: () => sessionId,
+      getSessionService: () => sessionService,
+    } as unknown as Config;
+  }
+
+  it('adopts a stale marker when re-attaching to an inactive owner', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('adopt-stale');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    await writeWorktreeSessionMarker(setup.context.worktreePath, 'old-session');
+    await writeRuntimeStatus(
+      new Storage(setup.context.worktreePath).getRuntimeStatusPath(
+        'old-session',
+      ),
+      {
+        sessionId: 'old-session',
+        workDir: setup.context.worktreePath,
+        pid: 2147483647,
+      },
+    );
+
+    await persistStartupWorktreeSidecar(
+      makeConfig(setup.context.worktreePath, 'new-session'),
+      { ...setup.context, wasReattached: true },
+    );
+
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'new-session',
+    );
+  });
+
+  it('keeps the marker when the owner runtime is still active', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('owner-active');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    await writeWorktreeSessionMarker(setup.context.worktreePath, 'old-session');
+    await writeRuntimeStatus(
+      new Storage(setup.context.worktreePath).getRuntimeStatusPath(
+        'old-session',
+      ),
+      {
+        sessionId: 'old-session',
+        workDir: setup.context.worktreePath,
+        pid: process.pid,
+      },
+    );
+
+    await persistStartupWorktreeSidecar(
+      makeConfig(setup.context.worktreePath, 'new-session'),
+      { ...setup.context, wasReattached: true },
+    );
+
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'old-session',
+    );
+  });
+
+  it('finds an active owner under a repo-subdir relative runtime dir', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+    const packageDir = path.join(tempRepo, 'packages', 'app');
+    await fs.mkdir(packageDir, { recursive: true });
+    Storage.setRuntimeBaseDir('.qwen', packageDir);
+
+    const setup = await setupStartupWorktree('owner-subdir-runtime');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    await writeWorktreeSessionMarker(setup.context.worktreePath, 'old-session');
+    await writeRuntimeStatus(
+      new Storage(packageDir).getRuntimeStatusPath('old-session'),
+      {
+        sessionId: 'old-session',
+        workDir: packageDir,
+        pid: process.pid,
+      },
+    );
+
+    Storage.setRuntimeBaseDir('.qwen', setup.context.worktreePath);
+    await persistStartupWorktreeSidecar(
+      makeConfig(setup.context.worktreePath, 'new-session'),
+      { ...setup.context, wasReattached: true },
+    );
+
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'old-session',
+    );
   });
 });
 

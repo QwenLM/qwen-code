@@ -58,6 +58,11 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'LICENSE',
   'locales',
   'examples',
+  // Web Shell SPA served at the daemon root by `qwen serve` (index.html +
+  // assets/). Copied into dist/web-shell/ by copy_bundle_assets.js when the
+  // web-shell workspace has been built; optional, so it's allowed but not
+  // required.
+  'web-shell',
 ]);
 const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,

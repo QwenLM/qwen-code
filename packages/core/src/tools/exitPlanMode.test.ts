@@ -57,6 +57,13 @@ describe('ExitPlanModeTool', () => {
       expect(tool.kind).toBe('think');
     });
 
+    // Regression for #5210: must stay declared so the model can call it
+    // directly in plan mode.
+    it('is always declared even though categorised as deferred (#5210)', () => {
+      expect(tool.shouldDefer).toBe(true);
+      expect(tool.alwaysLoad).toBe(true);
+    });
+
     it('should have correct schema', () => {
       expect(tool.schema).toEqual({
         name: 'exit_plan_mode',
@@ -88,6 +95,25 @@ describe('ExitPlanModeTool', () => {
           $schema: 'http://json-schema.org/draft-07/schema#',
         },
       });
+    });
+  });
+
+  describe('non-empty plan constraint in descriptions', () => {
+    it('should mention non-empty constraint in plan parameter description', () => {
+      const schema = tool.schema as {
+        parametersJsonSchema: {
+          properties: { plan: { description: string } };
+        };
+      };
+      expect(schema.parametersJsonSchema.properties.plan.description).toContain(
+        'empty strings will be rejected',
+      );
+    });
+
+    it('should mention non-empty constraint in tool description', () => {
+      expect(tool.schema.description).toContain(
+        'empty strings will be rejected',
+      );
     });
   });
 
@@ -467,12 +493,6 @@ describe('ExitPlanModeTool', () => {
         expectedDetail: 'Approve execution',
         expectedCapEscalationPending: true,
       },
-      {
-        name: 'unavailable',
-        decision: { kind: 'unavailable', reason: 'review model timed out' },
-        expectedMessage: 'Plan gate: unavailable - review model timed out',
-        expectedDetail: 'review model timed out',
-      },
     ])(
       'should keep the submitted plan visible when the gate returns $name',
       async ({
@@ -529,5 +549,51 @@ describe('ExitPlanModeTool', () => {
         expect(approvalMode).toBe(ApprovalMode.PLAN);
       },
     );
+
+    it('should ask user to confirm when gate is unavailable', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const gateState = {
+        entryId: 1,
+        reviewCount: 0,
+        gateMode: 'capped' as const,
+        lastFindings: [],
+        capEscalationPending: false,
+        needsUserPending: false,
+      };
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        gateState,
+      );
+      mockedRunPlanApprovalGate.mockResolvedValue({
+        kind: 'unavailable',
+        reason: 'review model timed out',
+      });
+
+      const params: ExitPlanModeParams = {
+        plan: 'Fallback test plan',
+        originalRequest: 'Test fallback',
+      };
+      const signal = new AbortController().signal;
+
+      const result = await tool.build(params).execute(signal);
+
+      // Should return plan_summary (NOT rejected) so user is not trapped
+      expect(result.returnDisplay).toEqual({
+        type: 'plan_summary',
+        message: expect.stringContaining('confirm whether to execute'),
+        plan: params.plan,
+      });
+      expect(result.llmContent).toContain('Ask the user');
+      // Should NOT set gate pending flags
+      expect(gateState.needsUserPending).toBe(false);
+      expect(gateState.capEscalationPending).toBe(false);
+      // Should restore to DEFAULT (not pre-plan YOLO) to force confirmation dialog
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
+    });
   });
 });

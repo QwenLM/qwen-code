@@ -18,6 +18,7 @@ import {
   useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
+  useWorkspaceEventSignals,
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -65,6 +66,7 @@ import {
   AuthMessage,
 } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import {
   SETTINGS_ACTIVE_EVENT,
   SettingsMessage,
@@ -315,6 +317,12 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
+  /**
+   * Called whenever transcript blocks change. Receives the full blocks array
+   * from useTranscriptBlocks(). Fires on every streaming delta during active
+   * generation, so consumers should debounce or throttle expensive work.
+   */
+  onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
@@ -703,6 +711,7 @@ export function App({
   collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
+  onTranscriptChange,
   onToast,
   composerRef,
   composerInput,
@@ -998,11 +1007,78 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
   const [authInlineOpen, setAuthInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
+
+  // Refresh commands when extensions change (install/uninstall/update).
+  const workspaceEventSignals = useWorkspaceEventSignals();
+  const extensionsVersionRef = useRef(
+    workspaceEventSignals?.extensionsVersion ?? 0,
+  );
+  useEffect(() => {
+    const current = workspaceEventSignals?.extensionsVersion ?? 0;
+    if (current !== extensionsVersionRef.current) {
+      extensionsVersionRef.current = current;
+      const change = workspaceEventSignals?.lastExtensionChange;
+      if (change?.status === 'failed') {
+        store.dispatch([
+          {
+            type: 'error',
+            text: t('extensions.action.failed', {
+              name: change.name ?? '',
+              source: change.source ?? '',
+              error: change.error ?? t('error.unknown'),
+            }),
+          },
+        ]);
+        return;
+      }
+      if (change?.status === 'installed') {
+        const name = change.name ?? change.source ?? t('extensions.label');
+        store.dispatch([
+          {
+            type: 'status',
+            text: change.version
+              ? t('extensions.install.installedWithVersion', {
+                  name,
+                  version: change.version,
+                })
+              : t('extensions.install.installed', { name }),
+          },
+        ]);
+      } else if (change?.status) {
+        const name = change.name ?? change.source ?? t('extensions.label');
+        const key =
+          change.status === 'updated' && change.version
+            ? 'extensions.manage.updatedWithVersion'
+            : `extensions.manage.${change.status}`;
+        store.dispatch([
+          {
+            type: 'status',
+            text: t(key, { name, version: change.version ?? '' }),
+          },
+        ]);
+      }
+      sessionActions.refreshCommands().catch(() => {
+        store.dispatch([
+          {
+            type: 'error',
+            text: t('extensions.commands.refreshFailed'),
+          },
+        ]);
+      });
+    }
+  }, [
+    workspaceEventSignals?.extensionsVersion,
+    workspaceEventSignals?.lastExtensionChange,
+    sessionActions,
+    store,
+    t,
+  ]);
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
     'workspace',
   );
@@ -1044,7 +1120,8 @@ export function App({
     showReleaseDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showToolsDialog;
+    showToolsDialog ||
+    showExtensionsDialog;
   const inlinePanelOpen =
     approvalModeInlineOpen ||
     authInlineOpen ||
@@ -1614,6 +1691,10 @@ export function App({
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
+
+  useEffect(() => {
+    onTranscriptChange?.(blocks);
+  }, [blocks, onTranscriptChange]);
 
   useEffect(() => {
     if (connection.error) {
@@ -2232,6 +2313,130 @@ export function App({
               agentsMode = 'manage';
             }
             setAgentsInlineMode(agentsMode);
+            return true;
+          }
+          if (cmd === 'extensions') {
+            const args = text.slice(match[0].length).trim();
+            const subCommand = args.split(/\s+/)[0]?.toLowerCase();
+            if (!subCommand || subCommand === 'manage') {
+              store.appendLocalUserMessage(text);
+              setShowExtensionsDialog(true);
+              return true;
+            }
+            if (subCommand === 'install') {
+              const tokens = args.slice('install'.length).trim().split(/\s+/);
+              let source = '';
+              let ref: string | undefined;
+              let registry: string | undefined;
+              let autoUpdate: boolean | undefined;
+              let allowPreRelease: boolean | undefined;
+              let parseError: string | null = null;
+              for (let index = 0; index < tokens.length; index++) {
+                const token = tokens[index];
+                if (!token) continue;
+                if (token === '--auto-update') {
+                  autoUpdate = true;
+                } else if (
+                  token === '--pre-release' ||
+                  token === '--allow-pre-release'
+                ) {
+                  allowPreRelease = true;
+                } else if (token === '--ref' || token === '--registry') {
+                  const value = tokens[index + 1];
+                  if (!value || value.startsWith('--')) {
+                    parseError = t('extensions.install.missingOptionValue', {
+                      option: token,
+                    });
+                    break;
+                  }
+                  if (token === '--ref') {
+                    ref = value;
+                  } else {
+                    registry = value;
+                  }
+                  index += 1;
+                } else if (token.startsWith('--')) {
+                  parseError = t('extensions.install.unknownOption', {
+                    option: token,
+                  });
+                  break;
+                } else if (!source) {
+                  source = token;
+                } else {
+                  parseError = t('extensions.install.usage');
+                  break;
+                }
+              }
+              if (parseError) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([{ type: 'error', text: parseError }]);
+                return true;
+              }
+              if (!source) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([
+                  {
+                    type: 'error',
+                    text: t('extensions.install.usage'),
+                  },
+                ]);
+                return true;
+              }
+              if (promptBlocked) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([
+                  {
+                    type: 'error',
+                    text: t('extensions.install.waitForTurn'),
+                  },
+                ]);
+                return true;
+              }
+              const clientId = connectionRef.current.clientId;
+              if (!clientId) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([
+                  {
+                    type: 'error',
+                    text: t('extensions.install.waitForSession'),
+                  },
+                ]);
+                return true;
+              }
+              store.appendLocalUserMessage(text);
+              store.dispatch([
+                {
+                  type: 'status',
+                  text: t('extensions.install.started', { source }),
+                },
+              ]);
+              workspaceActions
+                .installExtension(
+                  {
+                    source,
+                    ...(ref ? { ref } : {}),
+                    ...(registry ? { registry } : {}),
+                    ...(autoUpdate !== undefined ? { autoUpdate } : {}),
+                    ...(allowPreRelease !== undefined
+                      ? { allowPreRelease }
+                      : {}),
+                    consent: true,
+                  },
+                  clientId,
+                )
+                .then(() => undefined)
+                .catch((error: unknown) => {
+                  reportError(error, t('extensions.install.requestFailed'));
+                });
+              return true;
+            }
+            store.appendLocalUserMessage(text);
+            store.dispatch([
+              {
+                type: 'error',
+                text: t('extensions.install.usage'),
+              },
+            ]);
             return true;
           }
           if (cmd === 'clear') {
@@ -2853,6 +3058,11 @@ export function App({
               )}
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
+              )}
+              {showExtensionsDialog && (
+                <ExtensionsDialog
+                  onClose={() => setShowExtensionsDialog(false)}
+                />
               )}
             </div>
           )}

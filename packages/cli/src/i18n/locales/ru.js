@@ -438,12 +438,58 @@ export default {
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'Просмотр статистики сессии. Использование: /stats [model|tools]',
   'Show model-specific usage statistics.':
     'Показать статистику использования модели.',
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
+  'Show daily token usage statistics.':
+    'Показать дневную статистику использования токенов.',
+  'Show monthly token usage statistics.':
+    'Показать месячную статистику использования токенов.',
+  'Export token usage statistics to CSV or JSON.':
+    'Экспортировать статистику использования токенов в CSV или JSON.',
+  'No usage data.': 'Нет данных об использовании.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} токенов ({{requests}} запросов)',
+  'Daily token usage for {{value}}':
+    'Дневное использование токенов за {{value}}',
+  'Monthly token usage for {{value}}':
+    'Месячное использование токенов за {{value}}',
+  'Total: {{tokens}} tokens': 'Всего: {{tokens}} токенов',
+  'Requests: {{requests}}': 'Запросы: {{requests}}',
+  'Breakdown:': 'Разбивка:',
+  'Input: {{tokens}}': 'Ввод: {{tokens}}',
+  'Output: {{tokens}}': 'Вывод: {{tokens}}',
+  'Cached (included in Input): {{tokens}}': 'Кэш (включён во ввод): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Рассуждения: {{tokens}}',
+  'By model:': 'По модели:',
+  'By auth type:': 'По типу аутентификации:',
+  'By model/auth type:': 'По модели/типу аутентификации:',
+  'By source:': 'По источнику:',
+  'Failed to load token usage stats: {{error}}':
+    'Не удалось загрузить статистику использования токенов: {{error}}',
+  'Expected --format csv or --format json.':
+    'Ожидается --format csv или --format json.',
+  'Expected a file path after --output.':
+    'После --output ожидается путь к файлу.',
+  'Unexpected argument: {{argument}}': 'Неожиданный аргумент: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Использование: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Путь экспорта использования токенов должен находиться внутри рабочего каталога проекта.',
+  'Export target does not exist: {{path}}':
+    'Цель экспорта не существует: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Не удалось определить путь экспорта внутри рабочего каталога.',
+  'Could not create a temporary export file.':
+    'Не удалось создать временный файл экспорта.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Использование токенов экспортировано в {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Не удалось экспортировать статистику использования токенов: {{error}}',
+  'Unclosed quote in arguments.': 'Незакрытая кавычка в аргументах.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Примечание: время генерации (TTFT/TPS) относится к метрикам генерации.',
   'exit the cli': 'Выход из CLI',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',
@@ -1276,6 +1322,7 @@ export default {
   'Tools:': 'Инструменты:',
   'Parameters:': 'Параметры:',
   'Prompts:': 'Промпты:',
+  'Resources:': 'Ресурсы:',
   Blocked: 'Заблокировано',
   '💡 Tips:': '💡 Подсказки:',
   Use: 'Используйте',
@@ -1966,6 +2013,26 @@ export default {
     'Последующие dream-запуски могут пропускаться как заблокированные, пока следующая очистка устаревших сессий не удалит файл.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'Планировщик не увидел временную метку этого dream-запуска; следующий цикл dream может запуститься раньше обычного.',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'История свёрнута: {{n}} сообщений скрыто. Используйте /history expand-now для отображения.',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': ' (не в реестре моделей)',
   'start server': 'запустить сервер',

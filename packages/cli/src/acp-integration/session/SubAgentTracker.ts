@@ -63,6 +63,7 @@ export class SubAgentTracker {
     private readonly client: AgentSideConnection,
     parentToolCallId: string,
     subagentType: string,
+    private readonly onPermissionCancel?: () => void,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -226,18 +227,31 @@ export class SubAgentTracker {
             : z
                 .nativeEnum(ToolConfirmationOutcome)
                 .parse(output.outcome.optionId);
-
         // Respond to subagent with the outcome
         await event.respond(outcome, {
           answers: 'answers' in output ? output.answers : undefined,
         });
+        if (outcome === ToolConfirmationOutcome.Cancel) {
+          this.onPermissionCancel?.();
+        }
       } catch (error) {
         // If permission request fails, cancel the tool call
         debugLogger.error(
           `Permission request failed for subagent tool ${event.name}:`,
           error,
         );
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        // Fail closed: if the client cannot answer a nested permission
+        // request, stop the parent turn instead of letting later tools run
+        // without the required user input.
+        this.onPermissionCancel?.();
+        try {
+          await event.respond(ToolConfirmationOutcome.Cancel);
+        } catch (respondError) {
+          debugLogger.error(
+            `Failed to cancel subagent tool ${event.name} after permission request failure:`,
+            respondError,
+          );
+        }
       }
     };
   }

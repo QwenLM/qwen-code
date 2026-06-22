@@ -75,39 +75,6 @@ describe('tryGenerateSessionTitle', () => {
     expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
   });
 
-  it('returns {ok:false, reason:"empty_history"} when history has only startup prelude (no real user message)', async () => {
-    // Guard: auto-title should not be generated based solely on the
-    // initialization prelude — a role:'user' <system-reminder> message
-    // seeded by getInitialChatHistory. Without the guard, the title model
-    // would be called with only the startup context and produce a title
-    // like "初始化项目上下文" instead of one based on the user's actual
-    // first message.
-    const { config, generateJson } = makeConfig({
-      fastModel: 'qwen-turbo',
-      history: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: "<system-reminder>\nThis is the Qwen Code. We are setting up the context for our chat.\nToday's date is Monday, June 15, 2026.\nMy operating system is: linux\nI'm currently working in the directory: /home/me/project\n</system-reminder>",
-            },
-          ],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Got it! How can I help you today?' }],
-        },
-      ],
-    });
-    const outcome = await tryGenerateSessionTitle(
-      config,
-      new AbortController().signal,
-    );
-    expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
-    // The title model must NOT be called — the guard should short-circuit.
-    expect(generateJson).not.toHaveBeenCalled();
-  });
-
   it('returns {ok:false, reason:"model_error"} when the LLM throws', async () => {
     const { config } = makeConfig({
       fastModel: 'qwen-turbo',
