@@ -9,6 +9,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonSessionTaskStatus,
@@ -775,6 +776,55 @@ export function createDaemonSessionActions({
           'Global permission response failed',
           error,
           'submit_permission',
+        );
+      }
+    },
+
+    async branchSession(name?: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Branch session failed',
+        'branch_session',
+      );
+      try {
+        const result = await withActionTimeout(
+          session.client.branchSession(session.sessionId, { name }),
+          'Branch session timed out',
+        );
+        await startSessionSwitch(result.sessionId, 'load');
+        return {
+          sessionId: result.sessionId,
+          displayName: result.displayName,
+        };
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Branch session failed',
+          error,
+          'branch_session',
+        );
+      }
+    },
+
+    async forkSession(directive: string): Promise<DaemonForkSessionResult> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Fork session failed',
+        'fork_session',
+      );
+      try {
+        return await withActionTimeout(
+          session.fork(directive),
+          'Fork session timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Fork session failed',
+          error,
+          'fork_session',
         );
       }
     },

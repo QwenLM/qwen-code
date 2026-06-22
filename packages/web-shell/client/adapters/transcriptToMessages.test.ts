@@ -169,6 +169,41 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('localizes structured session branch status blocks', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        statusBlock('branch-1', 'Branched conversation "old"', 1, {
+          source: 'session_branched',
+          data: {
+            sourceSessionId: 'source',
+            newSessionId: 'new',
+            displayName: 'support-branch-new3 (Branch 2)',
+          },
+        }),
+      ],
+      {
+        labels: {
+          branchSuccess: (name) =>
+            `已复制会话，新会话名称为： "${name}"，当前已切换到新的会话。`,
+        },
+      },
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content:
+          '已复制会话，新会话名称为： "support-branch-new3 (Branch 2)"，当前已切换到新的会话。',
+        source: 'session_branched',
+        data: {
+          sourceSessionId: 'source',
+          newSessionId: 'new',
+          displayName: 'support-branch-new3 (Branch 2)',
+        },
+      }),
+    ]);
+  });
+
   it('ignores daemon plan entries without content', () => {
     const plan = {
       sessionUpdate: 'plan',
