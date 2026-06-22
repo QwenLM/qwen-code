@@ -135,13 +135,13 @@ jobs:
       - name: 'Verify all prebuilds are present'
         run: |
           for file in \
-            prebuilds/darwin-arm64/node.napi.node \
-            prebuilds/darwin-x64/node.napi.node \
-            prebuilds/win32-x64/node.napi.node \
-            prebuilds/win32-arm64/node.napi.node \
-            prebuilds/linux-x64/node.napi.glibc.node \
-            prebuilds/linux-x64/node.napi.musl.node \
-            prebuilds/linux-arm64/node.napi.glibc.node
+            prebuilds/darwin-arm64/@qwen-code+audio-capture.node \
+            prebuilds/darwin-x64/@qwen-code+audio-capture.node \
+            prebuilds/win32-x64/@qwen-code+audio-capture.node \
+            prebuilds/win32-arm64/@qwen-code+audio-capture.node \
+            prebuilds/linux-x64/@qwen-code+audio-capture.glibc.node \
+            prebuilds/linux-x64/@qwen-code+audio-capture.musl.node \
+            prebuilds/linux-arm64/@qwen-code+audio-capture.glibc.node
           do
             test -f "$file" || (echo "::error::Missing: $file" && exit 1)
           done
