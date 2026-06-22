@@ -14,7 +14,7 @@ import {
   collectText,
   splitImageParts,
   validateImagePart,
-} from './imagePartUtils.js';
+} from './image-part-utils.js';
 
 const debugLogger = createDebugLogger('VISION_BRIDGE');
 const BRIDGE_MAX_OUTPUT_TOKENS = 2048;

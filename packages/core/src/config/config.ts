@@ -24,8 +24,8 @@ import { detectDefaultModalities } from '../core/modalityDefaults.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import type { VisionBridgeModelSelection } from '../services/visionBridge/visionBridgeService.js';
-import { selectVisionBridgeModel } from '../services/visionBridge/visionBridgeService.js';
+import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
+import { selectVisionBridgeModel } from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
@@ -80,6 +80,7 @@ import type { InstructionLoadReason } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
@@ -1137,6 +1138,7 @@ export class Config {
    */
   private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
+  private resourceRegistry!: ResourceRegistry;
   private subagentManager!: SubagentManager;
   private memoryPressureConfig?: MemoryPressureConfig;
   private memoryPressureMonitor?: MemoryPressureMonitor;
@@ -1611,6 +1613,7 @@ export class Config {
     // Initialize centralized FileDiscoveryService
     this.getFileService();
     this.promptRegistry = new PromptRegistry();
+    this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
     if (!this.getBareMode()) {
@@ -2618,10 +2621,22 @@ export class Config {
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
+      const rawSelector = resolveModelId(this.fastModel);
+      if (!rawSelector) return undefined;
+      if (rawSelector.authType) return rawSelector;
+
+      const currentAuthType = this.getContentGeneratorConfig()?.authType;
+      if (!currentAuthType) {
+        this.debugLogger.debug(
+          'No active auth type; skipping bare fast model resolution',
+        );
+        return undefined;
+      }
+
       return resolveModelId(this.fastModel, {
-        currentAuthType: this.getContentGeneratorConfig()?.authType,
-        getAvailableModels: (authTypes) =>
-          this.getAllConfiguredModels(authTypes),
+        currentAuthType,
+        getAvailableModels: () =>
+          this.getAllConfiguredModels([currentAuthType]),
       });
     } catch {
       return undefined;
@@ -3084,6 +3099,10 @@ export class Config {
 
   getPromptRegistry(): PromptRegistry {
     return this.promptRegistry;
+  }
+
+  getResourceRegistry(): ResourceRegistry {
+    return this.resourceRegistry;
   }
 
   getDebugMode(): boolean {

@@ -155,6 +155,6 @@ These deterministic tests cover the provider-routing edge case that tmux cannot
 reliably isolate without a custom provider setup:
 
 ```bash
-npm -w packages/core exec vitest run src/services/visionBridge/visionBridgeService.test.ts
+npm -w packages/core exec vitest run src/services/visionBridge/vision-bridge-service.test.ts
 npm -w packages/core exec vitest run src/utils/sideQuery.test.ts src/core/baseLlmClient.test.ts
 ```

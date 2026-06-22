@@ -11,7 +11,7 @@ import {
   formatOmittedReasons,
   selectVisionBridgeModel,
   type VisionModelCandidate,
-} from './visionBridgeService.js';
+} from './vision-bridge-service.js';
 import type { Config } from '../../config/config.js';
 
 vi.mock('../../utils/sideQuery.js', () => ({ runSideQuery: vi.fn() }));

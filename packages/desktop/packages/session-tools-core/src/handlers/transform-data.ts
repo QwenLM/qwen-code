@@ -153,12 +153,14 @@ export async function handleTransformData(
     // Return the absolute path for use in preview/table block "src" fields
     const lines = [`Output written to: ${resolvedOutput}`];
     lines.push(`Runtime: ${cmd} (source: ${runtime.source})`);
-    lines.push(`\nUse this absolute path as the "src" value in your datatable, spreadsheet, html-preview, pdf-preview, or image-preview block.`);
+    lines.push('');
+    lines.push('Use this absolute path as the "src" value in your datatable, spreadsheet, html-preview, pdf-preview, or image-preview block.');
     if (result.stdout.trim()) {
-      lines.push(`\nStdout:\n${result.stdout.slice(0, 500)}`);
+      lines.push('');
+      lines.push(`Stdout:\n${result.stdout.slice(0, 500)}`);
     }
 
-    return successResponse(lines.join(''));
+    return successResponse(lines.join('\n'));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return errorResponse(`Error running script: ${msg}`);

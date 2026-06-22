@@ -9,6 +9,53 @@ import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
 import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+import { matchMcpServerPrefix } from './mcpResourceRef.js';
+
+/**
+ * `@server:uri` MCP resource completion. Returns suggestions when `pattern`
+ * is of the form `<server>:<partial>` and `<server>` is a configured MCP
+ * server (so a plain file path containing ':' is never hijacked); returns
+ * `null` otherwise to let the caller fall through to filesystem search.
+ *
+ * Matching is a case-sensitive substring on the URI (an empty partial matches
+ * every resource — `'x'.includes('')` is `true`), with prefix matches ranked
+ * above mid-string matches. The resource list comes from the post-discovery
+ * `ResourceRegistry`, so an empty result before discovery completes simply
+ * shows no suggestions.
+ */
+function getMcpResourceSuggestions(
+  config: Config | undefined,
+  pattern: string,
+): Suggestion[] | null {
+  if (!config) return null;
+  // Don't surface resource URIs in an untrusted folder: the read path
+  // (`ToolRegistry.readMcpResource`) is blocked there, so completing them
+  // would both mislead and leak the existence of a server's resources.
+  if (config.isTrustedFolder?.() === false) return null;
+  // Shared longest-prefix match (see `matchMcpServerPrefix`) so the
+  // completion path and the `@server:uri` injection path stay in lockstep.
+  const mcpServers = config.getMcpServers?.() || {};
+  const match = matchMcpServerPrefix(pattern, Object.keys(mcpServers));
+  if (!match) return null;
+  const serverName = match.serverName;
+  const partialUri = match.rest;
+  const resources =
+    config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
+  const matches = resources
+    .filter((r) => r.uri.includes(partialUri))
+    .sort((a, b) => {
+      // Rank URIs that start with the partial above mid-string matches,
+      // then alphabetically for a stable order.
+      const aPrefix = a.uri.startsWith(partialUri) ? 0 : 1;
+      const bPrefix = b.uri.startsWith(partialUri) ? 0 : 1;
+      return aPrefix - bPrefix || a.uri.localeCompare(b.uri);
+    });
+  return matches.slice(0, MAX_SUGGESTIONS_TO_SHOW * 3).map((r) => ({
+    label: `${serverName}:${r.uri}`,
+    value: `${serverName}:${r.uri}`,
+    isDirectory: false,
+  }));
+}
 
 export enum AtCompletionStatus {
   IDLE = 'idle',
@@ -201,7 +248,26 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
     };
 
     const search = async () => {
-      if (!fileSearch.current || state.pattern === null) {
+      if (state.pattern === null) {
+        return;
+      }
+
+      // `@server:uri` MCP resource completion short-circuits filesystem
+      // search. Synchronous (in-memory registry), so no abort/slow-timer
+      // machinery is needed.
+      const resourceSuggestions = getMcpResourceSuggestions(
+        config,
+        state.pattern,
+      );
+      if (resourceSuggestions !== null) {
+        if (slowSearchTimer.current) {
+          clearTimeout(slowSearchTimer.current);
+        }
+        dispatch({ type: 'SEARCH_SUCCESS', payload: resourceSuggestions });
+        return;
+      }
+
+      if (!fileSearch.current) {
         return;
       }
 

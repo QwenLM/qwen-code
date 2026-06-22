@@ -13,7 +13,7 @@ import {
   normalizeParts,
   splitImageParts,
   validateImagePart,
-} from './imagePartUtils.js';
+} from './image-part-utils.js';
 
 const imagePart: Part = {
   inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
