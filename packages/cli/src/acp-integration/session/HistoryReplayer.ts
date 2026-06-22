@@ -59,10 +59,28 @@ export class HistoryReplayer {
   async replay(records: ChatRecord[]): Promise<void> {
     this.pendingReplayToolCalls.clear();
     try {
-      for (const record of records) {
-        await this.replayRecord(record);
+      let replayError: unknown;
+      try {
+        for (const record of records) {
+          await this.replayRecord(record);
+        }
+      } catch (error) {
+        replayError = error;
       }
-      await this.failDanglingToolCalls();
+
+      let danglingError: unknown;
+      try {
+        await this.failDanglingToolCalls();
+      } catch (error) {
+        danglingError = error;
+      }
+
+      if (replayError) {
+        throw replayError;
+      }
+      if (danglingError) {
+        throw danglingError;
+      }
     } finally {
       this.pendingReplayToolCalls.clear();
       this.setActiveRecordId(null);
@@ -258,6 +276,7 @@ export class HistoryReplayer {
   }
 
   private async failDanglingToolCalls(): Promise<void> {
+    let firstError: unknown;
     for (const pending of this.pendingReplayToolCalls.values()) {
       this.setActiveRecordId(pending.recordId, pending.timestamp);
       try {
@@ -269,9 +288,14 @@ export class HistoryReplayer {
           error: new Error(MISSING_TOOL_RESULT_MESSAGE),
           timestamp: pending.timestamp,
         });
+      } catch (error) {
+        firstError ??= error;
       } finally {
         this.setActiveRecordId(null);
       }
+    }
+    if (firstError) {
+      throw firstError;
     }
   }
 

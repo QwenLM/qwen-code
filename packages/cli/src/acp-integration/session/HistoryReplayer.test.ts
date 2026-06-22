@@ -372,6 +372,102 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('should fail dangling calls before rethrowing replay errors', async () => {
+      const danglingRecord: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+      const failingRecord = createUserRecord('this send fails');
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'user_message_chunk') {
+            throw new Error('replay failed');
+          }
+        },
+      );
+
+      await expect(
+        replayer.replay([danglingRecord, failingRecord]),
+      ).rejects.toThrow('replay failed');
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'user_message_chunk',
+        'tool_call_update',
+      ]);
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'call-missing',
+        status: 'failed',
+      });
+    });
+
+    it('should continue failing dangling calls after a synthetic update error', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-a',
+                name: 'read_file',
+                args: { path: 'a.ts' },
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-b',
+                name: 'read_file',
+                args: { path: 'b.ts' },
+              },
+            },
+          ],
+        },
+      };
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (
+            update['sessionUpdate'] === 'tool_call_update' &&
+            update['toolCallId'] === 'call-a'
+          ) {
+            throw new Error('first synthetic failure failed');
+          }
+        },
+      );
+
+      await expect(replayer.replay([record])).rejects.toThrow(
+        'first synthetic failure failed',
+      );
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'tool_call',
+        'tool_call_update',
+        'tool_call_update',
+      ]);
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'call-a',
+        status: 'failed',
+      });
+      expect(updates[3]).toMatchObject({
+        toolCallId: 'call-b',
+        status: 'failed',
+      });
+    });
+
     it('should not fail function calls that have matching tool results', async () => {
       const records: ChatRecord[] = [
         {
