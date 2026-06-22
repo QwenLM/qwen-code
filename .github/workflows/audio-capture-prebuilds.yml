@@ -111,7 +111,7 @@ jobs:
       - name: 'Install build deps'
         run: 'npm install --no-workspaces --ignore-scripts --no-audit --no-fund'
       - name: 'Build prebuild'
-        run: 'npx prebuildify --napi --strip --tag-libc'
+        run: 'npm run prebuildify'
       - name: 'Upload prebuild'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:

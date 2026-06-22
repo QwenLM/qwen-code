@@ -23,7 +23,7 @@
   ],
   "scripts": {
     "install": "node install.js",
-    "prebuildify": "prebuildify --napi --strip",
+    "prebuildify": "prebuildify --napi --strip --tag-libc",
     "build": "node-gyp rebuild && tsc --build",
     "build:ts": "tsc --build",
     "test": "vitest run",
