@@ -238,4 +238,18 @@ describe('cleanupOldSubagentTranscripts', () => {
     expect(r).toEqual({ removed: 1, errors: 0 });
     expect(fs.readdirSync(subagentsRoot).sort()).toEqual(['current', 'recent']);
   });
+
+  it('keeps the project-local subagents root after it becomes empty', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    mkSessionDir(subagentsRoot, 'stale', old);
+
+    const r = await cleanupOldSubagentTranscripts({
+      cutoffDate: cutoff,
+      subagentsRoot,
+    });
+
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(subagentsRoot)).toBe(true);
+    expect(fs.readdirSync(subagentsRoot)).toEqual([]);
+  });
 });

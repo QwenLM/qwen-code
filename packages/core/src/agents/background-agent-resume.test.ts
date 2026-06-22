@@ -2127,7 +2127,9 @@ describe('BackgroundAgentResumeService', () => {
       notified: true,
       outputOffset: original?.outputOffset,
     });
-    expect(readAgentMeta(metaPath)?.lastError).toBeUndefined();
+    const restoredMeta = readAgentMeta(metaPath);
+    expect(restoredMeta?.lastError).toBeUndefined();
+    expect(restoredMeta?.status).toBe('completed');
   });
 
   it('emits one start event and one terminal notification when a completed agent is revived', async () => {

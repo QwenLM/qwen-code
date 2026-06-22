@@ -1141,7 +1141,10 @@ export class BackgroundAgentResumeService {
       },
     );
     if (entry.metaPath) {
-      patchAgentMeta(entry.metaPath, { lastError: undefined });
+      patchAgentMeta(entry.metaPath, {
+        lastError: undefined,
+        status: 'completed',
+      });
     }
     return restored;
   }

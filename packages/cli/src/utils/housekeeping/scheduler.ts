@@ -208,5 +208,4 @@ export const _needsCatchUpForTesting = needsCatchUp;
 export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;
-export const _SUBAGENT_MARKER_FOR_TESTING = SUBAGENT_MARKER;
 export const _getSubagentMarkerPathForTesting = getSubagentMarkerPath;

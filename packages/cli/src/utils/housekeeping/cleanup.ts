@@ -28,6 +28,7 @@ export interface CleanupResult {
 export interface CleanupOptions {
   cutoffDate: Date;
   excludeSessionIds?: ReadonlySet<string>;
+  removeEmptyRoot?: boolean;
 }
 
 export interface SubagentCleanupOptions extends CleanupOptions {
@@ -93,8 +94,11 @@ async function sweepOldSessionDirs(
     );
   }
 
-  // Sweep empty root too; silent failure if not empty.
-  await rmdir(root).catch(() => {});
+  // Sweep empty roots only for Qwen-owned global storage. Project-local roots
+  // such as <projectDir>/subagents/ should remain stable for file watchers.
+  if (opts.removeEmptyRoot !== false) {
+    await rmdir(root).catch(() => {});
+  }
   return result;
 }
 
@@ -113,7 +117,10 @@ export async function cleanupOldFileHistoryBackups(
 export async function cleanupOldSubagentTranscripts(
   opts: SubagentCleanupOptions,
 ): Promise<CleanupResult> {
-  return sweepOldSessionDirs(opts.subagentsRoot, opts);
+  return sweepOldSessionDirs(opts.subagentsRoot, {
+    ...opts,
+    removeEmptyRoot: false,
+  });
 }
 
 function isENOENT(e: unknown): boolean {
