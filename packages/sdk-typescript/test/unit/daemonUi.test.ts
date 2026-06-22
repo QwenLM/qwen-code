@@ -1236,6 +1236,45 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('rewinds to an exact user turn index', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'first', { now: 2 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer one' }],
+      { now: 3 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'second', { now: 4 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer two' }],
+      { now: 5 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'third', { now: 6 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer three' }],
+      { now: 7 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'session.rewound',
+          promptId: 'prompt-2',
+          targetTurnIndex: 1,
+        },
+      ],
+      { now: 8 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: 'first' },
+      { kind: 'assistant', text: 'answer one' },
+    ]);
+  });
+
   it('normalizes plan session updates as visible tool blocks', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),

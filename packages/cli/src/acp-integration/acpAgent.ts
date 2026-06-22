@@ -218,14 +218,19 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 
-function deriveForkDescription(directive: string): string {
+function collapseForkDirective(directive: string, maxLength: number): string {
   const oneLine = directive.replace(/\s+/g, ' ').trim();
-  return oneLine.length > 60 ? `${oneLine.slice(0, 57)}…` : oneLine;
+  return oneLine.length > maxLength
+    ? `${oneLine.slice(0, maxLength - 3)}…`
+    : oneLine;
+}
+
+function deriveForkDescription(directive: string): string {
+  return collapseForkDirective(directive, 60);
 }
 
 function truncateForkDirectiveForHistory(directive: string): string {
-  const oneLine = directive.replace(/\s+/g, ' ').trim();
-  return oneLine.length > 200 ? `${oneLine.slice(0, 197)}…` : oneLine;
+  return collapseForkDirective(directive, 200);
 }
 
 function hasFailedDisplayStatus(
@@ -5829,7 +5834,7 @@ class QwenAgent implements Agent {
             role: 'user',
             parts: [
               {
-                text: `[system] User launched a background fork via /fork. Directive (truncated): ${truncateForkDirectiveForHistory(
+                text: `User launched a background fork via /fork. Directive (truncated): ${truncateForkDirectiveForHistory(
                   trimmed,
                 )}`,
               },
