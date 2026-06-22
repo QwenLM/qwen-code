@@ -513,6 +513,7 @@ describe('Gemini Client (client.ts)', () => {
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
+      getAutoSkillConfirmEnabled: vi.fn().mockReturnValue(true),
       getModelsConfig: vi.fn().mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
@@ -4904,6 +4905,29 @@ hello
         );
 
         expect(client['skillsModifiedInSession']).toBe(false);
+      });
+
+      it('should pass confirmBeforePersist from getAutoSkillConfirmEnabled', async () => {
+        vi.spyOn(
+          client['config'],
+          'getAutoSkillConfirmEnabled',
+        ).mockReturnValue(true);
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'below_threshold',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'a query' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-confirm',
+          ),
+        );
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({ confirmBeforePersist: true }),
+        );
       });
     });
 

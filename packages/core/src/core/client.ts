@@ -1423,6 +1423,7 @@ export class GeminiClient {
           threshold: AUTO_SKILL_THRESHOLD,
           maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
           timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+          confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
           // Reset tool-call counter when a review is dispatched so the next
