@@ -138,8 +138,8 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.currentModelAffected).toBe(false);
   });
 
-  it('reports currentModelAffected when model is removed', async () => {
-    mockConfig.getModel.mockReturnValue('old-deprecated-model');
+  it('excludes user-added custom models from the diff', async () => {
+    mockConfig.getModel.mockReturnValue('my-custom-model');
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -150,10 +150,10 @@ describe('useProviderUpdates', () => {
       [AuthType.USE_OPENAI]: [
         ...chinaTemplate,
         {
-          id: 'old-deprecated-model',
+          id: 'my-custom-model',
           baseUrl: CODING_PLAN_CHINA_BASE_URL,
           envKey: CODING_PLAN_ENV_KEY,
-          name: '[Coding Plan] old-deprecated-model',
+          name: '[Coding Plan] my-custom-model',
         },
       ],
     };
@@ -171,8 +171,8 @@ describe('useProviderUpdates', () => {
     });
 
     const entry = result.current.providerUpdateRequest?.entries[0];
-    expect(entry?.diff.currentModelAffected).toBe(true);
-    expect(entry?.diff.removed).toContain('old-deprecated-model');
+    expect(entry?.diff.removed).not.toContain('my-custom-model');
+    expect(entry?.diff.currentModelAffected).toBe(false);
   });
 
   it('executes update when user confirms with "update"', async () => {

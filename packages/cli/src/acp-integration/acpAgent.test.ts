@@ -206,6 +206,41 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
       provider.ownsModel ??
       ((model: { envKey?: string }) => model.envKey === provider.envKey),
   ),
+  findExistingProviderModels: vi.fn(
+    (
+      provider: {
+        envKey?: string | ((...args: unknown[]) => string);
+        protocol: string;
+        protocolOptions?: string[];
+        ownsModel?: (model: { envKey?: string }) => boolean;
+      },
+      modelProviders: Record<string, unknown> | undefined,
+    ) => {
+      const ownsModel =
+        provider.ownsModel ??
+        (typeof provider.envKey === 'string'
+          ? (model: { envKey?: string }) => model.envKey === provider.envKey
+          : undefined);
+      if (!ownsModel || !modelProviders) return undefined;
+      const protocols =
+        provider.protocolOptions && provider.protocolOptions.length > 0
+          ? provider.protocolOptions
+          : [provider.protocol];
+      for (const protocol of protocols) {
+        const raw = modelProviders[protocol];
+        if (!Array.isArray(raw)) continue;
+        const models = raw.filter(
+          (m): m is { id: string; envKey?: string } =>
+            typeof m === 'object' &&
+            m !== null &&
+            typeof (m as { id?: unknown }).id === 'string' &&
+            ownsModel(m),
+        );
+        if (models.length > 0) return { protocol, models };
+      }
+      return undefined;
+    },
+  ),
   ExtensionManager: vi.fn().mockImplementation(() => ({
     refreshCache: mockExtensionManagerState.refreshCache,
     getLoadedExtensions: vi.fn(() => mockExtensionManagerState.extensions),

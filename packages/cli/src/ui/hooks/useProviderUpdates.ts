@@ -165,8 +165,14 @@ function getInstalledOwnedModelIds(
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
-  if (!ownsFn) return allModels.map((m) => m.id);
-  return allModels.filter(ownsFn).map((m) => m.id);
+  const installedIds = ownsFn
+    ? allModels.filter(ownsFn).map((m) => m.id)
+    : allModels.map((m) => m.id);
+  // Only compare built-in model IDs — user-added custom models should not
+  // appear as "removed" in the diff since they were never part of the
+  // provider's built-in list.
+  const builtinIds = new Set(getDefaultModelIds(provider));
+  return installedIds.filter((id) => builtinIds.has(id));
 }
 
 function findAllPendingUpdates(
