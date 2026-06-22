@@ -179,6 +179,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'voice-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'skills_manage'

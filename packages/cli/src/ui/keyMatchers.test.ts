@@ -50,6 +50,8 @@ describe('keyMatchers', () => {
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
+    [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
+      key.name === 'space' && !key.ctrl && !key.meta,
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
     [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>

@@ -45,6 +45,7 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@qwen-code/audio-capture": "file:../audio-capture",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
     "@qwen-code/channel-qqbot": "file:../channels/qqbot",

@@ -61,6 +61,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',
       ),
+      '@qwen-code/audio-capture': path.resolve(
+        __dirname,
+        '../audio-capture/src/index.ts',
+      ),
     },
   },
   test: {

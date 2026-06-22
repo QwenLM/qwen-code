@@ -156,6 +156,15 @@ export type {
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+export type {
+  ArtifactTool,
+  ArtifactToolParams,
+} from './tools/artifact/artifact-tool.js';
+export type {
+  ArtifactPublisher,
+  PublishArtifactInput,
+  PublishedArtifact,
+} from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';

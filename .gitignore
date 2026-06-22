@@ -52,6 +52,8 @@ Thumbs.db
 
 # Ignore built ts files
 dist
+packages/audio-capture/build/
+packages/audio-capture/prebuilds/
 
 # Docker folder to help skip auth refreshes
 .docker
