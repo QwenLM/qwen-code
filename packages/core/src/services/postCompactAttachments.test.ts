@@ -963,26 +963,37 @@ describe('composePostCompactHistory', () => {
     const secret = join(outsideDir, 'secret.txt');
     writeFileSync(secret, 'TOP_SECRET_CONTENT');
     const link = join(tmpDir, 'innocent.ts');
-    symlinkSync(secret, link); // workspace/innocent.ts -> outsideDir/secret.txt
+    try {
+      try {
+        symlinkSync(secret, link); // workspace/innocent.ts -> outsideDir/secret.txt
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EPERM' || code === 'EACCES' || code === 'ENOTSUP') {
+          return;
+        }
+        throw error;
+      }
 
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { file_path: link } } },
-        ],
-      },
-    ];
-    const result = await composePostCompactHistory(history, 'SUM', {
-      workspaceRoot: tmpDir,
-    });
-    const allText = result
-      .flatMap((c) => c.parts ?? [])
-      .map((p) => (p as { text?: string }).text ?? '')
-      .join('\n');
-    // Lexical resolve would embed the secret; realpath rejects the link.
-    expect(allText).not.toContain('TOP_SECRET_CONTENT');
-    rmSync(outsideDir, { recursive: true, force: true });
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: link } } },
+          ],
+        },
+      ];
+      const result = await composePostCompactHistory(history, 'SUM', {
+        workspaceRoot: tmpDir,
+      });
+      const allText = result
+        .flatMap((c) => c.parts ?? [])
+        .map((p) => (p as { text?: string }).text ?? '')
+        .join('\n');
+      // Lexical resolve would embed the secret; realpath rejects the link.
+      expect(allText).not.toContain('TOP_SECRET_CONTENT');
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 
   it('honors AbortSignal — does not invoke file reads after abort (Finding 5)', async () => {

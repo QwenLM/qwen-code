@@ -6,7 +6,10 @@
 
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
-import type { ChatMessage } from '../../services/qwenAgentManager.js';
+import type {
+  AcpHistorySnapshot,
+  ChatMessage,
+} from '../../services/qwenAgentManager.js';
 import type { Conversation } from '../../services/conversationStore.js';
 import type { ImageAttachment } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
@@ -594,7 +597,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     let editRestoreSnapshot: Conversation | null = null;
     let editStoreMutationApplied = false;
     let editAcpMutationApplied = false;
-    let editAcpHistorySnapshot: unknown[] | null = null;
+    let editAcpHistorySnapshot: AcpHistorySnapshot | null = null;
 
     if (editTargetTurnIndex !== undefined) {
       if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {

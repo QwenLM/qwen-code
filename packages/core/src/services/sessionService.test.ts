@@ -1376,6 +1376,52 @@ describe('SessionService', () => {
       expect(history).toEqual([recordA1.message, assistantA1.message]);
     });
 
+    it('excludes slash and question-prefixed user records from resume API history', () => {
+      const slashCommand: ChatRecord = {
+        ...recordA1,
+        uuid: 'slash-command',
+        message: { role: 'user', parts: [{ text: '/help' }] },
+      };
+      const questionCommand: ChatRecord = {
+        ...recordA1,
+        uuid: 'question-command',
+        message: { role: 'user', parts: [{ text: '?status' }] },
+      };
+      const secondUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'user-2',
+        message: { role: 'user', parts: [{ text: 'second prompt' }] },
+      };
+      const assistantReply: ChatRecord = {
+        ...recordB2,
+        sessionId: sessionIdA,
+        parentUuid: secondUser.uuid,
+        message: { role: 'model', parts: [{ text: 'reply' }] },
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [
+          recordA1,
+          slashCommand,
+          questionCommand,
+          secondUser,
+          assistantReply,
+        ],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([
+        recordA1.message,
+        secondUser.message,
+        assistantReply.message,
+      ]);
+    });
+
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
       const largePayload = {
         output: 'x'.repeat(128 * 1024),

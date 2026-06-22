@@ -7,19 +7,26 @@
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
 import {
+  createDebugLogger,
   getStartupContextLength,
-  isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
+import {
+  getApiUserTextIndices,
+  getCompressionTailStartIndex,
+  hasCompressionSummaryPair,
+} from '../../utils/api-history-utils.js';
+
+const debugLogger = createDebugLogger('HISTORY_MAPPING');
 
 /**
  * Returns true when the history item represents a real user prompt that was
  * sent to the model, as opposed to a slash-command invocation (`/help`,
- * `/stats`, …) which is stored with `type: 'user'` in the UI but never
+ * `/stats`, ...) which is stored with `type: 'user'` in the UI but never
  * reaches the API history or `turnParentUuids`.
  *
  * Typed as a type predicate so callers can drop their `as HistoryItemUser`
- * casts — a regression that loosened either side of the narrowing would now
+ * casts - a regression that loosened either side of the narrowing would now
  * be caught by tsc instead of silently bypassing it.
  */
 export function isRealUserTurn(
@@ -34,28 +41,23 @@ export function isRealUserTurn(
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 
-/**
- * Checks if a Content entry is a user-initiated text prompt
- * as opposed to a tool result (functionResponse).
- */
-function isUserTextContent(content: Content): boolean {
-  if (content.role !== 'user') return false;
-  if (!content.parts || content.parts.length === 0) return false;
+function getUiTurnOrdinals(
+  uiHistory: HistoryItem[],
+  targetUserItemId: number,
+): { targetOrdinal: number; totalRealUserTurns: number } {
+  let targetOrdinal = -1;
+  let totalRealUserTurns = 0;
 
-  const hasFunctionResponse = content.parts.some(
-    (part) => 'functionResponse' in part,
-  );
-  if (hasFunctionResponse) return false;
+  for (const item of uiHistory) {
+    if (!isRealUserTurn(item)) continue;
 
-  // Exclude pure <system-reminder> entries (the startup prelude and the
-  // mid-history MCP added-tool reminders). They are structural, not real user
-  // prompts; counting them here would shift the rewind truncation index and
-  // silently drop a real turn's context. A genuine user turn that merely has
-  // a per-turn reminder prepended still has a non-reminder prompt part, so it
-  // is NOT excluded.
-  if (isSystemReminderContent(content)) return false;
+    totalRealUserTurns++;
+    if (item.id === targetUserItemId) {
+      targetOrdinal = totalRealUserTurns;
+    }
+  }
 
-  return content.parts.some((part) => 'text' in part && part.text);
+  return { targetOrdinal, totalRealUserTurns };
 }
 
 /**
@@ -63,13 +65,13 @@ function isUserTextContent(content: Content): boolean {
  * to a specific user turn in the UI history.
  *
  * The API history may include:
- * - A startup context entry at the beginning
+ * - A startup context entry or startup context pair at the beginning
  * - User text prompts (corresponding to UI user turns)
  * - Model responses (with optional functionCall parts)
  * - Tool result entries: user(functionResponse) + model(response)
  *
  * This function counts user text Content entries (skipping tool results
- * and the startup context entry) to find the API boundary corresponding
+ * and the startup context) to find the API boundary corresponding
  * to the target UI user turn.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
@@ -88,41 +90,52 @@ export function computeApiTruncationIndex(
   targetUserItemId: number,
   apiHistory: Content[],
 ): number {
-  // Count how many UI user turns exist before the target
-  let uiUserTurnCount = 0;
-  for (const item of uiHistory) {
-    if (item.id === targetUserItemId) {
-      break;
-    }
-    if (isRealUserTurn(item)) {
-      uiUserTurnCount++;
-    }
-  }
+  const { targetOrdinal, totalRealUserTurns } = getUiTurnOrdinals(
+    uiHistory,
+    targetUserItemId,
+  );
 
-  // Determine the starting index in the API history (skip startup context)
+  if (targetOrdinal < 0) return -1;
+
   const startIndex = getStartupContextLength(apiHistory);
 
-  if (uiUserTurnCount === 0) {
+  if (hasCompressionSummaryPair(apiHistory, startIndex)) {
+    // Compression replaces the oldest N UI turns with one synthetic
+    // summary/attachment prelude. The remaining API user-text entries are
+    // the uncompressed tail, so align that tail against the end of the UI
+    // turn list instead of counting from the front.
+    const apiTailUserIndices = getApiUserTextIndices(
+      apiHistory,
+      getCompressionTailStartIndex(apiHistory, startIndex),
+      true,
+    );
+    const compressedTurnCount = Math.max(
+      0,
+      totalRealUserTurns - apiTailUserIndices.length,
+    );
+
+    if (targetOrdinal <= compressedTurnCount) {
+      debugLogger.info(
+        `Rewind target turn ${targetOrdinal} is unreachable: compressed ${compressedTurnCount} of ${totalRealUserTurns} total turns, tail has ${apiTailUserIndices.length} entries`,
+      );
+      return -1;
+    }
+
+    return apiTailUserIndices[targetOrdinal - compressedTurnCount - 1]!;
+  }
+
+  if (targetOrdinal === 1) {
     // Rewinding to the first user turn: keep only startup context (if any)
     return startIndex;
   }
 
-  // Walk the API history from after the startup context, counting
-  // user text prompts to find the one corresponding to the target turn.
-  let realUserPromptCount = 0;
+  const apiUserTextIndices = getApiUserTextIndices(
+    apiHistory,
+    startIndex,
+    false,
+  );
+  const targetApiIndex = apiUserTextIndices[targetOrdinal - 1];
+  if (targetApiIndex !== undefined) return targetApiIndex;
 
-  for (let i = startIndex; i < apiHistory.length; i++) {
-    if (isUserTextContent(apiHistory[i]!)) {
-      realUserPromptCount++;
-      // The target turn is the (uiUserTurnCount + 1)th real user prompt.
-      // We want to truncate right before it.
-      if (realUserPromptCount > uiUserTurnCount) {
-        return i;
-      }
-    }
-  }
-
-  // If we didn't find enough user prompts (e.g., after compression),
-  // signal that the target turn is unreachable.
   return -1;
 }

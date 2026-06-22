@@ -38,6 +38,7 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+import { COMPRESSION_SUMMARY_MODEL_ACK } from './chat-compression-constants.js';
 
 /**
  * Hard cap on the compression sideQuery output (summary text only, since
@@ -665,10 +666,7 @@ export class ChatCompressionService {
           },
           {
             role: 'model',
-            parts: [
-              { text: 'Got it. Thanks for the additional context!' },
-              ...fcParts,
-            ],
+            parts: [{ text: COMPRESSION_SUMMARY_MODEL_ACK }, ...fcParts],
           },
         ];
       }

@@ -209,6 +209,7 @@ export type {
   TokenUsageTotals,
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
+export * from './services/chat-compression-constants.js';
 export {
   stripTerminalControlSequences,
   TERMINAL_OSC_REGEX,

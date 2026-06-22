@@ -9,9 +9,13 @@ import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
+  COMPRESSION_CONTINUATION_BRIDGE,
+  COMPRESSION_SUMMARY_MODEL_ACK,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
+
+const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,6 +29,17 @@ function modelContent(text: string): Content {
   return { role: 'model', parts: [{ text } as Part] };
 }
 
+function functionCallContent(): Content {
+  return {
+    role: 'model',
+    parts: [
+      {
+        functionCall: { name: 'tool', args: {} },
+      } as unknown as Part,
+    ],
+  };
+}
+
 function functionResponseContent(): Content {
   return {
     role: 'user',
@@ -34,6 +49,13 @@ function functionResponseContent(): Content {
       } as unknown as Part,
     ],
   };
+}
+
+function startupPair(): [Content, Content] {
+  return [
+    userContent('Environment context...'),
+    modelContent(STARTUP_CONTEXT_MODEL_ACK),
+  ];
 }
 
 function startupEntry(): Content {
@@ -68,6 +90,16 @@ describe('computeApiTruncationIndex', () => {
     const ui: HistoryItem[] = [userItem(1)];
     const api: Content[] = [];
     expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+  });
+
+  it('returns -1 when the target user item is absent', () => {
+    const ui: HistoryItem[] = [userItem(1), geminiItem(2)];
+    const api: Content[] = [
+      userContent('prompt 1'),
+      modelContent('response 1'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 99, api)).toBe(-1);
   });
 
   describe('without startup context', () => {
@@ -248,6 +280,178 @@ describe('computeApiTruncationIndex', () => {
   });
 
   describe('compression fallback', () => {
+    it('maps tail user turns after a compression summary pair', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(2);
+    });
+
+    it('keeps compressed turns unreachable after a compression summary pair', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    });
+
+    it('keeps the first UI turn unreachable when compression absorbed it', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+    });
+
+    it('does not treat post-compact attachment restoration as a tail turn', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent(
+          'Recently accessed file (full current content embedded):\n\n' +
+            '## a.ts\n\n```ts\nexport const a = 1;\n```',
+        ),
+        functionCallContent(),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
+
+    it('maps compressed tail turns after startup context', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        ...startupPair(),
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
+
+    it('ignores the compression continuation bridge when mapping tail turns', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent(COMPRESSION_CONTINUATION_BRIDGE),
+        modelContent('continued response'),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
+
+    it('skips the legacy visible bridge text without the sentinel', () => {
+      const visibleBridgeText =
+        'Continue with the prior task using the context above.';
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5, visibleBridgeText),
+        geminiItem(6),
+        userItem(7),
+        geminiItem(8),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent(visibleBridgeText),
+        modelContent('continued response'),
+        userContent('prompt 7'),
+        modelContent('response 7'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 7, api)).toBe(4);
+    });
+
+    it('ignores tool-call entries between the bridge and next tail prompt', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('compressed summary of prompt 1 and prompt 3'),
+        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
+        userContent(COMPRESSION_CONTINUATION_BRIDGE),
+        functionCallContent(),
+        functionResponseContent(),
+        modelContent('tool result response'),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
+    });
+
     it('returns -1 when not enough user prompts found', () => {
       const ui: HistoryItem[] = [
         userItem(1),

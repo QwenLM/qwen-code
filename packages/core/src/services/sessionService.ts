@@ -1374,8 +1374,70 @@ function copyContentForApiHistory(content: Content): Content {
   };
 }
 
+function getUserRecordText(record: ChatRecord): string {
+  const textParts =
+    record.message?.parts
+      ?.filter(
+        (part): part is { text: string } & Part =>
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.trim().length > 0,
+      )
+      .map((part) => part.text.trim()) ?? [];
+  return textParts.join(' ');
+}
+
+function isResumeSlashCommand(query: string): boolean {
+  if (!query.startsWith('/')) {
+    return false;
+  }
+  if (query.startsWith('//') || query.startsWith('/*')) {
+    return false;
+  }
+  const firstToken = query.slice(1).trimStart().split(/\s+/u)[0] ?? '';
+  if (/[/\\]/.test(firstToken)) {
+    return false;
+  }
+  return true;
+}
+
+function isModelFacingUserRecordForApiHistory(record: ChatRecord): boolean {
+  if (record.type !== 'user') {
+    return false;
+  }
+  if (
+    record.subtype === 'notification' ||
+    record.subtype === 'mid_turn_user_message'
+  ) {
+    return false;
+  }
+  if (
+    record.message?.parts?.some(
+      (part) => 'functionResponse' in part && part.functionResponse,
+    )
+  ) {
+    return true;
+  }
+  const fullText = getUserRecordText(record);
+  if (fullText.length === 0) {
+    return false;
+  }
+  if (record.subtype === 'cron') {
+    return true;
+  }
+  return !fullText.startsWith('?') && !isResumeSlashCommand(fullText);
+}
+
 function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
   if (!record.message) return;
+
+  if (
+    record.type === 'user' &&
+    record.subtype !== 'mid_turn_user_message' &&
+    !isModelFacingUserRecordForApiHistory(record)
+  ) {
+    return;
+  }
 
   const message = copyContentForApiHistory(record.message as Content);
   if (record.subtype === 'mid_turn_user_message') {

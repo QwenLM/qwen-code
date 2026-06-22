@@ -3,7 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { AcpConnection } from './acpConnection.js';
+import { AcpConnection, type AcpHistorySnapshot } from './acpConnection.js';
 import type {
   ModelInfo,
   AvailableCommand,
@@ -41,7 +41,7 @@ import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
 import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
 
-export type { ChatMessage, PlanEntry, ToolCallUpdateData };
+export type { AcpHistorySnapshot, ChatMessage, PlanEntry, ToolCallUpdateData };
 
 /**
  * Extract session list items from ACP response.
@@ -398,11 +398,11 @@ export class QwenAgentManager {
 
   async rewindSession(
     targetTurnIndex: number,
-  ): Promise<{ historyBeforeRewind?: unknown[] }> {
+  ): Promise<{ historyBeforeRewind?: AcpHistorySnapshot }> {
     return this.connection.rewindSession(targetTurnIndex);
   }
 
-  async restoreSessionHistory(history: unknown[]): Promise<void> {
+  async restoreSessionHistory(history: AcpHistorySnapshot): Promise<void> {
     await this.connection.restoreSessionHistory(history);
   }
 

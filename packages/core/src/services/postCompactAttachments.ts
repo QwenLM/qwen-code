@@ -23,6 +23,7 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { COMPRESSION_SUMMARY_MODEL_ACK } from './chat-compression-constants.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -825,9 +826,7 @@ export async function composePostCompactHistory(
   //                       model→model adjacency that would otherwise
   //                       arise from a separate appended entry.
   const trailingFc = trailingFunctionCallContent(history);
-  const ackParts: Part[] = [
-    { text: 'Got it. Thanks for the additional context!' },
-  ];
+  const ackParts: Part[] = [{ text: COMPRESSION_SUMMARY_MODEL_ACK }];
 
   const out: Content[] = [
     { role: 'user', parts: [{ text: postProcessSummary(summary) }] },

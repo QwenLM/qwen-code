@@ -137,7 +137,11 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  Session,
+  buildAvailableCommandsSnapshot,
+  type HistorySnapshot,
+} from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
 import {
@@ -6290,7 +6294,25 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        if (!Array.isArray(history)) {
+        const isHistorySnapshot =
+          !!history &&
+          typeof history === 'object' &&
+          !Array.isArray(history) &&
+          Array.isArray((history as { history?: unknown }).history) &&
+          ((history as { history?: unknown[] }).history?.length ?? 0) > 0 &&
+          Number.isInteger(
+            (history as { modelFacingUserTurnCount?: unknown })
+              .modelFacingUserTurnCount,
+          ) &&
+          Number.isFinite(
+            (history as { modelFacingUserTurnCount?: unknown })
+              .modelFacingUserTurnCount as number,
+          ) &&
+          ((history as { modelFacingUserTurnCount?: unknown })
+            .modelFacingUserTurnCount as number) >= 0 &&
+          ((history as { modelFacingUserTurnCount?: unknown })
+            .modelFacingUserTurnCount as number) <= Number.MAX_SAFE_INTEGER;
+        if (!Array.isArray(history) && !isHistorySnapshot) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing history',
@@ -6304,7 +6326,7 @@ class QwenAgent implements Agent {
           );
         }
 
-        session.restoreHistory(history as Content[]);
+        session.restoreHistory(history as Content[] | HistorySnapshot);
         return { success: true };
       }
       case 'getAccountInfo': {

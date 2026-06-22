@@ -64,7 +64,6 @@ import {
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
-  isSystemReminderContent,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -138,6 +137,12 @@ import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType, type HistoryItemGoalStatus } from '../../ui/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import {
+  getApiUserTextIndices,
+  getCompressionTailStartIndex,
+  hasCompressionSummaryPair,
+  isApiUserTextContent,
+} from '../../utils/api-history-utils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
@@ -174,8 +179,100 @@ function maskApiKeyForDisplay(apiKey: string | undefined): string {
 }
 
 type AutoCompressionSendResult =
-  | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
-  | { responseStream: null; stopReason: PromptResponse['stopReason'] };
+  | {
+      responseStream: AsyncGenerator<StreamEvent>;
+      stopReason?: never;
+      historyCompressed?: boolean;
+    }
+  | {
+      responseStream: null;
+      stopReason: PromptResponse['stopReason'];
+      historyCompressed?: boolean;
+    };
+
+export interface HistorySnapshot {
+  history: Content[];
+  modelFacingUserTurnCount: number;
+}
+
+function computeVisibleModelFacingUserTurnCount(apiHistory: Content[]): number {
+  const startIndex = getStartupContextLength(apiHistory);
+  if (hasCompressionSummaryPair(apiHistory, startIndex)) {
+    return getApiUserTextIndices(
+      apiHistory,
+      getCompressionTailStartIndex(apiHistory, startIndex),
+      true,
+    ).length;
+  }
+  return getApiUserTextIndices(apiHistory, startIndex, true).length;
+}
+
+function validateModelFacingUserTurnCount(count: unknown): number {
+  if (typeof count !== 'number' || !Number.isInteger(count)) {
+    throw RequestError.invalidParams(
+      undefined,
+      `modelFacingUserTurnCount must be an integer, got ${typeof count}`,
+    );
+  }
+  if (!Number.isFinite(count) || count < 0) {
+    throw RequestError.invalidParams(
+      undefined,
+      `modelFacingUserTurnCount must be a non-negative finite integer, got ${count}`,
+    );
+  }
+  if (count > Number.MAX_SAFE_INTEGER) {
+    throw RequestError.invalidParams(
+      undefined,
+      `modelFacingUserTurnCount exceeds maximum safe integer, got ${count}`,
+    );
+  }
+  return count;
+}
+
+function validateModelFacingUserTurnCountForHistory(
+  history: Content[],
+  count: unknown,
+  maxKnownModelFacingUserTurnCount: number,
+): number {
+  const validatedCount = validateModelFacingUserTurnCount(count);
+  const startIndex = getStartupContextLength(history);
+
+  if (hasCompressionSummaryPair(history, startIndex)) {
+    const visibleTailTurnCount = getApiUserTextIndices(
+      history,
+      getCompressionTailStartIndex(history, startIndex),
+      true,
+    ).length;
+    if (validatedCount < visibleTailTurnCount) {
+      throw RequestError.invalidParams(
+        undefined,
+        `modelFacingUserTurnCount ${validatedCount} is less than visible model-facing user entries ${visibleTailTurnCount}`,
+      );
+    }
+    if (validatedCount > maxKnownModelFacingUserTurnCount) {
+      throw RequestError.invalidParams(
+        undefined,
+        `modelFacingUserTurnCount ${validatedCount} exceeds known model-facing user entries ${maxKnownModelFacingUserTurnCount}`,
+      );
+    }
+    return validatedCount;
+  }
+
+  const visibleTurnCount = computeVisibleModelFacingUserTurnCount(history);
+  if (validatedCount < visibleTurnCount) {
+    throw RequestError.invalidParams(
+      undefined,
+      `modelFacingUserTurnCount ${validatedCount} is less than visible model-facing user entries ${visibleTurnCount}`,
+    );
+  }
+  if (validatedCount > visibleTurnCount) {
+    throw RequestError.invalidParams(
+      undefined,
+      `modelFacingUserTurnCount ${validatedCount} exceeds visible model-facing user entries ${visibleTurnCount}`,
+    );
+  }
+  return validatedCount;
+}
 
 type RunToolResult = {
   parts: Part[];
@@ -448,6 +545,51 @@ export function computeInitialTurnFromHistory(
   return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
 }
 
+export function computeInitialModelFacingUserTurnCountFromHistory(
+  records: ChatRecord[],
+  sessionId: string,
+): number {
+  return records.filter(
+    (record) =>
+      record.sessionId === sessionId && isModelFacingUserPromptRecord(record),
+  ).length;
+}
+
+export function computeMaxModelFacingUserTurnCountFromHistory(
+  records: ChatRecord[],
+  sessionId: string,
+): number {
+  let maxModelFacingUserTurnCount = 0;
+
+  for (const record of records) {
+    if (
+      record.sessionId !== sessionId ||
+      record.type !== 'system' ||
+      record.subtype !== 'rewind'
+    ) {
+      continue;
+    }
+
+    const count = (
+      record.systemPayload as { maxModelFacingUserTurnCount?: unknown }
+    )?.maxModelFacingUserTurnCount;
+    if (
+      typeof count === 'number' &&
+      Number.isInteger(count) &&
+      Number.isFinite(count) &&
+      count >= 0 &&
+      count <= Number.MAX_SAFE_INTEGER
+    ) {
+      maxModelFacingUserTurnCount = Math.max(
+        maxModelFacingUserTurnCount,
+        count,
+      );
+    }
+  }
+
+  return maxModelFacingUserTurnCount;
+}
+
 export async function fireSessionPermissionDeniedForAutoMode(
   config: Config,
   decision: AutoModeDecision,
@@ -514,6 +656,35 @@ function isUserPromptRecord(record: ChatRecord): boolean {
       (part) => typeof part.text === 'string' && part.text.trim().length > 0,
     ) ?? false
   );
+}
+
+function isModelFacingUserPromptRecord(record: ChatRecord): boolean {
+  if (record.type !== 'user') {
+    return false;
+  }
+  if (
+    record.subtype === 'notification' ||
+    record.subtype === 'mid_turn_user_message'
+  ) {
+    return false;
+  }
+  const textParts =
+    record.message?.parts
+      ?.filter(
+        (part): part is { text: string } & Part =>
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.trim().length > 0,
+      )
+      .map((part) => part.text.trim()) ?? [];
+  if (textParts.length === 0) {
+    return false;
+  }
+  if (record.subtype === 'cron') {
+    return true;
+  }
+  const fullText = textParts.join(' ');
+  return !fullText.startsWith('?') && !isSlashCommand(fullText);
 }
 
 export interface AvailableCommandsSnapshot {
@@ -643,6 +814,8 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private modelFacingUserTurnCount: number = 0;
+  private maxModelFacingUserTurnCount: number = 0;
   private readonly createdAt: number = Date.now();
   /**
    * Running cumulative usage for this session, snapshotted onto each todo/plan
@@ -850,6 +1023,23 @@ export class Session implements SessionContext {
       this.turn,
       computeInitialTurnFromHistory(records, this.config.getSessionId()),
     );
+    const initialModelFacingUserTurnCount =
+      computeInitialModelFacingUserTurnCountFromHistory(
+        records,
+        this.config.getSessionId(),
+      );
+    this.modelFacingUserTurnCount = Math.max(
+      this.modelFacingUserTurnCount,
+      initialModelFacingUserTurnCount,
+    );
+    this.maxModelFacingUserTurnCount = Math.max(
+      this.maxModelFacingUserTurnCount,
+      this.modelFacingUserTurnCount,
+      computeMaxModelFacingUserTurnCountFromHistory(
+        records,
+        this.config.getSessionId(),
+      ),
+    );
     await this.historyReplayer.replay(records);
   }
 
@@ -893,6 +1083,9 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
+    // targetTurnIndex is zero-based; after truncating before that turn,
+    // exactly targetTurnIndex model-facing user turns remain.
+    this.modelFacingUserTurnCount = targetTurnIndex;
 
     const fileHistoryService = this.config.getFileHistoryService();
     const survivingSnapshots = fileHistoryService
@@ -901,22 +1094,26 @@ export class Session implements SessionContext {
 
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
-    this.config
-      .getChatRecordingService()
-      ?.rewindRecording(
-        targetTurnIndex,
-        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
-        survivingSnapshots,
-      );
+    this.config.getChatRecordingService()?.rewindRecording(
+      targetTurnIndex,
+      {
+        truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex),
+        maxModelFacingUserTurnCount: this.maxModelFacingUserTurnCount,
+      },
+      survivingSnapshots,
+    );
 
     return { targetTurnIndex, apiTruncateIndex };
   }
 
-  captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
+  captureHistorySnapshot(): HistorySnapshot {
+    return {
+      history: this.config.getGeminiClient()!.getChat().getHistoryShallow(),
+      modelFacingUserTurnCount: this.modelFacingUserTurnCount,
+    };
   }
 
-  restoreHistory(history: Content[]): void {
+  restoreHistory(snapshot: Content[] | HistorySnapshot): void {
     if (
       this.pendingPrompt ||
       this.cronProcessing ||
@@ -930,10 +1127,29 @@ export class Session implements SessionContext {
       );
     }
 
+    const history = Array.isArray(snapshot) ? snapshot : snapshot.history;
+    if (history.length === 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot restore an empty history snapshot',
+      );
+    }
+    const newModelFacingUserTurnCount = Array.isArray(snapshot)
+      ? computeVisibleModelFacingUserTurnCount(history)
+      : validateModelFacingUserTurnCountForHistory(
+          history,
+          snapshot.modelFacingUserTurnCount,
+          this.maxModelFacingUserTurnCount,
+        );
     this.config
       .getGeminiClient()!
       .getChat()
       .setHistory(structuredClone(history));
+    this.modelFacingUserTurnCount = newModelFacingUserTurnCount;
+    this.maxModelFacingUserTurnCount = Math.max(
+      this.maxModelFacingUserTurnCount,
+      newModelFacingUserTurnCount,
+    );
   }
 
   #computeApiTruncationIndexForUserTurn(
@@ -946,40 +1162,63 @@ export class Session implements SessionContext {
       return startIndex;
     }
 
-    let realUserPromptCount = 0;
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (!this.#isUserTextContent(apiHistory[i]!)) {
-        continue;
+    if (hasCompressionSummaryPair(apiHistory, startIndex)) {
+      const apiTailUserIndices = getApiUserTextIndices(
+        apiHistory,
+        getCompressionTailStartIndex(apiHistory, startIndex),
+        true,
+      );
+      if (this.modelFacingUserTurnCount < targetTurnIndex + 1) {
+        debugLogger.warn(
+          `Cannot rewind to user turn ${targetTurnIndex}; ` +
+            `modelFacingUserTurnCount=${this.modelFacingUserTurnCount}, ` +
+            `apiHistoryLength=${apiHistory.length}, startIndex=${startIndex}.`,
+        );
+        return -1;
+      }
+      const totalUserTurns = this.modelFacingUserTurnCount;
+      if (totalUserTurns < apiTailUserIndices.length) {
+        debugLogger.warn(
+          `Inconsistent compressed rewind state for turn ${targetTurnIndex}: ` +
+            `modelFacingUserTurnCount=${totalUserTurns}, ` +
+            `apiTailUserIndices.length=${apiTailUserIndices.length}, ` +
+            `apiHistoryLength=${apiHistory.length}, startIndex=${startIndex}.`,
+        );
+      }
+      const compressedTurnCount = Math.max(
+        0,
+        totalUserTurns - apiTailUserIndices.length,
+      );
+
+      if (targetTurnIndex < compressedTurnCount) {
+        debugLogger.warn(
+          `Rewind to turn ${targetTurnIndex} rejected after compression: ` +
+            `compressedTurnCount=${compressedTurnCount}, ` +
+            `modelFacingUserTurnCount=${totalUserTurns}, ` +
+            `apiTailUserIndices.length=${apiTailUserIndices.length}, ` +
+            `apiHistoryLength=${apiHistory.length}, startIndex=${startIndex}.`,
+        );
+        return -1;
       }
 
-      if (realUserPromptCount === targetTurnIndex) {
-        return i;
+      const tailOffset = targetTurnIndex - compressedTurnCount;
+      if (tailOffset < 0 || tailOffset >= apiTailUserIndices.length) {
+        debugLogger.warn(
+          `Compressed rewind index out of bounds: targetTurnIndex=${targetTurnIndex}, ` +
+            `compressedTurnCount=${compressedTurnCount}, ` +
+            `apiTailUserIndices.length=${apiTailUserIndices.length}, ` +
+            `apiHistoryLength=${apiHistory.length}, startIndex=${startIndex}.`,
+        );
+        return -1;
       }
 
-      realUserPromptCount += 1;
+      return apiTailUserIndices[tailOffset]!;
     }
 
-    return -1;
-  }
-
-  #isUserTextContent(content: Content): boolean {
-    if (content.role !== 'user') return false;
-    if (!content.parts || content.parts.length === 0) return false;
-
-    const hasFunctionResponse = content.parts.some(
-      (part) => 'functionResponse' in part,
+    return (
+      getApiUserTextIndices(apiHistory, startIndex, false)[targetTurnIndex] ??
+      -1
     );
-    if (hasFunctionResponse) return false;
-
-    // Exclude pure <system-reminder> entries (the startup prelude and the
-    // mid-history MCP added-tool reminders). They are structural, not real
-    // user prompts; counting them would shift the rewind truncation index and
-    // silently drop a real turn. A genuine user turn that merely has a
-    // per-turn reminder prepended still has a non-reminder prompt part, so it
-    // is NOT excluded.
-    if (isSystemReminderContent(content)) return false;
-
-    return content.parts.some((part) => 'text' in part && part.text);
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -1428,6 +1667,7 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.#getCurrentChat().addHistory(nextMessage);
+                  this.#recordModelFacingUserTurn(nextMessage);
                   return { stopReason: 'cancelled' };
                 }
 
@@ -1435,21 +1675,36 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
+                let recordedModelFacingTurn = false;
+                let sendHistoryCompressed = false;
+                let sendDispatched = false;
 
                 try {
+                  recordedModelFacingTurn =
+                    this.#recordModelFacingUserTurn(nextMessage);
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
                     );
+                  sendHistoryCompressed = !!sendResult.historyCompressed;
                   if (!sendResult.responseStream) {
+                    if (
+                      sendResult.stopReason !== 'cancelled' &&
+                      !sendHistoryCompressed
+                    ) {
+                      this.#rollbackModelFacingUserTurn(
+                        recordedModelFacingTurn,
+                      );
+                    }
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
                       sendResult.stopReason === 'cancelled',
                     );
                     return { stopReason: sendResult.stopReason };
                   }
+                  sendDispatched = true;
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
 
@@ -1492,6 +1747,9 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
+                  if (!sendDispatched && !sendHistoryCompressed) {
+                    this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
+                  }
                   // Only explicit user cancellation maps to a normal
                   // cancelled turn. Other aborts/errors should surface so
                   // infra failures are not hidden as successful cancels.
@@ -1728,8 +1986,13 @@ export class Session implements SessionContext {
           const functionCalls: FunctionCall[] = [];
           let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
           const streamStartTime = Date.now();
+          let recordedModelFacingTurn = false;
+          let sendHistoryCompressed = false;
+          let sendDispatched = false;
 
           try {
+            recordedModelFacingTurn =
+              this.#recordModelFacingUserTurn(nextMessage);
             const continueSendResult =
               await this.#sendMessageStreamWithAutoCompression(
                 promptId + '_stop_hook_' + stopHookIterationCount,
@@ -1737,13 +2000,21 @@ export class Session implements SessionContext {
                 pendingSend.signal,
                 { skipCompression: stopHookIterationCount > 1 },
               );
+            sendHistoryCompressed = !!continueSendResult.historyCompressed;
             if (!continueSendResult.responseStream) {
+              if (
+                continueSendResult.stopReason !== 'cancelled' &&
+                !continueSendResult.historyCompressed
+              ) {
+                this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
+              }
               this.#preserveUnsentMessageHistory(
                 nextMessage,
                 continueSendResult.stopReason === 'cancelled',
               );
               return { stopReason: continueSendResult.stopReason };
             }
+            sendDispatched = true;
             const continueResponseStream = continueSendResult.responseStream;
             nextMessage = null;
 
@@ -1783,6 +2054,10 @@ export class Session implements SessionContext {
               }
             }
           } catch (error) {
+            if (!sendDispatched && !sendHistoryCompressed) {
+              this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
+            }
+
             // Fire StopFailure hook (fire-and-forget)
             const errorStatus = getErrorStatus(error);
             const errorMessage =
@@ -1875,6 +2150,27 @@ export class Session implements SessionContext {
     return this.config.getGeminiClient()!.getChat();
   }
 
+  #recordModelFacingUserTurn(message: Content): boolean {
+    if (isApiUserTextContent(message)) {
+      this.modelFacingUserTurnCount += 1;
+      this.maxModelFacingUserTurnCount = Math.max(
+        this.maxModelFacingUserTurnCount,
+        this.modelFacingUserTurnCount,
+      );
+      return true;
+    }
+    return false;
+  }
+
+  #rollbackModelFacingUserTurn(recorded: boolean): void {
+    if (recorded) {
+      this.modelFacingUserTurnCount = Math.max(
+        0,
+        this.modelFacingUserTurnCount - 1,
+      );
+    }
+  }
+
   /**
    * Mirrors the core send path for ACP model sends.
    *
@@ -1892,6 +2188,7 @@ export class Session implements SessionContext {
     const geminiClient = this.config.getGeminiClient()!;
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
+    let historyCompressed = false;
     if (!options.skipCompression) {
       try {
         const compressed = await geminiClient.tryCompressChat(
@@ -1902,6 +2199,7 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          historyCompressed = true;
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
@@ -1915,7 +2213,11 @@ export class Session implements SessionContext {
       } catch (compressionError) {
         if (abortSignal.aborted || this.#isAbortError(compressionError)) {
           debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
-          return { responseStream: null, stopReason: 'cancelled' };
+          return {
+            responseStream: null,
+            stopReason: 'cancelled',
+            historyCompressed,
+          };
         }
         debugLogger.warn(
           `Auto-compression failed for prompt ${promptId}; proceeding without compression: ` +
@@ -1926,7 +2228,11 @@ export class Session implements SessionContext {
 
     if (abortSignal.aborted) {
       debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
-      return { responseStream: null, stopReason: 'cancelled' };
+      return {
+        responseStream: null,
+        stopReason: 'cancelled',
+        historyCompressed,
+      };
     }
 
     if (!compressionInfo) {
@@ -1947,7 +2253,11 @@ export class Session implements SessionContext {
             'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           `Failed to emit token limit diagnostic for prompt ${promptId}`,
         );
-        return { responseStream: null, stopReason: 'max_tokens' };
+        return {
+          responseStream: null,
+          stopReason: 'max_tokens',
+          historyCompressed,
+        };
       }
     }
 
@@ -1962,7 +2272,11 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after compression diagnostic for prompt ${promptId}`,
       );
-      return { responseStream: null, stopReason: 'cancelled' };
+      return {
+        responseStream: null,
+        stopReason: 'cancelled',
+        historyCompressed,
+      };
     }
 
     const responseStream = await this.#getCurrentChat().sendMessageStream(
@@ -1975,7 +2289,7 @@ export class Session implements SessionContext {
       },
       promptId,
     );
-    return { responseStream };
+    return { responseStream, historyCompressed };
   }
 
   #preserveUnsentMessageHistory(
@@ -2459,71 +2773,93 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
+                let recordedModelFacingTurn = false;
+                let sendHistoryCompressed = false;
+                let sendDispatched = false;
 
-                const sendResult =
-                  await this.#sendMessageStreamWithAutoCompression(
-                    promptId,
-                    nextMessage.parts ?? [],
-                    ac.signal,
-                  );
-                if (!sendResult.responseStream) {
-                  this.#preserveUnsentMessageHistory(
-                    nextMessage,
-                    sendResult.stopReason === 'cancelled',
-                  );
-                  if (sendResult.stopReason === 'max_tokens') {
-                    this.#stopCronAfterTokenLimit();
-                  }
-                  return;
-                }
-                const responseStream = sendResult.responseStream;
-                nextMessage = null;
-
-                for await (const resp of responseStream) {
-                  if (ac.signal.aborted) return;
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.candidates &&
-                    resp.value.candidates.length > 0
-                  ) {
-                    const candidate = resp.value.candidates[0];
-                    for (const part of candidate.content?.parts ?? []) {
-                      if (!part.text) continue;
-                      this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        part.thought,
+                try {
+                  recordedModelFacingTurn =
+                    this.#recordModelFacingUserTurn(nextMessage);
+                  const sendResult =
+                    await this.#sendMessageStreamWithAutoCompression(
+                      promptId,
+                      nextMessage.parts ?? [],
+                      ac.signal,
+                    );
+                  sendHistoryCompressed = !!sendResult.historyCompressed;
+                  if (!sendResult.responseStream) {
+                    if (
+                      sendResult.stopReason !== 'cancelled' &&
+                      !sendHistoryCompressed
+                    ) {
+                      this.#rollbackModelFacingUserTurn(
+                        recordedModelFacingTurn,
                       );
+                    }
+                    this.#preserveUnsentMessageHistory(
+                      nextMessage,
+                      sendResult.stopReason === 'cancelled',
+                    );
+                    if (sendResult.stopReason === 'max_tokens') {
+                      this.#stopCronAfterTokenLimit();
+                    }
+                    return;
+                  }
+                  sendDispatched = true;
+                  const responseStream = sendResult.responseStream;
+                  nextMessage = null;
+
+                  for await (const resp of responseStream) {
+                    if (ac.signal.aborted) return;
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.candidates &&
+                      resp.value.candidates.length > 0
+                    ) {
+                      const candidate = resp.value.candidates[0];
+                      for (const part of candidate.content?.parts ?? []) {
+                        if (!part.text) continue;
+                        this.messageEmitter.emitMessage(
+                          part.text,
+                          'assistant',
+                          part.thought,
+                        );
+                      }
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.usageMetadata
+                    ) {
+                      usageMetadata = resp.value.usageMetadata;
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.functionCalls
+                    ) {
+                      functionCalls.push(...resp.value.functionCalls);
                     }
                   }
 
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.usageMetadata
-                  ) {
-                    usageMetadata = resp.value.usageMetadata;
+                  if (usageMetadata) {
+                    this.#recordPromptTokenCount(usageMetadata);
+                    if (this.messageRewriter) {
+                      this.messageRewriter.flushTurn(ac.signal);
+                    }
+                    const durationMs = Date.now() - streamStartTime;
+                    await this.messageEmitter.emitUsageMetadata(
+                      usageMetadata,
+                      '',
+                      durationMs,
+                    );
                   }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.functionCalls
-                  ) {
-                    functionCalls.push(...resp.value.functionCalls);
+                } catch (error) {
+                  if (!sendDispatched && !sendHistoryCompressed) {
+                    this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
                   }
-                }
-
-                if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
-                  if (this.messageRewriter) {
-                    this.messageRewriter.flushTurn(ac.signal);
-                  }
-                  const durationMs = Date.now() - streamStartTime;
-                  await this.messageEmitter.emitUsageMetadata(
-                    usageMetadata,
-                    '',
-                    durationMs,
-                  );
+                  throw error;
                 }
 
                 if (functionCalls.length > 0) {
@@ -2761,65 +3097,85 @@ export class Session implements SessionContext {
               null;
             let responseText = '';
             const streamStartTime = Date.now();
+            let recordedModelFacingTurn = false;
+            let sendHistoryCompressed = false;
+            let sendDispatched = false;
 
-            const sendResult = await this.#sendMessageStreamWithAutoCompression(
-              promptId,
-              nextMessage.parts ?? [],
-              ac.signal,
-            );
-            if (!sendResult.responseStream) {
-              this.#preserveUnsentMessageHistory(
-                nextMessage,
-                sendResult.stopReason === 'cancelled',
-              );
-              await this.#emitBackgroundNotificationEndTurn(
-                sendResult.stopReason,
-              );
-              return;
-            }
-
-            const responseStream = sendResult.responseStream;
-            nextMessage = null;
-
-            for await (const resp of responseStream) {
-              if (ac.signal.aborted) {
-                await this.#emitBackgroundNotificationEndTurn('cancelled');
+            try {
+              recordedModelFacingTurn =
+                this.#recordModelFacingUserTurn(nextMessage);
+              const sendResult =
+                await this.#sendMessageStreamWithAutoCompression(
+                  promptId,
+                  nextMessage.parts ?? [],
+                  ac.signal,
+                );
+              sendHistoryCompressed = !!sendResult.historyCompressed;
+              if (!sendResult.responseStream) {
+                if (
+                  sendResult.stopReason !== 'cancelled' &&
+                  !sendHistoryCompressed
+                ) {
+                  this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
+                }
+                this.#preserveUnsentMessageHistory(
+                  nextMessage,
+                  sendResult.stopReason === 'cancelled',
+                );
+                await this.#emitBackgroundNotificationEndTurn(
+                  sendResult.stopReason,
+                );
                 return;
               }
+              sendDispatched = true;
+              const responseStream = sendResult.responseStream;
+              nextMessage = null;
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) continue;
-                  if (part.thought) {
-                    await this.messageEmitter.emitMessage(
-                      part.text,
-                      'assistant',
-                      true,
-                    );
-                  } else {
-                    responseText += part.text;
+              for await (const resp of responseStream) {
+                if (ac.signal.aborted) {
+                  await this.#emitBackgroundNotificationEndTurn('cancelled');
+                  return;
+                }
+
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.candidates &&
+                  resp.value.candidates.length > 0
+                ) {
+                  const candidate = resp.value.candidates[0];
+                  for (const part of candidate.content?.parts ?? []) {
+                    if (!part.text) continue;
+                    if (part.thought) {
+                      await this.messageEmitter.emitMessage(
+                        part.text,
+                        'assistant',
+                        true,
+                      );
+                    } else {
+                      responseText += part.text;
+                    }
                   }
                 }
-              }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
-              }
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.usageMetadata
+                ) {
+                  usageMetadata = resp.value.usageMetadata;
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.functionCalls
+                ) {
+                  functionCalls.push(...resp.value.functionCalls);
+                }
               }
+            } catch (error) {
+              if (!sendDispatched && !sendHistoryCompressed) {
+                this.#rollbackModelFacingUserTurn(recordedModelFacingTurn);
+              }
+              throw error;
             }
 
             if (responseText.length > 0) {
