@@ -45,7 +45,6 @@
     "fastify": "^5.3.2",
     "is-admin": "^4.0.0",
     "node-fetch": "2",
-    "pino": "^9.6.0",
     "uuid": "^11.1.0"
   },
   "devDependencies": {
@@ -61,7 +60,6 @@
     "jest": "^29.7.0",
     "lint-staged": "^15.5.1",
     "nodemon": "^3.1.10",
-    "pino-pretty": "^13.0.0",
     "rimraf": "^6.0.1",
     "supertest": "^7.1.0",
     "ts-jest": "^29.3.2",
