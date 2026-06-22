@@ -133,18 +133,18 @@ jobs:
           merge-multiple: true
           path: 'packages/audio-capture/prebuilds'
       - name: 'List collected prebuilds'
-        run: 'find packages/audio-capture/prebuilds -type f'
+        run: 'find prebuilds -type f'
       - name: 'Verify all prebuilds are present'
         run: |
           # Keep in sync with the build and build-linux matrices above.
           for file in \
-            packages/audio-capture/prebuilds/darwin-arm64/node.napi.node \
-            packages/audio-capture/prebuilds/darwin-x64/node.napi.node \
-            packages/audio-capture/prebuilds/win32-x64/node.napi.node \
-            packages/audio-capture/prebuilds/win32-arm64/node.napi.node \
-            packages/audio-capture/prebuilds/linux-x64/node.napi.glibc.node \
-            packages/audio-capture/prebuilds/linux-x64/node.napi.musl.node \
-            packages/audio-capture/prebuilds/linux-arm64/node.napi.glibc.node
+            prebuilds/darwin-arm64/node.napi.node \
+            prebuilds/darwin-x64/node.napi.node \
+            prebuilds/win32-x64/node.napi.node \
+            prebuilds/win32-arm64/node.napi.node \
+            prebuilds/linux-x64/node.napi.glibc.node \
+            prebuilds/linux-x64/node.napi.musl.node \
+            prebuilds/linux-arm64/node.napi.glibc.node
           do
             test -f "$file" || (echo "::error::Missing: $file" && exit 1)
           done
