@@ -335,6 +335,8 @@ export {
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
+  logWorkflowKeyword,
+  logWorkflowRun,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -348,6 +350,8 @@ export {
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  WorkflowKeywordEvent,
+  WorkflowRunEvent,
 } from './telemetry/types.js';
 
 // ============================================================================

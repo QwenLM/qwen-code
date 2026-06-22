@@ -50,6 +50,8 @@ import {
   PromptSuggestionEvent,
   logSpeculation,
   SpeculationEvent,
+  logWorkflowKeyword,
+  WorkflowKeywordEvent,
   startSpeculation,
   acceptSpeculation,
   abortSpeculation,
@@ -1779,6 +1781,7 @@ export const AppContainer = (props: AppContainerProps) => {
         detectWorkflowKeyword(userPromptText)
       ) {
         setWorkflowKeywordActive(true);
+        logWorkflowKeyword(config, new WorkflowKeywordEvent());
         submittedValue =
           `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;

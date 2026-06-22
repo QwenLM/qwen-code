@@ -40,6 +40,8 @@ import { resolveSavedWorkflowScript } from '../../agents/runtime/workflow-saved.
 import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
 import type { JournalReplay } from '../../agents/runtime/workflow-journal.js';
 import { writeWorkflowSnapshot } from '../../agents/workflow-snapshot.js';
+import { logWorkflowRun } from '../../telemetry/loggers.js';
+import { WorkflowRunEvent } from '../../telemetry/types.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
@@ -459,6 +461,25 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // still running (defensive).
       if (registryEntry && registryEntry.status !== 'running') {
         await writeWorkflowSnapshot(this.config, registryEntry);
+        // P-telemetry: emit the terminal run event (no-op when telemetry is
+        // off). Best-effort: never let a logging failure mask the result.
+        try {
+          logWorkflowRun(
+            this.config,
+            new WorkflowRunEvent({
+              status: registryEntry.status,
+              agents_dispatched: registryEntry.agentsDispatched,
+              agents_completed: registryEntry.agentsCompleted,
+              phase_count: registryEntry.phases.length,
+              tokens_spent: registryEntry.tokensSpent,
+              duration_ms:
+                (registryEntry.endTime ?? registryEntry.startTime) -
+                registryEntry.startTime,
+            }),
+          );
+        } catch {
+          // swallow — telemetry must not affect tool output
+        }
       }
     }
   }
