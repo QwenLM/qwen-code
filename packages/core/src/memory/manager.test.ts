@@ -348,6 +348,96 @@ describe('MemoryManager', () => {
     });
   });
 
+  // ─── scheduleSkillReview() confirmBeforePersist ───────────────────────────
+
+  describe('scheduleSkillReview() confirmBeforePersist', () => {
+    let tempDir: string;
+    let projectRoot: string;
+    let skillFilePath: string;
+
+    beforeEach(async () => {
+      vi.resetAllMocks();
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-confirm-'));
+      projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      // Create a real auto-skill dir under .qwen/skills/
+      const skillDir = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+      );
+      await fs.mkdir(skillDir, { recursive: true });
+      skillFilePath = path.join(skillDir, 'SKILL.md');
+      await fs.writeFile(
+        skillFilePath,
+        '---\ndescription: Foo skill\n---\n# Foo\n',
+      );
+    });
+
+    afterEach(async () => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('stages the skill and records pendingSkills when confirmBeforePersist is true', async () => {
+      vi.mocked(runSkillReviewByAgent).mockResolvedValue({
+        touchedSkillFiles: [skillFilePath],
+      });
+
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+
+      expect(record.status).toBe('completed');
+      const pendingSkills = record.metadata?.['pendingSkills'] as
+        | unknown[]
+        | undefined;
+      expect(pendingSkills).toBeDefined();
+      expect(pendingSkills).toHaveLength(1);
+
+      // The skill must no longer be under .qwen/skills/
+      await expect(fs.access(skillFilePath)).rejects.toThrow();
+    });
+
+    it('leaves the skill in place and sets no pendingSkills when confirmBeforePersist is false', async () => {
+      vi.mocked(runSkillReviewByAgent).mockResolvedValue({
+        touchedSkillFiles: [skillFilePath],
+      });
+
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: false,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+
+      expect(record.status).toBe('completed');
+      expect(record.metadata?.['pendingSkills']).toBeUndefined();
+
+      // The skill must still be under .qwen/skills/
+      await expect(fs.access(skillFilePath)).resolves.toBeUndefined();
+    });
+  });
+
   // ─── listTasksByType() ────────────────────────────────────────────────────
 
   describe('listTasksByType()', () => {

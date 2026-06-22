@@ -76,6 +76,7 @@ import {
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
+import { stageSkillDirs } from './pending-skills.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
@@ -138,6 +139,10 @@ export interface ScheduleSkillReviewParams {
   threshold?: number;
   maxTurns?: number;
   timeoutMs?: number;
+  /** When true, stage created skills for user confirmation instead of
+   * leaving them live in the skills root. Sourced from
+   * Config.getAutoSkillConfirmEnabled(). */
+  confirmBeforePersist?: boolean;
 }
 
 export interface SkillReviewScheduleResult {
@@ -882,13 +887,32 @@ export class MemoryManager {
         maxTurns: params.maxTurns,
         timeoutMs: params.timeoutMs,
       });
-      this.update(record, {
-        status: 'completed',
-        progressText:
-          result.systemMessage ??
-          'Managed skill review completed without durable changes.',
-        metadata: { touchedSkillFiles: result.touchedSkillFiles },
-      });
+
+      if (params.confirmBeforePersist && result.touchedSkillFiles.length > 0) {
+        const pending = await stageSkillDirs(
+          result.touchedSkillFiles,
+          params.projectRoot,
+        );
+        this.update(record, {
+          status: 'completed',
+          progressText:
+            pending.length > 0
+              ? `${pending.length} skill(s) awaiting review.`
+              : 'Managed skill review completed without durable changes.',
+          metadata: {
+            touchedSkillFiles: result.touchedSkillFiles,
+            ...(pending.length > 0 ? { pendingSkills: pending } : {}),
+          },
+        });
+      } else {
+        this.update(record, {
+          status: 'completed',
+          progressText:
+            result.systemMessage ??
+            'Managed skill review completed without durable changes.',
+          metadata: { touchedSkillFiles: result.touchedSkillFiles },
+        });
+      }
     } catch (error) {
       this.update(record, {
         status: 'failed',
