@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore from 'ignore';
+import { isPathWithinRoot } from './workspaceContext.js';
 
 export interface GitIgnoreFilter {
   isIgnored(filePath: string): boolean;
@@ -102,16 +103,14 @@ export class GitIgnoreParser implements GitIgnoreFilter {
       return false;
     }
 
-    const absoluteFilePath = path.resolve(this.projectRoot, filePath);
-    if (!absoluteFilePath.startsWith(this.projectRoot)) {
-      return false;
-    }
-
     try {
       const resolved = path.resolve(this.projectRoot, filePath);
       const relativePath = path.relative(this.projectRoot, resolved);
 
-      if (relativePath === '' || relativePath.startsWith('..')) {
+      if (
+        relativePath === '' ||
+        !isPathWithinRoot(resolved, this.projectRoot)
+      ) {
         return false;
       }
 

@@ -186,8 +186,18 @@ export interface BranchSessionRequest {
 }
 
 export interface DaemonBranchedSession extends DaemonRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface ForkSessionRequest {
+  directive: string;
+}
+
+export interface DaemonForkSessionResult {
+  sessionId: string;
+  description: string;
+  launched: boolean;
 }
 
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
@@ -196,7 +206,6 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
@@ -1686,10 +1695,31 @@ export interface DaemonExtensionCapabilities {
   hasSettings: boolean;
 }
 
+export type DaemonExtensionUpdateState =
+  | 'checking for updates'
+  | 'updated, needs restart'
+  | 'updating'
+  | 'updated'
+  | 'update available'
+  | 'up to date'
+  | 'error'
+  | 'not updatable'
+  | 'unknown';
+
+export interface DaemonExtensionDetails {
+  mcpServers: string[];
+  commands: string[];
+  skills: string[];
+  agents: string[];
+  contextFiles: string[];
+  settings: string[];
+}
+
 export interface DaemonExtensionEntry {
   kind: 'extension';
   id: string;
   name: string;
+  displayName?: string;
   version: string;
   isActive: boolean;
   path: string;
@@ -1698,7 +1728,9 @@ export interface DaemonExtensionEntry {
   originSource?: DaemonExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  updateState?: DaemonExtensionUpdateState;
   capabilities: DaemonExtensionCapabilities;
+  details?: DaemonExtensionDetails;
 }
 
 export interface DaemonWorkspaceExtensionsStatus {
@@ -1707,4 +1739,34 @@ export interface DaemonWorkspaceExtensionsStatus {
   initialized: boolean;
   extensions: DaemonExtensionEntry[];
   errors?: DaemonStatusCell[];
+}
+
+export interface ExtensionInstallRequest {
+  source: string;
+  ref?: string;
+  autoUpdate?: boolean;
+  allowPreRelease?: boolean;
+  registry?: string;
+  consent?: boolean;
+}
+
+export interface ExtensionInstallResponse {
+  accepted: true;
+}
+
+export type ExtensionMutationResponse = ExtensionInstallResponse;
+
+export type ExtensionScope = 'user' | 'workspace';
+
+export interface ExtensionScopeRequest {
+  scope: ExtensionScope;
+}
+
+export interface ExtensionUpdateCheckResponse {
+  states: Record<string, DaemonExtensionUpdateState>;
+}
+
+export interface ExtensionRefreshResponse {
+  refreshed: number;
+  failed: number;
 }

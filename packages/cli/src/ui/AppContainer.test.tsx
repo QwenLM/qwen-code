@@ -304,6 +304,8 @@ describe('AppContainer State Management', () => {
       thought: null,
       cancelOngoingRequest: vi.fn(),
       retryLastPrompt: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
     });
     mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
     mockedUseFolderTrust.mockReturnValue({
@@ -338,7 +340,10 @@ describe('AppContainer State Management', () => {
       vimEnabled: false,
       vimMode: 'NORMAL',
     });
-    mockedUseSessionStats.mockReturnValue({ stats: {} });
+    mockedUseSessionStats.mockReturnValue({
+      stats: {},
+      seedPromptCount: vi.fn(),
+    });
     mockedUseTextBuffer.mockReturnValue({
       text: '',
       setText: vi.fn(),
@@ -351,6 +356,8 @@ describe('AppContainer State Management', () => {
     mockedUseLoadingIndicator.mockReturnValue({
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
+      taskStartTokens: 0,
+      taskStartStreamingChars: 0,
     });
     mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
 
@@ -828,6 +835,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: [],
@@ -866,6 +875,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: [],
@@ -935,11 +946,11 @@ describe('AppContainer State Management', () => {
 
   describe('Cancel Handler (issue #3204)', () => {
     // The cancel handler is wired through useGeminiStream's onCancelSubmit
-    // arg (positional index 14 — see the useGeminiStream call site in
+    // arg (positional index 15 — see the useGeminiStream call site in
     // AppContainer.tsx). We capture it via mockImplementation so a future
     // signature change surfaces as a clear test failure rather than silently
     // grabbing the wrong callback.
-    const ON_CANCEL_SUBMIT_ARG_INDEX = 14;
+    const ON_CANCEL_SUBMIT_ARG_INDEX = 15;
     type CapturedCancelSubmit = (info?: {
       pendingItem: HistoryItemWithoutId | null;
       lastTurnUserItem: { id: number; text: string } | null;
@@ -969,7 +980,11 @@ describe('AppContainer State Management', () => {
         if (typeof candidate === 'function') {
           capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
         }
-        return streamReturnValue;
+        return {
+          ...streamReturnValue,
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        };
       });
     };
 
@@ -2293,6 +2308,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: thoughtSubject },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2337,6 +2354,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2382,6 +2401,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: thoughtSubject },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2427,6 +2448,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: shortTitle },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2477,6 +2500,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: title },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2524,6 +2549,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2587,6 +2614,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       const { unmount } = render(
@@ -2679,6 +2708,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       const { unmount } = render(
@@ -2793,6 +2824,8 @@ describe('AppContainer State Management', () => {
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
         activePtyId: 'some-id',
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -2811,6 +2844,105 @@ describe('AppContainer State Management', () => {
         resizePtySpy.mock.calls[resizePtySpy.mock.calls.length - 1];
       // Check the height argument specifically
       expect(lastCall[2]).toBe(1);
+    });
+
+    it('loads a collapsed summary into history on cold-boot resume when collapseOnResume is enabled', async () => {
+      const historyManager = {
+        history: [] as HistoryItem[],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn((items: HistoryItem[]) => {
+          historyManager.history = items;
+        }),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+
+      const resumeSessionData = {
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 'session-1',
+              timestamp: '2024-01-01T00:00:00Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'hello' }] },
+              cwd: '/test/workspace',
+              version: '1.0.0',
+            },
+            {
+              uuid: 'a1',
+              parentUuid: 'u1',
+              sessionId: 'session-1',
+              timestamp: '2024-01-01T00:00:01Z',
+              type: 'assistant',
+              message: { role: 'model', parts: [{ text: 'world' }] },
+              cwd: '/test/workspace',
+              version: '1.0.0',
+            },
+          ],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'a1',
+      };
+
+      vi.spyOn(mockConfig, 'getContentGenerator').mockReturnValue({
+        useSummarizedThinking: vi.fn(() => false),
+      } as unknown as ReturnType<typeof mockConfig.getContentGenerator>);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue(
+        resumeSessionData as ReturnType<
+          typeof mockConfig.getResumedSessionData
+        >,
+      );
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      mockSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            history: {
+              collapseOnResume: true,
+            },
+          },
+        },
+      } as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(historyManager.loadHistory).toHaveBeenCalled();
+      });
+
+      expect(historyManager.loadHistory).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ display: { kind: 'collapse-summary' } }),
+        ]),
+      );
+      expect(historyManager.history.at(-1)).toMatchObject({
+        type: 'info',
+        display: { kind: 'collapse-summary' },
+      });
+      expect(
+        historyManager.history
+          .slice(0, -1)
+          .every((item) => item.display?.suppressOnRestore === true),
+      ).toBe(true);
     });
 
     it('does not remeasure footer height for sticky todo status-only updates', async () => {
@@ -3022,6 +3154,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: mockCancelOngoingRequest,
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       const mockHandleSlashCommand = vi.fn();
@@ -3099,6 +3233,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -3153,6 +3289,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -3212,6 +3350,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -3804,6 +3944,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
 
@@ -3846,6 +3988,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(false);
 

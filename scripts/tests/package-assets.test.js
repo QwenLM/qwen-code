@@ -59,8 +59,14 @@ describe('package asset scripts', () => {
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
     );
+    const rootPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
+    );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.optionalDependencies).toMatchObject({
+      '@qwen-code/audio-capture': rootPackageJson.version,
+    });
     expect(
       existsSync(
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
@@ -123,6 +129,12 @@ describe('package asset scripts', () => {
     writeFile(rootDir, 'dist/cli.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
+      recursive: true,
+    });
+    // Web Shell release gate (prepare-package.js verifyBundleArtifacts): the
+    // published package must ship the UI, so the fixture provides it too.
+    writeFile(rootDir, 'dist/web-shell/index.html', '<!doctype html>');
+    mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });
   }

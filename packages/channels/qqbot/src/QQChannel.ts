@@ -140,8 +140,9 @@ export class QQChannel extends ChannelBase {
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
   private readonly qqStatePath: string;
   /**
-   * Path to the global sessions.json managed by start.ts.
-   * start.ts deletes it on shutdown, so we back it up.
+   * Path to the SessionRouter persistence file we back up before shutdown.
+   * start.ts passes a shared router; standalone QQChannel instances use a
+   * per-channel router file.
    */
   private readonly globalSessionsPath: string;
   /** Backup of sessions.json so conversations survive daemon restarts. */
@@ -158,6 +159,7 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
+    const hasExternalRouter = Boolean(options?.router);
     const router =
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
@@ -165,7 +167,9 @@ export class QQChannel extends ChannelBase {
     super(name, config, bridge, { ...options, router });
     this.qqConfig = config as unknown as QQChannelConfig;
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
-    this.globalSessionsPath = join(stateDir, 'sessions.json');
+    this.globalSessionsPath = hasExternalRouter
+      ? join(stateDir, 'sessions.json')
+      : sessionsPath;
     this.sessionsBackupPath = join(
       stateDir,
       `${safeName}-sessions-backup.json`,
@@ -539,20 +543,24 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
           );
-          // Retry fetchToken directly instead of going through
-          // scheduleTokenRefresh (which would add another ~60s of
-          // delay from the stale tokenExpiresAt).
-          this.tokenRefreshTimer = setTimeout(() => {
-            if (this.disposed) return;
-            this.fetchToken().catch(() => {
-              process.stderr.write(
-                `[QQ:${this.name}] Token refresh failed again after retry\n`,
-              );
-            });
-          }, 60_000);
+          this.scheduleTokenRefreshRetry();
         });
       }, delay);
     }
+  }
+
+  private scheduleTokenRefreshRetry(): void {
+    if (this.disposed) return;
+    this.stopTokenRefresh();
+    this.tokenRefreshTimer = setTimeout(() => {
+      this.fetchToken().catch((e) => {
+        if (this.disposed) return;
+        process.stderr.write(
+          `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
+        );
+        this.scheduleTokenRefreshRetry();
+      });
+    }, 60_000);
   }
 
   private stopTokenRefresh(): void {
@@ -633,7 +641,11 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})\n`,
         );
         if (!this.isReconnecting) {
-          setTimeout(() => this.reconnectWithRetry(), delay);
+          this.reconnectTimer = setTimeout(
+            () => this.reconnectWithRetry(),
+            delay,
+          );
+          this.reconnectTimer.unref();
         }
       } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
         process.stderr.write(
@@ -813,6 +825,7 @@ export class QQChannel extends ChannelBase {
     }
 
     const maxGwRetries = 5;
+    let gatewayAttempted = false;
     for (let attempt = 0; attempt < maxGwRetries; attempt++) {
       try {
         // Refresh token before reconnect attempt
@@ -825,6 +838,7 @@ export class QQChannel extends ChannelBase {
           await this.sleep(2000);
           continue;
         }
+        gatewayAttempted = true;
         await this.connectGateway();
         return; // success
       } catch (e: unknown) {
@@ -837,8 +851,9 @@ export class QQChannel extends ChannelBase {
       }
     }
     process.stderr.write(
-      `[QQ:${this.name}] RC: exhausted ${maxGwRetries} gateway retries, will retry in 60s\n`,
+      `[QQ:${this.name}] RC: exhausted ${maxGwRetries} reconnect retries, will retry in 60s\n`,
     );
+    if (gatewayAttempted) this.reconnectAttempts++;
     this.tryResume = false; // fall back to full IDENTIFY next time
     this.isReconnecting = false; // release guard for future retries
     // Schedule another attempt with longer delay

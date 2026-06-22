@@ -27,7 +27,7 @@
  *     but the denylist still wins).
  *   - An `overrides` map with `undefined` value silently failing to
  *     delete a stale inherited var (PR 14 fix #4247 wenshao R5 —
- *     the `runQwenServe.ts:216` use case).
+ *     the `run-qwen-serve.ts:216` use case).
  *
  * Each branch listed below is now regression-guarded by an assertion.
  */

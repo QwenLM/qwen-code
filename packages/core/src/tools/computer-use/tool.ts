@@ -375,7 +375,11 @@ export function coerceTypes(
     ) {
       const trimmed = value.trim();
       // Only coerce if the string is a clean numeric — don't swallow garbage.
-      if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const matchesType =
+        fieldType === 'integer'
+          ? /^-?\d+$/.test(trimmed)
+          : /^-?\d+(\.\d+)?$/.test(trimmed);
+      if (matchesType) {
         const parsed =
           fieldType === 'integer' ? parseInt(trimmed, 10) : parseFloat(trimmed);
         if (Number.isFinite(parsed)) {

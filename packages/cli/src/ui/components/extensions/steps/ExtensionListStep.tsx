@@ -174,7 +174,11 @@ export const ExtensionListStep = ({
       : [];
 
     return (
-      <Box key={extension.name} flexDirection="column" marginBottom={descLines.length > 0 ? 1 : 0}>
+      <Box
+        key={extension.name}
+        flexDirection="column"
+        marginBottom={descLines.length > 0 ? 1 : 0}
+      >
         <Box alignItems="center">
           <Box minWidth={2} flexShrink={0}>
             <Text color={isSelected ? theme.text.accent : theme.text.primary}>
@@ -189,15 +193,17 @@ export const ExtensionListStep = ({
               {getExtensionDisplayName(extension, locale)}
             </Text>
           </Box>
-          <Box width={maxStatusWidth + 4} flexShrink={0}>
-            <Text color={activeColor}>  ({activeString})</Text>
+          <Box marginLeft={2} width={maxStatusWidth + 2} flexShrink={0}>
+            <Text color={activeColor}>({activeString})</Text>
           </Box>
           {stateText && <Text color={stateColor}>[{stateText}]</Text>}
         </Box>
         {descLines.length > 0 && (
           <Box paddingLeft={2} flexDirection="column">
             {descLines.map((line, i) => (
-              <Text key={i} color={theme.text.secondary}>{line}</Text>
+              <Text key={i} color={theme.text.secondary}>
+                {line}
+              </Text>
             ))}
           </Box>
         )}

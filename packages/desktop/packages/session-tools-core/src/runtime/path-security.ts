@@ -1,19 +1,49 @@
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
-import { existsSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
 
-function normalizePath(path: string): string {
+function normalizePathForBoundary(path: string): string {
   return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
-function isWithin(base: string, target: string): boolean {
-  const normalizedBase = normalizePath(base);
-  const normalizedTarget = normalizePath(target);
-  const rel = relative(normalizedBase, normalizedTarget);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+/**
+ * Check whether targetPath is baseDir or a child path of baseDir.
+ */
+export function isPathInsideOrEqual(baseDir: string, targetPath: string): boolean {
+  const resolvedBase = normalizePathForBoundary(resolve(baseDir));
+  const resolvedTarget = normalizePathForBoundary(resolve(targetPath));
+  const relativePath = relative(resolvedBase, resolvedTarget);
+
+  return (
+    relativePath === '' ||
+    (relativePath !== '..' &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath))
+  );
 }
 
-function realpathIfExists(path: string): string {
-  return existsSync(path) ? realpathSync.native(path) : resolve(path);
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    const code =
+      error && typeof error === 'object'
+        ? (error as { code?: unknown }).code
+        : undefined;
+    return code !== 'ENOENT' && code !== 'ENOTDIR';
+  }
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return null;
+  }
+}
+
+function realpathIfEntryExists(path: string): string | null {
+  return pathEntryExists(path) ? realpathOrNull(path) : resolve(path);
 }
 
 /**
@@ -23,13 +53,17 @@ export function isPathWithinDirectory(targetPath: string, baseDir: string): bool
   const resolvedTarget = resolve(targetPath);
   const resolvedBase = resolve(baseDir);
 
-  if (!isWithin(resolvedBase, resolvedTarget)) {
+  if (!isPathInsideOrEqual(resolvedBase, resolvedTarget)) {
     return false;
   }
 
-  const realBase = realpathIfExists(resolvedBase);
-  const realTarget = realpathIfExists(resolvedTarget);
-  return isWithin(realBase, realTarget);
+  const realBase = realpathIfEntryExists(resolvedBase);
+  const realTarget = realpathIfEntryExists(resolvedTarget);
+  if (!realBase || !realTarget) {
+    return false;
+  }
+
+  return isPathInsideOrEqual(realBase, realTarget);
 }
 
 /**
@@ -41,21 +75,24 @@ export function isPathWithinDirectoryForCreation(targetPath: string, baseDir: st
   const resolvedTarget = resolve(targetPath);
   const resolvedBase = resolve(baseDir);
 
-  if (!isWithin(resolvedBase, resolvedTarget)) {
+  if (!isPathInsideOrEqual(resolvedBase, resolvedTarget)) {
     return false;
   }
 
-  const realBase = realpathIfExists(resolvedBase);
+  const realBase = realpathIfEntryExists(resolvedBase);
+  if (!realBase) {
+    return false;
+  }
 
-  if (existsSync(resolvedTarget)) {
-    return isPathWithinDirectory(resolvedTarget, realBase);
+  if (pathEntryExists(resolvedTarget)) {
+    return isPathWithinDirectory(resolvedTarget, resolvedBase);
   }
 
   let current = dirname(resolvedTarget);
   while (true) {
-    if (existsSync(current)) {
-      const realCurrent = realpathSync.native(current);
-      return isWithin(realBase, realCurrent);
+    if (pathEntryExists(current)) {
+      const realCurrent = realpathOrNull(current);
+      return !!realCurrent && isPathInsideOrEqual(realBase, realCurrent);
     }
     const parent = dirname(current);
     if (parent === current) {

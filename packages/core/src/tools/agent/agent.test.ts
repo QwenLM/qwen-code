@@ -10,7 +10,7 @@ import {
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
-import type { PartListUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
@@ -2072,6 +2072,97 @@ describe('AgentTool', () => {
 
       return capturedInvocation;
     }
+
+    it('preserves subagent tool protocol payloads in non-interactive mode', async () => {
+      vi.mocked(config.isInteractive).mockReturnValue(false);
+      const responseParts: Part[] = [{ text: 'raw protocol result' }];
+      const snapshots: AgentResultDisplay[] = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          args: { path: '/test.ts' },
+          description: 'Reading test.ts',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          success: true,
+          responseParts,
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      const resultSnapshot = snapshots.find((snapshot) =>
+        snapshot.toolCalls?.some(
+          (toolCall) =>
+            toolCall.callId === 'call-read-1' && toolCall.status === 'success',
+        ),
+      );
+      const toolCall = resultSnapshot?.toolCalls?.find(
+        (entry) => entry.callId === 'call-read-1',
+      );
+      expect(toolCall?.args).toEqual({ path: '/test.ts' });
+      expect(toolCall?.responseParts).toBe(responseParts);
+    });
+
+    it('omits subagent protocol payloads from interactive display state', async () => {
+      vi.mocked(config.isInteractive).mockReturnValue(true);
+      const responseParts: Part[] = [{ text: 'raw protocol result' }];
+      const snapshots: AgentResultDisplay[] = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          args: { path: '/test.ts' },
+          description: 'Reading test.ts',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          success: true,
+          responseParts,
+          resultDisplay: 'Rendered result',
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      const resultSnapshot = snapshots.find((snapshot) =>
+        snapshot.toolCalls?.some(
+          (toolCall) =>
+            toolCall.callId === 'call-read-1' && toolCall.status === 'success',
+        ),
+      );
+      const toolCall = resultSnapshot?.toolCalls?.find(
+        (entry) => entry.callId === 'call-read-1',
+      );
+      expect(toolCall?.description).toBe('Reading test.ts');
+      expect(toolCall?.resultDisplay).toBe('Rendered result');
+      expect(toolCall).not.toHaveProperty('args');
+      expect(toolCall).not.toHaveProperty('responseParts');
+    });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
       // Track whether pendingConfirmation was set then cleared, using

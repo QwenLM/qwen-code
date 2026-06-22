@@ -18,6 +18,8 @@ interface UninstallConfirmStepProps {
   selectedExtension: Extension | null;
   onConfirm: (extension: Extension) => Promise<void>;
   onNavigateBack: () => void;
+  /** Whether this step should respond to keyboard input (default true). */
+  isActive?: boolean;
 }
 
 const debugLogger = createDebugLogger('EXTENSION_UNINSTALL_STEP');
@@ -26,6 +28,7 @@ export function UninstallConfirmStep({
   selectedExtension,
   onConfirm,
   onNavigateBack,
+  isActive = true,
 }: UninstallConfirmStepProps) {
   useKeypress(
     async (key) => {
@@ -42,7 +45,7 @@ export function UninstallConfirmStep({
         onNavigateBack();
       }
     },
-    { isActive: true },
+    { isActive },
   );
 
   if (!selectedExtension) {
@@ -60,8 +63,8 @@ export function UninstallConfirmStep({
           name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
         })}
       </Text>
-      <Text color={theme.text.secondary}>
-        {t('This action cannot be undone.')}
+      <Text color={theme.status.error}>
+        {t('Note: Uninstall permanently removes this extension.')}
       </Text>
     </Box>
   );

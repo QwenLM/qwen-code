@@ -167,7 +167,7 @@ export interface ReadSizeOutcome {
  * when `opts.maxBytes < fileSize <= MAX_READ_BYTES`. It runs only
  * AFTER `readText`'s pre-stat hard-cap check has rejected files
  * above `MAX_READ_BYTES` with `file_too_large` (see
- * `workspaceFileSystem.ts:readText`). Within the hard cap the
+ * `workspace-file-system.ts:readText`). Within the hard cap the
  * caller can opt into a tighter byte ceiling via `opts.maxBytes`,
  * and we surface that truncation via `truncated: true` rather
  * than throwing — operators want to see a partial config file

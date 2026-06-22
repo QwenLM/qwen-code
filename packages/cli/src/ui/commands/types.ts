@@ -53,6 +53,8 @@ export interface CommandContext {
   };
   // UI state and history management
   ui: {
+    /** The current history items. */
+    history: HistoryItem[];
     /** Adds a new item to the history display. */
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
@@ -86,6 +88,8 @@ export interface CommandContext {
      * @param history The array of history items to load.
      */
     loadHistory: UseHistoryManagerReturn['loadHistory'];
+    /** Refreshes the static history display in Ink. */
+    refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
@@ -175,6 +179,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'voice-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'skills_manage'
@@ -275,9 +280,9 @@ export type CommandSource =
   | 'bundled-skill' // BundledSkillLoader
   | 'skill-dir-command' // FileCommandLoader (user/project, no extensionName)
   | 'plugin-command' // FileCommandLoader (extension, extensionName set)
-  | 'mcp-prompt'; // McpPromptLoader
+  | 'mcp-prompt' // McpPromptLoader
+  | 'workflow-command'; // SavedWorkflowLoader (.qwen/workflows/<name>.js)
 // Reserved for future loaders (not implemented in Phase 1):
-// | 'workflow-command'
 // | 'plugin-skill'
 // | 'dynamic-skill'
 

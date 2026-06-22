@@ -16,7 +16,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
-import { StreamingState, type HistoryItemToolGroup } from '../types.js';
+import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
 
@@ -31,6 +31,9 @@ export const Composer = () => {
     showAutoAcceptIndicator,
     streamingResponseLengthRef,
     isReceivingContent,
+    responseCandidateTokens,
+    taskStartTokens,
+    taskStartStreamingChars,
   } = uiState;
 
   // Real-time token animation is performed inside LoadingIndicator itself, so
@@ -46,28 +49,6 @@ export const Composer = () => {
   const suppressBottomLoadingIndicator =
     uiState.streamingState === StreamingState.Responding &&
     uiState.terminalWidth <= 30;
-
-  // Aggregate agent tool tokens from executing tool calls. Only changes when
-  // a subagent reports progress, so it doesn't drive the animation loop.
-  let agentTokens = 0;
-  for (const item of uiState.pendingGeminiHistoryItems ?? []) {
-    if (item.type === 'tool_group') {
-      const toolGroup = item as HistoryItemToolGroup;
-      for (const tool of toolGroup.tools) {
-        const display = tool.resultDisplay;
-        if (
-          typeof display === 'object' &&
-          display !== null &&
-          'type' in display &&
-          display.type === 'task_execution' &&
-          'tokenCount' in display &&
-          typeof display.tokenCount === 'number'
-        ) {
-          agentTokens += display.tokenCount;
-        }
-      }
-    }
-  }
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -103,7 +84,9 @@ export const Composer = () => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
-          candidatesTokens={agentTokens}
+          candidatesTokens={responseCandidateTokens}
+          taskStartTokens={taskStartTokens}
+          taskStartStreamingChars={taskStartStreamingChars}
           streamingCharsRef={streamingResponseLengthRef}
           isStreaming={isStreaming}
           showResponseTokensPerSecond={config.getShowResponseTokensPerSecond()}

@@ -26,6 +26,7 @@ import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
+import { useVoiceInput } from '../hooks/use-voice-input.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
@@ -54,6 +55,7 @@ vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
+vi.mock('../hooks/use-voice-input.js');
 vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
@@ -184,6 +186,7 @@ describe('InputPrompt', () => {
   const mockedUseReverseSearchCompletion = vi.mocked(
     useReverseSearchCompletion,
   );
+  const mockedUseVoiceInput = vi.mocked(useVoiceInput);
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -325,6 +328,12 @@ describe('InputPrompt', () => {
     mockedUseReverseSearchCompletion.mockReturnValue(
       mockReverseSearchCompletion,
     );
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: vi.fn(() => false),
+    });
 
     props = {
       buffer: mockBuffer,
@@ -349,6 +358,136 @@ describe('InputPrompt', () => {
       focus: true,
       placeholder: '  Type your message or @path/to/file',
     };
+  });
+
+  it('routes Space through voice input when the prompt is empty', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('keeps normal Space typing when the prompt already has text', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    props.buffer.setText('hello');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(props.buffer.handleInput).toHaveBeenCalled();
+    });
+    expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets Space stop voice recording even when shell mode is active', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    props.shellModeActive = true;
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('does not route voice keys while the background dialog is open', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseBackgroundTaskViewState.mockReturnValue({
+      entries: [],
+      selectedIndex: 0,
+      dialogMode: 'list',
+      dialogOpen: true,
+      pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets the feedback dialog consume option keys before active voice input', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: true,
+      messageQueue: [],
+      pendingGeminiHistoryItems: [],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write('1');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets non-voice keys fall through while voice recording is active', async () => {
+    const handleVoiceKeypress = vi.fn(() => false);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write('a');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).toHaveBeenCalled();
+    unmount();
   });
 
   // Two microtask yields are intentional: Ink 7 + React 19 split a render
@@ -4768,6 +4907,45 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down focuses the background-tasks pill when only the pill is shown (workflow-only session)', async () => {
+      // Branch 3 of descendFromComposer: no Arena roster (agents empty) and no
+      // live bg-agent panel, but a workflow run keeps the background-tasks pill
+      // on screen. ↓ from the empty composer must focus the pill so the run's
+      // detail/save dialog stays reachable — without this branch a
+      // workflow-only session could never open it.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+
+      const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+      await wait();
+
+      stdin.write('[B'); // Down arrow at the bottom edge
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
       expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
       unmount();
     });

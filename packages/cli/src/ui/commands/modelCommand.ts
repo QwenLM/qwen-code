@@ -21,6 +21,16 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import {
+  formatUnsupportedVoiceModelMessage,
+  isSelectableVoiceModel,
+} from '../voice/voice-model.js';
+
+const MAIN_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model without arguments to choose from configured models.';
+
+const FAST_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.';
 
 function persistSetting(
   settings: LoadedSettings,
@@ -81,7 +91,9 @@ function formatUnavailableModelMessage(
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
     `${availableModelsLine}\n` +
-    'Configure models in settings.modelProviders or run /model to select an available model.'
+    (kind === 'Fast model'
+      ? FAST_MODEL_CONFIGURATION_HINT
+      : MAIN_MODEL_CONFIGURATION_HINT)
   );
 }
 
@@ -100,7 +112,31 @@ function formatUnavailableFastModelMessage(
   return (
     `Fast model '${modelName}' is not configured for any auth type.\n` +
     `${availableModelsLine}\n` +
-    'Configure models in settings.modelProviders or run /model to select an available model.'
+    FAST_MODEL_CONFIGURATION_HINT
+  );
+}
+
+function formatUnavailableVoiceModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  const availableModelIds = Array.from(
+    new Set(availableModels.map((model) => model.id)),
+  );
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? t('No models are configured.')
+      : t('Configured models: {{models}}.', {
+          models: availableModelIds.join(', '),
+        });
+
+  return (
+    t("Voice model '{{modelName}}' is not configured.", { modelName }) +
+    '\n' +
+    `${availableModelsLine}\n` +
+    t(
+      'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.',
+    )
   );
 }
 
@@ -121,27 +157,35 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
     );
   },
-  argumentHint: '[--fast] [<model-id>]',
+  argumentHint: '[--fast|--voice] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
-    if (partialArg && '--fast'.startsWith(partialArg)) {
-      return [
+    if (partialArg) {
+      const flagCompletions = [
         {
           value: '--fast',
           description: t(
             'Set a lighter model for prompt suggestions and speculative execution',
           ),
         },
-      ];
-    } else if (partialArg.trim()) {
-      // Include model IDs matching the partial argument
-      return getAvailableModelIds(context).filter((id) =>
-        id.startsWith(partialArg.trim()),
-      );
+        {
+          value: '--voice',
+          description: t('Set the model for voice transcription'),
+        },
+      ].filter((item) => item.value.startsWith(partialArg));
+      if (flagCompletions.length > 0) {
+        return flagCompletions;
+      }
+      if (partialArg.trim()) {
+        return getAvailableModelIds(context).filter((id) =>
+          id.startsWith(partialArg.trim()),
+        );
+      }
+      return null;
     } else {
       return null;
     }
@@ -163,6 +207,76 @@ export const modelCommand: SlashCommand = {
 
     // Handle --fast flag: /model --fast <modelName>
     const args = context.invocation?.args?.trim() || actionArgs.trim();
+    const isVoiceModelCommand =
+      args === '--voice' || args.startsWith('--voice ');
+    if (isVoiceModelCommand) {
+      const modelName = args.replace('--voice', '').trim();
+      if (!modelName) {
+        if (context.executionMode !== 'interactive') {
+          const voiceModel =
+            context.services.settings?.merged?.voiceModel?.trim() ||
+            t('not set');
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t(
+              'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
+              { voiceModel },
+            ),
+          };
+        }
+        return {
+          type: 'dialog',
+          dialog: 'voice-model',
+        };
+      }
+
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
+      }
+
+      const availableModels = config.getAllConfiguredModels();
+      const matches = availableModels.filter((model) => model.id === modelName);
+      if (matches.length === 0) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableVoiceModelMessage(
+            modelName,
+            availableModels,
+          ),
+        };
+      }
+      if (matches.length > 1) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
+            { modelName },
+          ),
+        };
+      }
+      if (!isSelectableVoiceModel(matches[0]!)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnsupportedVoiceModelMessage(modelName),
+        };
+      }
+
+      persistSetting(settings, 'voiceModel', modelName);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Voice Model') + ': ' + modelName,
+      };
+    }
+
     const isFastModelCommand = args === '--fast' || args.startsWith('--fast ');
     if (isFastModelCommand) {
       const modelName = args.replace('--fast', '').trim();

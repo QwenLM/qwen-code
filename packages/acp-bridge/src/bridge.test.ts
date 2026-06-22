@@ -34,6 +34,7 @@ import {
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SessionBusyError,
   SessionNotFoundError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
@@ -381,6 +382,118 @@ describe('createAcpSessionBridge', () => {
 
     releasePrompt?.();
     await prompt;
+    await bridge.shutdown();
+  });
+
+  it('refreshes extensions across live sessions and broadcasts merged results', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (
+              method === 'qwen/control/workspace/extensions/refresh' &&
+              String(params['sessionId']).endsWith('#2')
+            ) {
+              throw new Error('refresh failed');
+            }
+            return {};
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const first = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(first.sessionId, {
+      signal: abort.signal,
+    });
+    const nextEvent = iter[Symbol.asyncIterator]().next();
+
+    const result = await bridge.refreshExtensionsForAllSessions({
+      status: 'updated',
+      name: 'test-ext',
+    });
+
+    expect(result).toEqual({ refreshed: 1, failed: 1 });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: 'qwen/control/workspace/extensions/refresh',
+        params: { sessionId: first.sessionId },
+      },
+      {
+        method: 'qwen/control/workspace/extensions/refresh',
+        params: { sessionId: second.sessionId },
+      },
+    ]);
+    const event = await nextEvent;
+    expect(event.value).toMatchObject({
+      type: 'extensions_changed',
+      data: {
+        status: 'updated',
+        name: 'test-ext',
+        refreshed: 1,
+        failed: 1,
+      },
+    });
+    abort.abort();
+    await bridge.shutdown();
+  });
+
+  it('does not refresh or broadcast extensions when no sessions are live', async () => {
+    const bridge = makeBridge();
+
+    await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+      refreshed: 0,
+      failed: 0,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('skips dying sessions when refreshing extensions', async () => {
+    let releaseKill: (() => void) | undefined;
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel();
+        const originalKill = h.channel.kill;
+        h.channel.kill = async () => {
+          await new Promise<void>((resolve) => {
+            releaseKill = resolve;
+          });
+          await originalKill();
+        };
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const killPromise = bridge.killSession(session.sessionId);
+    await vi.waitFor(() => {
+      expect(releaseKill).toBeDefined();
+    });
+
+    await expect(bridge.refreshExtensionsForAllSessions()).resolves.toEqual({
+      refreshed: 0,
+      failed: 0,
+    });
+    expect(
+      handles[0]?.agent.extMethodCalls.filter(
+        (call) => call.method === 'qwen/control/workspace/extensions/refresh',
+      ),
+    ).toEqual([]);
+
+    releaseKill?.();
+    await killPromise;
     await bridge.shutdown();
   });
 
@@ -2828,9 +2941,73 @@ describe('createAcpSessionBridge', () => {
       releaseBranch!();
       await expect(branch).resolves.toMatchObject({
         sessionId: 'branch-1',
-        title: 'Branch 1',
+        displayName: 'Branch 1',
       });
       await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
+    it('publishes session_branched only on the new session stream', async () => {
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== 'qwen/control/session/branch') return {};
+            return { newSessionId: 'branch-1', title: 'Branch 1' };
+          },
+          resumeSessionImpl: () => ({}),
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sourceAbort = new AbortController();
+      const sourceIter = bridge
+        .subscribeEvents(session.sessionId, { signal: sourceAbort.signal })
+        [Symbol.asyncIterator]();
+
+      const branch = await bridge.branchSession(session.sessionId, {
+        name: 'Branch 1',
+      });
+
+      const sourceEvent = await Promise.race([
+        sourceIter.next(),
+        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
+      ]);
+      expect(sourceEvent).toBe('timeout');
+      sourceAbort.abort();
+
+      const sourceReplayAbort = new AbortController();
+      const sourceReplayIter = bridge
+        .subscribeEvents(session.sessionId, {
+          lastEventId: 0,
+          signal: sourceReplayAbort.signal,
+        })
+        [Symbol.asyncIterator]();
+      const sourceReplayEvent = await Promise.race([
+        sourceReplayIter.next(),
+        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
+      ]);
+      expect(sourceReplayEvent).toMatchObject({
+        value: { type: 'replay_complete' },
+      });
+      const sourceReplayNext = await Promise.race([
+        sourceReplayIter.next(),
+        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
+      ]);
+      expect(sourceReplayNext).toBe('timeout');
+      sourceReplayAbort.abort();
+
+      const branchedIter = bridge
+        .subscribeEvents(branch.sessionId, { lastEventId: 0 })
+        [Symbol.asyncIterator]();
+      const replayed = await branchedIter.next();
+      expect(replayed.value).toMatchObject({
+        type: 'session_branched',
+        data: {
+          sourceSessionId: session.sessionId,
+          newSessionId: branch.sessionId,
+          displayName: 'Branch 1',
+        },
+      });
+
       await bridge.shutdown();
     });
 
@@ -2870,6 +3047,37 @@ describe('createAcpSessionBridge', () => {
       });
       expect(ok).toEqual({ stopReason: 'end_turn' });
 
+      await bridge.shutdown();
+    });
+
+    it('rejects launchSessionForkAgent while a prompt is active', async () => {
+      let releasePrompt: (() => void) | undefined;
+      const handle = makeChannel({
+        promptImpl: async () =>
+          new Promise<PromptResponse>((resolve) => {
+            releasePrompt = () => resolve({ stopReason: 'end_turn' });
+          }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const active = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'active' }],
+      });
+      await vi.waitFor(() => expect(releasePrompt).toBeDefined());
+
+      await expect(
+        bridge.launchSessionForkAgent(session.sessionId, 'review this'),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+      expect(
+        handle.agent.extMethodCalls.some(
+          (call) => call.method === 'qwen/control/session/fork_agent',
+        ),
+      ).toBe(false);
+
+      releasePrompt!();
+      await expect(active).resolves.toEqual({ stopReason: 'end_turn' });
       await bridge.shutdown();
     });
 

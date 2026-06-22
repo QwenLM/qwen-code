@@ -50,6 +50,8 @@ import {
   PromptSuggestionEvent,
   logSpeculation,
   SpeculationEvent,
+  logWorkflowKeyword,
+  WorkflowKeywordEvent,
   startSpeculation,
   acceptSpeculation,
   abortSpeculation,
@@ -67,9 +69,12 @@ import {
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import {
+  applyCollapsePolicyAndSummary,
+  buildResumedHistoryItems,
+  expandCollapsedHistory,
+} from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
-import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -123,6 +128,7 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
+import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -148,6 +154,10 @@ import {
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
+import {
+  detectWorkflowKeyword,
+  buildWorkflowSteeringNotice,
+} from './utils/workflow-keyword.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -164,6 +174,7 @@ import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
 import { useCommandMigration } from './hooks/useCommandMigration.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
+import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -256,6 +267,34 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function getResponseCandidateTokens(
+  pendingGeminiHistoryItems: HistoryItemWithoutId[],
+): number {
+  let tokens = 0;
+
+  for (const item of pendingGeminiHistoryItems) {
+    if (item.type !== 'tool_group') {
+      continue;
+    }
+
+    for (const tool of item.tools) {
+      const display = tool.resultDisplay;
+      if (
+        typeof display === 'object' &&
+        display !== null &&
+        'type' in display &&
+        display.type === 'task_execution' &&
+        'tokenCount' in display &&
+        typeof display.tokenCount === 'number'
+      ) {
+        tokens += display.tokenCount;
+      }
+    }
+  }
+
+  return tokens;
 }
 
 function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
@@ -463,6 +502,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
+  // P7-trigger: true while the current turn was steered toward the Workflow
+  // tool by the `workflow` keyword (drives the Footer indicator). Set in
+  // `handleFinalSubmit`, cleared when the turn returns to idle (effect below).
+  const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   /**
    * One-shot worktree restore reminder for the TUI path. Set during
    * `--resume` when the persisted sidecar names a live worktree, then
@@ -563,9 +606,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
-        const historyItems = buildResumedHistoryItems(
-          resumedSessionData,
-          config,
+        const rawItems = buildResumedHistoryItems(resumedSessionData, config);
+        const collapseOnResume =
+          settings.merged.ui?.history?.collapseOnResume ?? false;
+
+        const historyItems = applyCollapsePolicyAndSummary(
+          rawItems,
+          collapseOnResume,
         );
         historyManager.loadHistory(historyItems);
 
@@ -1028,6 +1075,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     isModelDialogOpen,
     isFastModelMode,
+    isVoiceModelMode,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -1062,6 +1110,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleResume,
   } = useResumeCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,
@@ -1070,6 +1119,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { handleBranch } = useBranchCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,
@@ -1229,10 +1279,11 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useSlashCommandProcessor(
     config,
     settings,
+    historyManager.history,
     historyManager.addItem,
     historyManager.clearItems,
     historyManager.loadHistory,
-    remountStaticHistory,
+    refreshStatic,
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
@@ -1455,6 +1506,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.history,
     historyManager.addItem,
     config,
+    isConfigInitialized,
     settings,
     onDebugMessage,
     handleSlashCommand,
@@ -1480,6 +1532,9 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (streamingState === StreamingState.Idle) {
       updateHandlerRef.current?.flush();
+      // P7-trigger: a steered turn has finished — drop the `workflow active`
+      // indicator until the next keyword prompt re-arms it.
+      setWorkflowKeywordActive(false);
     }
   }, [streamingState]);
 
@@ -1696,6 +1751,9 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
       }
+      // The user's raw text, captured before any `<system-reminder>` prefix is
+      // prepended below (so keyword detection sees only what the user typed).
+      const userPromptText = submittedValue;
       // Phase C: one-shot worktree restore reminder. Set during --resume
       // when the persisted sidecar names a live worktree. We only inject
       // on top-level user prompts (not btw-during-response, not slash
@@ -1706,6 +1764,30 @@ export const AppContainer = (props: AppContainerProps) => {
         pendingWorktreeNoticeRef.current = null;
         submittedValue =
           `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
+          submittedValue;
+      }
+      // P7-trigger: when the user's prompt mentions `workflow`, softly steer
+      // this turn toward the Workflow tool (same one-shot reminder mechanism
+      // as the worktree notice). Detect on the user's original text — `notice`
+      // above only adds system text, never the keyword. Gated on the feature
+      // flag + the opt-out setting; skipped for slash commands. The model
+      // keeps discretion, so a casual mention can't force a tool call.
+      const workflowTriggerEnabled =
+        config.isWorkflowsEnabled() &&
+        !settings.merged.ui?.disableWorkflowKeywordTrigger;
+      if (
+        workflowTriggerEnabled &&
+        !isSlashCommand(userPromptText) &&
+        // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
+        // break the BTW routing check below (which tests `submittedValue`),
+        // queuing the side question as a normal prompt instead.
+        !isBtwCommand(userPromptText) &&
+        detectWorkflowKeyword(userPromptText)
+      ) {
+        setWorkflowKeywordActive(true);
+        logWorkflowKeyword(config, new WorkflowKeywordEvent());
+        submittedValue =
+          `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
       }
       if (
@@ -1863,6 +1945,7 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       geminiClient,
       historyManager,
+      settings.merged.ui?.disableWorkflowKeywordTrigger,
     ],
   );
 
@@ -2646,7 +2729,12 @@ export const AppContainer = (props: AppContainerProps) => {
           !(option === 'both' && hasRestoreFailure)
         ) {
           const originalHistory = historyManager.history;
-          const originalLength = originalHistory.length;
+          const hasSummary = originalHistory.some(
+            (h) => h.display?.kind === 'collapse-summary',
+          );
+          const effectiveLength = hasSummary
+            ? originalHistory.length - 1
+            : originalHistory.length;
 
           let targetTurnIndex = 0;
           for (const h of originalHistory) {
@@ -2656,7 +2744,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
           geminiClient.truncateHistory(apiTruncateIndex);
 
-          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          // Strip suppressOnRestore flags and filter out collapse-summary items
+          // so rewound items remain visible without stale summary text
+          const truncatedUi = expandCollapsedHistory(
+            originalHistory.filter((h) => h.id < userItem.id),
+          );
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();
@@ -2677,7 +2769,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
           config.getChatRecordingService()?.rewindRecording(
             targetTurnIndex,
-            { truncatedCount: originalLength - truncatedUi.length },
+            { truncatedCount: effectiveLength - truncatedUi.length },
             !hasRestoreFailure
               ? config
                   .getFileHistoryService()
@@ -2837,16 +2929,21 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
-  const currentCandidatesTokens = Object.values(
-    sessionStats.metrics?.models ?? {},
-  ).reduce((acc, model) => acc + (model.tokens?.candidates ?? 0), 0);
+  const responseCandidateTokens = getResponseCandidateTokens(
+    pendingGeminiHistoryItems,
+  );
 
-  const { elapsedTime, currentLoadingPhrase, taskStartTokens } =
-    useLoadingIndicator(
-      streamingState,
-      settings.merged.ui?.customWittyPhrases,
-      currentCandidatesTokens,
-    );
+  const {
+    elapsedTime,
+    currentLoadingPhrase,
+    taskStartTokens,
+    taskStartStreamingChars,
+  } = useLoadingIndicator(
+    streamingState,
+    settings.merged.ui?.customWittyPhrases,
+    responseCandidateTokens,
+    streamingResponseLengthRef.current,
+  );
 
   useAttentionNotifications({
     isFocused,
@@ -2857,6 +2954,29 @@ export const AppContainer = (props: AppContainerProps) => {
     terminal,
     pendingToolCalls,
   });
+
+  // P-notif: terminal-bell when a workflow run finishes (completed / failed),
+  // so a long run ending is noticed without watching the /workflows dialog.
+  // User-initiated cancels are intentionally not notified (the registry omits
+  // them). Separate from the dialog's status-change subscription.
+  const workflowBellEnabled =
+    (settings.merged.general?.terminalBell as boolean) ?? true;
+  useEffect(() => {
+    const registry = config.getWorkflowRunRegistry?.();
+    // Optional call: production always has `setNotificationCallback`, but
+    // partial registry mocks in CLI tests may omit it — no-op rather than throw.
+    if (!registry?.setNotificationCallback) return;
+    registry.setNotificationCallback((entry) => {
+      const name = entry.meta?.name ?? entry.runId;
+      const verb = entry.status === 'failed' ? 'failed' : 'completed';
+      sendNotification(
+        { message: `Workflow '${name}' ${verb}`, title: 'Qwen Code' },
+        terminal,
+        workflowBellEnabled,
+      );
+    });
+    return () => registry.setNotificationCallback(undefined);
+  }, [config, terminal, workflowBellEnabled]);
 
   // Dialog close functionality
   const { closeAnyOpenDialog } = useDialogClose({
@@ -3340,6 +3460,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isVoiceModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3409,6 +3530,7 @@ export const AppContainer = (props: AppContainerProps) => {
       branchName,
       activeWorktree,
       showWorktreeExitDialog,
+      workflowKeywordActive,
       sessionStats,
       terminalWidth,
       terminalHeight,
@@ -3441,6 +3563,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,
@@ -3472,6 +3596,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isVoiceModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3540,6 +3665,7 @@ export const AppContainer = (props: AppContainerProps) => {
       branchName,
       activeWorktree,
       showWorktreeExitDialog,
+      workflowKeywordActive,
       sessionStats,
       terminalWidth,
       terminalHeight,
@@ -3574,6 +3700,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,

@@ -215,7 +215,7 @@ unanimity for M = 4, use the same field.
 ## Boot-time policy validation
 
 `runQwenServe.validatePolicyConfig(policyConfig)`
-(`packages/cli/src/serve/runQwenServe.ts`) validates merged `settings.json`
+(`packages/cli/src/serve/run-qwen-serve.ts`) validates merged `settings.json`
 `policy.*` at boot and throws `InvalidPolicyConfigError` for operator mistakes:
 
 - `policy.permissionStrategy` is set but not in the four supported modes. The
@@ -270,5 +270,5 @@ mechanism does not exist in v1.
 - `packages/acp-bridge/src/permissionMediator.ts` (F3 mediator implementation)
 - `packages/acp-bridge/src/bridgeClient.ts` (uses structural sub-typing on `PermissionMediator`)
 - `packages/acp-bridge/src/bridgeErrors.ts` (`CancelSentinelCollisionError`, `InvalidPermissionOptionError`, `PermissionForbiddenError`)
-- `packages/cli/src/serve/permissionAudit.ts` (audit ring + publisher)
+- `packages/cli/src/serve/permission-audit.ts` (audit ring + publisher)
 - Issue: [#4175](https://github.com/QwenLM/qwen-code/issues/4175) F3 series.

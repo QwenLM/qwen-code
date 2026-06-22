@@ -264,12 +264,6 @@ export function formatCapEscalationResponse(
   return lines.join('\n');
 }
 
-export function formatUnavailableResponse(
-  decision: GateDecision & { kind: 'unavailable' },
-): string {
-  return `Plan Approval Gate: **unavailable** — ${decision.reason}. Staying in plan mode. The gate cannot approve autonomous execution; the user may need to intervene.`;
-}
-
 export function formatApprovedNotes(findings: MergedGateFinding[]): string {
   if (findings.length === 0) return '';
   const lines = ['Non-blocking review notes (P3, not required to address):\n'];

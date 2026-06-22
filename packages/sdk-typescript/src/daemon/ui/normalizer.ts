@@ -176,6 +176,12 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
+    case 'session_rewound':
+      return normalizeSessionRewound(event, base);
+
+    case 'session_branched':
+      return normalizeSessionBranched(event, base);
+
     case 'prompt_cancelled': {
       // Forward the optional `reason` (e.g. `'forward_failed'` from the
       // bridge's C3 compensating broadcast) so consumers can distinguish a
@@ -267,6 +273,9 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
+    case 'extensions_changed':
+      return normalizeExtensionsChanged(event, base);
+
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
       return normalizeAuthDeviceFlowStarted(event, base);
@@ -327,6 +336,48 @@ function normalizeStateResyncRequired(
       reason,
       lastDeliveredId,
       earliestAvailableId,
+    },
+  ];
+}
+
+function normalizeSessionRewound(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const promptId = getString(event.data, 'promptId');
+  const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
+  if (!promptId || targetTurnIndex === undefined) {
+    return fallbackDebug(event, base, 'malformed session_rewound payload');
+  }
+  const sessionId = getString(event.data, 'sessionId');
+  return [
+    {
+      ...base,
+      type: 'session.rewound',
+      promptId,
+      targetTurnIndex,
+      ...(sessionId ? { sessionId } : {}),
+    },
+  ];
+}
+
+function normalizeSessionBranched(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sourceSessionId = getString(event.data, 'sourceSessionId');
+  const newSessionId = getString(event.data, 'newSessionId');
+  const displayName = getString(event.data, 'displayName');
+  if (!sourceSessionId || !newSessionId || !displayName) {
+    return fallbackDebug(event, base, 'malformed session_branched payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'session.branched',
+      sourceSessionId,
+      newSessionId,
+      displayName,
     },
   ];
 }
@@ -1248,6 +1299,46 @@ function normalizeMcpServerRestartRefused(
       type: 'workspace.mcp.server_restart_refused',
       serverName,
       reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+    },
+  ];
+}
+
+function normalizeExtensionsChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const refreshed = numberField(event.data, 'refreshed');
+  const failed = numberField(event.data, 'failed');
+  const status = getString(event.data, 'status');
+  const source = getString(event.data, 'source');
+  const name = getString(event.data, 'name');
+  const version = getString(event.data, 'version');
+  const error = getString(event.data, 'error');
+  if (refreshed === undefined || failed === undefined) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  if (
+    status !== undefined &&
+    status !== 'installed' &&
+    status !== 'enabled' &&
+    status !== 'disabled' &&
+    status !== 'updated' &&
+    status !== 'uninstalled' &&
+    status !== 'failed'
+  ) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.extensions.changed',
+      refreshed,
+      failed,
+      ...(status ? { status } : {}),
+      ...(source ? { source } : {}),
+      ...(name ? { name } : {}),
+      ...(version ? { version } : {}),
+      ...(error ? { error } : {}),
     },
   ];
 }

@@ -109,8 +109,14 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface BridgeForkAgentResult {
+  sessionId: string;
+  description: string;
+  launched: boolean;
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -119,7 +125,6 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
@@ -238,6 +243,22 @@ export interface BridgeDaemonStatusSnapshot {
   channelLive: boolean;
   permissionPolicy: PermissionPolicy;
   sessions: BridgeDaemonSessionDiagnostic[];
+}
+
+export interface BridgeExtensionsChangedData {
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
 }
 
 export interface AcpSessionBridge {
@@ -473,6 +494,20 @@ export interface AcpSessionBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
+   * Broadcast extension refresh to all active sessions and emit an
+   * `extensions_changed` workspace event when complete.
+   */
+  refreshExtensionsForAllSessions(
+    data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+  ): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
+
+  /** Emit an extension lifecycle event without refreshing sessions. */
+  broadcastExtensionsChanged(data: BridgeExtensionsChangedData): void;
+
+  /**
    * Switch the active model service for a session. Throws
    * `SessionNotFoundError` for unknown ids.
    */
@@ -542,6 +577,17 @@ export interface AcpSessionBridge {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<{ sessionId: string; answer: string | null }>;
+
+  /**
+   * Launch a background fork agent that inherits the live session's current
+   * conversation context. This is CLI `/fork`, not ACP `session/fork`
+   * (which maps to `/branch`).
+   */
+  launchSessionForkAgent(
+    sessionId: string,
+    directive: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeForkAgentResult>;
 
   /**
    * Queue a mid-turn user message for the running turn. The ACP child drains

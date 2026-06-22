@@ -231,7 +231,7 @@ async function parseFaviconsFromHtml(url: string): Promise<Array<{href: string, 
       } else if (href.startsWith('/')) {
         const origin = new URL(url).origin;
         href = `${origin}${href}`;
-      } else if (!href.startsWith('http')) {
+      } else if (!/^https?:\/\//i.test(href)) {
         const baseUrl = new URL(url);
         href = `${baseUrl.origin}/${href}`;
       }

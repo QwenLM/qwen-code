@@ -155,6 +155,15 @@ export type {
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+export type {
+  ArtifactTool,
+  ArtifactToolParams,
+} from './tools/artifact/artifact-tool.js';
+export type {
+  ArtifactPublisher,
+  PublishArtifactInput,
+  PublishedArtifact,
+} from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
@@ -219,9 +228,23 @@ export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './agents/workflow-run-registry.js';
+export * from './agents/workflow-snapshot.js';
+export {
+  listSavedWorkflows,
+  resolveSavedWorkflowScript,
+  saveWorkflowScript,
+  validateWorkflowName,
+  getSavedWorkflowDirs,
+  WORKFLOW_NAME_PATTERN,
+  type SavedWorkflowEntry,
+  type SavedWorkflowSource,
+  type ResolvedSavedWorkflow,
+  type WorkflowSaveResult,
+} from './agents/runtime/workflow-saved.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
+export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
 // Managed Auto-Memory
@@ -312,6 +335,8 @@ export {
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
+  logWorkflowKeyword,
+  logWorkflowRun,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -325,6 +350,8 @@ export {
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  WorkflowKeywordEvent,
+  WorkflowRunEvent,
 } from './telemetry/types.js';
 
 // ============================================================================
@@ -354,6 +381,7 @@ export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
 export * from './utils/environmentContext.js';
+export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
@@ -368,6 +396,7 @@ export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/gitDiff.js';
+export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';

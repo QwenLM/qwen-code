@@ -219,6 +219,12 @@ describe('Storage – getPlansDir', () => {
     );
   });
 
+  it('allows project subdirectories whose names start with two dots', () => {
+    expect(Storage.getPlansDir(projectRoot, './..plans')).toBe(
+      path.join(projectRoot, '..plans'),
+    );
+  });
+
   it('expands tilde in configured plansDirectory values', () => {
     const projectInHome = path.join(os.homedir(), 'workspace', 'project');
     expect(

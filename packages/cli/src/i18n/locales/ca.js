@@ -1407,6 +1407,7 @@ export default {
   'Tools:': 'Eines:',
   'Parameters:': 'Paràmetres:',
   'Prompts:': 'Missatges:',
+  'Resources:': 'Recursos:',
   Blocked: 'Bloquejat',
   '💡 Tips:': '💡 Consells:',
   Use: 'Useu',
@@ -2035,4 +2036,24 @@ export default {
   in: 'ent.',
   out: 'sort.',
   'In/Out': 'Ent/Sort',
+
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Establir la història per reduir-se per defecte en reprendre una sessió',
+  'Set history to expand by default when resuming a session':
+    'Establir la història per expandir-se per defecte en reprendre una sessió',
+  'Expand the currently collapsed history transcript':
+    'Expandir la transcripció de la història actualment reduïda',
+  'Control history display preferences and visibility':
+    'Controlar les preferències de visualització de la història i la visibilitat',
+  'History will be collapsed by default for future resumed sessions.':
+    'La història es reduirà per defecte per a futures sessions represes.',
+  'History will be expanded by default for future resumed sessions.':
+    "La història s'expandirà per defecte per a futures sessions represes.",
+  'History is already expanded in this session.':
+    'La història ja està expandida en aquesta sessió.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Ús: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
 };

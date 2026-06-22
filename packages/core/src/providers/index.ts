@@ -50,6 +50,7 @@ export {
   minimaxProvider,
   modelscopeProvider,
   openRouterProvider,
+  requestyProvider,
   THIRD_PARTY_PROVIDERS,
   tokenPlanProvider,
   zaiProvider,
@@ -69,6 +70,7 @@ export {
   OPENROUTER_BASE_URL,
   OPENROUTER_ENV_KEY,
 } from './presets/openrouter.js';
+export { REQUESTY_BASE_URL, REQUESTY_ENV_KEY } from './presets/requesty.js';
 
 // Install logic
 export {

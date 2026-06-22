@@ -220,6 +220,8 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     isHooksDialogOpen: false,
     isFeedbackDialogOpen: false,
     taskStartTokens: 0,
+    taskStartStreamingChars: 0,
+    responseCandidateTokens: 0,
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     sessionName: null,
@@ -507,6 +509,42 @@ describe('<MainContent />', () => {
     );
 
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+  });
+
+  it('filters out suppressed history items from rendering', async () => {
+    staticItemsSpy.mockClear();
+    historyItemDisplayPropsSpy.mockClear();
+    const history = [
+      { type: 'user' as const, id: 1, text: 'hello' },
+      {
+        type: 'gemini' as const,
+        id: 2,
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+      {
+        type: 'info' as const,
+        id: 3,
+        text: 'History collapsed: 1 messages hidden.',
+        display: { kind: 'collapse-summary' as const },
+      },
+    ];
+    const uiState = createUIState({ history });
+    renderMainContent(uiState);
+    expect(historyItemDisplayPropsSpy).toHaveBeenCalled();
+    const renderedHistoryItems = historyItemDisplayPropsSpy.mock.calls.map(
+      (c) => c[0].item,
+    );
+    // Unsuppressed user message and collapse-summary should render (summary has no suppressOnRestore)
+    expect(renderedHistoryItems).toHaveLength(2);
+    expect(renderedHistoryItems.find((i) => i.id === 1)).toMatchObject({
+      id: 1,
+    });
+    expect(renderedHistoryItems.find((i) => i.id === 3)).toMatchObject({
+      id: 3,
+    });
+    // Suppressed gemini item should NOT render
+    expect(renderedHistoryItems.find((i) => i.id === 2)).toBeUndefined();
   });
 
   it('does NOT reset progressive replay when only currentModel changes (PR #4119 regression guard)', async () => {
