@@ -12,7 +12,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
-      // cli's daemonStatusProvider.test.ts imports `FakeAgent` /
+      // cli's daemon-status-provider.test.ts imports `FakeAgent` /
       // `makeChannel` from acp-bridge's package-private
       // `internal/testUtils` module. This alias overrides the runtime
       // resolution so vitest reads the .ts source directly instead of
@@ -64,6 +64,10 @@ export default defineConfig({
       '@qwen-code/acp-bridge/workspacePaths': path.resolve(
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',
+      ),
+      '@qwen-code/audio-capture': path.resolve(
+        __dirname,
+        '../audio-capture/src/index.ts',
       ),
     },
   },

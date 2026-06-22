@@ -101,7 +101,7 @@ If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwe
 
 ## 🚀 Option 3: API Key (flexible)
 
-Use this if you want to connect to third-party providers such as OpenAI, Anthropic, Google, Azure OpenAI, OpenRouter, ModelScope, or a self-hosted endpoint. Supports multiple protocols and providers.
+Use this if you want to connect to third-party providers such as OpenAI, Anthropic, Google, Azure OpenAI, OpenRouter, Requesty, ModelScope, or a self-hosted endpoint. Supports multiple protocols and providers.
 
 ### Recommended: One-file setup via `settings.json`
 
@@ -153,11 +153,11 @@ The key concept is **Model Providers** (`modelProviders`): Qwen Code supports mu
 
 #### Supported protocols
 
-| Protocol          | `modelProviders` key | Environment variables                                        | Providers                                                                                   |
-| ----------------- | -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`          | OpenAI, Azure OpenAI, OpenRouter, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
-| Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` | Anthropic Claude                                                                            |
-| Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                             | Google Gemini                                                                               |
+| Protocol          | `modelProviders` key | Environment variables                                        | Providers                                                                                             |
+| ----------------- | -------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`          | OpenAI, Azure OpenAI, OpenRouter, Requesty, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
+| Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` | Anthropic Claude                                                                                      |
+| Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                             | Google Gemini                                                                                         |
 
 #### Step 1: Configure models and providers in `~/.qwen/settings.json`
 
@@ -315,6 +315,7 @@ The standalone `qwen auth` CLI command has been removed. Use these replacements 
 | Interactive authentication setup | Run `qwen`, then use `/auth`                                                                |
 | Coding Plan setup                | Use `/auth`, or set `BAILIAN_CODING_PLAN_API_KEY` with the Coding Plan base URL             |
 | OpenRouter setup                 | Use `/auth`, or set `OPENROUTER_API_KEY` and `OPENAI_BASE_URL=https://openrouter.ai/api/v1` |
+| Requesty setup                   | Use `/auth`, or set `REQUESTY_API_KEY` and `OPENAI_BASE_URL=https://router.requesty.ai/v1`  |
 | API-key or custom provider setup | Configure `~/.qwen/settings.json`, `.env`, or provider-specific environment variables       |
 | Check current authentication     | Run `/doctor` inside Qwen Code                                                              |
 | OAuth browser flow               | Run `qwen` interactively and use `/auth`; OAuth cannot be configured with env vars alone    |

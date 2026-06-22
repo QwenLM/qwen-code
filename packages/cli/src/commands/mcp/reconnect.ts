@@ -16,6 +16,7 @@ import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { getPendingGatedMcpServers } from '../../config/mcpApprovals.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
+import { getCurrentLanguage } from '../../i18n/index.js';
 
 async function getMcpServersFromConfig(
   extensionManager?: ExtensionManager,
@@ -24,8 +25,9 @@ async function getMcpServersFromConfig(
   const extManager =
     extensionManager ??
     new ExtensionManager({
-      isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+      isWorkspaceTrusted: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
       telemetrySettings: settings.merged.telemetry,
+      locale: getCurrentLanguage(),
     });
 
   if (!extensionManager) {
@@ -122,8 +124,9 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
 async function reconnectAllMcpServers(): Promise<void> {
   const settings = loadSettings();
   const extensionManager = new ExtensionManager({
-    isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+    isWorkspaceTrusted: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
     telemetrySettings: settings.merged.telemetry,
+    locale: getCurrentLanguage(),
   });
   await extensionManager.refreshCache();
 

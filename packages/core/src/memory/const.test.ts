@@ -4,12 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect } from 'vitest';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 import {
+  AGENT_CONTEXT_FILENAME,
+  DEFAULT_CONTEXT_FILENAME,
   setGeminiMdFilename,
   getCurrentGeminiMdFilename,
   getAllGeminiMdFilenames,
 } from './const.js';
+import {
+  setGeminiMdFilename as setToolGeminiMdFilename,
+  getCurrentGeminiMdFilename as getToolCurrentGeminiMdFilename,
+  getAllGeminiMdFilenames as getToolAllGeminiMdFilenames,
+} from '../tools/memory-config.js';
 
 // Mock dependencies
 vi.mock(import('node:fs/promises'), async (importOriginal) => {
@@ -24,6 +31,10 @@ vi.mock(import('node:fs/promises'), async (importOriginal) => {
 vi.mock('os');
 
 describe('setGeminiMdFilename', () => {
+  beforeEach(() => {
+    setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+  });
+
   it('should update currentGeminiMdFilename when a valid new name is provided', () => {
     const newName = 'CUSTOM_CONTEXT.md';
     setGeminiMdFilename(newName);
@@ -44,5 +55,15 @@ describe('setGeminiMdFilename', () => {
     setGeminiMdFilename(newNames);
     expect(getCurrentGeminiMdFilename()).toBe('CUSTOM_CONTEXT.md');
     expect(getAllGeminiMdFilenames()).toEqual(newNames);
+  });
+
+  it('shares filename state with the legacy tools memory config entrypoint', () => {
+    setGeminiMdFilename(['CUSTOM_CONTEXT.md', 'AGENTS.md']);
+    expect(getToolCurrentGeminiMdFilename()).toBe('CUSTOM_CONTEXT.md');
+    expect(getToolAllGeminiMdFilenames()).toEqual(getAllGeminiMdFilenames());
+
+    setToolGeminiMdFilename('LEGACY_CONTEXT.md');
+    expect(getCurrentGeminiMdFilename()).toBe('LEGACY_CONTEXT.md');
+    expect(getAllGeminiMdFilenames()).toEqual(['LEGACY_CONTEXT.md']);
   });
 });

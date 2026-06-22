@@ -113,7 +113,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
-import { ApiRetryEvent, LoopType } from '../telemetry/types.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 
 // Hook types and utilities
@@ -211,6 +211,7 @@ export class GeminiClient {
   private skillsModifiedInSession = false;
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
+  private shutdownRequested = false;
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -594,6 +595,15 @@ export class GeminiClient {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
     });
+  }
+
+  /**
+   * Signal that shutdown is imminent. Subsequent calls to background memory
+   * tasks (extract, dream, skill review) will be skipped so the process can
+   * exit cleanly without spawning new work.
+   */
+  requestShutdown(): void {
+    this.shutdownRequested = true;
   }
 
   /**
@@ -1380,6 +1390,15 @@ export class GeminiClient {
   private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
   ): void {
+    // During shutdown, skip all background memory tasks so the process
+    // can exit cleanly without spawning new work.
+    if (this.shutdownRequested) {
+      debugLogger.debug(
+        'Skipping background memory tasks: shutdown requested.',
+      );
+      return;
+    }
+
     // autoSkill counts tool calls and can trigger on both UserQuery and
     // ToolResult turns so the threshold can fire mid-session.
     if (
@@ -2123,35 +2142,47 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        // Loop detection is opt-in: `model.skipLoopDetection` defaults to true
-        // (see settingsSchema) to avoid false-positive interruptions. Keep BOTH
-        // the deterministic identical-tool-call check and the heuristic checks
-        // behind this single flag so the documented `model.skipLoopDetection`
-        // escape hatch stays honest (including the non-interactive hint in
-        // nonInteractiveCli.ts). The deterministic split, retry-reset, and
-        // pending-call splice below still apply once detection is enabled.
+        // Always-on safety checks (consecutive-identical tool-call guard +
+        // per-turn tool-call cap). These fire before the skipLoopDetection
+        // gate so they cannot be bypassed by configuration.
+        const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+        if (alwaysOnLoop) {
+          // Drop every tool call collected before the guard fired so the run
+          // halts here instead of spawning a continuation that re-trips it.
+          // turn.pendingToolCalls is internal to this loop and is not read
+          // after the early return — stream consumers (the TUI scheduler and
+          // the non-interactive runner) build their own list from the yielded
+          // ToolCallRequest events and stop on LoopDetected.
+          turn.pendingToolCalls.length = 0;
+          const loopType = this.loopDetector.getLastLoopType();
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
+          this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          this.cancelPendingMemoryPrefetch();
+          return turn;
+        }
+
+        // Heuristic loop detection is opt-in: `model.skipLoopDetection`
+        // defaults to true (see settingsSchema) to avoid false-positive
+        // interruptions. Only the historically false-positive-prone heuristics
+        // (content/thought repetition, read-file and action stagnation,
+        // global-duplicate and alternating tool-call patterns) sit behind this
+        // flag. The precise consecutive-identical guard and the per-turn cap
+        // run unconditionally in checkAlwaysOnSafeties above, so the documented
+        // escape hatch only relaxes the heuristics (see nonInteractiveCli.ts).
         const skipLoopDetection = this.config.getSkipLoopDetection();
-        const deterministicToolCallLoop =
-          !skipLoopDetection &&
-          this.loopDetector.addAndCheckDeterministicToolCallLoop(event);
         const heuristicLoop =
-          !deterministicToolCallLoop &&
           !skipLoopDetection &&
           this.loopDetector.addAndCheckHeuristicLoops(event);
-        if (deterministicToolCallLoop || heuristicLoop) {
+        if (heuristicLoop) {
           const loopType = this.loopDetector.getLastLoopType();
-          if (
-            event.type === GeminiEventType.ToolCallRequest &&
-            loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
-          ) {
-            const repeatedCount =
-              this.loopDetector.getConsecutiveToolCallCount();
-            const repeatedStartIndex = Math.max(
-              0,
-              turn.pendingToolCalls.length - repeatedCount,
-            );
-            turn.pendingToolCalls.splice(repeatedStartIndex);
-          }
           yield {
             type: GeminiEventType.LoopDetected,
             ...(loopType && { value: { loopType } }),
@@ -2656,8 +2687,9 @@ export class GeminiClient {
 
   /**
    * Surgically disarm FileReadCache entries for files evicted by
-   * microcompaction. Falls back to a blanket clear() when any evicted
-   * path can't be resolved.
+   * microcompaction. Falls back to a blanket clear() only when a blanked read
+   * cannot be linked to any path; path-level resolution failures are targeted
+   * to that path so one ghost file does not wipe unrelated cache entries.
    *
    * Shared by pre-send microcompaction and /compress-fast.
    */
@@ -2682,23 +2714,28 @@ export class GeminiClient {
         fsPromises.stat(p).catch(() => undefined),
       ),
     );
-    let fullyDisarmed = true;
-    for (const stats of statResults) {
-      if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-        fullyDisarmed = false;
+    let usedPathFallback = false;
+    for (let i = 0; i < meta.evictedReadPaths.length; i++) {
+      const stats = statResults[i];
+      if (stats && fileReadCache.markReadEvictedFromHistory(stats)) {
+        continue;
+      }
+      const evictedPath = meta.evictedReadPaths[i];
+      if (evictedPath) {
+        fileReadCache.invalidateByPath(evictedPath);
+        usedPathFallback = true;
       }
     }
-    if (fullyDisarmed) {
+    if (usedPathFallback) {
       debugLogger.debug(
-        `[FILE_READ_CACHE] disarmed fast-path for ` +
+        `[FILE_READ_CACHE] disarmed fast-path by path for ` +
           `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
       );
     } else {
       debugLogger.debug(
-        `[FILE_READ_CACHE] clear after ${logTag} ` +
-          '(an evicted path was unresolvable)',
+        `[FILE_READ_CACHE] disarmed fast-path for ` +
+          `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
       );
-      fileReadCache.clear();
     }
   }
 

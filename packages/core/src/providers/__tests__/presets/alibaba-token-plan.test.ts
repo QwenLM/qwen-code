@@ -31,14 +31,17 @@ describe('token plan provider', () => {
     });
 
     expect(template.map((model) => model.id)).toEqual([
+      'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
       'qwen3.6-flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
       'deepseek-v3.2',
+      'kimi-k2.7-code',
       'kimi-k2.6',
       'kimi-k2.5',
+      'glm-5.2',
       'glm-5.1',
       'glm-5',
       'MiniMax-M2.5',
@@ -52,8 +55,22 @@ describe('token plan provider', () => {
     ).toEqual({
       extra_body: { enable_thinking: true },
       contextWindowSize: 1000000,
-      modalities: { image: true, video: true },
     });
+    expect(
+      template.find((model) => model.id === 'kimi-k2.6')?.generationConfig,
+    ).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 262144,
+    });
+    // Plus/2.5 variants are genuinely multimodal and stay that way.
+    expect(
+      template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig
+        ?.modalities,
+    ).toEqual({ image: true, video: true });
+    expect(
+      template.find((model) => model.id === 'kimi-k2.5')?.generationConfig
+        ?.modalities,
+    ).toEqual({ image: true, video: true });
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [TOKEN_PLAN_ENV_KEY]: 'sk-token' });

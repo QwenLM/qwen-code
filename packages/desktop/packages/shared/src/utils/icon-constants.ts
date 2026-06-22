@@ -42,7 +42,7 @@ export function isEmoji(str: string | undefined): boolean {
  * Check if a string is a valid icon URL (http or https).
  */
 export function isIconUrl(str: string): boolean {
-  return str.startsWith('http://') || str.startsWith('https://');
+  return /^https?:\/\//i.test(str);
 }
 
 /**

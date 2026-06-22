@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore from 'ignore';
 import { createDebugLogger } from './debugLogger.js';
+import { isPathWithinRoot } from './workspaceContext.js';
 
 const QWEN_IGNORE_FILE_NAME = '.qwenignore';
 const debugLogger = createDebugLogger('QWEN_IGNORE');
@@ -174,7 +175,7 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
     const resolved = path.resolve(this.projectRoot, filePath);
     const relativePath = path.relative(this.projectRoot, resolved);
 
-    if (relativePath === '' || relativePath.startsWith('..')) {
+    if (relativePath === '' || !isPathWithinRoot(resolved, this.projectRoot)) {
       return null;
     }
 

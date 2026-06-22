@@ -108,14 +108,17 @@ const ALIBABA_SUBSCRIPTION_MODELS = [
 ] as const satisfies readonly SubscriptionPlanModelSpec[];
 
 const BAILIAN_TOKEN_PLAN_MODELS = [
+  { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
   { id: 'qwen3.6-plus', contextWindowSize: 1000000, enableThinking: true },
   { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
   { id: 'qwen3.6-flash', contextWindowSize: 1000000, enableThinking: true },
   { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
   { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
   { id: 'deepseek-v3.2', contextWindowSize: 131072 },
+  { id: 'kimi-k2.7-code', contextWindowSize: 262144, enableThinking: true },
   { id: 'kimi-k2.6', contextWindowSize: 262144, enableThinking: true },
   { id: 'kimi-k2.5', contextWindowSize: 262144, enableThinking: true },
+  { id: 'glm-5.2', contextWindowSize: 1000000, enableThinking: true },
   { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
   { id: 'MiniMax-M2.5', contextWindowSize: 196608 },

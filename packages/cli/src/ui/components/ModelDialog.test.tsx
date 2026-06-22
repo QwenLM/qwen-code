@@ -139,6 +139,31 @@ describe('<ModelDialog />', () => {
     expect(props.showNumbers).toBe(true);
   });
 
+  it('hides discontinued qwen-oauth models for other auth types', () => {
+    renderComponent(
+      {},
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: DEFAULT_QWEN_MODEL,
+            label: DEFAULT_QWEN_MODEL,
+            authType: AuthType.QWEN_OAUTH,
+          },
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+      },
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::gpt-4`);
+  });
+
   it('initializes with the model from ConfigContext', () => {
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     renderComponent(
@@ -283,10 +308,131 @@ describe('<ModelDialog />', () => {
       'model.name',
       'gpt-4',
     );
+    // The selected provider has no baseUrl, so the disambiguator must be
+    // cleared with an empty-string tombstone (overrides any lower-scope value).
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      '',
+    );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'security.auth.selectedType',
       AuthType.USE_OPENAI,
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists model.baseUrl alongside model.name when the selected provider has a baseUrl', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'qwen3.7-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'qwen3.7-max',
+          label: '[Token Plan] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'TOKEN_PLAN_KEY',
+        },
+        {
+          id: 'qwen3.7-max',
+          label: '[IdeaLab] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.example.com/v1',
+          envKey: 'IDEALAB_KEY',
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        baseUrl: 'https://idealab.example.com/v1',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    // Select the IdeaLab entry (second provider with the same id).
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-max\0https://idealab.example.com/v1`,
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3.7-max',
+      {
+        baseUrl: 'https://idealab.example.com/v1',
+      },
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      'qwen3.7-max',
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      'https://idealab.example.com/v1',
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the picker entry baseUrl when switchModel does not propagate it', async () => {
+    // Regression guard for the `after?.baseUrl ?? selectedEntry?.model.baseUrl`
+    // fallback: if switchModel succeeds but getContentGeneratorConfig returns a
+    // config WITHOUT baseUrl, the disambiguator must still be persisted from the
+    // selected picker entry's baseUrl — otherwise an empty-string tombstone would
+    // be written and the wrong same-id provider would resolve on next launch.
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'qwen3.7-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'qwen3.7-max',
+          label: '[Token Plan] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'TOKEN_PLAN_KEY',
+        },
+        {
+          id: 'qwen3.7-max',
+          label: '[IdeaLab] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.example.com/v1',
+          envKey: 'IDEALAB_KEY',
+        },
+      ]),
+      // Resolved config has NO baseUrl, so `after?.baseUrl` is undefined and the
+      // `?? selectedEntry?.model.baseUrl` fallback must supply the disambiguator.
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    // Select the IdeaLab entry (second provider with the same id).
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-max\0https://idealab.example.com/v1`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      'qwen3.7-max',
+    );
+    // baseUrl comes from the picker entry, not the (baseUrl-less) resolved config.
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      'https://idealab.example.com/v1',
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
@@ -419,6 +565,84 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('stores the plain model id in voice model mode without switching models', async () => {
+    const switchModel = vi.fn();
+    const setFastModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVoiceModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'qwen3-asr-flash',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+          },
+          {
+            id: 'qwen3.7-max',
+            label: 'qwen3.7-max',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const selectProps = mockedSelect.mock.calls[0][0];
+    await selectProps.onSelect(selectProps.items[0].value);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'voiceModel',
+      'qwen3-asr-flash',
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      expect.any(String),
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not store a voice model without a transcription baseUrl', async () => {
+    const switchModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVoiceModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3-coder',
+            label: 'qwen3-coder',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen3-coder`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it('highlights the cross-auth row for a bare fast-model setting', () => {
     // `/model --fast deepseek-v4-flash` validates across all providers and
     // persists the bare model id. When the dialog re-opens, it must locate
@@ -483,48 +707,6 @@ describe('<ModelDialog />', () => {
     );
     expect(deepseekIndex).toBeGreaterThanOrEqual(0);
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(deepseekIndex);
-  });
-
-  it('blocks switching to qwen-oauth from another authType (discontinued)', async () => {
-    const switchModel = vi.fn().mockResolvedValue(undefined);
-    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
-    const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
-      if (t === AuthType.USE_OPENAI) {
-        return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
-      }
-      if (t === AuthType.QWEN_OAUTH) {
-        return getFilteredQwenModels().map((m) => ({
-          id: m.id,
-          label: m.label,
-          authType: AuthType.QWEN_OAUTH,
-        }));
-      }
-      return [];
-    });
-
-    const mockConfigWithSwitchAuthType = {
-      getAuthType,
-      getModel: vi.fn(() => 'gpt-4'),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.USE_OPENAI,
-        model: 'gpt-4',
-      })),
-      switchModel,
-      getAvailableModelsForAuthType,
-    };
-
-    const { props } = renderComponent(
-      {},
-      mockConfigWithSwitchAuthType as unknown as Partial<Config>,
-    );
-
-    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
-
-    // qwen-oauth is discontinued — switchModel should NOT be called
-    expect(switchModel).not.toHaveBeenCalled();
-    // Dialog should NOT close
-    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {

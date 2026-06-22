@@ -117,6 +117,9 @@ export { useDaemonWorkspaceActions as useWorkspaceActions } from './daemon/index
 /** Like `useWorkspace()` but returns null when outside a WorkspaceProvider. */
 export { useOptionalDaemonWorkspace as useOptionalWorkspace } from './daemon/index.js';
 
+/** Workspace-level event signals (memory/agents/tools/settings/mcp/extensions version counters). */
+export { useDaemonWorkspaceEventSignals as useWorkspaceEventSignals } from './daemon/index.js';
+
 // ── Transcript Hooks (low-level) ──────────────────────────────────
 
 /** Raw transcript blocks from the SSE stream. For custom message conversion. */
@@ -133,6 +136,9 @@ export { useDaemonPromptStatus as usePromptStatus } from './daemon/session/index
 
 /** Server-pushed prompt follow-up suggestions for daemon-backed UIs. */
 export { useDaemonFollowupSuggestion } from './daemon/index.js';
+
+/** Notifies when the daemon drains browser-queued messages into the running turn. */
+export { useDaemonMidTurnInjected } from './daemon/index.js';
 
 // ── Constants ─────────────────────────────────────────────────────
 

@@ -313,6 +313,63 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('disposes PTY terminal resources on natural exit', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
+
+      const { result } = await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      expect(dataDisposableStub.dispose).toHaveBeenCalled();
+      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      expect(removeListenerSpy).toHaveBeenCalledWith(
+        'error',
+        expect.any(Function),
+      );
+      // One terminal is used for live PTY rendering, another for final replay.
+      expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
+
+      terminalDisposeSpy.mockRestore();
+    });
+
+    it('disposes PTY resources and resolves when final render throws', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      mockSerializeTerminalToText.mockImplementationOnce(() => {
+        throw new Error('final render failed');
+      });
+
+      const { result } = await simulateExecution(
+        'render-fails-on-exit',
+        (pty) => {
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        {
+          ...shellExecutionConfig,
+          disableDynamicLineTrimming: false,
+        },
+      );
+
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe('');
+      expect(dataDisposableStub.dispose).toHaveBeenCalled();
+      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      // One terminal is used for live PTY rendering, another for final replay.
+      expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
+
+      terminalDisposeSpy.mockRestore();
+    });
+
     it('should strip ANSI codes from output', async () => {
       const { result } = await simulateExecution('ls --color=auto', (pty) => {
         pty.onData.mock.calls[0][0]('a\u001b[31mred\u001b[0mword');
@@ -704,6 +761,7 @@ describe('ShellExecutionService', () => {
     });
 
     it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       // Critical: do NOT fire onExit — the child is still alive after the
       // background-promote abort. The result Promise must resolve via the
       // abort handler's own immediate resolve, not via the exit handler.
@@ -738,6 +796,39 @@ describe('ShellExecutionService', () => {
         -mockPtyProcess.pid,
         'SIGKILL',
       );
+      expect(terminalDisposeSpy).toHaveBeenCalled();
+
+      terminalDisposeSpy.mockRestore();
+    });
+
+    it('background-promote replay failure falls back to full decoded raw output', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      mockSerializeTerminalToText.mockImplementationOnce(() => {
+        throw new Error('replay failed');
+      });
+      const output = Array.from(
+        { length: 250 },
+        (_, index) => `line-${index}`,
+      ).join('\n');
+
+      const { result } = await simulateExecution(
+        'long-running-output',
+        (pty, ac) => {
+          pty.onData.mock.calls[0][0](output);
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_replay_fallback',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      expect(result.output).toContain('line-0');
+      expect(result.output).toContain('line-249');
+      // One terminal is used for replay, another for the promoted snapshot.
+      expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
+
+      terminalDisposeSpy.mockRestore();
     });
 
     it('post-promotion: PTY data is no longer routed to onOutputEvent (handoff boundary)', async () => {

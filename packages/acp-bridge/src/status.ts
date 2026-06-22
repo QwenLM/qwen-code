@@ -130,6 +130,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
+  sessionTitle: 'qwen/control/session/title',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
@@ -139,6 +140,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
+  workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
 } as const;
 
 export type ServeStatus =
@@ -857,7 +859,8 @@ export type ServeExtensionInstallType =
   | 'local'
   | 'link'
   | 'github-release'
-  | 'npm';
+  | 'npm'
+  | 'archive-url';
 
 export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
@@ -872,10 +875,31 @@ export interface ServeExtensionCapabilities {
   hasSettings: boolean;
 }
 
+export type ServeExtensionUpdateState =
+  | 'checking for updates'
+  | 'updated, needs restart'
+  | 'updating'
+  | 'updated'
+  | 'update available'
+  | 'up to date'
+  | 'error'
+  | 'not updatable'
+  | 'unknown';
+
+export interface ServeExtensionDetails {
+  mcpServers: string[];
+  commands: string[];
+  skills: string[];
+  agents: string[];
+  contextFiles: string[];
+  settings: string[];
+}
+
 export interface ServeExtensionEntry {
   kind: 'extension';
   id: string;
   name: string;
+  displayName?: string;
   version: string;
   isActive: boolean;
   path: string;
@@ -884,7 +908,9 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
+  details?: ServeExtensionDetails;
 }
 
 export interface ServeWorkspaceExtensionsStatus {
@@ -993,7 +1019,7 @@ export function createIdleWorkspaceProvidersStatus(
  * tests, embedded callers that don't need daemon-host cells). Single
  * construction site so future optional-field additions to
  * `ServeWorkspaceEnvStatus` only need updating in one place — the
- * production builder in `cli/src/serve/envSnapshot.ts buildEnvStatusFromProcess`
+ * production builder in `cli/src/serve/env-snapshot.ts buildEnvStatusFromProcess`
  * and this helper would otherwise diverge silently (TS won't flag a
  * missing optional field).
  *

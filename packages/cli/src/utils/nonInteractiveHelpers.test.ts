@@ -733,6 +733,64 @@ describe('createAgentToolProgressHandler', () => {
     );
   });
 
+  it('forwards subagent tool args and response parts for JSON output', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          name: 'test_tool',
+          id: 'tool-1',
+          response: { output: 'Success from responseParts' },
+        },
+      },
+    ];
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: { arg1: 'value1' },
+          status: 'success',
+          responseParts,
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+        status: 'executing',
+      }),
+      'parent-tool-id',
+    );
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+      }),
+      expect.objectContaining({
+        callId: 'tool-1',
+        responseParts,
+      }),
+      'parent-tool-id',
+    );
+  });
+
   it('should not duplicate tool_use emissions', () => {
     const { handler } = createAgentToolProgressHandler(
       mockConfig,

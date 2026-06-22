@@ -90,7 +90,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       type: 'tool.update',
-      toolName: 'TodoWrite',
+      toolName: 'todo_write',
       rawOutput: {
         entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
         stats: {
@@ -152,7 +152,10 @@ describe('daemon UI normalizer and transcript reducer', () => {
       },
     });
 
-    expect(events).toMatchObject([{ type: 'assistant.text.delta' }]);
+    expect(events).toMatchObject([
+      { type: 'assistant.text.delta' },
+      { type: 'assistant.usage', usage: { inputTokens: 0, outputTokens: 1 } },
+    ]);
 
     let state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
@@ -175,6 +178,147 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       { kind: 'assistant', text: 'done', streaming: false },
     ]);
+  });
+
+  it('emits assistant.usage from an empty-text usage chunk (no text delta)', () => {
+    const events = normalizeDaemonEvent({
+      id: 9,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage: { inputTokens: 30, outputTokens: 12 } },
+        },
+      },
+    });
+
+    // The blank text would otherwise be dropped; the usage must still survive.
+    expect(events).toMatchObject([
+      { type: 'assistant.usage', usage: { inputTokens: 30, outputTokens: 12 } },
+    ]);
+  });
+
+  it('emits no usage event when the chunk carries no _meta.usage', () => {
+    const events = normalizeDaemonEvent({
+      id: 9,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+
+    expect(events).toMatchObject([{ type: 'assistant.text.delta' }]);
+    expect(events).toHaveLength(1);
+  });
+
+  it('folds per-round usage onto the active assistant block, accumulating', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answer' },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+        { type: 'assistant.usage', usage: { inputTokens: 5, outputTokens: 3 } },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'answer',
+        usage: { inputTokens: 105, outputTokens: 23 },
+      },
+    ]);
+  });
+
+  it('folds sub-agent usage (parentToolCallId) into the parent turn total', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answer' },
+        // The parent's own round.
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+        // A round from a spawned sub-agent — part of the turn's real cost.
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5000, outputTokens: 800 },
+          parentToolCallId: 'sub-1',
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'answer',
+        usage: { inputTokens: 5100, outputTokens: 820 },
+      },
+    ]);
+  });
+
+  it('carries and accumulates cached-read tokens', () => {
+    const events = normalizeDaemonEvent({
+      id: 11,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            usage: { inputTokens: 30, outputTokens: 12, cachedReadTokens: 24 },
+          },
+        },
+      },
+    });
+    expect(events).toMatchObject([
+      {
+        type: 'assistant.usage',
+        usage: { inputTokens: 30, outputTokens: 12, cachedTokens: 24 },
+      },
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'a' },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 30, outputTokens: 12, cachedTokens: 24 },
+        },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 10, outputTokens: 3, cachedTokens: 8 },
+        },
+      ],
+      { now: 2 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      usage: { inputTokens: 40, outputTokens: 15, cachedTokens: 32 },
+    });
+  });
+
+  it('drops usage with no active assistant block rather than minting one', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [{ type: 'assistant.usage', usage: { inputTokens: 9, outputTokens: 9 } }],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toHaveLength(0);
   });
 
   it('finalizes scalar thought blocks when the assistant turn finishes', () => {
@@ -1399,6 +1543,21 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\x00');
   });
 
+  it('renders extension failures without assuming install failed', () => {
+    const output = daemonUiEventToTerminalText({
+      type: 'workspace.extensions.changed',
+      refreshed: 0,
+      failed: 0,
+      status: 'failed',
+      name: 'test-extension',
+      error: 'Extension mutation failed',
+    });
+
+    expect(output).toContain('extension action failed test-extension');
+    expect(output).toContain('Extension mutation failed');
+    expect(output).not.toContain('install failed');
+  });
+
   it('strips terminal control and bidi spoofing sequences', () => {
     const output = sanitizeTerminalText(
       '\u202etxt.exe\u001b[31mred\roverwrite\u001bPhidden\u001b\\ok',
@@ -1911,6 +2070,60 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(refused[0]).toMatchObject({
       type: 'workspace.mcp.server_restart_refused',
       reason: 'in_flight',
+    });
+  });
+
+  it('normalizes extension install lifecycle details', () => {
+    const installed = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 1,
+        failed: 0,
+        status: 'installed',
+        source: 'owner/repo',
+        name: 'test-extension',
+        version: '1.2.3',
+      }),
+    );
+    expect(installed[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      refreshed: 1,
+      failed: 0,
+      status: 'installed',
+      source: 'owner/repo',
+      name: 'test-extension',
+      version: '1.2.3',
+    });
+
+    const updated = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 1,
+        failed: 0,
+        status: 'updated',
+        name: 'test-extension',
+        version: '1.2.4',
+      }),
+    );
+    expect(updated[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      status: 'updated',
+      name: 'test-extension',
+      version: '1.2.4',
+    });
+
+    const failed = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 0,
+        failed: 0,
+        status: 'failed',
+        source: 'owner/repo',
+        error: 'install failed',
+      }),
+    );
+    expect(failed[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      status: 'failed',
+      source: 'owner/repo',
+      error: 'install failed',
     });
   });
 

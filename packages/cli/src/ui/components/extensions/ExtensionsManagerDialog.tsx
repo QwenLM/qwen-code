@@ -4,512 +4,201 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { Box, Text } from 'ink';
-import {
-  ExtensionListStep,
-  ExtensionDetailStep,
-  ActionSelectionStep,
-  UninstallConfirmStep,
-  ScopeSelectStep,
-} from './steps/index.js';
-import { MANAGEMENT_STEPS, type ExtensionAction } from './types.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useUIState } from '../../contexts/UIStateContext.js';
-import { t } from '../../../i18n/index.js';
-import type { Extension, Config } from '@qwen-code/qwen-code-core';
-import { SettingScope, createDebugLogger } from '@qwen-code/qwen-code-core';
-import { ExtensionUpdateState } from '../../state/extensions.js';
-import { getErrorMessage } from '../../../utils/errors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { t } from '../../../i18n/index.js';
+import { stripUnsafeCharacters } from '../../utils/textUtils.js';
+import {
+  EXTENSIONS_TABS,
+  type ExtensionsTab,
+  type ExtensionsTabDef,
+  type ExtensionsManagerDialogProps,
+} from './types.js';
+import { TabBar } from './TabBar.js';
+import { DiscoverTab } from './tabs/DiscoverTab.js';
+import { InstalledTab } from './tabs/InstalledTab.js';
+import { SourcesTab } from './tabs/SourcesTab.js';
+import { ConsentPrompt } from '../ConsentPrompt.js';
+import { SettingInputPrompt } from '../SettingInputPrompt.js';
+import { PluginChoicePrompt } from '../PluginChoicePrompt.js';
 
-interface ExtensionsManagerDialogProps {
-  onClose: () => void;
-  config: Config | null;
+export interface StatusMessage {
+  type: 'info' | 'success' | 'error';
+  text: string;
 }
 
-const debugLogger = createDebugLogger('EXTENSIONS_MANAGER_DIALOG');
+const TABS: ExtensionsTabDef[] = [
+  { id: EXTENSIONS_TABS.INSTALLED, label: 'Installed' },
+  { id: EXTENSIONS_TABS.DISCOVER, label: 'Discover' },
+  { id: EXTENSIONS_TABS.SOURCES, label: 'Sources' },
+];
+
+// Literal t() calls keep the footer hints extractable for translation.
+function footerHint(tab: ExtensionsTab): string {
+  switch (tab) {
+    case EXTENSIONS_TABS.DISCOVER:
+      return t(
+        'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
+      );
+    case EXTENSIONS_TABS.INSTALLED:
+      return t(
+        '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close',
+      );
+    case EXTENSIONS_TABS.SOURCES:
+      return t('↑↓ navigate · Enter select · d remove marketplace · Esc close');
+    default:
+      return '';
+  }
+}
 
 export function ExtensionsManagerDialog({
   onClose,
   config,
+  initialTab,
 }: ExtensionsManagerDialogProps) {
-  const { extensionsUpdateState } = useUIState();
-
-  const [extensions, setExtensions] = useState<Extension[]>([]);
-  const [selectedExtensionIndex, setSelectedExtensionIndex] =
-    useState<number>(-1);
-  const [navigationStack, setNavigationStack] = useState<string[]>([
-    MANAGEMENT_STEPS.EXTENSION_LIST,
-  ]);
-  const [updateInProgress, setUpdateInProgress] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const { columns } = useTerminalSize();
-  const boxWidth = columns - 4;
-
-  // Load extensions
-  const loadExtensions = useCallback(async () => {
-    if (!config) return;
-
-    const extensionManager = config.getExtensionManager();
-    if (!extensionManager) {
-      debugLogger.error('ExtensionManager not available');
-      return;
-    }
-
-    try {
-      await extensionManager.refreshCache();
-      const loadedExtensions = extensionManager.getLoadedExtensions();
-      setExtensions(loadedExtensions);
-    } catch (error) {
-      debugLogger.error('Failed to load extensions:', error);
-    }
-  }, [config]);
-
-  // Initial load
-  useEffect(() => {
-    loadExtensions();
-  }, [loadExtensions]);
-
-  // Memoized selected extension
-  const selectedExtension = useMemo(
-    () =>
-      selectedExtensionIndex >= 0 ? extensions[selectedExtensionIndex] : null,
-    [extensions, selectedExtensionIndex],
-  );
-
-  // Check if update is available for selected extension
-  const hasUpdateAvailable = useMemo(() => {
-    if (!selectedExtension) return false;
-    const state = extensionsUpdateState.get(selectedExtension.name);
-    return state === ExtensionUpdateState.UPDATE_AVAILABLE;
-  }, [selectedExtension, extensionsUpdateState]);
-
-  // Helper to get current step
-  const getCurrentStep = useCallback(
-    () =>
-      navigationStack[navigationStack.length - 1] ||
-      MANAGEMENT_STEPS.EXTENSION_LIST,
-    [navigationStack],
-  );
-
-  const handleSelectExtension = useCallback((extensionIndex: number) => {
-    setSelectedExtensionIndex(extensionIndex);
-    setSuccessMessage(null); // Clear success message when navigating
-    setErrorMessage(null); // Clear error message when navigating
-    setNavigationStack((prev) => [...prev, MANAGEMENT_STEPS.ACTION_SELECTION]);
-  }, []);
-
-  const handleNavigateToStep = useCallback((step: string) => {
-    setNavigationStack((prev) => [...prev, step]);
-  }, []);
-
-  const handleNavigateBack = useCallback(() => {
-    setNavigationStack((prev) => {
-      if (prev.length <= 1) {
-        return prev;
-      }
-      return prev.slice(0, -1);
-    });
-    // Clear messages when navigating back
-    setErrorMessage(null);
-  }, []);
-
-  const handleUpdateExtension = useCallback(async () => {
-    if (!config || !selectedExtension) return;
-
-    setUpdateInProgress(true);
-    setUpdateError(null);
-
-    try {
-      const extensionManager = config.getExtensionManager();
-      if (!extensionManager) {
-        throw new Error('ExtensionManager not available');
-      }
-
-      const state = extensionsUpdateState.get(selectedExtension.name);
-      if (state !== ExtensionUpdateState.UPDATE_AVAILABLE) {
-        throw new Error('No update available');
-      }
-
-      // Use the extension manager to update
-      await extensionManager.updateExtension(
-        selectedExtension,
-        ExtensionUpdateState.UPDATE_AVAILABLE,
-        (name, newState) => {
-          debugLogger.debug(`Update state for ${name}:`, newState);
-        },
-      );
-
-      // Reload extensions after update to get new version info
-      await loadExtensions();
-
-      // Trigger a re-check of update status for all extensions
-      await extensionManager.checkForAllExtensionUpdates((name, newState) => {
-        debugLogger.debug(`Recheck update state for ${name}:`, newState);
-      });
-
-      // Show success message
-      setSuccessMessage(
-        t('Extension "{{name}}" updated successfully.', {
-          name: selectedExtension.name,
-        }),
-      );
-
-      // Go back to action selection
-      handleNavigateBack();
-    } catch (error) {
-      debugLogger.error('Failed to update extension:', error);
-      setUpdateError(
-        error instanceof Error ? error.message : 'Unknown error occurred',
-      );
-    } finally {
-      setUpdateInProgress(false);
-    }
-  }, [
-    config,
-    selectedExtension,
+  const {
     extensionsUpdateState,
-    loadExtensions,
-    handleNavigateBack,
-  ]);
+    confirmUpdateExtensionRequests,
+    settingInputRequests,
+    pluginChoiceRequests,
+  } = useUIState();
+  const { columns } = useTerminalSize();
+  // Cap the width to the app's main content area (AppContainer caps it at 100).
+  // Without this the dialog grows to the full terminal width on wide terminals
+  // and overflows its container, clipping the right-aligned status column.
+  const boxWidth = Math.min(columns - 4, 100);
 
-  const handleActionSelect = useCallback(
-    (action: ExtensionAction) => {
-      switch (action) {
-        case 'view':
-          handleNavigateToStep(MANAGEMENT_STEPS.EXTENSION_DETAIL);
-          break;
-        case 'update':
-          handleNavigateToStep(MANAGEMENT_STEPS.UPDATE_PROGRESS);
-          handleUpdateExtension();
-          break;
-        case 'disable':
-          handleNavigateToStep(MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT);
-          break;
-        case 'enable':
-          handleNavigateToStep(MANAGEMENT_STEPS.ENABLE_SCOPE_SELECT);
-          break;
-        case 'uninstall':
-          handleNavigateToStep(MANAGEMENT_STEPS.UNINSTALL_CONFIRMATION);
-          break;
-        default:
-          break;
-      }
-    },
-    [handleNavigateToStep, handleUpdateExtension],
+  // Install flows raise interactive requests (consent, setting input, plugin
+  // choice). They are rendered here, inside the dialog, so the dialog stays
+  // mounted and keeps its tab/list state; DialogManager skips them while this
+  // dialog is open. (Unmounting would reset the active tab and drop the
+  // reload signal that refreshes the Installed tab after an install.)
+  const consentRequest = confirmUpdateExtensionRequests?.[0];
+  const settingRequest = settingInputRequests?.[0];
+  const pluginChoiceRequest = pluginChoiceRequests?.[0];
+  const hasPendingRequest =
+    !!consentRequest || !!settingRequest || !!pluginChoiceRequest;
+
+  const [activeTab, setActiveTab] = useState<ExtensionsTab>(
+    initialTab ?? EXTENSIONS_TABS.INSTALLED,
   );
+  const [tabLocked, setTabLocked] = useState(false);
+  const [status, setStatus] = useState<StatusMessage | null>(null);
+  // Bumped to force tabs to re-load when a cross-tab change happens
+  // (e.g. installing from Discover should refresh Installed).
+  const [reloadSignal, setReloadSignal] = useState(0);
+  // When set, the Discover tab is restricted to this marketplace (set by the
+  // Marketplaces tab's "Browse plugins" action; cleared on manual tab switch).
+  const [discoverFilter, setDiscoverFilter] = useState<string | null>(null);
+  // Optional context-aware footer hint provided by the active tab.
+  const [tabFooter, setTabFooter] = useState<string | null>(null);
 
-  // Unified handler for toggling extension state (enable/disable)
-  const handleToggleExtensionState = useCallback(
-    async (scope: 'user' | 'workspace', newState: boolean) => {
-      if (!config || !selectedExtension) return;
+  const cycleTab = useCallback((direction: 1 | -1) => {
+    setStatus(null);
+    setDiscoverFilter(null);
+    setTabFooter(null);
+    setActiveTab((current) => {
+      const index = TABS.findIndex((tab) => tab.id === current);
+      const next = (index + direction + TABS.length) % TABS.length;
+      return TABS[next].id;
+    });
+  }, []);
 
-      try {
-        const extensionManager = config.getExtensionManager();
-        if (!extensionManager) {
-          throw new Error('ExtensionManager not available');
-        }
+  const handleBrowseSource = useCallback((marketplaceName: string) => {
+    setStatus(null);
+    setTabLocked(false);
+    // The marketplace name is untrusted (it originates from a remote
+    // marketplace.json). Scrub terminal escapes before it becomes the Discover
+    // filter: it is rendered as a hint AND compared against the
+    // already-sanitized DiscoveredPlugin.marketplaceName, so sanitizing here
+    // both blocks ANSI injection and keeps the filter comparison matching.
+    setDiscoverFilter(stripUnsafeCharacters(marketplaceName));
+    setActiveTab(EXTENSIONS_TABS.DISCOVER);
+  }, []);
 
-        const settingScope =
-          scope === 'user' ? SettingScope.User : SettingScope.Workspace;
+  const bumpReload = useCallback(() => {
+    setReloadSignal((value) => value + 1);
+  }, []);
 
-        if (newState) {
-          await extensionManager.enableExtension(
-            selectedExtension.name,
-            settingScope,
-          );
-        } else {
-          await extensionManager.disableExtension(
-            selectedExtension.name,
-            settingScope,
-          );
-        }
+  const handleLockChange = useCallback((locked: boolean) => {
+    setTabLocked(locked);
+  }, []);
 
-        // Update local state
-        setExtensions((prev) =>
-          prev.map((ext) =>
-            ext.name === selectedExtension.name
-              ? { ...ext, isActive: newState }
-              : ext,
-          ),
-        );
-
-        // Show success message
-        const actionKey = newState ? 'enabled' : 'disabled';
-        setSuccessMessage(
-          t(`Extension "{{name}}" ${actionKey} successfully.`, {
-            name: selectedExtension.name,
-          }),
-        );
-        setErrorMessage(null);
-
-        // Go back to extension list to show success message
-        setNavigationStack([MANAGEMENT_STEPS.EXTENSION_LIST]);
-      } catch (error) {
-        debugLogger.error(
-          `Failed to ${newState ? 'enable' : 'disable'} extension:`,
-          error,
-        );
-        setErrorMessage(
-          t('Failed to {{action}} extension "{{name}}": {{error}}', {
-            action: newState ? 'enable' : 'disable',
-            name: selectedExtension.name,
-            error: getErrorMessage(error),
-          }),
-        );
-        setSuccessMessage(null);
-      }
-    },
-    [config, selectedExtension],
-  );
-
-  const handleDisableExtension = useCallback(
-    async (scope: 'user' | 'workspace') => {
-      await handleToggleExtensionState(scope, false);
-    },
-    [handleToggleExtensionState],
-  );
-
-  const handleEnableExtension = useCallback(
-    async (scope: 'user' | 'workspace') => {
-      await handleToggleExtensionState(scope, true);
-    },
-    [handleToggleExtensionState],
-  );
-
-  const handleUninstallExtension = useCallback(
-    async (extension: Extension) => {
-      if (!config) return;
-
-      try {
-        const extensionManager = config.getExtensionManager();
-        if (!extensionManager) {
-          throw new Error('ExtensionManager not available');
-        }
-
-        await extensionManager.uninstallExtension(extension.name, false);
-
-        // Reload extensions
-        await loadExtensions();
-
-        // Navigate back to extension list
-        setNavigationStack([MANAGEMENT_STEPS.EXTENSION_LIST]);
-        setSelectedExtensionIndex(-1);
-      } catch (error) {
-        debugLogger.error('Failed to uninstall extension:', error);
-        throw error;
-      }
-    },
-    [config, loadExtensions],
-  );
-
-  // Centralized ESC key handling
+  // Tab switching + close. Inactive while a tab owns a sub-view (locked).
   useKeypress(
     (key) => {
-      if (key.name !== 'escape') {
-        return;
-      }
-
-      const currentStep = getCurrentStep();
-      // If there's a success message, clear it first instead of closing
-      if (successMessage && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
-        setSuccessMessage(null);
-        return;
-      }
-      if (currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
+      if (key.name === 'tab') {
+        // On Discover with an active marketplace filter, Tab clears the filter
+        // in place (revealing all extensions) instead of leaving the tab — this
+        // is what the "(Tab to clear)" hint promises. Otherwise it cycles tabs.
+        if (activeTab === EXTENSIONS_TABS.DISCOVER && discoverFilter) {
+          setStatus(null);
+          setDiscoverFilter(null);
+        } else {
+          cycleTab(key.shift ? -1 : 1);
+        }
+      } else if (key.name === 'right') {
+        cycleTab(1);
+      } else if (key.name === 'left') {
+        cycleTab(-1);
+      } else if (key.name === 'escape') {
         onClose();
-      } else {
-        handleNavigateBack();
       }
     },
-    { isActive: true },
+    { isActive: !tabLocked && !hasPendingRequest },
   );
 
-  const renderStepHeader = useCallback(() => {
-    const currentStep = getCurrentStep();
-    const getStepHeaderText = () => {
-      switch (currentStep) {
-        case MANAGEMENT_STEPS.EXTENSION_LIST:
-          return t('Manage Extensions');
-        case MANAGEMENT_STEPS.ACTION_SELECTION:
-          return selectedExtension?.name || t('Choose Action');
-        case MANAGEMENT_STEPS.EXTENSION_DETAIL:
-          return t('Extension Details');
-        case MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT:
-          return t('Disable Extension');
-        case MANAGEMENT_STEPS.ENABLE_SCOPE_SELECT:
-          return t('Enable Extension');
-        case MANAGEMENT_STEPS.UNINSTALL_CONFIRMATION:
-          return t('Uninstall Extension');
-        case MANAGEMENT_STEPS.UPDATE_PROGRESS:
-          return t('Update Extension');
-        default:
-          return t('Unknown Step');
-      }
-    };
-
+  if (!config) {
     return (
-      <Box>
-        <Text color={theme.text.accent} bold>
-          {getStepHeaderText()}
-        </Text>
+      <Box flexDirection="column" width={boxWidth}>
+        <Box
+          borderStyle="single"
+          borderColor={theme.border.default}
+          padding={1}
+          width={boxWidth}
+        >
+          <Text color={theme.status.error}>
+            {t('Extensions are not available in this environment.')}
+          </Text>
+        </Box>
       </Box>
     );
-  }, [getCurrentStep, selectedExtension]);
-
-  const renderStepFooter = useCallback(() => {
-    const currentStep = getCurrentStep();
-    const getNavigationInstructions = () => {
-      if (currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
-        if (extensions.length === 0 || successMessage) {
-          return t('Esc to close');
-        }
-        return t('↑↓ to navigate · Enter to select · Esc to close');
-      }
-
-      if (currentStep === MANAGEMENT_STEPS.EXTENSION_DETAIL) {
-        return t('Esc to go back');
-      }
-
-      if (currentStep === MANAGEMENT_STEPS.UNINSTALL_CONFIRMATION) {
-        return t('Y/Enter to confirm · N/Esc to cancel');
-      }
-
-      if (currentStep === MANAGEMENT_STEPS.UPDATE_PROGRESS) {
-        return updateInProgress ? t('Updating...') : '';
-      }
-
-      return t('↑↓ to navigate · Enter to select · Esc to go back');
-    };
-
-    return (
-      <Box>
-        <Text color={theme.text.secondary}>{getNavigationInstructions()}</Text>
-      </Box>
-    );
-  }, [getCurrentStep, extensions.length, updateInProgress, successMessage]);
-
-  const renderStepContent = useCallback(() => {
-    const currentStep = getCurrentStep();
-
-    // Show error message if present (only on extension list step)
-    if (errorMessage && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
-      return (
-        <Box flexDirection="column" gap={1}>
-          <Text color={theme.status.error}>{errorMessage}</Text>
-        </Box>
-      );
-    }
-
-    // Show success message if present (only on extension list step)
-    if (successMessage && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
-      return (
-        <Box flexDirection="column" gap={1}>
-          <Text color={theme.status.success}>{successMessage}</Text>
-        </Box>
-      );
-    }
-
-    if (updateError && currentStep === MANAGEMENT_STEPS.UPDATE_PROGRESS) {
-      return (
-        <Box flexDirection="column" gap={1}>
-          <Text color={theme.status.error}>{t('Update failed:')}</Text>
-          <Text>{updateError}</Text>
-        </Box>
-      );
-    }
-
-    switch (currentStep) {
-      case MANAGEMENT_STEPS.EXTENSION_LIST:
-        return (
-          <ExtensionListStep
-            extensions={extensions}
-            extensionsUpdateState={extensionsUpdateState}
-            onExtensionSelect={handleSelectExtension}
-          />
-        );
-      case MANAGEMENT_STEPS.ACTION_SELECTION:
-        return (
-          <ActionSelectionStep
-            selectedExtension={selectedExtension}
-            hasUpdateAvailable={hasUpdateAvailable}
-            onNavigateToStep={handleNavigateToStep}
-            onActionSelect={handleActionSelect}
-          />
-        );
-      case MANAGEMENT_STEPS.EXTENSION_DETAIL:
-        return <ExtensionDetailStep selectedExtension={selectedExtension} />;
-      case MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT:
-        return (
-          <ScopeSelectStep
-            selectedExtension={selectedExtension}
-            mode="disable"
-            onScopeSelect={handleDisableExtension}
-          />
-        );
-      case MANAGEMENT_STEPS.ENABLE_SCOPE_SELECT:
-        return (
-          <ScopeSelectStep
-            selectedExtension={selectedExtension}
-            mode="enable"
-            onScopeSelect={handleEnableExtension}
-          />
-        );
-      case MANAGEMENT_STEPS.UNINSTALL_CONFIRMATION:
-        return (
-          <UninstallConfirmStep
-            selectedExtension={selectedExtension}
-            onConfirm={handleUninstallExtension}
-            onNavigateBack={handleNavigateBack}
-          />
-        );
-      case MANAGEMENT_STEPS.UPDATE_PROGRESS:
-        return (
-          <Box flexDirection="column" gap={1}>
-            <Text>
-              {updateInProgress
-                ? t('Updating {{name}}...', {
-                    name: selectedExtension?.name || '',
-                  })
-                : t('Update complete!')}
-            </Text>
-          </Box>
-        );
-      default:
-        return (
-          <Box>
-            <Text color={theme.status.error}>
-              {t('Invalid step: {{step}}', { step: currentStep })}
-            </Text>
-          </Box>
-        );
-    }
-  }, [
-    getCurrentStep,
-    extensions,
-    extensionsUpdateState,
-    selectedExtension,
-    hasUpdateAvailable,
-    updateInProgress,
-    updateError,
-    successMessage,
-    errorMessage,
-    handleSelectExtension,
-    handleNavigateToStep,
-    handleNavigateBack,
-    handleActionSelect,
-    handleDisableExtension,
-    handleEnableExtension,
-    handleUninstallExtension,
-  ]);
+  }
 
   return (
     <Box flexDirection="column" width={boxWidth}>
+      {consentRequest ? (
+        <ConsentPrompt
+          prompt={consentRequest.prompt}
+          onConfirm={consentRequest.onConfirm}
+          terminalWidth={boxWidth}
+        />
+      ) : settingRequest ? (
+        <SettingInputPrompt
+          key={settingRequest.settingName}
+          settingName={settingRequest.settingName}
+          settingDescription={settingRequest.settingDescription}
+          sensitive={settingRequest.sensitive}
+          onSubmit={settingRequest.onSubmit}
+          onCancel={settingRequest.onCancel}
+          terminalWidth={boxWidth}
+        />
+      ) : pluginChoiceRequest ? (
+        <PluginChoicePrompt
+          key={pluginChoiceRequest.marketplaceName}
+          marketplaceName={pluginChoiceRequest.marketplaceName}
+          plugins={pluginChoiceRequest.plugins}
+          onSelect={pluginChoiceRequest.onSelect}
+          onCancel={pluginChoiceRequest.onCancel}
+          terminalWidth={boxWidth}
+        />
+      ) : null}
       <Box
+        display={hasPendingRequest ? 'none' : 'flex'}
         borderStyle="single"
         borderColor={theme.border.default}
         flexDirection="column"
@@ -518,9 +207,73 @@ export function ExtensionsManagerDialog({
         width={boxWidth}
         gap={1}
       >
-        {renderStepHeader()}
-        {renderStepContent()}
-        {renderStepFooter()}
+        <TabBar tabs={TABS} activeTab={activeTab} canSwitch={!tabLocked} />
+
+        <Box flexDirection="column">
+          {activeTab === EXTENSIONS_TABS.DISCOVER && (
+            <DiscoverTab
+              config={config}
+              isActive={
+                activeTab === EXTENSIONS_TABS.DISCOVER && !hasPendingRequest
+              }
+              onLockChange={handleLockChange}
+              onStatus={setStatus}
+              onInstalled={bumpReload}
+              marketplaceFilter={discoverFilter ?? undefined}
+              reloadSignal={reloadSignal}
+            />
+          )}
+          {activeTab === EXTENSIONS_TABS.INSTALLED && (
+            <InstalledTab
+              config={config}
+              isActive={
+                activeTab === EXTENSIONS_TABS.INSTALLED && !hasPendingRequest
+              }
+              onLockChange={handleLockChange}
+              onStatus={setStatus}
+              extensionsUpdateState={extensionsUpdateState}
+              reloadSignal={reloadSignal}
+            />
+          )}
+          {activeTab === EXTENSIONS_TABS.SOURCES && (
+            <SourcesTab
+              config={config}
+              isActive={
+                activeTab === EXTENSIONS_TABS.SOURCES && !hasPendingRequest
+              }
+              onLockChange={handleLockChange}
+              onStatus={setStatus}
+              onChanged={bumpReload}
+              onBrowse={handleBrowseSource}
+              onFooter={setTabFooter}
+              reloadSignal={reloadSignal}
+            />
+          )}
+        </Box>
+
+        {status && (
+          <Text
+            color={
+              status.type === 'error'
+                ? theme.status.error
+                : status.type === 'success'
+                  ? theme.status.success
+                  : theme.text.secondary
+            }
+          >
+            {status.text}
+          </Text>
+        )}
+
+        <Text color={theme.text.secondary}>
+          {/* A tab-provided hint wins even while a sub-view is locked, so a
+              locked view (e.g. a failed marketplace load offering R to retry)
+              can surface its own footer instead of the generic locked text. */}
+          {tabFooter ??
+            (tabLocked
+              ? t('Enter to select · Esc to go back')
+              : footerHint(activeTab))}
+        </Text>
       </Box>
     </Box>
   );

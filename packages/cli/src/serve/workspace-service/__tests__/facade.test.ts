@@ -389,6 +389,47 @@ describe('createDaemonWorkspaceService', () => {
     });
   });
 
+  describe('refreshExtensionsForAllSessions', () => {
+    it('delegates to the all-session refresh callback', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const refreshExtensionsForAllSessions = vi
+        .fn()
+        .mockResolvedValue({ refreshed: 2, failed: 1 });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, refreshExtensionsForAllSessions }),
+      );
+
+      const result = await svc.refreshExtensionsForAllSessions();
+
+      expect(result).toEqual({ refreshed: 2, failed: 1 });
+      expect(refreshExtensionsForAllSessions).toHaveBeenCalledOnce();
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    });
+
+    it('returns a failed result when the refresh callback is not wired', async () => {
+      const svc = createDaemonWorkspaceService(makeDeps());
+
+      await expect(svc.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 0,
+        failed: 1,
+      });
+    });
+
+    it('returns a failed result when the refresh callback rejects', async () => {
+      const refreshExtensionsForAllSessions = vi
+        .fn()
+        .mockRejectedValue(new Error('bridge down'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ refreshExtensionsForAllSessions }),
+      );
+
+      await expect(svc.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 0,
+        failed: 1,
+      });
+    });
+  });
+
   describe('restartMcpServer', () => {
     it('calls invokeWorkspaceCommand with correct method and params', async () => {
       const invokeWorkspaceCommand = vi.fn().mockResolvedValue({

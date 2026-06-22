@@ -10,7 +10,7 @@ tools:
   - ReadManyFiles
   - NotebookRead
   - WebFetch
-  - TodoWrite
+  - TodoList
 modelConfig:
   model: qwen3-coder-plus
 ---

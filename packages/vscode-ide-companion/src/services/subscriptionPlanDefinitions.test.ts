@@ -14,14 +14,17 @@ describe('subscription plan definitions', () => {
     const codingPlan = getSubscriptionPlanConfig('coding');
 
     expect(tokenPlan.template.map((model) => model.id)).toEqual([
+      'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
       'qwen3.6-flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
       'deepseek-v3.2',
+      'kimi-k2.7-code',
       'kimi-k2.6',
       'kimi-k2.5',
+      'glm-5.2',
       'glm-5.1',
       'glm-5',
       'MiniMax-M2.5',

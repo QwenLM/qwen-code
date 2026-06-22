@@ -155,7 +155,7 @@ notebook_edit(
   - `pattern` (string, required): The regular expression pattern to search for in file contents (e.g., `"function\\s+myFunction"`, `"log.*Error"`).
   - `path` (string, optional): File or directory to search in. Defaults to current working directory.
   - `glob` (string, optional): Glob pattern to filter files (e.g. `"*.js"`, `"src/**/*.{ts,tsx}"`).
-  - `limit` (number, optional): Limit output to first N matching lines. Optional - shows all matches if not specified.
+  - `limit` (integer, optional): Limit output to first N matching lines. Must be a positive integer. Optional - shows all matches if not specified.
 - **Behavior:**
   - Uses ripgrep for fast search when available; otherwise falls back to a JavaScript-based search implementation.
   - Returns matching lines with file paths and line numbers.

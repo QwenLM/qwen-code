@@ -109,8 +109,8 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -119,7 +119,6 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
@@ -183,7 +182,83 @@ export interface BridgeHeartbeatState {
   clientLastSeenAt: ReadonlyMap<string, number>;
 }
 
+/**
+ * ACP ext-method the spawned `qwen --acp` child calls between tool batches to
+ * pull user messages the browser queued mid-turn. The child-side caller
+ * (`cli/src/acp-integration/session/Session.ts`) and the daemon-side answerer
+ * (`bridgeClient.ts`) both import THIS single definition, so a rename can't
+ * silently desync them into a runtime `-32601 methodNotFound` (which would
+ * latch the drain off for the session). The desktop ACP client answers the same
+ * method from its own in-memory queue; in `qwen serve` the daemon answers it
+ * from `SessionEntry.midTurnMessageQueue`.
+ */
+export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+/**
+ * One queued mid-turn message. `originatorClientId` is the trusted client id
+ * that pushed it (from `resolveTrustedClientId`), carried so the drain's SSE
+ * echo can be routed/filtered to that client only — a peer attached to the
+ * same session must not dedupe a message it did not queue.
+ */
+export interface MidTurnQueueEntry {
+  text: string;
+  originatorClientId?: string;
+}
+
+export interface BridgeDaemonStatusLimits {
+  maxSessions: number | null;
+  maxPendingPromptsPerSession: number | null;
+  eventRingSize: number;
+  channelIdleTimeoutMs: number;
+  sessionIdleTimeoutMs: number;
+}
+
+export interface BridgeDaemonSessionDiagnostic {
+  sessionId: string;
+  workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  subscriberCount: number;
+  attachCount: number;
+  pendingPromptCount: number;
+  pendingPermissionCount: number;
+  hasActivePrompt: boolean;
+  lastEventId: number;
+  lastSeenAt?: number;
+  currentModelId?: string;
+  currentApprovalMode?: string;
+}
+
+export interface BridgeDaemonStatusSnapshot {
+  limits: BridgeDaemonStatusLimits;
+  sessionCount: number;
+  pendingPermissionCount: number;
+  channelLive: boolean;
+  permissionPolicy: PermissionPolicy;
+  sessions: BridgeDaemonSessionDiagnostic[];
+}
+
+export interface BridgeExtensionsChangedData {
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
+}
+
 export interface AcpSessionBridge {
+  /** Read-only daemon diagnostics for status endpoints. */
+  getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
+
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.
@@ -413,6 +488,20 @@ export interface AcpSessionBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
+   * Broadcast extension refresh to all active sessions and emit an
+   * `extensions_changed` workspace event when complete.
+   */
+  refreshExtensionsForAllSessions(
+    data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+  ): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
+
+  /** Emit an extension lifecycle event without refreshing sessions. */
+  broadcastExtensionsChanged(data: BridgeExtensionsChangedData): void;
+
+  /**
    * Switch the active model service for a session. Throws
    * `SessionNotFoundError` for unknown ids.
    */
@@ -482,6 +571,24 @@ export interface AcpSessionBridge {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<{ sessionId: string; answer: string | null }>;
+
+  /**
+   * Queue a mid-turn user message for the running turn. The ACP child drains
+   * it between tool batches via the `craft/drainMidTurnQueue` ext-method so
+   * the model sees it before the turn ends. Accepted only while the session
+   * is busy (a prompt is queued or active); an idle (or full-queue) session
+   * returns `{ accepted: false }` so the caller falls back to a normal
+   * next-turn prompt. `context.clientId` is authorized against the session
+   * like `/prompt` and `/btw` — throws `InvalidClientIdError` when the id is
+   * not bound to the session, and `SessionNotFoundError` for unknown ids. The
+   * trusted client id is recorded as the message's originator so the drain's
+   * SSE echo only dedupes that client's pending queue.
+   */
+  enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    context?: BridgeClientRequestContext,
+  ): { accepted: boolean };
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).
@@ -621,6 +728,23 @@ export interface AcpSessionBridge {
    * session count.
    */
   isChannelLive(): boolean;
+
+  /** Number of sessions with an active prompt (promptActive === true). */
+  readonly activePromptCount: number;
+
+  /**
+   * Epoch-ms timestamp of the last "activity" event (prompt start/end,
+   * session spawn/restore). `null` when the daemon has never processed
+   * any activity since boot.
+   */
+  readonly lastActivityAt: number | null;
+
+  /**
+   * Milliseconds since the last activity event (`Date.now() - lastActivityAt`).
+   * `null` when no activity has occurred since boot. Computed atomically to
+   * avoid race windows between reading `lastActivityAt` and `Date.now()`.
+   */
+  readonly idleSinceMs: number | null;
 
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;

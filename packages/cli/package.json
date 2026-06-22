@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.18.0",
+  "version": "0.18.5",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.18.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.18.5"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
@@ -45,8 +45,10 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@qwen-code/audio-capture": "file:../audio-capture",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
+    "@qwen-code/channel-qqbot": "file:../channels/qqbot",
     "@qwen-code/channel-feishu": "file:../channels/feishu",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
@@ -54,6 +56,7 @@
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",
+    "chokidar": "^4.0.3",
     "command-exists": "^1.2.9",
     "comment-json": "^4.2.5",
     "diff": "^7.0.0",
@@ -62,7 +65,7 @@
     "fzf": "^0.5.2",
     "glob": "^10.5.0",
     "highlight.js": "^11.11.1",
-    "ink": "^7.0.3",
+    "ink": "7.0.3",
     "ink-gradient": "^3.0.0",
     "ink-link": "^4.1.0",
     "ink-spinner": "^5.0.0",

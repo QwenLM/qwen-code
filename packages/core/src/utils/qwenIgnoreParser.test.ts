@@ -67,6 +67,20 @@ describe('QwenIgnoreParser', () => {
         false,
       );
     });
+
+    it('should still evaluate files whose names start with two dots', async () => {
+      await createTestFile('.qwenignore', '..secret.log');
+
+      const parser = new QwenIgnoreParser(projectRoot);
+
+      expect(parser.isIgnored('..secret.log')).toBe(true);
+    });
+
+    it('should not evaluate paths outside the project root', () => {
+      const parser = new QwenIgnoreParser(projectRoot);
+
+      expect(parser.isIgnored(path.join('..', '..secret.log'))).toBe(false);
+    });
   });
 
   describe('when compatibility agent ignore files exist', () => {

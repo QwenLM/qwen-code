@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '../adapters/types';
 import {
   applyTurnCollapse,
@@ -394,6 +394,7 @@ describe('applyTurnCollapse', () => {
       turnId: 'u1',
       collapsed: true,
       hiddenCount: 1,
+      toolCallCount: 2,
     });
     expect(messageRow(out[1]).collapse).toBeUndefined();
   });
@@ -412,21 +413,145 @@ describe('applyTurnCollapse', () => {
       turnId: 'u1',
       collapsed: false,
       hiddenCount: 1,
+      toolCallCount: 2,
     });
   });
 
-  it('never collapses the active turn while responding', () => {
+  it('keeps narration followed by a tool visible when expanded', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        id: 'a0',
+        role: 'assistant',
+        content: 'I will inspect the project.',
+      },
+      makeMultiToolGroup('g1'),
+    ]);
+    const out = collapseItems(items, {
+      isResponding: true,
+      overrides: new Map([['u1', true]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'a0', 'g1']);
+  });
+
+  it('tags but keeps the active turn expanded while responding', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       makeAssistantMessage('a1'),
     ]);
     const out = collapseItems(items, { isResponding: true });
+    // Every row stays visible; the head carries the seam but is not collapsed.
+    // The streamed answer is provisional (not a step), so only the tool group
+    // counts — a step-less reply stays step-less rather than flashing "1 step".
     expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
-    expect(messageRow(out[0]).collapse).toBeUndefined();
+    expect(messageRow(out[0]).collapse?.collapsed).toBe(false);
+    expect(messageRow(out[0]).collapse?.hiddenCount).toBe(1);
   });
 
-  it('collapses earlier turns but leaves the active last turn open', () => {
+  it('collapsing the active turn folds to prompt + seam (no stranded line)', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      // An intermediate status line, not a final answer — the turn is still live.
+      { id: 'a1', role: 'assistant', content: 'Deterministic analysis clean…' },
+    ]);
+    const out = collapseItems(items, {
+      isResponding: true,
+      overrides: new Map([['u1', false]]),
+    });
+    // No final answer yet, so the fold drops the intermediate text too — only
+    // the prompt row (carrying the seam) survives.
+    expect(rowIds(out)).toEqual(['u1']);
+    expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
+  });
+
+  it('keeps a step-less reply step-less while it streams', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: '你好', timestamp: 1_000 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '你好！',
+        timestamp: 1_500,
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+    ]);
+    const head = messageRow(
+      collapseItems(items, { isResponding: true })[0],
+    ).collapse;
+    // The streamed answer is provisional, not a step → nothing to fold, so no
+    // chevron flashes in then out when the turn completes.
+    expect(head?.hiddenCount).toBe(0);
+  });
+
+  it('marks the active turn live with its prompt timestamp', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'in_progress' }],
+        timestamp: 2_000,
+      },
+    ]);
+    const head = messageRow(
+      collapseItems(items, { isResponding: true })[0],
+    ).collapse;
+    expect(head?.liveStartedAt).toBe(1_000);
+  });
+
+  it('marks a prompt-only active turn live with its prompt timestamp', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+    ]);
+    const head = messageRow(
+      collapseItems(items, { isResponding: true })[0],
+    ).collapse;
+    expect(head).toMatchObject({
+      collapsed: false,
+      hiddenCount: 0,
+      liveStartedAt: 1_000,
+    });
+  });
+
+  it('marks a prompt-only active turn live without a prompt timestamp', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const items = groupParallelAgents([
+        { id: 'u1', role: 'user', content: 'hi' },
+      ]);
+      const head = messageRow(
+        collapseItems(items, { isResponding: true })[0],
+      ).collapse;
+      expect(head).toMatchObject({
+        collapsed: false,
+        hiddenCount: 0,
+        liveStartedAt: 10_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not mark a completed turn live', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 2_000,
+      },
+      { id: 'a1', role: 'assistant', content: 'done', timestamp: 3_000 },
+    ]);
+    expect(
+      messageRow(collapseItems(items)[0]).collapse?.liveStartedAt,
+    ).toBeUndefined();
+  });
+
+  it('collapses earlier turns but leaves the active last turn expanded', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
@@ -437,7 +562,34 @@ describe('applyTurnCollapse', () => {
     const out = collapseItems(items, { isResponding: true });
     expect(rowIds(out)).toEqual(['u1', 'a1', 'u2', 'g2']);
     expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
-    expect(messageRow(out[2]).collapse).toBeUndefined();
+    expect(messageRow(out[2]).collapse?.collapsed).toBe(false);
+  });
+
+  it('shows live metrics on the active turn without collapsing it', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'in_progress' }],
+        timestamp: 3_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'working',
+        timestamp: 3_500,
+        usage: { inputTokens: 120, outputTokens: 30 },
+      },
+    ]);
+    const out = collapseItems(items, { isResponding: true });
+    // Active turn stays fully expanded, yet the seam carries live metrics.
+    expect(rowIds(out)).toEqual(['u1', 'g1', 'a1']);
+    const head = messageRow(out[0]).collapse;
+    expect(head?.collapsed).toBe(false);
+    expect(head?.elapsedMs).toBe(2_500);
+    expect(head?.inputTokens).toBe(120);
+    expect(head?.outputTokens).toBe(30);
   });
 
   it('does not tag a turn with no intermediate steps', () => {
@@ -462,6 +614,7 @@ describe('applyTurnCollapse', () => {
       turnId: 'u1',
       collapsed: true,
       hiddenCount: 2,
+      toolCallCount: 4,
     });
   });
 
@@ -595,6 +748,214 @@ describe('applyTurnCollapse', () => {
     const out = collapseItems(items, { pendingApprovalCallId: 'call-other' });
     expect(rowIds(out)).toEqual(['u1', 'a1']);
     expect(messageRow(out[0]).collapse?.collapsed).toBe(true);
+  });
+
+  it('records elapsed (prompt → last step) and token usage on the head', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 2_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'final',
+        timestamp: 5_000,
+        usage: { inputTokens: 3100, outputTokens: 5100 },
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(messageRow(out[0]).collapse).toEqual({
+      turnId: 'u1',
+      collapsed: true,
+      hiddenCount: 1,
+      elapsedMs: 4_000,
+      inputTokens: 3100,
+      outputTokens: 5100,
+      toolCallCount: 1,
+    });
+  });
+
+  it('ignores non-step system timestamps when recording elapsed', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 2_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'final',
+        timestamp: 5_000,
+      },
+      {
+        id: 's1',
+        role: 'system',
+        content: 'late title refresh',
+        variant: 'info',
+        timestamp: 100_000,
+      },
+    ]);
+    const head = messageRow(collapseItems(items)[0]).collapse;
+    expect(head?.elapsedMs).toBe(4_000);
+  });
+
+  it('sums token usage across a turn (hidden mid-turn text + final answer)', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'a0',
+        role: 'assistant',
+        content: 'mid-turn note',
+        timestamp: 2_000,
+        usage: { inputTokens: 100, outputTokens: 50 },
+      },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 3_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'final',
+        timestamp: 4_000,
+        usage: { inputTokens: 200, outputTokens: 80 },
+      },
+    ]);
+    const head = messageRow(collapseItems(items)[0]).collapse;
+    expect(head?.inputTokens).toBe(300);
+    expect(head?.outputTokens).toBe(130);
+    expect(head?.elapsedMs).toBe(3_000);
+    expect(head?.toolCallCount).toBe(1);
+  });
+
+  it('counts visible tool calls across regular and grouped agent rows', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [
+          { callId: 'c1', toolName: 'Read', status: 'completed' },
+          { callId: 'c2', toolName: 'Write', status: 'completed' },
+        ],
+        timestamp: 2_000,
+      },
+      {
+        id: 'agent-1',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'a1',
+            toolName: 'agent',
+            status: 'completed',
+            subTools: [
+              { callId: 'a1-read', toolName: 'Read', status: 'completed' },
+              {
+                callId: 'a1-shell',
+                toolName: 'Shell',
+                status: 'completed',
+                subTools: [
+                  {
+                    callId: 'a1-shell-child',
+                    toolName: 'Parse',
+                    status: 'completed',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        timestamp: 3_000,
+      },
+      {
+        id: 'agent-2',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'a2',
+            toolName: 'agent',
+            status: 'completed',
+          },
+        ],
+        timestamp: 4_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'final',
+        timestamp: 5_000,
+      },
+    ]);
+    const head = messageRow(collapseItems(items)[0]).collapse;
+    expect(head?.toolCallCount).toBe(4);
+  });
+
+  it('omits elapsed/usage when the turn carries no timestamps or usage', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const head = messageRow(collapseItems(items)[0]).collapse;
+    expect(head).toEqual({
+      turnId: 'u1',
+      collapsed: true,
+      hiddenCount: 1,
+      toolCallCount: 2,
+    });
+  });
+
+  it('shows a chevron-less metrics seam on a step-less turn', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: '你好', timestamp: 1_000 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '你好！有什么可以帮你的吗？',
+        timestamp: 1_900,
+        usage: { inputTokens: 1200, outputTokens: 45 },
+      },
+    ]);
+    const out = collapseItems(items);
+    // Nothing foldable, but the metrics still surface and all rows stay visible.
+    expect(rowIds(out)).toEqual(['u1', 'a1']);
+    const head = messageRow(out[0]).collapse;
+    expect(head?.hiddenCount).toBe(0);
+    expect(head?.collapsed).toBe(false);
+    expect(head?.elapsedMs).toBe(900);
+    expect(head?.inputTokens).toBe(1200);
+    expect(head?.outputTokens).toBe(45);
+  });
+
+  it('sums cached-read tokens across the turn', () => {
+    const items = groupParallelAgents([
+      { id: 'u1', role: 'user', content: 'hi', timestamp: 1_000 },
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'completed' }],
+        timestamp: 2_000,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'done',
+        timestamp: 3_000,
+        usage: { inputTokens: 2000, outputTokens: 100, cachedTokens: 1800 },
+      },
+    ]);
+    expect(messageRow(collapseItems(items)[0]).collapse?.cachedTokens).toBe(
+      1800,
+    );
   });
 });
 

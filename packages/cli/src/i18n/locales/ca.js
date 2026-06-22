@@ -489,12 +489,57 @@ export default {
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools]',
   'Show model-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques de les eines.",
+  'Show daily token usage statistics.':
+    "Mostrar les estadístiques diàries d'ús de tokens.",
+  'Show monthly token usage statistics.':
+    "Mostrar les estadístiques mensuals d'ús de tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exportar les estadístiques d'ús de tokens a CSV o JSON.",
+  'No usage data.': "No hi ha dades d'ús.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} sol·licituds)',
+  'Daily token usage for {{value}}': 'Ús diari de tokens per a {{value}}',
+  'Monthly token usage for {{value}}': 'Ús mensual de tokens per a {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Sol·licituds: {{requests}}',
+  'Breakdown:': 'Desglossament:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Sortida: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Memòria cau (inclosa a l’entrada): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raonament: {{tokens}}',
+  'By model:': 'Per model:',
+  'By auth type:': "Per tipus d'autenticació:",
+  'By model/auth type:': "Per model/tipus d'autenticació:",
+  'By source:': 'Per origen:',
+  'Failed to load token usage stats: {{error}}':
+    "No s'han pogut carregar les estadístiques d'ús de tokens: {{error}}",
+  'Expected --format csv or --format json.':
+    "S'esperava --format csv o --format json.",
+  'Expected a file path after --output.':
+    "S'esperava una ruta de fitxer després de --output.",
+  'Unexpected argument: {{argument}}': 'Argument inesperat: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Ús: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "La ruta d'exportació de l'ús de tokens ha d'estar dins del directori de treball del projecte.",
+  'Export target does not exist: {{path}}':
+    "La destinació d'exportació no existeix: {{path}}",
+  'Cannot resolve export path within the working directory.':
+    "No s'ha pogut resoldre la ruta d'exportació dins del directori de treball.",
+  'Could not create a temporary export file.':
+    "No s'ha pogut crear un fitxer temporal d'exportació.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Ús de tokens exportat a {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "No s'han pogut exportar les estadístiques d'ús de tokens: {{error}}",
+  'Unclosed quote in arguments.': 'Cometes sense tancar als arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Nota: el temps de generació (TTFT/TPS) pertany a les mètriques de generació.',
   'exit the cli': 'sortir del CLI',
   'Manage workspace directories':
     "Gestionar els directoris de l'espai de treball",
@@ -1362,6 +1407,7 @@ export default {
   'Tools:': 'Eines:',
   'Parameters:': 'Paràmetres:',
   'Prompts:': 'Missatges:',
+  'Resources:': 'Recursos:',
   Blocked: 'Bloquejat',
   '💡 Tips:': '💡 Consells:',
   Use: 'Useu',
@@ -1990,4 +2036,24 @@ export default {
   in: 'ent.',
   out: 'sort.',
   'In/Out': 'Ent/Sort',
+
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Establir la història per reduir-se per defecte en reprendre una sessió',
+  'Set history to expand by default when resuming a session':
+    'Establir la història per expandir-se per defecte en reprendre una sessió',
+  'Expand the currently collapsed history transcript':
+    'Expandir la transcripció de la història actualment reduïda',
+  'Control history display preferences and visibility':
+    'Controlar les preferències de visualització de la història i la visibilitat',
+  'History will be collapsed by default for future resumed sessions.':
+    'La història es reduirà per defecte per a futures sessions represes.',
+  'History will be expanded by default for future resumed sessions.':
+    "La història s'expandirà per defecte per a futures sessions represes.",
+  'History is already expanded in this session.':
+    'La història ja està expandida en aquesta sessió.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Ús: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
 };

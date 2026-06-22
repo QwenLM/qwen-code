@@ -70,6 +70,7 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -80,6 +81,12 @@ import type {
   DaemonRewindResult,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
+  ExtensionMutationResponse,
+  ExtensionInstallRequest,
+  ExtensionInstallResponse,
+  ExtensionScopeRequest,
+  ExtensionRefreshResponse,
+  ExtensionUpdateCheckResponse,
   DaemonWorkspaceHooksStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
@@ -561,6 +568,29 @@ export class DaemonClient {
     return new DaemonHttpError(res.status, body, `${label}: ${detail}`);
   }
 
+  private async jsonRequest<T>(
+    path: string,
+    label: string,
+    opts: { method?: string; body?: unknown; clientId?: string } = {},
+  ): Promise<T> {
+    const hasBody = opts.body !== undefined;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      {
+        ...(opts.method ? { method: opts.method } : {}),
+        headers: this.headers(
+          hasBody ? { 'Content-Type': 'application/json' } : {},
+          opts.clientId,
+        ),
+        ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, label);
+        return (await res.json()) as T;
+      },
+    );
+  }
+
   // -- Lifecycle / discovery ---------------------------------------------
 
   async health(): Promise<{ status: string }> {
@@ -661,14 +691,86 @@ export class DaemonClient {
   }
 
   async workspaceExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/extensions`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok)
-          throw await this.failOnError(res, 'GET /workspace/extensions');
-        return (await res.json()) as DaemonWorkspaceExtensionsStatus;
-      },
+    return await this.jsonRequest<DaemonWorkspaceExtensionsStatus>(
+      '/workspace/extensions',
+      'GET /workspace/extensions',
+    );
+  }
+
+  async installExtension(
+    params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    return await this.jsonRequest<ExtensionInstallResponse>(
+      '/workspace/extensions/install',
+      'POST /workspace/extensions/install',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async checkExtensionUpdates(
+    clientId?: string,
+  ): Promise<ExtensionUpdateCheckResponse> {
+    return await this.jsonRequest<ExtensionUpdateCheckResponse>(
+      '/workspace/extensions/check-updates',
+      'POST /workspace/extensions/check-updates',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async refreshExtensions(
+    clientId?: string,
+  ): Promise<ExtensionRefreshResponse> {
+    return await this.jsonRequest<ExtensionRefreshResponse>(
+      '/workspace/extensions/refresh',
+      'POST /workspace/extensions/refresh',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async enableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}/enable`,
+      'POST /workspace/extensions/:name/enable',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async disableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}/disable`,
+      'POST /workspace/extensions/:name/disable',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async updateExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}/update`,
+      'POST /workspace/extensions/:name/update',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async uninstallExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}`,
+      'DELETE /workspace/extensions/:name',
+      { method: 'DELETE', clientId },
     );
   }
 
@@ -1475,6 +1577,44 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/btw');
     return (await res.json()) as DaemonSessionBtwResult;
+  }
+
+  /**
+   * Queue a user message typed while the session's turn is still running. The
+   * ACP child drains it between tool batches so the model sees it before the
+   * turn ends. Resolves `{ accepted: false }` when the session is idle — the
+   * caller should then send the message as a normal next-turn prompt.
+   */
+  async enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonMidTurnMessageResult> {
+    // Route through `fetchWithTimeout` like every other method so a hung daemon
+    // can't wedge this promise forever (the caller in `actions.ts` awaits it).
+    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
+    // timeout controller, so the mid-turn-settle abort still propagates.
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/mid-turn-message`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ message }),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-message',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessageResult;
+      },
+    );
   }
 
   /**

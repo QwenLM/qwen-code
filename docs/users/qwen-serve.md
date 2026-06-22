@@ -10,6 +10,7 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 
 ## What it gives you
 
+- **Built-in Web Shell UI** — `qwen serve` serves the browser-based Web Shell at its root (`http://127.0.0.1:4170/`) out of the box; run `qwen serve --open` to launch it in your browser automatically. It is served on the same origin as the API, so no second port or reverse proxy is needed. Pass `--no-web` for an API-only daemon.
 - **One agent process, many clients** — under the default `sessionScope: 'single'`, every client connecting to the daemon shares one ACP session. Live cross-client collaboration on the same conversation, the same file diffs, the same permission prompts.
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
@@ -43,8 +44,9 @@ The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — 
 - ✅ Boot-time security gate (refuses non-loopback bind without a token, [PR 15 / #4236](https://github.com/QwenLM/qwen-code/pull/4236))
 - ✅ Mutation-route auth gate, session-scoped permission routing (Wave 4 PRs)
 - ✅ MCP guardrails + multi-client permission coordination (F2 / F3)
-- ⏸️ **Prompt absolute deadline + SSE writer idle timeout** — current AbortSignal + 15s heartbeat + `res.on('error')` cleanup is sufficient for local dev; explicit application-layer deadlines defer to v0.16.x once a remote / long-running scenario lands.
-- ⏸️ **Rate limiting + observability + load test harness** — defers to v0.17 F4 Phase-1 scale instrumentation when 30-50 active sessions becomes a real target.
+- ✅ **Prompt absolute deadline + SSE writer idle timeout** — opt-in via `--prompt-deadline-ms` and `--writer-idle-timeout-ms`; advertised through `prompt_absolute_deadline` and `writer_idle_timeout` when enabled.
+- ✅ **HTTP rate limiting** — opt-in via `--rate-limit` and per-tier thresholds; advertised through `rate_limit` when enabled.
+- ⏸️ **Prometheus metrics + load test harness** — defers to v0.17 F4 Phase-1 scale instrumentation when 30-50 active sessions becomes a real target.
 - ⏸️ **`--max-body-size` CLI flag** — daemon enforces `express.json({ limit: '10mb' })` by default which comfortably covers text-only prompts (model context windows are well under 10 MiB of chars). Tunable via flag in v0.16.x.
 
 For the deeper "what we won't fix in Stage 1" enumeration (single-host session-state mutation model + N-parallel-sessions sharing one ACP child), see [Stage 1 scope boundaries](#stage-1-scope-boundaries--what-we-wont-fix-in-stage-15) below.
@@ -62,6 +64,8 @@ qwen serve
 
 The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works". The daemon binds to the current working directory; use `--workspace /path/to/dir` to override.
 
+**Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
+
 ### 2. Sanity-check it
 
 ```bash
@@ -69,17 +73,28 @@ curl http://127.0.0.1:4170/health
 # → {"status":"ok"}
 
 curl http://127.0.0.1:4170/capabilities
-# → {"v":1,"mode":"http-bridge","features":["health","capabilities","session_create",...],"workspaceCwd":"/path/to/your-project"}
+# → {"v":1,"mode":"http-bridge","features":["health","daemon_status","capabilities","session_create",...],"workspaceCwd":"/path/to/your-project"}
+
+curl http://127.0.0.1:4170/daemon/status
+# → {"v":1,"detail":"summary","status":"ok","runtime":{...}}
 ```
 
 The `workspaceCwd` field surfaces the bound workspace so clients can pre-flight check + omit `cwd` on `POST /session`.
 The `limits.maxPendingPromptsPerSession` field advertises the active per-session prompt admission cap; `null` means the cap is disabled.
 
-The daemon also exposes read-only runtime snapshots for client UIs:
-`GET /workspace/mcp`, `GET /workspace/skills`, `GET /workspace/providers`,
-`GET /workspace/env`, `GET /workspace/preflight`,
+The daemon also exposes read-only runtime snapshots for client UIs and
+operators: `GET /daemon/status`, `GET /workspace/mcp`,
+`GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
+`GET /workspace/preflight`,
 `GET /session/:id/context`, `GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`.
+
+`GET /daemon/status` is the consolidated troubleshooting snapshot. The default
+`detail=summary` reads only in-memory daemon state (sessions, permissions,
+SSE/ACP transport counts, rate limit rejects, process memory, resolved limits)
+and does not start the ACP child. Use `GET /daemon/status?detail=full` for
+per-session diagnostics, ACP connection details, auth device-flow counts, and
+workspace status sections when you are actively investigating a problem.
 
 `GET /workspace/mcp`, `GET /workspace/skills`, and `GET /workspace/providers`
 report the live ACP runtime and do not start the ACP child when idle; an
@@ -149,7 +164,7 @@ curl -N http://127.0.0.1:4170/session/$SESSION_ID/events
 The `data:` line is the **full event envelope** — `{id?, v, type, data, originatorClientId?}` — JSON-stringified on a single line. The ACP payload (the `sessionUpdate` block in this example) sits under `data` inside that envelope. The SSE-level `id:` / `event:` lines are convenience for EventSource clients; the same values appear inside the JSON envelope so raw-`fetch` consumers get them too.
 
 Open this **before** sending the prompt — the SSE replay buffer holds the
-last 4000 events so a late subscriber can catch up via `Last-Event-ID`,
+last 8000 events so a late subscriber can catch up via `Last-Event-ID`,
 but for the simple "watch a single prompt" case it's easiest to subscribe
 first and let it stream live.
 
@@ -218,6 +233,8 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 | `--mcp-budget-mode <m>`                 | `warn` / `off`  | How `--mcp-client-budget` is enforced. `warn` (default when budget set): no refusal, snapshot's `budgets[0].status` flips to `warning` at ≥75% of budget. `enforce`: connects past the cap are refused, per-server cell shows `disabledReason: 'budget'`, deterministic by `mcpServers` declaration order. `off` (default when budget unset): pure observability. Boot rejects `enforce` without a budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `--http-bridge`                         | `true`          | Stage 1 mode: one `qwen --acp` child per daemon (bound to one workspace at boot, per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02); N sessions multiplex onto that child via ACP `newSession()`. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--allow-origin <pat>`                  | —               | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). Cross-origin allowlist for browser webui clients. Repeatable. Each value is `*` (any origin — boot refuses if no bearer token is configured; `--require-auth` on loopback is recommended so `/health` and `/demo` are also bearer-gated, since both are pre-auth on loopback by default) or a canonical URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path / userinfo / query). **Subdomain wildcards (`https://*.example.com`) are intentionally unsupported** — list each subdomain explicitly, or use `*` with a configured token (and `--require-auth` for full hardening). Matched origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, methods, headers, max-age, and exposed `Retry-After`); unmatched origins still get a 403 with the same envelope as today's wall. `Origin: null` (sandboxed iframes, file:// docs) is always rejected, even under `*`. Pre-flight via `caps.features.allow_origin`. Loopback self-origin hits are unaffected. |
+| `--web` / `--no-web`                    | `true`          | Serve the built Web Shell SPA at the daemon root (`GET /`, `/assets/*`, and SPA deep-link fallback). The static shell is registered **before** the bearer-auth gate — a browser can't attach a token to a `<script>` subresource or an address-bar navigation, the shell carries no secrets, and every API route stays token-gated regardless. On non-loopback binds a one-line stderr warning notes the UI is reachable without auth. Use `--no-web` for an API-only daemon. No effect when the build omits the Web Shell assets (the daemon logs a breadcrumb and runs API-only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `--open`                                | `false`         | After the listener is up, open the Web Shell in your default browser at the daemon URL (with `#token=` appended as a URL fragment when a token is configured — a fragment is never sent to the server, keeping the token out of access logs and Referer headers). No-op with `--no-web`, or in headless / CI / SSH environments where no browser is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 > **Sizing the load knobs.** `--max-sessions` is the **new-child** cap.
 > Three other layers also limit load — when sizing for a high-concurrency
@@ -317,12 +334,12 @@ To handle multiple **users** (each with their own quota, audit log, sandbox) or 
 
 ## Loading and resuming a persisted session
 
-The daemon exposes ACP's `session/load` and `session/unstable_resumeSession` over HTTP via two routes:
+The daemon exposes ACP's `session/load` and resume flow over HTTP via two routes:
 
-| Route                      | Use when                                                                                                                                                                                                                      |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /session/:id/load`   | The client has **no** history rendered (cold reconnect, picker-then-open). The daemon replays every persisted turn through SSE so subscribers see the full transcript. Capability tag: `session_load`.                        |
-| `POST /session/:id/resume` | The client already has the turns on screen and only needs the daemon-side handle back. Model context is restored on the agent side without UI replay — the SSE stream stays clean. Capability tag: `unstable_session_resume`. |
+| Route                      | Use when                                                                                                                                                                                                                                                                                      |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /session/:id/load`   | The client has **no** history rendered (cold reconnect, picker-then-open). The daemon replays every persisted turn through SSE so subscribers see the full transcript. Capability tag: `session_load`.                                                                                        |
+| `POST /session/:id/resume` | The client already has the turns on screen and only needs the daemon-side handle back. Model context is restored on the agent side without UI replay — the SSE stream stays clean. Capability tag: `session_resume` (`unstable_session_resume` remains a deprecated alias for older clients). |
 
 The TypeScript SDK exposes both as static factories on `DaemonSessionClient`:
 
@@ -343,9 +360,9 @@ for await (const event of session.events()) {
 }
 ```
 
-Pre-flight `caps.features.session_load` / `caps.features.unstable_session_resume` before calling — older daemons return `404`. Concurrent same-action requests for the same id coalesce; cross-action races (a `load` racing a `resume`) get `409 restore_in_progress` with `Retry-After: 5`. See the [protocol reference](../developers/qwen-serve-protocol.md) for the full error envelope.
+Pre-flight `caps.features.session_load` / `caps.features.session_resume` before calling — older daemons return `404`. `unstable_session_resume` is still advertised as a deprecated compatibility alias. Concurrent same-action requests for the same id coalesce; cross-action races (a `load` racing a `resume`) get `409 restore_in_progress` with `Retry-After: 5`. See the [protocol reference](../developers/qwen-serve-protocol.md) for the full error envelope.
 
-Note: history replay is bounded by the SSE ring (default 4000 frames). Long histories with chatty turns can exceed that — earliest frames are dropped silently. For very long sessions, prefer `resume` and rely on the client's local persisted UI.
+Note: history replay is bounded by the SSE ring (default 8000 frames). Long histories with chatty turns can exceed that — earliest frames are dropped silently. For very long sessions, prefer `resume` and rely on the client's local persisted UI.
 
 ## Durability model
 
@@ -353,7 +370,7 @@ Note: history replay is bounded by the SSE ring (default 4000 frames). Long hist
 
 - A child process crash publishes `session_died` and removes the live session from the daemon's maps. The persisted on-disk session **can** be reloaded via `POST /session/:id/load` if a fresh agent child is spawnable.
 - A daemon restart loses every in-flight live session. The persisted sessions remain on disk and can be loaded against a new daemon process, subject to the same workspace binding rules.
-- Long client disconnects (>5 min on a chatty turn) can outrun the SSE replay ring (default 4000 frames) — `Last-Event-ID` reconnect succeeds but state may be incoherent. For mobile / flaky-network clients, plan to re-open SSE on long drops or call `POST /session/:id/load` to replay from disk.
+- Long client disconnects (>5 min on a chatty turn) can outrun the SSE replay ring (default 8000 frames) — `Last-Event-ID` reconnect succeeds but state may be incoherent. For mobile / flaky-network clients, plan to re-open SSE on long drops or call `POST /session/:id/load` to replay from disk.
 - File operations (`writeTextFile`) are atomic across crashes (write-then-rename); they aren't atomic across daemon restarts in the sense of replaying — the file write either landed or it didn't.
 
 If your integration needs server-side cross-restart durability beyond what `session/load` covers (e.g. server-managed retry queues), you still need application-level state recovery. Don't hold long-running, restart-sensitive state inside the daemon's session.
@@ -371,7 +388,7 @@ Stage 1's contract is sized for prototyping. Per [#3889 chiga0 downstream-consum
 
 3. ~~**Client-initiated heartbeat path**~~ — shipped via [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 9. `POST /session/:id/heartbeat` records last-seen timestamps on the daemon (capability tag `client_heartbeat`); SDK helpers are `DaemonClient.heartbeat()` / `DaemonSessionClient.heartbeat()`.
 4. **`permission_already_resolved` event** when a vote loses the first-responder race — currently UIs have to infer state from a `404`.
-5. **Larger / per-session-configurable replay ring** — default 4000 covers short drops; mobile / chatty-turn workloads need 8000+ or per-session config.
+5. ~~**Larger replay ring**~~ — bumped to 8000. **Per-session-configurable ring** still open — mobile / chatty-turn workloads may need per-session overrides.
 6. **`slow_client_warning` event before `client_evicted`** — soft backpressure so well-behaved slow clients can self-throttle (trim render depth, drop chunks) before being terminated.
 
 **Integration ergonomics:**

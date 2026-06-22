@@ -28,6 +28,7 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
@@ -800,7 +801,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
         strikethrough={status === ToolCallStatus.Canceled}
       >
         <Text color={nameColor} bold>
-          {name}
+          {localizeToolDisplayName(name)}
         </Text>{' '}
         <Text color={theme.text.secondary}>{description}</Text>
       </Text>

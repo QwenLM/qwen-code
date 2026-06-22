@@ -26,6 +26,10 @@ import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
+import {
+  formatUnsupportedVoiceModelMessage,
+  isSelectableVoiceModel,
+} from '../voice/voice-model.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -80,6 +84,7 @@ function parseModelSelectionKey(key: string): {
 interface ModelDialogProps {
   onClose: () => void;
   isFastModelMode?: boolean;
+  isVoiceModelMode?: boolean;
 }
 
 function maskApiKey(apiKey: string | undefined): string {
@@ -95,9 +100,16 @@ function maskApiKey(apiKey: string | undefined): string {
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
   modelId: string,
+  baseUrl?: string,
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'model.name', modelId);
+  // Persist the paired baseUrl so the correct provider is restored on next
+  // launch when multiple providers share the same model id. When the selection
+  // has no baseUrl, write an empty-string tombstone (not undefined): undefined
+  // is dropped from JSON, so it would not override a stale model.baseUrl left
+  // in a lower-priority scope, whereas '' is a present value that does.
+  settings.setValue(scope, 'model.baseUrl', baseUrl ?? '');
 }
 
 function persistAuthTypeSelection(
@@ -132,6 +144,7 @@ interface HandleModelSwitchSuccessParams {
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
   effectiveModelId: string;
+  effectiveBaseUrl: string | undefined;
   isRuntime: boolean;
 }
 
@@ -141,9 +154,10 @@ function handleModelSwitchSuccess({
   after,
   effectiveAuthType,
   effectiveModelId,
+  effectiveBaseUrl,
   isRuntime,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(settings, effectiveModelId, effectiveBaseUrl);
   if (effectiveAuthType) {
     persistAuthTypeSelection(settings, effectiveAuthType);
   }
@@ -193,6 +207,7 @@ function DetailRow({
 export function ModelDialog({
   onClose,
   isFastModelMode,
+  isVoiceModelMode,
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
@@ -209,7 +224,12 @@ export function ModelDialog({
 
     // Separate runtime models from registry models
     const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
-    const registryModels = allModels.filter((m) => !m.isRuntimeModel);
+    const registryModels = allModels.filter(
+      (m) =>
+        !m.isRuntimeModel &&
+        (m.authType !== AuthType.QWEN_OAUTH ||
+          authType === AuthType.QWEN_OAUTH),
+    );
 
     // Group registry models by authType
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
@@ -262,7 +282,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [config]);
+  }, [authType, config]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -329,6 +349,7 @@ export function ModelDialog({
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
+  const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
   const parsedFastModelSetting = useMemo(() => {
     if (!isFastModelMode) return undefined;
     try {
@@ -343,9 +364,10 @@ export function ModelDialog({
       : config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
-  const activeRuntimeSnapshot = isFastModelMode
-    ? undefined // fast model is never a runtime model
-    : config?.getActiveRuntimeModelSnapshot?.();
+  const activeRuntimeSnapshot =
+    isFastModelMode || isVoiceModelMode
+      ? undefined // fast and voice models are never runtime model selections
+      : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()
     .getGenerationConfig()?.baseUrl;
@@ -367,21 +389,36 @@ export function ModelDialog({
             ({ model }) => model.id === parsedFastModelSetting.modelId,
           )
       : undefined;
+  const preferredVoiceModelEntry =
+    isVoiceModelMode && voiceModelSetting
+      ? availableModelEntries.find(
+          ({ model }) => model.id === voiceModelSetting,
+        )
+      : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
-    : preferredFastModelEntry
+    : preferredVoiceModelEntry
       ? buildModelSelectionKey(
-          preferredFastModelEntry.authType,
-          preferredFastModelEntry.model.id,
-          preferredFastModelEntry.model.baseUrl,
+          preferredVoiceModelEntry.authType,
+          preferredVoiceModelEntry.model.id,
+          preferredVoiceModelEntry.model.baseUrl,
         )
-      : authType
-        ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
-        : '';
+      : preferredFastModelEntry
+        ? buildModelSelectionKey(
+            preferredFastModelEntry.authType,
+            preferredFastModelEntry.model.id,
+            preferredFastModelEntry.model.baseUrl,
+          )
+        : authType
+          ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
+          : '';
 
   useKeypress(
     (key) => {
-      if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
+      if (
+        key.name === 'escape' ||
+        (key.name === 'left' && (isFastModelMode || isVoiceModelMode))
+      ) {
         onClose();
       }
     },
@@ -424,6 +461,45 @@ export function ModelDialog({
           return value === selected;
         },
       );
+
+      if (isVoiceModelMode) {
+        if (!selectedEntry) {
+          setErrorMessage(t('Selected voice model is unavailable.'));
+          return;
+        }
+
+        const voiceModel = selectedEntry.model.id;
+        if (!isSelectableVoiceModel(selectedEntry.model)) {
+          setErrorMessage(formatUnsupportedVoiceModelMessage(voiceModel));
+          return;
+        }
+
+        const matchingEntries = availableModelEntries.filter(
+          ({ model }) => model.id === voiceModel,
+        );
+        if (matchingEntries.length > 1) {
+          setErrorMessage(
+            t(
+              "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
+              { model: voiceModel },
+            ),
+          );
+          return;
+        }
+
+        const scope = getPersistScopeForModelSelection(settings);
+        settings.setValue(scope, 'voiceModel', voiceModel);
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Voice Model')}: ${voiceModel}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
       hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
       // Fast model mode: save authType:modelId so duplicate model ids across
@@ -548,6 +624,15 @@ export function ModelDialog({
         after,
         effectiveAuthType,
         effectiveModelId,
+        // Persist the selected provider's baseUrl so the right provider is
+        // restored next launch when several share the same id. Pair it with the
+        // same resolved config that effectiveModelId comes from (`after`) so the
+        // persisted (model.name, model.baseUrl) stays consistent even if
+        // switchModel transforms the id; fall back to the picker entry's
+        // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
+        effectiveBaseUrl: isRuntime
+          ? undefined
+          : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
         isRuntime,
       });
       onClose();
@@ -560,6 +645,7 @@ export function ModelDialog({
       uiState,
       setErrorMessage,
       isFastModelMode,
+      isVoiceModelMode,
       availableModelEntries,
     ],
   );
@@ -574,7 +660,13 @@ export function ModelDialog({
       padding={1}
       width="100%"
     >
-      <Text bold>{t('Select Model')}</Text>
+      <Text bold>
+        {isVoiceModelMode
+          ? t('Select Voice Model')
+          : isFastModelMode
+            ? t('Select Fast Model')
+            : t('Select Model')}
+      </Text>
 
       {!hasModels ? (
         <Box marginTop={1} flexDirection="column">

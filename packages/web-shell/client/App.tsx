@@ -11,18 +11,24 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
+  useWorkspaceEventSignals,
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  DaemonSessionTaskStatus,
+} from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
+import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
@@ -60,6 +66,7 @@ import {
   AuthMessage,
 } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import {
   SETTINGS_ACTIVE_EVENT,
   SettingsMessage,
@@ -72,6 +79,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
@@ -140,9 +148,13 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellComposerApi,
+  type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
   type WelcomeHeaderRenderer,
+  type FooterRenderer,
+  type WebShellTaskInfo,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -305,6 +317,12 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
+  /**
+   * Called whenever transcript blocks change. Receives the full blocks array
+   * from useTranscriptBlocks(). Fires on every streaming delta during active
+   * generation, so consumers should debounce or throttle expensive work.
+   */
+  onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
@@ -317,6 +335,8 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
+  renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
@@ -327,6 +347,33 @@ export interface WebShellProps {
   markdown?: WebShellMarkdownCustomization;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
   onToast?: (tone: ToastTone, message: string) => void;
+  /** Imperative handle for externally controlling the composer input. */
+  composerRef?: React.Ref<WebShellComposerApi>;
+  /** Declarative composer input value. Increment composerInputVersion to replay the same value. */
+  composerInput?: WebShellComposerInput;
+  /** Replay key for composerInput. */
+  composerInputVersion?: number;
+}
+
+const emptyComposerApi: WebShellComposerApi = {
+  insertText: () => {},
+  setText: () => {},
+  addTags: () => {},
+  removeTag: () => {},
+  clear: () => {},
+  submit: () => {},
+};
+
+function assignComposerRef(
+  ref: React.Ref<WebShellComposerApi> | undefined,
+  value: WebShellComposerApi,
+): void {
+  if (!ref) return;
+  if (typeof ref === 'function') {
+    ref(value);
+    return;
+  }
+  (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -532,6 +579,53 @@ function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
   return parts.join('|');
 }
 
+function mapToWebShellTaskInfo(
+  task: DaemonSessionTaskStatus,
+): WebShellTaskInfo {
+  const base = {
+    id: task.id,
+    label: task.label,
+    description: task.description,
+    runtimeMs: task.runtimeMs,
+    startTime: task.startTime,
+    endTime: task.endTime,
+    error: task.error,
+  };
+
+  switch (task.kind) {
+    case 'agent':
+      return {
+        ...base,
+        kind: 'agent',
+        status: task.status,
+        subagentType: task.subagentType,
+        isBackgrounded: task.isBackgrounded,
+        prompt: task.prompt,
+      };
+    case 'shell':
+      return {
+        ...base,
+        kind: 'shell',
+        status: task.status,
+        command: task.command,
+        cwd: task.cwd,
+        pid: task.pid,
+        exitCode: task.exitCode,
+      };
+    case 'monitor':
+      return {
+        ...base,
+        kind: 'monitor',
+        status: task.status,
+        command: task.command,
+        pid: task.pid,
+        exitCode: task.exitCode,
+      };
+    default:
+      return task satisfies never;
+  }
+}
+
 function translateCopyMessage(
   message: string,
   t: ReturnType<typeof getTranslator>,
@@ -612,11 +706,16 @@ export function App({
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
   renderWelcomeHeader,
+  renderFooter,
   compactThinking = false,
   collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
+  onTranscriptChange,
   onToast,
+  composerRef,
+  composerInput,
+  composerInputVersion,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -629,6 +728,7 @@ export function App({
     () => ({
       renderToolHeaderExtra,
       renderWelcomeHeader,
+      renderFooter,
       compactThinking,
       collapseCompletedTurns,
       markdown,
@@ -636,11 +736,13 @@ export function App({
     [
       renderToolHeaderExtra,
       renderWelcomeHeader,
+      renderFooter,
       compactThinking,
       collapseCompletedTurns,
       markdown,
     ],
   );
+  const CustomFooter = renderFooter;
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -682,6 +784,11 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
+  // Scopes the best-effort mid-turn enqueue POST(s) to the turn they were typed
+  // in. Aborted when the turn settles so a slow/late push can't arrive during a
+  // SUBSEQUENT turn (e.g. the browser's own next-turn resend of the same text)
+  // and get injected there — cross-turn double delivery.
+  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -797,8 +904,26 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
+  const backgroundTasks = useBackgroundTasks(
+    backgroundTaskActivityKey,
+    connection.status === 'connected',
+  );
+  const footerTasks = useMemo(
+    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
+    [backgroundTasks, renderFooter],
+  );
   const statusBarRef = useRef<StatusBarHandle>(null);
-  const editorRef = useRef<EditorHandle>(null);
+  const editorRef = useRef<EditorHandle | null>(null);
+  const setEditorHandle = useCallback(
+    (handle: EditorHandle | null) => {
+      editorRef.current = handle;
+      assignComposerRef(composerRef, handle ?? emptyComposerApi);
+    },
+    [composerRef],
+  );
+  useEffect(() => {
+    assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
+  }, [composerRef]);
   const messageListRef = useRef<MessageListHandle>(null);
   const handleLocateFloatingTodos = useCallback(() => {
     if (!floatingTodosState.sourceMessageId) return;
@@ -882,11 +1007,78 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
   const [authInlineOpen, setAuthInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
+
+  // Refresh commands when extensions change (install/uninstall/update).
+  const workspaceEventSignals = useWorkspaceEventSignals();
+  const extensionsVersionRef = useRef(
+    workspaceEventSignals?.extensionsVersion ?? 0,
+  );
+  useEffect(() => {
+    const current = workspaceEventSignals?.extensionsVersion ?? 0;
+    if (current !== extensionsVersionRef.current) {
+      extensionsVersionRef.current = current;
+      const change = workspaceEventSignals?.lastExtensionChange;
+      if (change?.status === 'failed') {
+        store.dispatch([
+          {
+            type: 'error',
+            text: t('extensions.action.failed', {
+              name: change.name ?? '',
+              source: change.source ?? '',
+              error: change.error ?? t('error.unknown'),
+            }),
+          },
+        ]);
+        return;
+      }
+      if (change?.status === 'installed') {
+        const name = change.name ?? change.source ?? t('extensions.label');
+        store.dispatch([
+          {
+            type: 'status',
+            text: change.version
+              ? t('extensions.install.installedWithVersion', {
+                  name,
+                  version: change.version,
+                })
+              : t('extensions.install.installed', { name }),
+          },
+        ]);
+      } else if (change?.status) {
+        const name = change.name ?? change.source ?? t('extensions.label');
+        const key =
+          change.status === 'updated' && change.version
+            ? 'extensions.manage.updatedWithVersion'
+            : `extensions.manage.${change.status}`;
+        store.dispatch([
+          {
+            type: 'status',
+            text: t(key, { name, version: change.version ?? '' }),
+          },
+        ]);
+      }
+      sessionActions.refreshCommands().catch(() => {
+        store.dispatch([
+          {
+            type: 'error',
+            text: t('extensions.commands.refreshFailed'),
+          },
+        ]);
+      });
+    }
+  }, [
+    workspaceEventSignals?.extensionsVersion,
+    workspaceEventSignals?.lastExtensionChange,
+    sessionActions,
+    store,
+    t,
+  ]);
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
     'workspace',
   );
@@ -928,7 +1120,8 @@ export function App({
     showReleaseDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showToolsDialog;
+    showToolsDialog ||
+    showExtensionsDialog;
   const inlinePanelOpen =
     approvalModeInlineOpen ||
     authInlineOpen ||
@@ -1113,8 +1306,7 @@ export function App({
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;
       } else {
-        const editorHasText =
-          (editorRef.current?.getText().trim().length ?? 0) > 0;
+        const editorHasText = editorRef.current?.hasInput() ?? false;
         const isPlainDismiss =
           !e.ctrlKey &&
           !e.metaKey &&
@@ -1142,6 +1334,7 @@ export function App({
     (text: string, images?: PromptImage[], onComplete?: () => void) => {
       const trimmed = text.trim();
       if (!trimmed) return true;
+      const hasImages = !!images && images.length > 0;
       const nextPrompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
         text: trimmed,
@@ -1150,10 +1343,48 @@ export function App({
       };
       queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
       setQueuedPrompts(queuedPromptsRef.current);
+      // Best-effort: also offer text-only messages to the running turn so the
+      // daemon can drain them mid-turn (text-only because the drain channel
+      // carries plain strings — messages with images stay queued for the next
+      // turn). On success the daemon emits `mid_turn_message_injected`, which
+      // the effect below removes from the queue so it isn't resent. If idle /
+      // unsupported / failed, the message harmlessly stays queued.
+      if (!hasImages) {
+        // One controller per turn: all mid-turn pushes typed during the same
+        // turn share it, and the settle effect aborts it so a late arrival
+        // can't land in the next turn. An aborted push resolves
+        // `{ accepted: false }`, so the message simply stays queued and is
+        // resent next turn — exactly-once preserved.
+        let abort = midTurnEnqueueAbortRef.current;
+        if (!abort) {
+          abort = new AbortController();
+          midTurnEnqueueAbortRef.current = abort;
+        }
+        void sessionActions.enqueueMidTurnMessage(trimmed, {
+          signal: abort.signal,
+        });
+      }
       return true;
     },
-    [],
+    [sessionActions],
   );
+
+  // When the turn settles, abort any still-in-flight mid-turn push so it can't
+  // arrive during the next turn and be injected twice (see midTurnEnqueueAbortRef).
+  // The aborted push resolves `{ accepted: false }`; the message is already in
+  // queuedPrompts and follows the normal next-turn path.
+  useEffect(() => {
+    if (streamingState !== 'idle') return;
+    const ctrl = midTurnEnqueueAbortRef.current;
+    if (!ctrl) return;
+    // A controller exists ⇒ at least one mid-turn push was issued this turn.
+    // Cancel it so a still-in-flight push can't land in the next turn (a
+    // completed one makes this a no-op). Debug-only, mirrors the server-side
+    // mid-turn observability.
+    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
+    ctrl.abort();
+    midTurnEnqueueAbortRef.current = null;
+  }, [streamingState]);
 
   const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
     const [nextPrompt, ...rest] = queuedPromptsRef.current;
@@ -1178,6 +1409,64 @@ export function App({
     store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
     return true;
   }, [store, t]);
+
+  // When the daemon drains queued messages into the running turn it emits
+  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
+  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
+  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
+  // newest — a multi-batch turn can publish several frames back-to-back, and the
+  // first must not be lost before this runs. The frames arrive in-order ahead of
+  // the turn-complete frame that flips streamingState to idle, so this runs
+  // before that resend fires; `consume()` then clears the reconciled batches.
+  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
+    useDaemonMidTurnInjected();
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId || midTurnInjectedBatches.length === 0) return;
+    // Pass OUR client id so only batches the daemon stamped with it (or
+    // anonymous ones) are deduped. The daemon stamps every drained frame with
+    // the originator's client id, and the web-shell always sends one, so
+    // omitting this would skip every batch — leaving our own messages in the
+    // queue to be resent next turn (double delivery). A peer on the same
+    // session keeps its own coincidentally-equal entry.
+    if (
+      connection.clientId === undefined &&
+      midTurnInjectedBatches.some(
+        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
+      )
+    ) {
+      // Edge: stamped batches but no client id yet (older daemon / reconnect
+      // timing). Dedupe skips them, so they may be resent next turn — make it
+      // diagnosable rather than a silent double-delivery.
+      console.debug(
+        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
+      );
+    }
+    const next = removeInjectedFromQueue(
+      queuedPromptsRef.current,
+      midTurnInjectedBatches,
+      sessionId,
+      connection.clientId,
+    );
+    if (next) {
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+    }
+    // Consume ONLY this session's batches. The reconcile above is session-
+    // scoped, so a batch for another session (a late frame after an in-place
+    // session switch) must NOT be cleared here — it was never reconciled and
+    // would otherwise be lost on switch-back (resent next turn = double
+    // delivery). Identity-removal also leaves any frame that arrived after this
+    // render's snapshot for the next effect run.
+    consumeMidTurnInjected(
+      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
+    );
+  }, [
+    midTurnInjectedBatches,
+    connection.sessionId,
+    connection.clientId,
+    consumeMidTurnInjected,
+  ]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -1402,6 +1691,10 @@ export function App({
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
+
+  useEffect(() => {
+    onTranscriptChange?.(blocks);
+  }, [blocks, onTranscriptChange]);
 
   useEffect(() => {
     if (connection.error) {
@@ -2022,6 +2315,130 @@ export function App({
             setAgentsInlineMode(agentsMode);
             return true;
           }
+          if (cmd === 'extensions') {
+            const args = text.slice(match[0].length).trim();
+            const subCommand = args.split(/\s+/)[0]?.toLowerCase();
+            if (!subCommand || subCommand === 'manage') {
+              store.appendLocalUserMessage(text);
+              setShowExtensionsDialog(true);
+              return true;
+            }
+            if (subCommand === 'install') {
+              const tokens = args.slice('install'.length).trim().split(/\s+/);
+              let source = '';
+              let ref: string | undefined;
+              let registry: string | undefined;
+              let autoUpdate: boolean | undefined;
+              let allowPreRelease: boolean | undefined;
+              let parseError: string | null = null;
+              for (let index = 0; index < tokens.length; index++) {
+                const token = tokens[index];
+                if (!token) continue;
+                if (token === '--auto-update') {
+                  autoUpdate = true;
+                } else if (
+                  token === '--pre-release' ||
+                  token === '--allow-pre-release'
+                ) {
+                  allowPreRelease = true;
+                } else if (token === '--ref' || token === '--registry') {
+                  const value = tokens[index + 1];
+                  if (!value || value.startsWith('--')) {
+                    parseError = t('extensions.install.missingOptionValue', {
+                      option: token,
+                    });
+                    break;
+                  }
+                  if (token === '--ref') {
+                    ref = value;
+                  } else {
+                    registry = value;
+                  }
+                  index += 1;
+                } else if (token.startsWith('--')) {
+                  parseError = t('extensions.install.unknownOption', {
+                    option: token,
+                  });
+                  break;
+                } else if (!source) {
+                  source = token;
+                } else {
+                  parseError = t('extensions.install.usage');
+                  break;
+                }
+              }
+              if (parseError) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([{ type: 'error', text: parseError }]);
+                return true;
+              }
+              if (!source) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([
+                  {
+                    type: 'error',
+                    text: t('extensions.install.usage'),
+                  },
+                ]);
+                return true;
+              }
+              if (promptBlocked) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([
+                  {
+                    type: 'error',
+                    text: t('extensions.install.waitForTurn'),
+                  },
+                ]);
+                return true;
+              }
+              const clientId = connectionRef.current.clientId;
+              if (!clientId) {
+                store.appendLocalUserMessage(text);
+                store.dispatch([
+                  {
+                    type: 'error',
+                    text: t('extensions.install.waitForSession'),
+                  },
+                ]);
+                return true;
+              }
+              store.appendLocalUserMessage(text);
+              store.dispatch([
+                {
+                  type: 'status',
+                  text: t('extensions.install.started', { source }),
+                },
+              ]);
+              workspaceActions
+                .installExtension(
+                  {
+                    source,
+                    ...(ref ? { ref } : {}),
+                    ...(registry ? { registry } : {}),
+                    ...(autoUpdate !== undefined ? { autoUpdate } : {}),
+                    ...(allowPreRelease !== undefined
+                      ? { allowPreRelease }
+                      : {}),
+                    consent: true,
+                  },
+                  clientId,
+                )
+                .then(() => undefined)
+                .catch((error: unknown) => {
+                  reportError(error, t('extensions.install.requestFailed'));
+                });
+              return true;
+            }
+            store.appendLocalUserMessage(text);
+            store.dispatch([
+              {
+                type: 'error',
+                text: t('extensions.install.usage'),
+              },
+            ]);
+            return true;
+          }
           if (cmd === 'clear') {
             sessionActions.newSession().catch((error: unknown) => {
               reportError(error, 'Failed to create a new session');
@@ -2432,8 +2849,7 @@ export function App({
         return;
       }
 
-      const text = editorRef.current?.getText() ?? '';
-      if (text.length > 0) {
+      if (editorRef.current?.hasInput()) {
         e.preventDefault();
         if (escPressCountRef.current === 0) {
           escPressCountRef.current = 1;
@@ -2445,7 +2861,7 @@ export function App({
             resetEscapeState();
           }, 500);
         } else {
-          editorRef.current?.clearText();
+          editorRef.current?.clear();
           resetEscapeState();
         }
         return;
@@ -2643,6 +3059,11 @@ export function App({
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
               )}
+              {showExtensionsDialog && (
+                <ExtensionsDialog
+                  onClose={() => setShowExtensionsDialog(false)}
+                />
+              )}
             </div>
           )}
 
@@ -2812,7 +3233,7 @@ export function App({
               <div className={styles.composer}>
                 <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
                 <Editor
-                  ref={editorRef}
+                  ref={setEditorHandle}
                   onSubmit={handleSubmit}
                   onCycleMode={handleCycleMode}
                   onToggleShortcuts={handleToggleShortcuts}
@@ -2830,6 +3251,8 @@ export function App({
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
+                  composerInput={composerInput}
+                  composerInputVersion={composerInputVersion}
                   placeholderText={
                     !connected
                       ? t('common.loading')
@@ -2856,6 +3279,34 @@ export function App({
               !tasksPanelMessage &&
               (showShortcuts ? (
                 <ShortcutsPanel onClose={handleCloseShortcuts} />
+              ) : CustomFooter ? (
+                <CustomFooter
+                  connected={connected}
+                  mode={currentMode}
+                  model={currentModel}
+                  streamingState={streamingState}
+                  contextUsageRatio={
+                    (connection.contextWindow ?? 0) > 0
+                      ? (connection.tokenCount ?? 0) /
+                        (connection.contextWindow ?? 0)
+                      : 0
+                  }
+                  activeGoal={activeGoal}
+                  tasks={footerTasks}
+                  availableModes={MODES_CYCLE}
+                  availableModels={(connection.models ?? []).map((m) => ({
+                    id: m.id,
+                    label: m.label,
+                    contextWindow: m.contextWindow,
+                  }))}
+                  skills={loadedSkills}
+                  onSelectMode={(mode) => handleSetMode(mode)}
+                  onSelectModel={(model) => {
+                    sessionActions.setModel(model).then(() => {
+                      setCurrentModel(model);
+                    });
+                  }}
+                />
               ) : (
                 <StatusBar
                   escapeHint={escapeHintVisible}
@@ -2868,7 +3319,7 @@ export function App({
                   ref={statusBarRef}
                   onOpenTasks={() => openTasksPanel()}
                   onReturnToInput={handleReturnToEditor}
-                  taskActivityKey={backgroundTaskActivityKey}
+                  tasks={backgroundTasks}
                   activeGoal={activeGoal}
                   hideSettings={hideSettings}
                   onToggleShortcuts={handleToggleShortcuts}

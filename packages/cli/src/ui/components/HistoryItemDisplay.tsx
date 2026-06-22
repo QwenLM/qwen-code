@@ -57,6 +57,7 @@ import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -137,6 +138,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const marginTop = getHistoryItemMarginTop(item);
 
   const { compactMode } = useCompactMode();
+  const settings = useSettings();
+  const showTimestamps = settings.merged.output?.showTimestamps === true;
+
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
@@ -160,15 +164,26 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <UserShellMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'gemini' && (
-        <AssistantMessage
-          text={itemForDisplay.text}
-          isPending={isPending}
-          availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
-          }
-          contentWidth={contentWidth}
-          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-        />
+        <>
+          {showTimestamps && itemForDisplay.timestamp != null && (
+            <Text dimColor>
+              [
+              {new Date(itemForDisplay.timestamp).toLocaleTimeString('en-US', {
+                hour12: false,
+              })}
+              ]
+            </Text>
+          )}
+          <AssistantMessage
+            text={itemForDisplay.text}
+            isPending={isPending}
+            availableTerminalHeight={
+              availableTerminalHeightGemini ?? availableTerminalHeight
+            }
+            contentWidth={contentWidth}
+            sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          />
+        </>
       )}
       {itemForDisplay.type === 'gemini_content' && (
         <AssistantMessageContent
@@ -181,20 +196,23 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
+      {itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={!compactMode}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
+          durationMs={itemForDisplay.durationMs}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
+      {itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={!compactMode}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }

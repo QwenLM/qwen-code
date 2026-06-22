@@ -119,31 +119,36 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 ```
 ['health', 'capabilities', 'session_create', 'session_scope_override',
- 'session_load', 'unstable_session_resume',
+ 'session_load', 'session_resume',
+ 'unstable_session_resume',
  'session_list', 'session_prompt', 'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
- 'workspace_providers', 'workspace_env', 'workspace_preflight',
- 'session_context', 'session_supported_commands', 'session_tasks',
+ 'workspace_providers', 'auth_provider_install', 'workspace_memory',
+ 'workspace_agents', 'workspace_agent_generate', 'workspace_env',
+ 'workspace_preflight', 'session_context', 'session_context_usage',
+ 'session_supported_commands', 'session_tasks', 'session_stats',
  'session_close', 'session_metadata', 'mcp_guardrails',
- 'mcp_guardrail_events',
+ 'workspace_mcp_manage', 'mcp_guardrail_events',
+ 'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
  'session_approval_mode_control', 'workspace_tool_toggle',
- 'workspace_init', 'workspace_mcp_restart',
- 'auth_device_flow', 'permission_mediation']
+ 'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
+ 'session_recap', 'session_btw', 'session_shell_command',
+ 'mcp_workspace_pool', 'mcp_pool_restart',
+ 'require_auth', 'allow_origin', 'auth_device_flow',
+ 'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
+ 'non_blocking_prompt', 'session_language', 'session_rewind',
+ 'workspace_hooks', 'session_hooks', 'workspace_extensions',
+ 'session_branch', 'rate_limit', 'workspace_reload']
 ```
 
-> The conditional `require_auth` tag (PR 15) appears only when the daemon
-> is started with `--require-auth`. F3's `permission_mediation` tag is
-> always-on and carries `modes: ['first-responder', 'designated',
-'consensus', 'local-only']` so SDK clients can introspect the
-> build-supported set; the runtime-active strategy is at
-> `body.policy.permission`.
+> Conditional tags appear only when their matching deployment toggle is on (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
-`session_load` and `unstable_session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. The `unstable_` prefix on `unstable_session_resume` mirrors the underlying ACP method (`connection.unstable_resumeSession`) — the daemon's wire shape is committed for v1, but the ACP method name itself may change before ACP marks resume stable.
+`session_load` and `session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. `unstable_session_resume` is still advertised as a deprecated alias for compatibility with SDKs that shipped while the underlying ACP method was named `connection.unstable_resumeSession`; new clients should gate on `session_resume`.
 
 `slow_client_warning` covers two co-released SSE backpressure knobs introduced in #4175 Wave 2.5 PR 10: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's queue crosses 75% full, once per overflow episode (rearmed after the queue drains below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber backlog for cold reconnects against a large replay ring. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack both — pre-flight this tag before opting in.
 
@@ -168,12 +173,23 @@ The write tag means the route contract exists; it does not mean the current
 deployment is open for anonymous mutation. Write/edit are strict mutation
 routes and require a configured bearer token even on loopback.
 
+`daemon_status` advertises `GET /daemon/status`, the consolidated read-only
+operator diagnostic snapshot documented below.
+
 **Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
 
-| Tag            | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds.                                                                                                                                                                                                                                                                                                                                    |
-| `allow_origin` | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). The daemon was started with at least one `--allow-origin <pattern>` (or `allowOrigins: [...]` via the embedded API). Cross-origin requests from matched origins receive proper CORS response headers; unmatched origins still get the default 403. The configured pattern list is intentionally NOT echoed in `/capabilities` to avoid leaking the trusted-origin set to unauthenticated readers — browser webui already knows its own origin. |
+| Tag                        | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `require_auth`             | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds.                                                                                                                                                                                                                                                                                                                                    |
+| `mcp_workspace_pool`       | the shared MCP transport pool is active. Omitted when `QWEN_SERVE_NO_MCP_POOL=1` disables the pool.                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `mcp_pool_restart`         | the shared MCP transport pool is active; restart responses may include pool-aware multi-entry shapes.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `allow_origin`             | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). The daemon was started with at least one `--allow-origin <pattern>` (or `allowOrigins: [...]` via the embedded API). Cross-origin requests from matched origins receive proper CORS response headers; unmatched origins still get the default 403. The configured pattern list is intentionally NOT echoed in `/capabilities` to avoid leaking the trusted-origin set to unauthenticated readers — browser webui already knows its own origin. |
+| `prompt_absolute_deadline` | `--prompt-deadline-ms` / `QWEN_SERVE_PROMPT_DEADLINE_MS` / `ServeOptions.promptDeadlineMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `writer_idle_timeout`      | `--writer-idle-timeout-ms` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` / `ServeOptions.writerIdleTimeoutMs` is set to a positive integer.                                                                                                                                                                                                                                                                                                                                                                             |
+| `workspace_settings`       | the daemon was created with settings persistence available.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `session_shell_command`    | session shell execution is explicitly enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `rate_limit`               | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `workspace_reload`         | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
@@ -200,6 +216,89 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 
 **Auth:** required **only on non-loopback binds**. On loopback (`127.0.0.1`, `::1`, `[::1]`) `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the loopback exemption.
 
+### `GET /daemon/status`
+
+Read-only operator diagnostics. Unlike `/health`, this is a normal daemon API:
+it is registered after bearer auth and rate limiting, including on loopback
+binds. Query parameter:
+
+- `detail=summary` (default) reads only in-memory daemon state.
+- `detail=full` also includes live session diagnostics, ACP connection
+  diagnostics, auth device-flow counts, and workspace status sections.
+- any other `detail` returns `400 { "code": "invalid_detail" }`.
+
+`summary` intentionally does not query workspace status methods, start an ACP
+child, or spawn a session. `full` queries each workspace section independently;
+a timeout or exception marks only that section as `unavailable` and adds a
+`workspace_status_unavailable` issue.
+
+Response shape:
+
+```json
+{
+  "v": 1,
+  "detail": "summary",
+  "generatedAt": "2026-06-16T00:00:00.000Z",
+  "status": "ok",
+  "issues": [],
+  "daemon": {
+    "pid": 12345,
+    "uptimeMs": 3600000,
+    "mode": "http-bridge",
+    "workspaceCwd": "/repo",
+    "qwenCodeVersion": "0.18.1",
+    "daemonId": "serve-..."
+  },
+  "security": {
+    "tokenConfigured": true,
+    "requireAuth": false,
+    "loopbackBind": true,
+    "allowOriginConfigured": false,
+    "allowOriginMode": "none",
+    "sessionShellCommandEnabled": false
+  },
+  "limits": {
+    "maxSessions": 20,
+    "maxPendingPromptsPerSession": 5,
+    "listenerMaxConnections": 256,
+    "eventRingSize": 8000,
+    "promptDeadlineMs": null,
+    "writerIdleTimeoutMs": null,
+    "channelIdleTimeoutMs": 0,
+    "sessionIdleTimeoutMs": 1800000,
+    "acpConnectionCap": 64
+  },
+  "runtime": {
+    "sessions": { "active": 0 },
+    "permissions": { "pending": 0, "policy": "first-responder" },
+    "channel": { "live": false },
+    "transport": {
+      "restSseActive": 0,
+      "acp": {
+        "enabled": true,
+        "connections": 0,
+        "connectionStreams": 0,
+        "sessionStreams": 0,
+        "sseStreams": 0,
+        "wsStreams": 0,
+        "pendingClientRequests": 0
+      }
+    }
+  }
+}
+```
+
+`status` is `error` if any issue has error severity, `warning` if any issue has
+warning severity, otherwise `ok`. Issue codes are stable and include
+`session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
+`acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
+`mcp_budget_exhausted`, `rate_limit_hits`, and
+`workspace_status_unavailable`.
+
+Security: the response never includes bearer tokens, client ids, full ACP
+connection ids, device-flow user codes, or verification URLs. `summary` omits
+the daemon log path; `full` may include it for authenticated operators.
+
 ### `GET /capabilities`
 
 ```json
@@ -210,7 +309,7 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
     "supported": ["v1"]
   },
   "mode": "http-bridge",
-  "features": ["health", "capabilities", "..."],
+  "features": ["health", "daemon_status", "capabilities", "..."],
   "modelServices": [],
   "workspaceCwd": "/canonical/path/to/workspace"
 }
@@ -986,7 +1085,7 @@ Response:
 
 `attached: true` means the session was already live (either from a prior `session/load`/`session/resume`, or because a coalesced concurrent caller raced just ahead).
 
-**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 4000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
+**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 8000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
 
 **Errors:**
 
@@ -997,13 +1096,13 @@ Response:
 
 ### `POST /session/:id/resume`
 
-Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.unstable_session_resume`.
+Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.session_resume`; `unstable_session_resume` remains a deprecated compatibility alias for older clients.
 
 Same request shape as `/load`. Same response shape — `state` mirrors ACP's `ResumeSessionResponse`. Same error envelope, including `409 restore_in_progress` (which fires when a `session/load` is in flight; `session/resume` racing behind another `session/resume` coalesces).
 
 Use `/load` when the client has no history rendered (cold reconnect, picker → open). Use `/resume` when the client already has the turns on screen and only needs the daemon-side handle back.
 
-> ⚠️ **Why `unstable_` on the capability tag?** The route is wire-stable for the daemon's v1, but it's backed by ACP's `connection.unstable_resumeSession` which is still subject to ACP-side breaking changes. The daemon insulates the wire shape from those changes; the prefix is a courtesy signal so SDK consumers know the underlying agent contract is not yet locked.
+> ⚠️ **Why is `unstable_session_resume` still advertised?** The daemon's HTTP route and `session_resume` capability are stable for v1, but the bridge still calls ACP's `connection.unstable_resumeSession`. The old tag remains only so SDKs that shipped before `session_resume` can keep working.
 
 ### `GET /workspace/:id/sessions`
 
@@ -1574,13 +1673,13 @@ The connection then closes.
 | Path                                                 | Purpose                                                                                                    |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                                                                |
-| `packages/cli/src/serve/runQwenServe.ts`             | listener lifecycle + signal handling                                                                       |
+| `packages/cli/src/serve/run-qwen-serve.ts`           | listener lifecycle + signal handling                                                                       |
 | `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                                                                |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
 | `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry                                                   |
 | `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
-| `packages/cli/src/serve/envSnapshot.ts`              | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
-| `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                                                          |
+| `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
+| `packages/acp-bridge/src/eventBus.ts`                | bounded async queue + replay ring                                                                          |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                                                                  |
 | `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                                                                   |
 | `integration-tests/cli/qwen-serve-routes.test.ts`    | 18 cases, no LLM                                                                                           |

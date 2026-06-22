@@ -11,10 +11,12 @@ import type { Argv, CommandModule } from 'yargs';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
+import { DEFAULT_RING_SIZE } from '../serve/event-bus.js';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
+  openBrowserSecurely,
+  shouldLaunchBrowser,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
@@ -30,6 +32,47 @@ function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+/**
+ * Open the Web Shell in a browser once the daemon is listening. Extracted from
+ * the `serve` handler so it is unit-testable. Best-effort:
+ *  - gated on `--open`, the UI actually being mounted (`webShellMounted`), and
+ *    `shouldLaunchBrowser()` (false in CI / SSH / headless);
+ *  - wildcard bind hosts (`0.0.0.0` / `[::]`) are rewritten to loopback so the
+ *    URL is client-addressable;
+ *  - the token rides in the URL fragment (`#token=`), which is never sent to
+ *    the server, and the daemon's already-resolved (trimmed) token is used so
+ *    it matches what the server authenticates against;
+ *  - any launch failure is logged, never thrown, so it can't take down the
+ *    already-listening daemon.
+ *
+ * Exported for tests.
+ */
+export async function maybeOpenWebShellBrowser(
+  handle: { url: string; webShellMounted: boolean; resolvedToken?: string },
+  open: boolean,
+): Promise<void> {
+  if (!open || !handle.webShellMounted || !shouldLaunchBrowser()) return;
+  try {
+    const target = new URL(handle.url);
+    // Node's URL returns the IPv6 wildcard as `[::]` (bracketed), never `::`.
+    if (target.hostname === '0.0.0.0' || target.hostname === '[::]') {
+      target.hostname = '127.0.0.1';
+    }
+    if (handle.resolvedToken) {
+      target.hash = `token=${encodeURIComponent(handle.resolvedToken)}`;
+      writeStderrLine(
+        'qwen serve: --open passes the token in the browser launch command ' +
+          '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
+      );
+    }
+    await openBrowserSecurely(target.toString());
+  } catch (browserErr) {
+    writeStderrLine(
+      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}`,
+    );
+  }
+}
+
 interface ServeArgs {
   port: number;
   hostname: string;
@@ -41,6 +84,8 @@ interface ServeArgs {
   workspace?: string;
   'require-auth': boolean;
   'enable-session-shell': boolean;
+  web: boolean;
+  open: boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -54,6 +99,7 @@ interface ServeArgs {
   'channel-idle-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
+  'permission-response-timeout-ms'?: number;
   'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
@@ -131,6 +177,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+      })
+      .option('web', {
+        type: 'boolean',
+        default: true,
+        description:
+          'Serve the Web Shell UI at the daemon root path. Use --no-web for an API-only daemon.',
+      })
+      .option('open', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Open the Web Shell in a browser once the daemon is listening. With a token configured, the launch URL (token included) is handed to the browser launcher and is visible in the process list, so prefer opening the URL manually on multi-user hosts. No-op with --no-web, when the UI assets are absent, or in headless/CI/SSH environments.',
       })
       .option('event-ring-size', {
         type: 'number',
@@ -216,6 +274,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Idle timeout before a disconnected session is reaped (ms). ' +
           '0 = disabled. Default: 1800000 (30 min).',
+      })
+      .option('permission-response-timeout-ms', {
+        type: 'number',
+        description:
+          'Wall-clock timeout for a single human permission / ' +
+          'ask_user_question response in daemon (ACP) mode (ms). ' +
+          '0 = disabled (wait forever). Default: 300000 (5 min).',
       })
       .option('rate-limit', {
         type: 'boolean',
@@ -404,7 +469,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     // express + body-parser + qs in their startup path.
     const { runQwenServe } = await import('../serve/index.js');
     try {
-      await runQwenServe({
+      const handle = await runQwenServe({
         port: argv.port,
         hostname: argv.hostname,
         token: argv.token,
@@ -416,6 +481,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
+        serveWebShell: argv.web,
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
@@ -437,12 +503,21 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['session-idle-timeout-ms'] !== undefined
           ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
           : {}),
+        ...(argv['permission-response-timeout-ms'] !== undefined
+          ? {
+              permissionResponseTimeoutMs:
+                argv['permission-response-timeout-ms'],
+            }
+          : {}),
         ...(rateLimit ? { rateLimit: true } : {}),
         ...(rateLimitPrompt !== undefined ? { rateLimitPrompt } : {}),
         ...(rateLimitMutation !== undefined ? { rateLimitMutation } : {}),
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
       });
+      // Open the Web Shell in a browser once the listener is up (best-effort;
+      // never throws — see maybeOpenWebShellBrowser).
+      await maybeOpenWebShellBrowser(handle, argv.open);
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

@@ -102,6 +102,46 @@ describe('icon-cache null handling', () => {
   })
 })
 
+describe('remote icon URLs', () => {
+  it('returns source icon URLs with uppercase schemes directly', async () => {
+    const { clearIconCaches, loadSourceIcon } = await import('../icon-cache')
+    clearIconCaches()
+
+    const icon = 'HTTPS://cdn.example.com/source.svg'
+
+    await expect(
+      loadSourceIcon({
+        workspaceId: 'workspace-id',
+        config: {
+          slug: 'source',
+          name: 'Source',
+          type: 'api',
+          icon,
+        },
+      }),
+    ).resolves.toBe(icon)
+    expect(mockReadWorkspaceImage).not.toHaveBeenCalled()
+  })
+
+  it('returns skill icon URLs with uppercase schemes directly', async () => {
+    const { clearIconCaches, loadSkillIcon } = await import('../icon-cache')
+    clearIconCaches()
+
+    const icon = 'HTTP://cdn.example.com/skill.svg'
+
+    await expect(
+      loadSkillIcon(
+        {
+          slug: 'skill',
+          metadata: { icon },
+        },
+        'workspace-id',
+      ),
+    ).resolves.toBe(icon)
+    expect(mockReadWorkspaceImage).not.toHaveBeenCalled()
+  })
+})
+
 // ============================================================================
 // Pure Function Tests for Null Guards
 // ============================================================================

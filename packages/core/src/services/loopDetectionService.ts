@@ -19,6 +19,12 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 
+// Consecutive identical tool calls (same name + identical args) tolerated
+// before the always-on guard halts the turn. Repeating an identical call
+// yields an identical result, so this is never a productive pattern. Kept
+// below the DashScope server-side "Repetitive tool calls detected" threshold
+// so the client breaks the loop before the server rejects the whole
+// conversation with a 400 (issue #5019).
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
@@ -43,6 +49,20 @@ const FILE_READ_WINDOW = 15;
 
 // Action stagnation tracking
 const STAGNATION_THRESHOLD = 8;
+
+// Global tool call duplicate tracking: how many times the same (tool, args)
+// pair must appear across the entire turn (not necessarily consecutively)
+// before it is treated as a loop.
+const GLOBAL_DUPLICATE_THRESHOLD = 6;
+
+// Alternating pattern detection: number of complete AB cycles needed to
+// trip the detector (3 cycles = 6 calls: A B A B A B).
+const ALTERNATING_PATTERN_CYCLES = 3;
+
+// Hard per-turn tool call cap. Always-on circuit breaker — not gated by
+// skipLoopDetection. If a single turn exceeds this many tool calls the
+// turn is halted regardless of loop-detection configuration.
+const TURN_TOOL_CALL_CAP = 100;
 
 /**
  * Service for detecting and preventing infinite loops in AI responses.
@@ -85,6 +105,27 @@ export class LoopDetectionService {
   // exploration rather than loop evidence. Resets per-prompt in reset().
   private hasSeenNonReadTool = false;
 
+  // Non-consecutive global duplicate tracking: counts every (tool, args)
+  // pair seen across the entire turn. When any pair reaches
+  // GLOBAL_DUPLICATE_THRESHOLD, the turn is halted.
+  private globalToolCallCounts = new Map<string, number>();
+
+  // Sliding window of recent tool-call keys for alternating-pattern
+  // detection (ABABAB…). Kept at 2 * ALTERNATING_PATTERN_CYCLES entries.
+  private recentToolCallKeys: string[] = [];
+
+  // Total tool calls emitted in the current turn. Always-on circuit breaker;
+  // exceeds TURN_TOOL_CALL_CAP → hard-stop. Accumulates across ToolResult
+  // continuations within a turn (reset() only runs for top-level interactions).
+  private turnToolCallTotal = 0;
+
+  // Rollback floor for turnToolCallTotal: the committed total as of the last
+  // completed round-trip (Finished event). A retry re-streams the failed
+  // attempt's tool calls (Turn clears pendingToolCalls on retry), so on Retry
+  // we roll back to this floor — discarding only the failed attempt, not the
+  // counts from prior completed round-trips.
+  private turnToolCallTotalCommitted = 0;
+
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
   // the user which detector actually fired.
@@ -124,12 +165,18 @@ export class LoopDetectionService {
   }
 
   /**
-   * Processes a stream event and checks for loop conditions.
+   * Convenience aggregate that runs every tier in order: the always-on
+   * safeties (consecutive-identical guard + per-turn cap) followed by the
+   * opt-in heuristics. Intended as a single "check everything" entry point for
+   * unit tests. Production code (client.ts) intentionally calls the tiers
+   * separately so the `skipLoopDetection` gate can sit between them — a new
+   * guard added here will NOT take effect in production unless it is also
+   * wired into checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
    * @param event - The stream event to process
-   * @returns true if a loop is detected, false otherwise
+   * @returns true if any tier detects a loop, false otherwise
    */
   addAndCheck(event: ServerGeminiStreamEvent): boolean {
-    if (this.addAndCheckDeterministicToolCallLoop(event)) {
+    if (this.checkAlwaysOnSafeties(event)) {
       return true;
     }
 
@@ -152,10 +199,26 @@ export class LoopDetectionService {
         this.thoughtHistory = [];
 
         this.trackToolCall(event.value);
+        const toolCallKey = this.getToolCallKey(event.value);
+        const globalDup = this.checkGlobalDuplicate(toolCallKey);
+        const alternating = this.checkAlternatingPattern(toolCallKey);
         const readFileLoop = this.checkReadFileLoop();
         const actionStagnation = this.checkActionStagnation();
 
-        this.loopDetected = readFileLoop || actionStagnation;
+        this.loopDetected =
+          globalDup || alternating || readFileLoop || actionStagnation;
+        break;
+      }
+      case GeminiEventType.Retry: {
+        // A retry replays the failed attempt's tool calls (Turn clears
+        // pendingToolCalls on retry), so drop the heuristic duplicate counters
+        // to avoid firing on a duplicated replay — e.g. 3 identical calls +
+        // Retry + 3 more would otherwise hit the global-duplicate threshold of
+        // 6. The always-on guards reset their own counters in
+        // checkAlwaysOnSafeties' Retry branch (cap rollback + consecutive
+        // streak reset).
+        this.globalToolCallCounts.clear();
+        this.recentToolCallKeys = [];
         break;
       }
       case GeminiEventType.Content: {
@@ -173,29 +236,60 @@ export class LoopDetectionService {
     return this.loopDetected;
   }
 
-  addAndCheckDeterministicToolCallLoop(
-    event: ServerGeminiStreamEvent,
-  ): boolean {
+  /**
+   * Always-on safety checks that fire regardless of the `skipLoopDetection`
+   * config default. Enforces two guards: the consecutive-identical tool-call
+   * loop and the per-turn tool-call cap. Call this before the gated heuristic
+   * checks so neither guard can be bypassed by configuration.
+   */
+  checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected) {
       return true;
     }
 
+    // A model response (round-trip) finished cleanly: commit its tool-call
+    // count as the rollback floor. The per-turn total accumulates across
+    // ToolResult continuations, so the floor must track the last committed
+    // round-trip rather than resetting to zero.
+    if (event.type === GeminiEventType.Finished) {
+      this.turnToolCallTotalCommitted = this.turnToolCallTotal;
+      return false;
+    }
+
+    // A retry re-streams the failed attempt's tool calls, which would
+    // double-count against both always-on guards. Roll the per-turn cap back
+    // to the last committed round-trip (never below it — prior round-trips
+    // stay) and drop the consecutive-identical streak so the replayed attempt
+    // cannot push it over the threshold.
     if (event.type === GeminiEventType.Retry) {
+      this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       return false;
     }
 
-    if (
-      this.disabledForSession ||
-      event.type !== GeminiEventType.ToolCallRequest
-    ) {
+    if (event.type !== GeminiEventType.ToolCallRequest) {
       return false;
     }
 
-    if (this.checkToolCallLoop(event.value)) {
+    // Consecutive identical tool calls (same name AND identical args) are the
+    // one repetition signal precise enough to halt unconditionally — an
+    // identical call returns an identical result, so it is never productive.
+    // Promoted here from the opt-in tier so it protects every user regardless
+    // of the `skipLoopDetection` config default: the DashScope server rejects
+    // this pattern with a 400 (issue #5019) far below the per-turn cap (100),
+    // so the gated default left users unprotected. It still honors an explicit
+    // in-session disable — the user's active "stop detecting" choice — whereas
+    // the per-turn cap below honors nothing.
+    if (!this.disabledForSession && this.checkToolCallLoop(event.value)) {
       this.loopDetected = true;
+      return true;
     }
-    return this.loopDetected;
+
+    if (this.checkTurnToolCallCap()) {
+      this.loopDetected = true;
+      return true;
+    }
+    return false;
   }
 
   private checkToolCallLoop(toolCall: { name: string; args: object }): boolean {
@@ -551,6 +645,89 @@ export class LoopDetectionService {
   }
 
   /**
+   * Always-on hard cap: if the turn exceeds TURN_TOOL_CALL_CAP tool calls
+   * the turn is halted. This is a safety net independent of
+   * skipLoopDetection and fires on the very next tool call that pushes the
+   * total past the cap, not retroactively.
+   */
+  private checkTurnToolCallCap(): boolean {
+    this.turnToolCallTotal++;
+    if (this.turnToolCallTotal > TURN_TOOL_CALL_CAP) {
+      this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Non-consecutive global duplicate detection: the SAME (tool, args) pair
+   * need not appear consecutively — if it appears GLOBAL_DUPLICATE_THRESHOLD
+   * times anywhere in the turn, it is treated as a loop. This catches models
+   * that intersperse the stuck call among other actions.
+   */
+  private checkGlobalDuplicate(toolCallKey: string): boolean {
+    const count = (this.globalToolCallCounts.get(toolCallKey) ?? 0) + 1;
+    this.globalToolCallCounts.set(toolCallKey, count);
+
+    if (count >= GLOBAL_DUPLICATE_THRESHOLD) {
+      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          this.promptId,
+        ),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Alternating-pattern detection: catches ABABAB… patterns where the model
+   * flips between two distinct tool calls. Tracked via a sliding window of
+   * tool-call keys; when the window fills with alternating A/B values the
+   * turn is halted.
+   */
+  private checkAlternatingPattern(toolCallKey: string): boolean {
+    const maxLen = 2 * ALTERNATING_PATTERN_CYCLES;
+    this.recentToolCallKeys.push(toolCallKey);
+    if (this.recentToolCallKeys.length > maxLen) {
+      this.recentToolCallKeys.shift();
+    }
+
+    if (this.recentToolCallKeys.length < maxLen) {
+      return false;
+    }
+
+    // Extract the two alternating keys. If there are more than two distinct
+    // keys in the window, there is no clean ABAB pattern.
+    const [a, b] = this.recentToolCallKeys;
+    if (a === b) return false; // not alternating, same tool
+
+    for (let i = 0; i < maxLen; i++) {
+      const expected = i % 2 === 0 ? a : b;
+      if (this.recentToolCallKeys[i] !== expected) {
+        return false;
+      }
+    }
+
+    this.lastLoopType = LoopType.ALTERNATING_TOOL_CALL_PATTERN;
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+        this.promptId,
+      ),
+    );
+    return true;
+  }
+
+  /**
    * Resets all loop detection state.
    */
   reset(promptId: string): void {
@@ -566,6 +743,10 @@ export class LoopDetectionService {
     this.lastSeenToolName = null;
     this.hasSeenNonReadTool = false;
     this.lastLoopType = null;
+    this.globalToolCallCounts.clear();
+    this.recentToolCallKeys = [];
+    this.turnToolCallTotal = 0;
+    this.turnToolCallTotalCommitted = 0;
   }
 
   private resetToolCallCount(): void {

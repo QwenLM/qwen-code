@@ -44,6 +44,9 @@ const DIST_REQUIRED_PATHS = [
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  // bin wrapper emitted by prepare-package.js that re-spawns `node --expose-gc
+  // cli.js`; ships in dist/ as the package `bin` entry (#4914).
+  'cli-entry.js',
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
@@ -55,6 +58,11 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'LICENSE',
   'locales',
   'examples',
+  // Web Shell SPA served at the daemon root by `qwen serve` (index.html +
+  // assets/). Copied into dist/web-shell/ by copy_bundle_assets.js when the
+  // web-shell workspace has been built; optional, so it's allowed but not
+  // required.
+  'web-shell',
 ]);
 const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,

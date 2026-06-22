@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
 
 interface Question {
@@ -391,7 +392,9 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
       {/* Header line like CLI */}
       <div className={styles.titleLine}>
         <span className={styles.icon}>?</span>
-        <span className={styles.toolName}>AskUserQuestion</span>
+        <span className={styles.toolName}>
+          {localizeToolDisplayName('ask_user_question', t)}
+        </span>
         <span className={styles.toolDesc}>
           {t('askUser.title', { count: questions.length })}
         </span>

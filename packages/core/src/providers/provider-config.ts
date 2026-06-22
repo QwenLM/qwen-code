@@ -119,6 +119,26 @@ function specToModelConfig(
   };
 }
 
+function applyProviderCustomHeaders(
+  models: ProviderModelConfig[],
+  config: ProviderConfig,
+): ProviderModelConfig[] {
+  if (!config.customHeaders) return models;
+  return models.map((model) => {
+    const existing = model.generationConfig ?? {};
+    return {
+      ...model,
+      generationConfig: {
+        ...existing,
+        customHeaders: {
+          ...(config.customHeaders as Record<string, string>),
+          ...(existing.customHeaders as Record<string, string> | undefined),
+        },
+      },
+    };
+  });
+}
+
 function buildModelConfigs(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
@@ -126,17 +146,17 @@ function buildModelConfigs(
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
 
+  let models: ProviderModelConfig[];
+
   // Fixed ModelSpec[] (not editable) — use specs directly
   if (config.models && !config.modelsEditable) {
-    return config.models.map((spec) =>
+    models = config.models.map((spec) =>
       specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
     );
-  }
-
-  // Editable ModelSpec[] — look up per-model metadata for known IDs
-  if (config.models && config.modelsEditable) {
+  } else if (config.models && config.modelsEditable) {
+    // Editable ModelSpec[] — look up per-model metadata for known IDs
     const specMap = new Map(config.models.map((s) => [s.id, s]));
-    return inputs.modelIds.map((id) => {
+    models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id);
       if (spec) {
         return specToModelConfig(spec, prefix, inputs.baseUrl, envKey);
@@ -150,23 +170,23 @@ function buildModelConfigs(
         ...(genConfig ? { generationConfig: genConfig } : {}),
       };
     });
+  } else {
+    // No predefined models (custom provider) — use advancedConfig
+    const advCfg = inputs.advancedConfig;
+    const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
+    models = inputs.modelIds.map((id) => {
+      const genConfig = buildAdvancedGenerationConfig(advCfg);
+      return {
+        id,
+        name: displayName(id),
+        baseUrl: inputs.baseUrl,
+        envKey,
+        ...(genConfig ? { generationConfig: genConfig } : {}),
+      };
+    });
   }
 
-  // No predefined models (custom provider) — use advancedConfig
-  const advCfg = inputs.advancedConfig;
-
-  const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
-
-  return inputs.modelIds.map((id) => {
-    const genConfig = buildAdvancedGenerationConfig(advCfg);
-    return {
-      id,
-      name: displayName(id),
-      baseUrl: inputs.baseUrl,
-      envKey,
-      ...(genConfig ? { generationConfig: genConfig } : {}),
-    };
-  });
+  return applyProviderCustomHeaders(models, config);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,24 +246,37 @@ export function buildInstallPlan(
   const protocol = inputs.protocol ?? config.protocol;
   const envKey = resolveEnvKey(config, inputs);
   const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const ownsModel = config.mergeModelsByIdentity
+    ? undefined
+    : resolveOwnsModel(config);
+  const firstModel = models[0];
   if (models.length === 0) {
     throw new Error(
       `No models configured for provider "${config.id}". Check model list or provider configuration.`,
     );
   }
-  const firstModelId = models[0]?.id;
+  const firstModelId = firstModel?.id;
+  const modelSelection =
+    firstModelId === undefined
+      ? undefined
+      : {
+          modelId: firstModelId,
+          ...(config.mergeModelsByIdentity && firstModel.baseUrl
+            ? { baseUrl: firstModel.baseUrl }
+            : {}),
+        };
 
   return {
     providerId: config.id,
     authType: protocol,
     env: { [envKey]: inputs.apiKey },
-    ...(firstModelId ? { modelSelection: { modelId: firstModelId } } : {}),
+    ...(modelSelection ? { modelSelection } : {}),
     modelProviders: [
       {
         authType: protocol,
         models,
         mergeStrategy: 'prepend-and-remove-owned' as const,
-        ownsModel: resolveOwnsModel(config),
+        ...(ownsModel ? { ownsModel } : {}),
       },
     ],
     providerState: resolveProviderState(config, inputs.baseUrl, models),
@@ -290,7 +323,12 @@ export function resolveBaseUrl(
     return config.baseUrl;
   }
   if (Array.isArray(config.baseUrl)) {
-    const match = config.baseUrl.find((opt) => opt.url === selectedBaseUrl);
+    const normalizedSelectedBaseUrl =
+      normalizeBaseUrlForMatching(selectedBaseUrl);
+    const match = config.baseUrl.find(
+      (opt) =>
+        normalizeBaseUrlForMatching(opt.url) === normalizedSelectedBaseUrl,
+    );
     if (match) return match.url;
     // Defensive: an empty baseUrl array would crash `config.baseUrl[0].url`
     // and bring down the install flow. Fall back to the caller-supplied
@@ -298,6 +336,15 @@ export function resolveBaseUrl(
     return config.baseUrl[0]?.url ?? selectedBaseUrl ?? '';
   }
   return selectedBaseUrl ?? '';
+}
+
+function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
+  if (baseUrl === undefined) return '';
+  let end = baseUrl.length;
+  while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
+    end--;
+  }
+  return end === baseUrl.length ? baseUrl : baseUrl.slice(0, end);
 }
 
 // ---------------------------------------------------------------------------

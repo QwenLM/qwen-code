@@ -594,6 +594,25 @@ describe('resolveBaseUrl edge cases', () => {
       'https://api.user.com/v1',
     );
   });
+
+  it('matches BaseUrlOption trailing-slash variants', () => {
+    const config = makeConfig({
+      baseUrl: [
+        { id: 'a', label: 'A', url: 'https://a.com/v1' },
+        { id: 'b', label: 'B', url: 'https://b.com/v1' },
+        { id: 'c', label: 'C', url: 'https://c.com/v1/' },
+      ],
+    });
+    expect(resolveBaseUrlSrc(config, 'https://b.com/v1/')).toBe(
+      'https://b.com/v1',
+    );
+    expect(resolveBaseUrlSrc(config, 'https://a.com/v1///')).toBe(
+      'https://a.com/v1',
+    );
+    expect(resolveBaseUrlSrc(config, 'https://c.com/v1')).toBe(
+      'https://c.com/v1/',
+    );
+  });
 });
 
 describe('providerMatchesCredentials with function envKey (custom provider)', () => {
@@ -683,6 +702,109 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
 });
 
 import { resolveMetadataKey as resolveMetadataKeySrc } from '../provider-config.js';
+
+describe('customHeaders in ProviderConfig', () => {
+  it('merges customHeaders into generationConfig for fixed models', () => {
+    const config = makeConfig({
+      customHeaders: {
+        'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+        'X-Title': 'Qwen Code',
+      },
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+
+    const gc = plan.modelProviders?.[0]?.models[0]?.generationConfig;
+    expect(gc?.customHeaders).toEqual({
+      'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+      'X-Title': 'Qwen Code',
+    });
+    // existing fields preserved
+    expect(gc?.extra_body).toEqual({ enable_thinking: true });
+    expect(gc?.contextWindowSize).toBe(8192);
+  });
+
+  it('merges customHeaders into generationConfig for editable unknown models', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      customHeaders: { 'X-Custom': 'val' },
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['unknown-model'],
+    });
+
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig?.customHeaders,
+    ).toEqual({ 'X-Custom': 'val' });
+  });
+
+  it('merges customHeaders for custom-provider models (no predefined list)', () => {
+    const config = makeConfig({
+      models: undefined,
+      modelNamePrefix: '',
+      customHeaders: { Authorization: 'Bearer test' },
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://custom.com/v1',
+      apiKey: 'sk-custom',
+      modelIds: ['my-model'],
+    });
+
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig?.customHeaders,
+    ).toEqual({ Authorization: 'Bearer test' });
+  });
+
+  it('does not add generationConfig when customHeaders is absent', () => {
+    const config = makeConfig({ models: [{ id: 'plain' }] });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['plain'],
+    });
+
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig,
+    ).toBeUndefined();
+  });
+
+  it('applies customHeaders to every model in the list', () => {
+    const config = makeConfig({
+      models: [{ id: 'a' }, { id: 'b' }],
+      customHeaders: { 'X-Test': 'yes' },
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['a', 'b'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models).toHaveLength(2);
+    expect(models?.[0]?.generationConfig?.customHeaders).toEqual({
+      'X-Test': 'yes',
+    });
+    expect(models?.[1]?.generationConfig?.customHeaders).toEqual({
+      'X-Test': 'yes',
+    });
+  });
+
+  it('includes customHeaders in buildProviderTemplate', () => {
+    const config = makeConfig({
+      models: [{ id: 'x' }],
+      customHeaders: { 'X-Template': 'val' },
+    });
+    const template = buildProviderTemplate(config);
+    expect(template[0]?.generationConfig?.customHeaders).toEqual({
+      'X-Template': 'val',
+    });
+  });
+});
 
 describe('resolveMetadataKey dotted-id guard', () => {
   it('returns the id unchanged for normal providers with static models', () => {

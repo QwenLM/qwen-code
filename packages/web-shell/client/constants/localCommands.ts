@@ -97,6 +97,12 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       argumentHint: '<session-id>',
     },
     { name: 'settings', description: t('local.settings') },
+    {
+      name: 'extensions',
+      description: t('local.extensions'),
+      argumentHint: 'manage|install <source>',
+      subcommands: ['manage', 'install'],
+    },
   ];
   return commands.map((command) => ({
     ...command,

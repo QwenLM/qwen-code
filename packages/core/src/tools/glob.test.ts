@@ -330,8 +330,8 @@ describe('GlobTool', () => {
     it('should return error if path is provided but is not a string', () => {
       const params = {
         pattern: '*.ts',
-        path: 123,
-      } as unknown as GlobToolParams; // Force incorrect type
+        path: {},
+      } as unknown as GlobToolParams; // Force incorrect type (object, not coercible)
       expect(globTool.validateToolParams(params)).toBe(
         'params/path must be string',
       );
@@ -731,6 +731,25 @@ describe('GlobTool', () => {
 
       // Should use plural "files" for multiple truncated files
       expect(result.llmContent).toContain('[5 files truncated] ...');
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('should return allow for paths within workspace', async () => {
+      const params: GlobToolParams = { pattern: '*', path: 'sub' };
+      const invocation = globTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for tilde paths outside workspace', async () => {
+      const params: GlobToolParams = {
+        pattern: '*',
+        path: '~/outside-workspace',
+      };
+      const invocation = globTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
   });
 });

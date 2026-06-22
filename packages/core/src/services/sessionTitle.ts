@@ -7,7 +7,6 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { isSystemReminderContent } from '../utils/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
@@ -24,7 +23,6 @@ Rules:
 - Sentence case: capitalize only the first word and proper nouns. NOT Title Case.
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
-- Match the dominant language of the conversation (English or Chinese). For Chinese, treat as roughly 12-20 characters total; still no trailing punctuation.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
 
 Good examples:
@@ -116,23 +114,6 @@ export async function tryGenerateSessionTitle(
 
     const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
-
-    // Guard: skip title generation if no real user message exists in history.
-    // This prevents the title from being generated based solely on
-    // initialization context (e.g., workspace loading, system prompts)
-    // before the user has actually said anything. Without this guard, a
-    // session that sends a prompt immediately after creation could get a
-    // title like "初始化项目上下文" instead of one based on the user's
-    // actual message.
-    //
-    // The startup prelude is a role:'user' message wrapping
-    // <system-reminder> content (see getInitialChatHistory), so we must
-    // exclude it via isSystemReminderContent to avoid misclassifying it
-    // as a real user turn.
-    const hasUserMessage = fullHistory.some(
-      (msg) => msg.role === 'user' && !isSystemReminderContent(msg),
-    );
-    if (!hasUserMessage) return { ok: false, reason: 'empty_history' };
 
     const dialog = filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);

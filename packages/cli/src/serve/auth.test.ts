@@ -123,7 +123,7 @@ describe('createMutationGate (#4175 PR 15)', () => {
     expect(body.error).toMatch(/--token/);
     // `--require-auth` is intentionally NOT named here as a remediation:
     // setting it without a token is itself a boot-error path (see
-    // `runQwenServe.ts`). The error must point operators at fixes that
+    // `run-qwen-serve.ts`). The error must point operators at fixes that
     // work standalone.
     expect(body.error).not.toMatch(/--require-auth/);
   });

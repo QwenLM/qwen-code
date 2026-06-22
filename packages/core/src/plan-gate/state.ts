@@ -33,6 +33,16 @@ export interface PlanGateState {
   /** Number of capped review rounds consumed so far. */
   reviewCount: number;
   gateMode: GateMode;
+  /**
+   * True when plan mode was entered by the model via `enter_plan_mode` (an
+   * autonomous flow that should be gated by the LLM reviewer). False when the
+   * user entered plan mode explicitly (Shift+Tab, `/plan`, the approval-mode
+   * dialog) — those entries always route through the user confirmation dialog,
+   * regardless of `prePlanMode`. See issue #5574: cycling Shift+Tab to PLAN
+   * always lands with `prePlanMode === 'yolo'` (it is the mode immediately
+   * before PLAN in the cycle), which must NOT auto-approve via the gate.
+   */
+  enteredByModel: boolean;
   /** Findings merged in the previous round, for the next Evidence Bundle. */
   lastFindings: MergedGateFinding[];
   /** Main model's resolution summary for the previous round's findings. */
@@ -43,11 +53,15 @@ export interface PlanGateState {
   needsUserPending: boolean;
 }
 
-export function createPlanGateState(entryId: number): PlanGateState {
+export function createPlanGateState(
+  entryId: number,
+  enteredByModel = false,
+): PlanGateState {
   return {
     entryId,
     reviewCount: 0,
     gateMode: 'capped',
+    enteredByModel,
     lastFindings: [],
     capEscalationPending: false,
     needsUserPending: false,

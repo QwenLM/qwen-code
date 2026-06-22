@@ -139,6 +139,7 @@ describe('coerceTypes', () => {
     properties: {
       x: { type: 'number' },
       y: { type: 'number' },
+      element_index: { type: 'integer' },
       label: { type: 'string' },
       app: { type: 'string' },
     },
@@ -151,6 +152,22 @@ describe('coerceTypes', () => {
     expect(result['y']).toBe(920);
     expect(typeof result['x']).toBe('number');
     expect(typeof result['y']).toBe('number');
+  });
+
+  it('coerces integer strings to numbers (schema type: integer)', () => {
+    const result = coerceTypes({ app: 'X', element_index: '11' }, schema);
+    expect(result['element_index']).toBe(11);
+    expect(typeof result['element_index']).toBe('number');
+  });
+
+  it('does not truncate fractional strings for integer fields', () => {
+    const result = coerceTypes({ app: 'X', element_index: '11.5' }, schema);
+    expect(result['element_index']).toBe('11.5');
+  });
+
+  it('continues to coerce fractional strings for number fields', () => {
+    const result = coerceTypes({ app: 'X', x: '11.5' }, schema);
+    expect(result['x']).toBe(11.5);
   });
 
   // Direction 2: number → string (schema wants string, model sent number)

@@ -10,6 +10,16 @@ import type {
   DaemonMcpTransport,
   PermissionOutcome,
 } from './types.js';
+// Single source of truth: the daemon publisher owns the wire literal in
+// acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
+// validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
+// share the exact same value — a rename can't silently break browser-side dedup.
+// The build-time devDep on acp-bridge inlines the value into the published bundle
+// (same lightweight mechanism as `@qwen-code/acp-bridge/mcpTimeouts`). A `const`
+// keeps its literal type, so it still narrows in `switch (event.type)` and works
+// as a `typeof`-d type argument.
+import { MID_TURN_MESSAGE_INJECTED_EVENT } from '@qwen-code/acp-bridge/daemonEventTypes';
+export { MID_TURN_MESSAGE_INJECTED_EVENT };
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
@@ -21,6 +31,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -72,6 +83,10 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // `DELETE /workspace/mcp/servers/:name` when an entry was actually
   // removed. Idempotent skip ('not_present') does NOT emit.
   'mcp_server_removed',
+  // Extensions lifecycle events. Fired by background extension install/refresh
+  // work. Carries refreshed/failed session counts, and may include install
+  // success/failure details.
+  'extensions_changed',
   // Multi-client permission coordination events.
   // `permission_partial_vote` only fires under `consensus` policy;
   // `permission_forbidden` fires under `designated` (originator
@@ -247,6 +262,41 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * `mid_turn_message_injected` payload. Emitted when the daemon drains
+ * browser-queued mid-turn messages into the running turn (web-shell mid-turn
+ * drain). It is a transient dedupe signal, not a transcript item: consumers
+ * move these messages out of their pending queue so they aren't resent as the
+ * next turn. They are not rendered from this event — the message already reached
+ * the model mid-turn, and the persisted transcript shows it on reload.
+ */
+export interface DaemonMidTurnMessageInjectedData {
+  sessionId: string;
+  messages: string[];
+  /**
+   * Trusted client id that queued these messages, so a consumer dedupes only its
+   * OWN pending queue — a peer attached to the same session must not drop a
+   * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
+   *
+   * CONTRACT: a consumer that dedupes on this event MUST compare this id against
+   * its own client id and skip frames originated by a different client. The
+   * daemon broadcasts the frame to every SSE subscriber on the session and does
+   * NOT route by originator, so a consumer that dedupes unconditionally will drop
+   * another client's coincidentally-equal pending message (double delivery).
+   *
+   * IMPORTANT — wire location: unlike the permission/settings events (which the
+   * session reducer's `mergeOriginator` step copies from the envelope INTO
+   * `data`), this event is NOT reduced, so the daemon leaves the id ONLY on the
+   * SSE envelope (`event.originatorClientId`) and never populates it here. A raw
+   * SDK consumer must read `event.originatorClientId`; `data.originatorClientId`
+   * is filled in only by a consumer that lifts it off the envelope itself (the
+   * web-shell's `parseSidechannelMidTurnInjected` does this). The field lives on
+   * this shape so that lifted representation is well-typed.
+   */
+  originatorClientId?: string;
   [key: string]: unknown;
 }
 
@@ -692,6 +742,28 @@ export type DaemonMcpServerRemovedEvent = DaemonEventEnvelope<
   DaemonMcpServerRemovedData
 >;
 
+export interface DaemonExtensionsChangedData {
+  readonly refreshed: number;
+  readonly failed: number;
+  readonly status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  readonly source?: string;
+  readonly name?: string;
+  readonly version?: string;
+  readonly error?: string;
+  [key: string]: unknown;
+}
+
+export type DaemonExtensionsChangedEvent = DaemonEventEnvelope<
+  'extensions_changed',
+  DaemonExtensionsChangedData
+>;
+
 export interface DaemonSessionSnapshotData {
   sessionId: string;
   currentModelId: string | null;
@@ -741,6 +813,10 @@ export type DaemonSessionClosedEvent = DaemonEventEnvelope<
 export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   'session_metadata_updated',
   DaemonSessionMetadataUpdatedData
+>;
+export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
+  typeof MID_TURN_MESSAGE_INJECTED_EVENT,
+  DaemonMidTurnMessageInjectedData
 >;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
@@ -874,6 +950,7 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonMidTurnMessageInjectedEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -917,7 +994,8 @@ export type DaemonMcpGuardrailEvent =
  */
 export type DaemonWorkspaceMutationEvent =
   | DaemonMemoryChangedEvent
-  | DaemonAgentChangedEvent;
+  | DaemonAgentChangedEvent
+  | DaemonExtensionsChangedEvent;
 
 /**
  * Daemon assist push events — non-terminal UX hints emitted by the ACP
@@ -1319,6 +1397,10 @@ export function asKnownDaemonEvent(
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
         : undefined;
+    case MID_TURN_MESSAGE_INJECTED_EVENT:
+      return isMidTurnMessageInjectedData(event.data)
+        ? (event as DaemonMidTurnMessageInjectedEvent)
+        : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
         ? (event as DaemonClientEvictedEvent)
@@ -1413,6 +1495,10 @@ export function asKnownDaemonEvent(
     case 'mcp_server_removed':
       return isMcpServerRemovedData(event.data)
         ? (event as DaemonMcpServerRemovedEvent)
+        : undefined;
+    case 'extensions_changed':
+      return isExtensionsChangedData(event.data)
+        ? (event as DaemonExtensionsChangedEvent)
         : undefined;
     case 'turn_complete':
       return isTurnCompleteData(event.data)
@@ -1799,9 +1885,14 @@ export function reduceDaemonSessionEvent(
         ...base,
         lastTurnError: event.data,
       };
+    // `mid_turn_message_injected` is a transient UX signal (the browser dedupes
+    // its own pending queue); like these mcp/settings notices it carries no
+    // reduced session-view state.
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'settings_reloaded':
+    case 'extensions_changed':
+    case MID_TURN_MESSAGE_INJECTED_EVENT:
       return base;
     case 'session_rewound':
       return {
@@ -2233,6 +2324,17 @@ function isSessionMetadataUpdatedData(
   );
 }
 
+function isMidTurnMessageInjectedData(
+  value: unknown,
+): value is DaemonMidTurnMessageInjectedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    Array.isArray(value['messages']) &&
+    value['messages'].every((message) => typeof message === 'string')
+  );
+}
+
 function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
   return (
     isRecord(value) &&
@@ -2561,6 +2663,38 @@ function isMcpServerRemovedData(
   if (!isNonEmptyString(value['name'])) return false;
   if (typeof value['wasShadowingSettings'] !== 'boolean') return false;
   if (!isNonEmptyString(value['originatorClientId'])) return false;
+  return true;
+}
+
+function isExtensionsChangedData(
+  value: unknown,
+): value is DaemonExtensionsChangedData {
+  if (!isRecord(value)) return false;
+  if (typeof value['refreshed'] !== 'number') return false;
+  if (typeof value['failed'] !== 'number') return false;
+  if (
+    value['status'] !== undefined &&
+    value['status'] !== 'installed' &&
+    value['status'] !== 'enabled' &&
+    value['status'] !== 'disabled' &&
+    value['status'] !== 'updated' &&
+    value['status'] !== 'uninstalled' &&
+    value['status'] !== 'failed'
+  ) {
+    return false;
+  }
+  if (value['source'] !== undefined && typeof value['source'] !== 'string') {
+    return false;
+  }
+  if (value['name'] !== undefined && typeof value['name'] !== 'string') {
+    return false;
+  }
+  if (value['version'] !== undefined && typeof value['version'] !== 'string') {
+    return false;
+  }
+  if (value['error'] !== undefined && typeof value['error'] !== 'string') {
+    return false;
+  }
   return true;
 }
 

@@ -9,6 +9,201 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'Cannot disable an extension-provided MCP server here.':
+    '無法在此處停用擴展提供的 MCP 伺服器。',
+  'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP "{{name}}" 已在所有專案中停用。',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    '啟用擴展 "{{name}}" 後才能管理此 MCP 伺服器。',
+  'Extension-provided MCP servers cannot be favorited.':
+    '擴展提供的 MCP 伺服器無法單獨收藏。',
+
+  'User level': '使用者層級',
+  'Project level': '專案層級',
+
+  // ==========================================================================
+  // Extensions manager dialog (Installed / Discover / Sources tabs)
+  // ==========================================================================
+  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}}（Tab 清除）',
+  '"{{name}}" {{state}}.': '"{{name}}" {{state}}。',
+  '(Tab / ←→ to switch)': '（Tab / ←→ 切換）',
+  '+ Add new marketplace': '+ 新增市場來源',
+  '+ Install a new extension': '+ 安裝一個新擴展',
+  Actions: '操作',
+  'Add Marketplace': '新增市場來源',
+  'Add a marketplace in the Sources tab to discover extensions.':
+    '在「來源」分頁中新增市場來源以發現擴展。',
+  'Add new': '新增',
+  'Add to Favorites': '加入收藏',
+  'Added "{{name}}" to favorites.': '已將 "{{name}}" 加入收藏。',
+  'Added marketplace "{{name}}".': '已新增市場來源 "{{name}}"。',
+  'Adding...': '新增中...',
+  'Back to extension list': '返回擴展清單',
+  'Browse extensions ({{count}})': '瀏覽擴展（{{count}}）',
+  'By: {{a}}': '作者：{{a}}',
+  'Change scope': '變更作用域',
+  'Change scope for "{{name}}":': '變更 "{{name}}" 的作用域：',
+  'Changing scope...': '正在變更作用域...',
+  'Uninstalling "{{name}}"...': '正在卸載 "{{name}}"...',
+  'Update available for "{{name}}".': '"{{name}}" 有可用更新。',
+  '"{{name}}" is already up to date.': '"{{name}}" 已是最新。',
+  'Checking "{{name}}" for updates...': '正在檢查 "{{name}}" 的更新...',
+  '"{{name}}" does not support update checks.': '"{{name}}" 不支援檢查更新。',
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    '"{{name}}" 無法檢查更新（Claude 市場源插件需卸載後重裝來更新）。',
+  'Failed to check "{{name}}" for updates.': '檢查 "{{name}}" 的更新失敗。',
+  'Claude plugin marketplace': 'Claude 外掛市場',
+  Commands: '命令',
+  'Components:': '元件：',
+  'Could not load this marketplace.': '無法載入此市場來源。',
+  'Current: {{scope}}': '目前：{{scope}}',
+  Disabled: '已禁用',
+  Discover: '發現',
+  'Disabling "{{name}}"...': '正在禁用 "{{name}}"...',
+  'Disabling MCP "{{name}}"...': '正在禁用 MCP "{{name}}"...',
+  'Discover extensions': '發現擴展',
+  'Discovering extensions...': '正在發現擴展...',
+  'Enabling "{{name}}"...': '正在啟用 "{{name}}"...',
+  'Enabling MCP "{{name}}"...': '正在啟用 MCP "{{name}}"...',
+  'Enter extension source:': '輸入擴展來源：',
+  'Enter marketplace source (Claude format):':
+    '輸入市場來源位址（Claude 格式）：',
+  'Examples:': '範例：',
+  'Extension details': '擴展詳情',
+  'Extension v{{version}}': '擴展 v{{version}}',
+  'Extensions are not available in this environment.': '目前環境中擴展不可用。',
+  'Failed to open {{url}}': '開啟 {{url}} 失敗',
+  Favorites: '收藏',
+  'Global (User Scope)': '全域（使用者作用域）',
+  'Install Extension': '安裝擴展',
+  'Install for the current workspace (project scope)':
+    '為目前工作區安裝（專案作用域）',
+  'Install for you (user scope)': '僅為你安裝（使用者作用域）',
+  'Install {{count}} extension(s) to which scope?':
+    '將 {{count}} 個擴展安裝到哪個作用域？',
+  Installed: '已安裝',
+  'Installed extension "{{name}}".': '已安裝擴展 "{{name}}"。',
+  'Installed extensions ({{count}}):': '已安裝的擴展（{{count}}）：',
+  'Installed {{count}} extension(s).': '已安裝 {{count}} 個擴展。',
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    '{{name}}：已安裝,但作用域回滾失敗 —— 該擴展可能在所有作用域均被停用;請在「已安裝」頁重新啟用。',
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    '無法變更作用域,且回滾也失敗 ——「{{name}}」可能在所有作用域均被停用。請在「已安裝」頁重新啟用。({{error}})',
+  'Installed {{ok}}, failed {{fail}}: {{detail}}':
+    '成功 {{ok}} 個，失敗 {{fail}} 個：{{detail}}',
+  'Installing...': '安裝中...',
+  'Last updated: {{date}}': '最近更新：{{date}}',
+  MCP: 'MCP',
+  'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}。',
+  'MCP servers': 'MCP 伺服器',
+  'Mark for Update': '標記為待更新',
+  Marketplaces: '市場來源',
+  'No extensions discovered.': '未發現任何擴展。',
+  'No extensions match your search.': '沒有與搜尋相符的擴展。',
+  'No extensions or marketplaces added yet.': '尚未新增任何擴展或市場來源。',
+  'No homepage available.': '沒有可用的主頁。',
+  'No installable extensions selected.': '未選取可安裝的擴展。',
+  'No plugins or MCP servers installed.': '尚未安裝任何外掛或 MCP 伺服器。',
+  None: '無',
+  'Note: Uninstall permanently removes this extension.':
+    '注意：卸載將永久移除此擴展。',
+  'Open homepage': '開啟主頁',
+  'Project (Workspace)': '專案（工作區）',
+  'Refreshed {{count}} extension(s).': '已刷新 {{count}} 個擴充。',
+  'Remove from Favorites': '從收藏中移除',
+  'Remove marketplace': '移除市場來源',
+  'Remove marketplace "{{name}}"?': '移除市場來源 "{{name}}"？',
+  'Removed "{{name}}" from favorites.': '已將 "{{name}}" 從收藏中移除。',
+  'Removed marketplace "{{name}}".': '已移除市場來源 "{{name}}"。',
+  'Scope:': '作用域：',
+  'Set "{{name}}" scope to {{scope}}.':
+    '已將 "{{name}}" 的作用域設為 {{scope}}。',
+  Sources: '來源',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    '輸入以搜尋 · Space 切換 · Enter 查看 · Ctrl+R 刷新 · Esc 返回',
+  Uninstall: '卸載',
+  'Uninstalled "{{name}}".': '已卸載 "{{name}}"。',
+  'Update Now': '立即更新',
+  'Update marketplace': '更新市場來源',
+  'Update marketplace (last updated {{date}})':
+    '更新市場來源（最近更新 {{date}}）',
+  'Could not update marketplace "{{name}}".': '無法更新市場來源 "{{name}}"。',
+  'Updated "{{name}}".': '已更新 "{{name}}"。',
+  'Updated marketplace "{{name}}".': '已更新市場來源 "{{name}}"。',
+  'Use the Discover tab to find and install plugins.':
+    '使用「發現」分頁尋找並安裝擴展。',
+  'Version: {{v}}': '版本：{{v}}',
+  'Will install:': '將安裝：',
+  'Would open: {{url}}': '將開啟：{{url}}',
+  'Y/Enter to confirm · N/Esc to cancel': 'Y/Enter 確認 · N/Esc 取消',
+  'Press R to retry · Esc to go back': '按 R 重試 · Esc 返回',
+  'Enter to select · R refresh · Esc to go back':
+    'Enter 選擇 · R 刷新 · Esc 返回',
+  'from {{marketplace}}': '來自 {{marketplace}}',
+  installed: '已安裝',
+  '{{count}} Agents': '{{count}} 個智能體',
+  '{{count}} Commands': '{{count}} 個命令',
+  '{{count}} MCP': '{{count}} 個 MCP',
+  '{{count}} Skills': '{{count}} 個技能',
+  '{{count}} available extensions': '{{count}} 個可用擴展',
+  '↑ more above': '↑ 上方更多',
+  '↑↓ navigate · Enter open · d remove marketplace · Esc close':
+    '↑↓ 導覽 · Enter 開啟 · d 移除市場來源 · Esc 關閉',
+  '↑↓ navigate · Enter select · Esc close': '↑↓ 導覽 · Enter 選擇 · Esc 關閉',
+  '↑↓ navigate · Enter select · d remove marketplace · Esc close':
+    '↑↓ 導覽 · Enter 選擇 · d 移除市場來源 · Esc 關閉',
+  '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
+    '↑↓ 導覽 · Space 啟用/禁用 · f 收藏 · Enter 查看詳情 · Esc 關閉',
+  '↓ more below': '↓ 下方更多',
+  '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
+    '⚠ 在安裝、更新或使用擴展前，請確保你信任它。我們無法驗證擴展包含哪些 MCP 伺服器、檔案或其他軟體，也無法保證其按預期運作。更多資訊請查看擴展主頁。',
+
+  // Tool display names (chat-stream badge labels)
+  // ----------------------------------------------------------------------------
+  // Keyed by `toolDisplayName.<English display name>` (from core
+  // `ToolDisplayNames`); a missing key falls back to the English display name
+  // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
+  // verbatim inside an otherwise-translated label.
+  // ============================================================================
+  'toolDisplayName.Edit': '編輯',
+  'toolDisplayName.WriteFile': '寫入檔案',
+  'toolDisplayName.ReadFile': '讀取檔案',
+  'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.Glob': 'Glob',
+  'toolDisplayName.Shell': '運行命令',
+  'toolDisplayName.Shell Command': 'Shell 命令',
+  'toolDisplayName.TodoList': '任務清單',
+  'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Artifact': '製品',
+  'toolDisplayName.Skill': '技能',
+  'toolDisplayName.EnterPlanMode': '進入計畫模式',
+  'toolDisplayName.ExitPlanMode': '退出計畫模式',
+  'toolDisplayName.WebFetch': '網路擷取',
+  'toolDisplayName.WebSearch': '網路搜尋',
+  'toolDisplayName.ListFiles': '列出檔案',
+  'toolDisplayName.Lsp': 'LSP',
+  'toolDisplayName.AskUserQuestion': '詢問使用者',
+  'toolDisplayName.CronCreate': '建立定時任務',
+  'toolDisplayName.CronList': '定時任務清單',
+  'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.LoopWakeup': '循環喚醒',
+  'toolDisplayName.TaskCreate': '建立任務',
+  'toolDisplayName.TaskUpdate': '更新任務',
+  'toolDisplayName.TaskList': '任務列表',
+  'toolDisplayName.TaskStop': '停止任務',
+  'toolDisplayName.TeamCreate': '建立團隊',
+  'toolDisplayName.TeamDelete': '刪除團隊',
+  'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.StructuredOutput': '結構化輸出',
+  'toolDisplayName.Monitor': '監控',
+  'toolDisplayName.NotebookEdit': '編輯 Notebook',
+  'toolDisplayName.ToolSearch': '工具搜尋',
+  'toolDisplayName.EnterWorktree': '進入 Worktree',
+  'toolDisplayName.ExitWorktree': '退出 Worktree',
+  'toolDisplayName.Workflow': '工作流程',
+
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
   'Attachments: ': '附件：',
@@ -454,8 +649,50 @@ export default {
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
-  'Show model-specific usage statistics.': '顯示模型相關的使用統計信息',
-  'Show tool-specific usage statistics.': '顯示工具相關的使用統計信息',
+  'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
+  'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
+  'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
+  'Export token usage statistics to CSV or JSON.':
+    '將 token 使用統計資訊匯出為 CSV 或 JSON',
+  'No usage data.': '沒有使用資料。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}：{{tokens}} 個 token（{{requests}} 個請求）',
+  'Daily token usage for {{value}}': '{{value}} 的每日 token 使用情況',
+  'Monthly token usage for {{value}}': '{{value}} 的每月 token 使用情況',
+  'Total: {{tokens}} tokens': '總計：{{tokens}} 個 token',
+  'Requests: {{requests}}': '請求數：{{requests}}',
+  'Breakdown:': '明細：',
+  'Input: {{tokens}}': '輸入：{{tokens}}',
+  'Output: {{tokens}}': '輸出：{{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    '快取（已包含在輸入中）：{{tokens}}',
+  'Thoughts: {{tokens}}': '思考：{{tokens}}',
+  'By model:': '按模型：',
+  'By auth type:': '按認證類型：',
+  'By model/auth type:': '按模型/認證類型：',
+  'By source:': '按來源：',
+  'Failed to load token usage stats: {{error}}':
+    '載入 token 使用統計資訊失敗：{{error}}',
+  'Expected --format csv or --format json.':
+    '應為 --format csv 或 --format json。',
+  'Expected a file path after --output.': '--output 後應提供檔案路徑。',
+  'Unexpected argument: {{argument}}': '未預期的參數：{{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '用法：/stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token 使用匯出路徑必須位於專案工作目錄內。',
+  'Export target does not exist: {{path}}': '匯出目標不存在：{{path}}',
+  'Cannot resolve export path within the working directory.':
+    '無法在工作目錄內解析匯出路徑。',
+  'Could not create a temporary export file.': '無法建立臨時匯出檔案。',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token 使用情況已匯出為 {{format}}：{{path}}',
+  'Failed to export token usage stats: {{error}}':
+    '匯出 token 使用統計資訊失敗：{{error}}',
+  'Unclosed quote in arguments.': '參數中有未閉合的引號。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注意：生成耗時（TTFT/TPS）屬於生成指標。',
   'exit the cli': '退出命令行界面',
   'Manage workspace directories': '管理工作區目錄',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -476,6 +713,27 @@ export default {
   'Uninstall an extension': '卸載擴展',
   'No extensions installed.': '未安裝擴展。',
   'Extension "{{name}}" not found.': '未找到擴展 "{{name}}"。',
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    '安裝擴展的作用域："user"（全域，預設）或 "project"（僅當前工作區）。',
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    '擴展 "{{name}}" 安裝成功，並已在當前工作區啟用。',
+  'Marketplace "{{name}}" not found.': '未找到市場源 "{{name}}"。',
+  'No marketplace sources added yet.': '尚未添加任何市場源。',
+  'No marketplaces added yet.': '尚未添加任何市場源。',
+  'Adds a marketplace source (Claude format).':
+    '添加一個市場源（Claude 格式）。',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    '要添加的市場源：owner/repo（GitHub）、git 或 https URL，或本地路徑。',
+  'Removes a marketplace source.': '移除一個市場源。',
+  'The name of the marketplace to remove.': '要移除的市場源名稱。',
+  'Lists configured marketplace sources.': '列出已配置的市場源。',
+  'Re-fetches a marketplace source and its plugin listing.':
+    '重新拉取市場源及其插件列表。',
+  'The name of the marketplace to update.': '要更新的市場源名稱。',
+  'Manage marketplace sources for discovering extensions.':
+    '管理用於發現擴展的市場源。',
+  'You need at least one command before continuing.':
+    '需要至少提供一個子命令。',
   'No extensions to update.': '沒有可更新的擴展。',
   'Usage: /extensions install <source>': '用法：/extensions install <來源>',
   'Installing extension from "{{source}}"...':
@@ -509,6 +767,16 @@ export default {
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     '要安裝的擴展的 GitHub URL、本地路徑或市場源（marketplace-url:plugin-name）。',
   'The git ref to install from.': '要安裝的 Git 引用。',
+  '--registry is only applicable for npm extensions.':
+    '--registry 僅適用於 npm 擴展。',
+  'Custom npm registry URL (only for npm extensions).':
+    '自訂 npm registry URL（僅適用於 npm 擴展）。',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    '--ref 不適用於 npm 擴展。請改用 @version 後綴（例如 @scope/package@1.2.0）。',
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    '從 Git 倉庫 URL、本地路徑、帶作用域的 npm 套件（@scope/name）或 Claude 市場源（marketplace-url:plugin-name）安裝擴展。',
+  Description: '描述',
+  'Delete Session': '刪除會話',
   'Enable auto-update for this extension.': '為此擴展啟用自動更新。',
   'Enable pre-release versions for this extension.': '為此擴展啟用預發佈版本。',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
@@ -882,6 +1150,7 @@ export default {
   connected: '已連接',
   connecting: '連接中',
   disconnected: '已斷開',
+  'needs authentication': '需要認證',
   'User MCPs': '用戶 MCP',
   'Project MCPs': '項目 MCP',
   'Extension MCPs': '擴展 MCP',
@@ -942,8 +1211,54 @@ export default {
     '生成摘要失敗 - 未從 LLM 響應中接收到文本內容',
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
+  'Toggle voice dictation input': '切換語音聽寫輸入',
+  'Set the model for voice transcription': '設定語音轉寫模型',
+  'Select Fast Model': '選擇快速模型',
+  'Select Voice Model': '選擇語音模型',
+  'Voice Model': '語音模型',
+  'Selected voice model is unavailable.': '所選語音模型不可用。',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "語音模型 '{{model}}' 被配置了多次。請先移除重複的模型 ID，再將其選為語音轉寫模型。",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    '語音聽寫：{{status}}（模式：{{mode}}，{{modelText}}）。',
+  'model: {{voiceModel}}': '模型：{{voiceModel}}',
+  'no voice model selected': '未選擇語音模型',
+  'Voice dictation disabled.': '語音聽寫已停用。',
+  'Usage: /voice [hold|tap|off|status]': '用法：/voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    '未選擇語音模型。請先執行 /model --voice 選擇模型，再啟用語音聽寫。',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    '語音聽寫已啟用（點按模式）。在空輸入框中點按 Space 開始，再點按一次或停頓後停止並提交，使用 {{voiceModel}}。',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    '語音聽寫已啟用（按住模式）。在空輸入框中按住 Space，使用 {{voiceModel}} 聽寫。',
+  'No models are configured.': '未設定模型。',
+  'Configured models: {{models}}.': '已設定模型：{{models}}。',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    '請在 settings.modelProviders 中設定唯一的模型 ID，或執行 /model --voice 選擇可用模型。',
+  "Voice model '{{modelName}}' is not configured.":
+    "語音模型 '{{modelName}}' 未設定。",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "語音模型 '{{modelName}}' 不能用於轉寫。",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "語音模型 '{{modelName}}' 不能用於轉寫。請在 settings.modelProviders 中設定帶 baseUrl 的 OpenAI 相容模型。",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    '請在 settings.modelProviders 中設定帶 baseUrl 的 OpenAI 相容模型。',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    '麥克風存取被拒絕。請在系統設定 → 隱私權與安全性 → 麥克風中允許目前終端機存取，然後重新啟動語音聽寫。',
+  'Voice dictation is not supported on {{platform}}.':
+    '語音聽寫不支援 {{platform}}。',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    '語音聽寫需要麥克風存取，但目前 WSL 會話不可用。請使用 WSLg/PulseAudio，或在具備麥克風的主機上執行 Qwen Code。',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    '語音聽寫需要麥克風存取。macOS 會在你首次錄音時彈出授權請求——請同意後重新開始。彈窗開啟期間的首次錄音可能為空。',
+  'Voice: recording': '語音：錄音中',
+  'Voice: transcribing': '語音：轉寫中',
+  'listening…': '聆聽中…',
+  'transcribing…': '轉寫中…',
   'Content generator configuration not available.': '內容生成器配置不可用',
   'Authentication type not available.': '認證類型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1103,6 +1418,10 @@ export default {
   audio: '音頻',
   video: '視頻',
   'not set': '未設置',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
   none: '無',
   unknown: '未知',
   'Manage folder trust settings': '管理檔案夾信任設置',
@@ -1204,6 +1523,7 @@ export default {
   'Tools:': '工具：',
   'Parameters:': '參數：',
   'Prompts:': '提示：',
+  'Resources:': '資源：',
   Blocked: '已阻止',
   '💡 Tips:': '💡 提示：',
   Use: '使用',
@@ -1728,6 +2048,24 @@ export default {
   prompt: '輸入',
   '\u2191 tabs \u00B7 r to cycle dates \u00B7 esc to close':
     '\u2191 tab 切換標籤 \u00B7 r 切換時間範圍 \u00B7 esc 關閉',
+
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    '恢復會話時預設摺疊歷史記錄',
+  'Set history to expand by default when resuming a session':
+    '恢復會話時預設展開歷史記錄',
+  'Expand the currently collapsed history transcript': '展開當前摺疊的歷史記錄',
+  'Control history display preferences and visibility':
+    '控制歷史記錄顯示偏好和可見性',
+  'History will be collapsed by default for future resumed sessions.':
+    '未來恢復的會話將預設摺疊歷史記錄。',
+  'History will be expanded by default for future resumed sessions.':
+    '未來恢復的會話將預設展開歷史記錄。',
+  'History is already expanded in this session.': '當前會話的歷史記錄已展開。',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    '用法：/history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '歷史記錄已摺疊：{{n}} 條訊息已隱藏。使用 /history expand-now 展開。',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',
