@@ -44,6 +44,18 @@ export interface VisionBridgeProviderHint {
   baseUrl?: string;
 }
 
+export function shouldRunVisionBridge(
+  config: Pick<
+    Config,
+    'getDefaultVisionBridgeModel' | 'getEffectiveInputModalities'
+  >,
+): boolean {
+  return (
+    config.getEffectiveInputModalities?.()?.image !== true &&
+    config.getDefaultVisionBridgeModel?.() !== undefined
+  );
+}
+
 function toSelection(model: VisionModelCandidate): VisionBridgeModelSelection {
   return {
     id: model.id,

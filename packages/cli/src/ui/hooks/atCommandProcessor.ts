@@ -15,6 +15,7 @@ import {
   isSubpath,
   unescapePath,
   readManyFiles,
+  shouldRunVisionBridge,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemToolGroup,
@@ -349,16 +350,12 @@ export async function resolveAtCommandQuery({
   }
 
   try {
-    const effectiveInputModalities = config.getEffectiveInputModalities?.();
-    const preserveUnsupportedImageForBridge =
-      effectiveInputModalities?.image !== true &&
-      config.getDefaultVisionBridgeModel?.() !== undefined;
     const result = await readManyFiles(config, {
       paths: pathSpecsToRead,
       signal,
       // Interactive @-resolution: keep images inline for a text-only model so
       // the vision bridge can transcribe them downstream.
-      preserveUnsupportedImageForBridge,
+      preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
     });
 
     const parts = Array.isArray(result.contentParts)

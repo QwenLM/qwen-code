@@ -51,6 +51,7 @@ import {
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   runVisionBridge,
+  shouldRunVisionBridge,
   hasImageParts,
   splitImageParts,
   VISION_BRIDGE_MAX_IMAGES,
@@ -863,8 +864,7 @@ export const useGeminiStream = (
       if (
         parts === null ||
         !hasImageParts(parts) ||
-        config.getEffectiveInputModalities?.()?.image === true ||
-        config.getDefaultVisionBridgeModel?.() === undefined
+        !shouldRunVisionBridge(config)
       ) {
         return { parts, shouldProceed: true, convertedCount: 0 };
       }
