@@ -215,6 +215,61 @@ describe('handleInstall', () => {
     processSpy.mockRestore();
   });
 
+  it('should install an extension from an archive URL', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    mockParseInstallSource.mockResolvedValue({
+      type: 'archive-url',
+      source: 'https://example.com/extension.zip',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'archive-extension' });
+
+    await handleInstall({
+      source: 'https://example.com/extension.zip',
+      autoUpdate: true,
+    });
+
+    expect(mockInstallExtension).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'https://example.com/extension.zip',
+        type: 'archive-url',
+        autoUpdate: true,
+      }),
+      expect.any(Function),
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "archive-extension" installed successfully and enabled.',
+    );
+
+    processSpy.mockRestore();
+  });
+
+  it('should reject --ref for archive URL extensions', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    mockParseInstallSource.mockResolvedValue({
+      type: 'archive-url',
+      source: 'https://example.com/extension.zip',
+    });
+
+    await handleInstall({
+      source: 'https://example.com/extension.zip',
+      ref: 'v1.0.0',
+    });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '--ref is not applicable for archive URL extensions.',
+    );
+    expect(mockInstallExtension).not.toHaveBeenCalled();
+    expect(processSpy).toHaveBeenCalledWith(1);
+
+    processSpy.mockRestore();
+  });
+
   it('should throw an error if install extension fails', async () => {
     const processSpy = vi
       .spyOn(process, 'exit')
@@ -365,5 +420,30 @@ describe('handleInstall', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "user-extension" installed successfully and enabled.',
     );
+  });
+
+  it('should print archive validation errors from the extension manager', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      source: 'owner/repo',
+    });
+    mockInstallExtension.mockRejectedValue(
+      new Error(
+        'Extension archive is missing a supported extension manifest. Expected qwen-extension.json, gemini-extension.json, .claude-plugin/marketplace.json, or .claude-plugin/plugin.json at the archive root, or inside a single top-level extension directory.',
+      ),
+    );
+
+    await handleInstall({ source: 'owner/repo' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Extension archive is missing a supported extension manifest. Expected qwen-extension.json, gemini-extension.json, .claude-plugin/marketplace.json, or .claude-plugin/plugin.json at the archive root, or inside a single top-level extension directory.',
+    );
+    expect(processSpy).toHaveBeenCalledWith(1);
+
+    processSpy.mockRestore();
   });
 });
