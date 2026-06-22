@@ -1058,6 +1058,7 @@ describe('modelCommand', () => {
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
+        content: expect.stringContaining('fast-model'),
       });
     });
 
@@ -1083,6 +1084,7 @@ describe('modelCommand', () => {
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
+        content: expect.stringContaining('voice-model'),
       });
     });
 
@@ -1145,6 +1147,74 @@ describe('modelCommand', () => {
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
+        content: expect.stringContaining('voice-model'),
+      });
+    });
+
+    it('should not filter out voiceOnly models from --voice selection', async () => {
+      const setValue = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --voice qwen3-asr-flash',
+          name: 'model',
+          args: '--voice qwen3-asr-flash',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'main-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              { id: 'main-model', label: 'Main', authType: AuthType.USE_OPENAI },
+              {
+                id: 'qwen3-asr-flash',
+                label: 'ASR',
+                voiceOnly: true,
+                authType: AuthType.USE_OPENAI,
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              },
+            ]),
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--voice qwen3-asr-flash');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('qwen3-asr-flash'),
+      });
+    });
+
+    it('should reject fastOnly models from --voice selection', async () => {
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --voice fast-model',
+          name: 'model',
+          args: '--voice fast-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'main-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              { id: 'main-model', label: 'Main' },
+              { id: 'fast-model', label: 'Fast', fastOnly: true },
+            ]),
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--voice fast-model');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('fast-model'),
       });
     });
   });
