@@ -8970,7 +8970,7 @@ describe('runQwenServe', () => {
     // Node 22 `server.maxConnections = 0` causes the listener to
     // refuse EVERY connection. An operator following the documented
     // disable path got a daemon that booted cleanly but silently
-    // bricked every request. Fix treats 0 / Infinity / non-finite as
+    // bricked every request. Fix treats 0 / Infinity as
     // "leave the property unset" so Node's default (no cap) actually
     // applies.
     handle = await runQwenServe({
@@ -9012,7 +9012,11 @@ describe('runQwenServe', () => {
     expect(handle.server.maxConnections).toBe(100);
   });
 
-  it('--max-connections NaN/negative throws at boot (BUF9-)', async () => {
+  it.each([
+    ['NaN', NaN],
+    ['negative', -5],
+    ['fractional', 1.5],
+  ])('--max-connections %s throws at boot (BUF9-)', async (_label, value) => {
     // Silent fail-OPEN on a CLI typo would weaken the DoS guard.
     // Boot-loud is the right behavior for an unparseable cap.
     await expect(
@@ -9020,17 +9024,9 @@ describe('runQwenServe', () => {
         hostname: '127.0.0.1',
         port: 0,
         mode: 'http-bridge',
-        maxConnections: NaN,
+        maxConnections: value,
       }),
-    ).rejects.toThrow(/maxConnections: NaN/);
-    await expect(
-      runQwenServe({
-        hostname: '127.0.0.1',
-        port: 0,
-        mode: 'http-bridge',
-        maxConnections: -5,
-      }),
-    ).rejects.toThrow(/maxConnections: -5/);
+    ).rejects.toThrow(/maxConnections/);
   });
 
   it('case-insensitive loopback: --hostname Localhost / LOCALHOST does NOT require a token (BQ92B)', async () => {

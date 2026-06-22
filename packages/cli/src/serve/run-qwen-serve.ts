@@ -1158,14 +1158,15 @@ export async function runQwenServe(
   // promise instead of escaping as an uncaught exception inside the
   // listen callback (which fires from the `listening` event after the
   // outer promise has already resolved). Silent fail-OPEN on NaN /
-  // negative would weaken the DoS/FD-exhaustion guard the cap exists
-  // for.
+  // negative / fractional values would weaken or blur the
+  // DoS/FD-exhaustion guard the cap exists for.
   if (
     opts.maxConnections !== undefined &&
-    (Number.isNaN(opts.maxConnections) || opts.maxConnections < 0)
+    !isNonNegativeIntegerOrInfinity(opts.maxConnections)
   ) {
     throw new TypeError(
-      `Invalid maxConnections: ${opts.maxConnections}. Must be >= 0 ` +
+      `Invalid maxConnections: ${opts.maxConnections}. ` +
+        `Must be a non-negative integer ` +
         `(0 / Infinity = unlimited).`,
     );
   }
@@ -1190,7 +1191,7 @@ export async function runQwenServe(
       // with `SocketError: other side closed`). Treat 0 / Infinity
       // as "leave the property unset" so the documented disable
       // path actually disables instead of silently bricking the
-      // daemon. NaN / negative are rejected upstream so
+      // daemon. NaN / negative / fractional values are rejected upstream so
       // they never reach here.
       const cap = opts.maxConnections ?? 256;
       if (cap > 0 && Number.isFinite(cap)) {
