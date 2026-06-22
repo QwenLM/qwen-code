@@ -125,7 +125,7 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
         </Box>
         <Box flexDirection="column" flexGrow={1}>
           {visibleLines.map((line, i) => (
-            <Text key={scrollOffset + i} dimColor wrap="truncate-end">
+            <Text key={i} dimColor wrap="truncate-end">
               {line || ' '}
             </Text>
           ))}
