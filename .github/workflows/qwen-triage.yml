@@ -389,14 +389,14 @@ jobs:
           set +e
           {
             printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
-            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH \
+            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
               npm ci --prefer-offline --no-audit --progress=false
             install_status=$?
             if [ "$install_status" -ne 0 ]; then
               printf '\n%s\n' "npm ci failed with exit code ${install_status}."
             else
               printf '\n%s\n' '$ npm run build'
-              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH \
+              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
                 npm run build
               build_status=$?
               if [ "$build_status" -ne 0 ]; then

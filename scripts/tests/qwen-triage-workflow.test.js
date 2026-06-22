@@ -87,6 +87,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prepareStep).toContain('-u GITHUB_STATE');
     expect(prepareStep).toContain('-u GITHUB_ENV');
     expect(prepareStep).toContain('-u GITHUB_PATH');
+    expect(prepareStep).toContain('-u GITHUB_STEP_SUMMARY');
   });
 
   it('installs the heavy tmux test harness only for runnable PRs', () => {
