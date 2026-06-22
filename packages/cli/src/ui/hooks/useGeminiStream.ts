@@ -1936,6 +1936,15 @@ export const useGeminiStream = (
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
 
+      // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
+      // events), so it must reflect only this turn's state. Reset it
+      // unconditionally at entry: if the previous turn detected a loop but threw
+      // before its own post-stream reset, a stuck `true` would otherwise make
+      // every later turn silently drop its tool calls. A ToolResult/btw
+      // continuation never carries a pending loop (a detected loop schedules
+      // nothing), so clearing it here is a no-op for those paths.
+      loopDetectedRef.current = false;
+
       // Reset turn-local ownership trackers at the very top of every
       // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
       // `prepareQueryForGemini` also resets `lastTurnUserItemRef`, but
