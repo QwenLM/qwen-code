@@ -7,7 +7,10 @@
 import process from 'node:process';
 
 import { AuthType } from '../core/contentGenerator.js';
-import type { ContentGeneratorConfig , Protocol } from '../core/contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  Protocol,
+} from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -258,7 +261,9 @@ export class ModelsConfig {
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
     const inputAuthTypes =
-      authTypes && authTypes.length > 0 ? authTypes : Object.values(AuthType);
+      authTypes && authTypes.length > 0
+        ? authTypes
+        : this.modelRegistry.getAuthTypes();
 
     // De-duplicate while preserving the original order.
     const seen = new Set<AuthType>();

@@ -155,6 +155,14 @@ export class ModelRegistry {
   }
 
   /**
+   * Get all registered authTypes.
+   * Used by getAllConfiguredModels to include custom providers.
+   */
+  getAuthTypes(): AuthType[] {
+    return Array.from(this.modelsByAuthType.keys());
+  }
+
+  /**
    * Get model configuration by authType and modelId.
    * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
    * When baseUrl is omitted, tries the plain id first (backward compatible),
