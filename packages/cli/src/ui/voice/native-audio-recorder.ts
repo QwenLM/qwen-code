@@ -111,12 +111,15 @@ class NativeAudioRecorder implements VoiceRecorder {
       throw new Error('Native voice recorder was not started.');
     }
 
-    const data = this.backend.stopRecording();
-    this.backend = null;
-    return {
-      data,
-      mimeType: 'audio/wav',
-    };
+    try {
+      const data = this.backend.stopRecording();
+      return {
+        data,
+        mimeType: 'audio/wav',
+      };
+    } finally {
+      this.backend = null;
+    }
   }
 }
 
