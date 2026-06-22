@@ -341,4 +341,65 @@ describe('workflow-saved', () => {
       );
     });
   });
+
+  // Security (round 3, r3451228756): the saved-workflow ROOT dir itself being a
+  // symlink must not turn its external target into the trusted boundary. Round 1
+  // only guarded symlinked *files* inside the dir; a symlinked dir slips past
+  // that guard because the entries it exposes are regular files, and
+  // `readWorkflowFileSecurely` realpaths the root — laundering the link into the
+  // allowed boundary. Refuse for discovery, read, and save.
+  describe('security — symlinked root workflow dir', () => {
+    let external: string;
+    let projectWorkflowsDir: string;
+
+    beforeEach(async () => {
+      // Attacker-controlled external dir with a planted secret-bearing script.
+      external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-evil-'));
+      await fs.writeFile(
+        path.join(external, 'leak.js'),
+        `return 'EXFILTRATED';`,
+        'utf8',
+      );
+      // Make `<projectDir>/.qwen/workflows` a symlink to that external dir.
+      projectWorkflowsDir = new Storage(projectDir).getProjectWorkflowsDir();
+      await fs.mkdir(path.dirname(projectWorkflowsDir), { recursive: true });
+      await fs.symlink(external, projectWorkflowsDir, 'dir');
+    });
+
+    afterEach(async () => {
+      await fs.rm(external, { recursive: true, force: true });
+    });
+
+    it('discovery excludes scripts behind a symlinked project root', async () => {
+      const list = await listSavedWorkflows(fakeConfig(projectDir));
+      expect(list).toEqual([]);
+    });
+
+    it("workflow('leak') is refused, not read, through a symlinked root", async () => {
+      await expect(
+        resolveSavedWorkflowScript('leak', fakeConfig(projectDir)),
+      ).rejects.toThrow(/no workflow with that name/);
+    });
+
+    it('{scriptPath} into a symlinked root is refused', async () => {
+      const p = path.join(projectWorkflowsDir, 'leak.js');
+      await expect(
+        resolveSavedWorkflowScript({ scriptPath: p }, fakeConfig(projectDir)),
+      ).rejects.toThrow(/outside the saved-workflow directories/);
+    });
+
+    it('save into a symlinked root is refused (no write-through)', async () => {
+      await expect(
+        saveWorkflowScript(fakeConfig(projectDir), {
+          name: 'planted',
+          scope: 'project',
+          script: 'return 1;',
+        }),
+      ).rejects.toThrow(/symlinked saved-workflow director/i);
+      // Nothing was written through the link.
+      await expect(
+        fs.access(path.join(external, 'planted.js')),
+      ).rejects.toThrow();
+    });
+  });
 });

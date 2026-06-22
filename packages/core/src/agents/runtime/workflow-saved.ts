@@ -87,7 +87,32 @@ export function getSavedWorkflowDirs(config: Config): Array<{
   ];
 }
 
+/**
+ * True when a saved-workflow root dir is itself a symlink. `readWorkflowFileSecurely`
+ * realpaths the root so it can tolerate symlinked *ancestors* (e.g. a project under
+ * macOS `/tmp -> /private/tmp`); but that same laundering turns a checked-in
+ * `.qwen/workflows -> /outside` link into the allowed boundary — letting discovery
+ * list, `workflow('<name>')` read, and the save dialog write external files. The
+ * per-entry symlink check in {@link listJsFiles} can't catch this because the link
+ * is the dir, not the files it exposes. So we refuse a symlinked root outright for
+ * all three operations. A missing dir (the common case) is not a symlink, so this
+ * is transparent until someone actually links the dir.
+ */
+async function isSymlinkedRoot(dir: string): Promise<boolean> {
+  return fs
+    .lstat(dir)
+    .then((st) => st.isSymbolicLink())
+    .catch(() => false);
+}
+
 async function listJsFiles(dir: string): Promise<string[]> {
+  // Refuse a symlinked root dir: `readdir` would otherwise enumerate the
+  // external target's `*.js` files as project workflows, and the per-entry
+  // symlink check below can't see it (the link is the dir, not the entries).
+  if (await isSymlinkedRoot(dir)) {
+    debugLogger.warn(`refusing symlinked saved-workflow dir: ${dir}`);
+    return [];
+  }
   try {
     const names = await fs.readdir(dir);
     const out: string[] = [];
@@ -124,15 +149,21 @@ async function readWorkflowFileSecurely(
   config: Config,
 ): Promise<string> {
   const real = await fs.realpath(filePath); // throws ENOENT if absent
-  const dirs = await Promise.all(
-    getSavedWorkflowDirs(config).map(async ({ dir }) => {
-      try {
-        return await fs.realpath(dir);
-      } catch {
-        return path.resolve(dir);
-      }
-    }),
-  );
+  const dirs = (
+    await Promise.all(
+      getSavedWorkflowDirs(config).map(async ({ dir }) => {
+        // Exclude a symlinked root: realpath(dir) would launder a
+        // `.qwen/workflows -> /outside` link into the allowed boundary, so a
+        // file resolving under the link's target would pass the check below.
+        if (await isSymlinkedRoot(dir)) return null;
+        try {
+          return await fs.realpath(dir);
+        } catch {
+          return path.resolve(dir);
+        }
+      }),
+    )
+  ).filter((d): d is string => d !== null);
   const inside = dirs.some(
     (d) => real === d || real.startsWith(d + path.sep),
   );
@@ -266,6 +297,14 @@ export async function saveWorkflowScript(
     scope === 'project'
       ? config.storage.getProjectWorkflowsDir()
       : Storage.getUserWorkflowsDir();
+  // Refuse to write through a symlinked root (e.g. `.qwen/workflows -> /outside`):
+  // it would persist the script outside the project/user workflow dir. The save
+  // overlay's try/catch surfaces this message as a user-facing error.
+  if (await isSymlinkedRoot(dir)) {
+    throw new Error(
+      `refusing to save into a symlinked saved-workflow directory: '${dir}'.`,
+    );
+  }
   const filePath = path.join(dir, `${name}.js`);
   if (!overwrite) {
     try {
