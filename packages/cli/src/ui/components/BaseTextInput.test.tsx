@@ -7,31 +7,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import type { DOMElement } from 'ink';
-import { BaseTextInput, getAbsolutePosition } from './BaseTextInput.js';
+import {
+  BaseTextInput,
+  getAbsolutePosition,
+  getPhysicalCursorPosition,
+} from './BaseTextInput.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 
 const mockSetCursorPosition = vi.hoisted(() => vi.fn());
-const mockAddLayoutListener = vi.hoisted(() =>
-  vi.fn((_rootNode: DOMElement, _listener: () => void) => vi.fn()),
+const mockUseBoxMetrics = vi.hoisted(() =>
+  vi.fn(() => ({
+    width: 0,
+    height: 0,
+    top: 0,
+    left: 0,
+    hasMeasured: true,
+  })),
 );
 
 vi.mock('ink', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ink')>();
   return {
     ...actual,
+    useBoxMetrics: mockUseBoxMetrics,
     useCursor: () => ({
       setCursorPosition: mockSetCursorPosition,
     }),
-  };
-});
-
-vi.mock('ink/dom', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('ink/dom')>();
-  return {
-    ...actual,
-    addLayoutListener: mockAddLayoutListener,
   };
 });
 
@@ -95,9 +98,13 @@ function captureKeypressHandler(): (key: Key) => void {
 describe('BaseTextInput', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockAddLayoutListener.mockImplementation(
-      (_rootNode: DOMElement, _listener: () => void) => vi.fn(),
-    );
+    mockUseBoxMetrics.mockReturnValue({
+      width: 0,
+      height: 0,
+      top: 0,
+      left: 0,
+      hasMeasured: true,
+    });
   });
 
   it('does not type the render-mode shortcut into the buffer', () => {
@@ -157,25 +164,22 @@ describe('BaseTextInput', () => {
     expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
   });
 
-  it('updates the physical cursor position on root layout commits', () => {
-    const buffer = createBuffer();
-    let layoutListener: (() => void) | undefined;
-    mockAddLayoutListener.mockImplementation((_rootNode, listener) => {
-      layoutListener = listener;
-      return vi.fn();
-    });
+  it('positions the physical cursor from absolute Ink DOM position', () => {
+    const root = createElement(2, 3);
+    const parent = createElement(5, 7, root);
+    const child = createElement(11, 13, parent);
 
-    render(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
-
-    expect(mockAddLayoutListener).toHaveBeenCalledWith(
-      expect.objectContaining({ nodeName: 'ink-root' }),
-      expect.any(Function),
-    );
-
-    mockSetCursorPosition.mockClear();
-    layoutListener?.();
-
-    expect(mockSetCursorPosition).toHaveBeenCalled();
+    expect(
+      getPhysicalCursorPosition(child, {
+        hasMeasured: true,
+        showCursor: true,
+        cursorVisualRow: 2,
+        cursorVisualCol: 3,
+        scrollVisualRow: 1,
+        linesToRender: ['', 'ab😀cd'],
+        prefixWidth: 2,
+      }),
+    ).toEqual({ x: 29, y: 20 });
   });
 });
 

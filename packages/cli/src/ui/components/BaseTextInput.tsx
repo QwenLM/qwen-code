@@ -20,9 +20,8 @@
  */
 
 import type { ReactNode } from 'react';
-import { useCallback, useEffect, useInsertionEffect, useRef } from 'react';
+import { useCallback, useInsertionEffect, useRef } from 'react';
 import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
-import { addLayoutListener } from 'ink/dom';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -127,6 +126,16 @@ export function defaultRenderLine({
 
 // ─── Helpers ────────────────────────────────────────────────
 
+type PhysicalCursorState = {
+  hasMeasured: boolean;
+  showCursor: boolean;
+  cursorVisualRow: number;
+  cursorVisualCol: number;
+  scrollVisualRow: number;
+  linesToRender: string[];
+  prefixWidth: number;
+};
+
 export function getAbsolutePosition(
   node: DOMElement | null,
 ): { top: number; left: number } | undefined {
@@ -147,33 +156,19 @@ export function getAbsolutePosition(
   return { top, left };
 }
 
-function findRootNode(node: DOMElement | null): DOMElement | undefined {
-  let current: DOMElement | undefined = node ?? undefined;
-  while (current?.parentNode) {
-    current = current.parentNode;
-  }
-  return current?.nodeName === 'ink-root' ? current : undefined;
-}
-
-function getPhysicalCursorPosition(
+export function getPhysicalCursorPosition(
   node: DOMElement | null,
   {
+    hasMeasured,
     showCursor,
     cursorVisualRow,
     cursorVisualCol,
     scrollVisualRow,
     linesToRender,
     prefixWidth,
-  }: {
-    showCursor: boolean;
-    cursorVisualRow: number;
-    cursorVisualCol: number;
-    scrollVisualRow: number;
-    linesToRender: string[];
-    prefixWidth: number;
-  },
+  }: PhysicalCursorState,
 ): { x: number; y: number } | undefined {
-  if (!showCursor) return undefined;
+  if (!showCursor || !hasMeasured) return undefined;
 
   const position = getAbsolutePosition(node);
   if (!position) return undefined;
@@ -320,7 +315,8 @@ export const BaseTextInput = ({
   const boxRef = useRef<DOMElement | null>(null);
   const { hasMeasured } = useBoxMetrics(boxRef);
   const { setCursorPosition } = useCursor();
-  const cursorStateRef = useRef({
+  const cursorPosition = getPhysicalCursorPosition(boxRef.current, {
+    hasMeasured,
     showCursor,
     cursorVisualRow,
     cursorVisualCol,
@@ -328,31 +324,10 @@ export const BaseTextInput = ({
     linesToRender,
     prefixWidth,
   });
-  cursorStateRef.current = {
-    showCursor,
-    cursorVisualRow,
-    cursorVisualCol,
-    scrollVisualRow,
-    linesToRender,
-    prefixWidth,
-  };
 
-  const getCurrentCursorPosition = useCallback(
-    () => getPhysicalCursorPosition(boxRef.current, cursorStateRef.current),
-    [],
-  );
-
-  useEffect(() => {
-    const rootNode = findRootNode(boxRef.current);
-    if (!rootNode) return undefined;
-    return addLayoutListener(rootNode, () => {
-      setCursorPosition(getCurrentCursorPosition());
-    });
-  }, [getCurrentCursorPosition, setCursorPosition]);
-
-  // Ink publishes this ref from its own insertion effect, so write it before
+  // Ink publishes this value from its own insertion effect, so write it before
   // Ink's effect setup reads the latest committed position.
-  setCursorPosition(hasMeasured ? getCurrentCursorPosition() : undefined);
+  setCursorPosition(cursorPosition);
 
   useInsertionEffect(
     () => () => setCursorPosition(undefined),
