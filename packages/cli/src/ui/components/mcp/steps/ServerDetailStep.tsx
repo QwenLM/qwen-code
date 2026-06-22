@@ -74,8 +74,15 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       });
     }
 
-    // 只在服务器未禁用且有资源时显示"查看资源"选项
-    if (!server.isDisabled && (server.resourceCount ?? 0) > 0) {
+    // 只在调用方接入了 onViewResources 回调、且服务器未禁用并有资源时显示
+    // "查看资源"。onViewResources 是可选 prop：像扩展管理器（McpServerActionsView）
+    // 这类同样复用 ServerDetailStep 的调用方，若未接入资源子视图就不应出现一个
+    // 点了没反应的死操作。
+    if (
+      onViewResources &&
+      !server.isDisabled &&
+      (server.resourceCount ?? 0) > 0
+    ) {
       result.push({
         key: 'view-resources',
         label: t('View resources'),
@@ -118,7 +125,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
     }
 
     return result;
-  }, [server]);
+  }, [server, onViewResources]);
 
   useKeypress(
     (key) => {

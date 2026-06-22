@@ -90,4 +90,48 @@ describe('ResourceDetailStep', () => {
     pressKey({ name: 'escape' });
     expect(onBack).toHaveBeenCalledTimes(1);
   });
+
+  it('renders size 0 as "0 bytes" (typeof guard, not a falsy check)', () => {
+    const { lastFrame } = render(
+      <ResourceDetailStep
+        resource={{ uri: 'file:///empty', serverName: 'srv', size: 0 }}
+        onBack={vi.fn()}
+      />,
+    );
+    expect(lastFrame()).toContain('0 bytes');
+  });
+
+  it('omits the Name line when the friendly name equals the URI', () => {
+    const { lastFrame } = render(
+      <ResourceDetailStep
+        resource={{
+          uri: 'file:///a.md',
+          name: 'file:///a.md', // identical to the URI → redundant, suppressed
+          serverName: 'srv',
+        }}
+        onBack={vi.fn()}
+      />,
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('file:///a.md');
+    expect(frame).not.toContain('Name:');
+  });
+
+  it('shows the title under Name when it differs from the URI', () => {
+    const { lastFrame } = render(
+      <ResourceDetailStep
+        resource={{
+          uri: 'file:///a.md',
+          name: 'a',
+          title: 'Friendly Title',
+          serverName: 'srv',
+        }}
+        onBack={vi.fn()}
+      />,
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('Name:');
+    // title is preferred over name for the display label
+    expect(frame).toContain('Friendly Title');
+  });
 });

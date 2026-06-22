@@ -129,4 +129,44 @@ describe('ResourceListStep', () => {
 
     expect(lastFrame()).toContain('No resources available for this server.');
   });
+
+  // Exercises the scroll-window path that only runs for >VISIBLE_RESOURCES_COUNT
+  // (10) items — the most non-trivial logic in the component, otherwise untested.
+  it('windows a long list with correct count + arrow indicators', () => {
+    const resources = Array.from({ length: 15 }, (_, i) =>
+      resource(`file:///r${String(i).padStart(2, '0')}.md`),
+    );
+    const { lastFrame } = render(
+      <ResourceListStep
+        resources={resources}
+        serverName="server"
+        onSelect={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+
+    // Top of the list: first 10 rows visible (r00–r09), the rest hidden;
+    // indicator "1/15" with a trailing ↓ and no leading ↑.
+    let frame = lastFrame()!;
+    expect(frame).toContain('file:///r00.md');
+    expect(frame).toContain('file:///r09.md');
+    expect(frame).not.toContain('file:///r10.md');
+    expect(frame).not.toContain('file:///r14.md');
+    expect(frame).toContain('1/15');
+    expect(frame).toContain('↓');
+    expect(frame).not.toContain('↑');
+
+    // Page to the bottom (14 downs → last item selected): window shifts so the
+    // tail is visible, the head scrolls off, indicator reads "15/15" with a
+    // leading ↑ and no trailing ↓.
+    for (let i = 0; i < 14; i++) {
+      pressKey({ name: 'down', shift: false });
+    }
+    frame = lastFrame()!;
+    expect(frame).toContain('file:///r14.md');
+    expect(frame).not.toContain('file:///r00.md');
+    expect(frame).toContain('15/15');
+    expect(frame).toContain('↑');
+    expect(frame).not.toContain('↓');
+  });
 });

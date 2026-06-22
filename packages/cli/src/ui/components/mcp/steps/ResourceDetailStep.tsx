@@ -8,6 +8,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
+import { buildMcpResourceRef } from '../../../hooks/mcpResourceRef.js';
 import type { ResourceDetailStepProps } from '../types.js';
 
 const LABEL_WIDTH = 15;
@@ -103,7 +104,7 @@ export const ResourceDetailStep: React.FC<ResourceDetailStepProps> = ({
           {t('Reference in chat')}:
         </Text>
         <Text color={theme.text.accent}>
-          @{resource.serverName}:{resource.uri}
+          @{buildMcpResourceRef(resource.serverName, resource.uri)}
         </Text>
       </Box>
     </Box>
