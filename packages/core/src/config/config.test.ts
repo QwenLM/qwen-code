@@ -4619,4 +4619,25 @@ describe('Model Switching and Config Updates', () => {
       expect(config.getModelDisplayName()).toBe('some-model');
     });
   });
+
+  describe('getAutoSkillConfirmEnabled', () => {
+    it('defaults to true when autoSkillConfirm is unset', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+    });
+
+    it('returns false when autoSkillConfirm is explicitly disabled', () => {
+      const config = new Config({ ...baseParams, autoSkillConfirm: false });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+
+    it('is forced false in bare mode even when autoSkillConfirm is true', () => {
+      const config = new Config({
+        ...baseParams,
+        autoSkillConfirm: true,
+        bareMode: true,
+      });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+  });
 });
