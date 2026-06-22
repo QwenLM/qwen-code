@@ -514,6 +514,17 @@ export async function runNonInteractive(
             .getChat()
             .getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
         );
+        debugLogger.info('[runNonInteractive] continueInterrupted detection', {
+          kind: detection.kind,
+          partsCount:
+            detection.kind === 'interrupted_prompt'
+              ? detection.parts.length
+              : 0,
+          danglingCallCount:
+            detection.kind === 'interrupted_turn'
+              ? detection.danglingCalls.length
+              : 0,
+        });
         if (detection.kind === 'none') {
           await emitNonInteractiveFinalMessage({
             message: 'No interrupted turn to continue.',
@@ -528,7 +539,9 @@ export async function runNonInteractive(
           // The send below re-pushes this content; strip the orphaned
           // original first so history doesn't carry it twice.
           strippedContinuationEntries =
-            geminiClient.stripOrphanedUserEntriesFromHistory() ?? [];
+            geminiClient.stripOrphanedUserEntriesFromHistory(
+              TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+            ) ?? [];
           initialPartList = detection.parts;
           continueSendType = SendMessageType.Retry;
         } else {

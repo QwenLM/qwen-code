@@ -150,7 +150,28 @@ describe('Query', () => {
     await transport.waitForWrite(1);
     await transport.close();
 
-    await expect(continuePromise).rejects.toThrow('Query is closed');
+    await expect(continuePromise).rejects.toThrow(
+      'Transport closed before control response',
+    );
+    await query.close();
+  });
+
+  it('does not close the query when the transport output ends', async () => {
+    const transport = new MockTransport();
+    const query = new Query(transport, {
+      timeout: { controlRequest: 1000 },
+    });
+
+    const initializeRequest = await transport.waitForWrite(0);
+    transport.pushMessage(controlSuccess(initializeRequest, null));
+    await query.initialized;
+
+    await transport.close();
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+
+    expect(() => query.endInput()).not.toThrow();
     await query.close();
   });
 

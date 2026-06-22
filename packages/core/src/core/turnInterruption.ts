@@ -91,6 +91,8 @@ export function detectTurnInterruption(history: Content[]): TurnInterruption {
     if (parts.length === 0) {
       return { kind: 'none' };
     }
+    // Public helper boundary: callers may pass raw history, so return detached
+    // parts even when current continuation callers only read them.
     return { kind: 'interrupted_prompt', parts: structuredClone(parts) };
   }
 

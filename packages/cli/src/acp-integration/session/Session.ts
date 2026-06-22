@@ -623,10 +623,17 @@ export async function buildAvailableCommandsSnapshot(
  */
 export interface ContinueTurnResponse {
   stopReason: PromptResponse['stopReason'];
-  /** False when the last turn had already ended cleanly (no-op). */
+  /** True only when a continuation actually reached the model turn path. */
   resumed: boolean;
-  /** Which interruption shape was continued; 'none' when resumed is false. */
+  /** Last detected interruption shape; use `resumed` to tell if work ran. */
   interruption: TurnInterruption['kind'];
+}
+
+interface ModelTurnLoopResult {
+  earlyExit: { stopReason: PromptResponse['stopReason'] } | null;
+  iterationsRun: number;
+  sendStarted: boolean;
+  error?: unknown;
 }
 
 /**
@@ -1437,7 +1444,9 @@ export class Session implements SessionContext {
                 strippedPromptEntries =
                   this.config
                     .getGeminiClient()!
-                    .stripOrphanedUserEntriesFromHistory() ?? [];
+                    .stripOrphanedUserEntriesFromHistory(
+                      TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+                    ) ?? [];
                 debugLogger.info(
                   '[Session] continueTurn stripped orphaned user entries',
                   { strippedCount: strippedPromptEntries.length },
@@ -1499,20 +1508,19 @@ ${this.pendingWorktreeNotice}
                 );
               };
               try {
-                const earlyExit = await this.#runModelTurnLoop(
+                const loopResult = await this.#runModelTurnLoop(
                   promptId,
                   { role: 'user', parts },
                   pendingSend,
-                  () => {
-                    turnCount++;
-                  },
-                  () => {
-                    continueSendStarted = true;
-                  },
                   ownsInitialUnsentMessage,
                 );
+                turnCount += loopResult.iterationsRun;
+                continueSendStarted = loopResult.sendStarted;
+                if (loopResult.error) {
+                  throw loopResult.error;
+                }
                 const result =
-                  earlyExit ??
+                  loopResult.earlyExit ??
                   (await this.#finishTurn(
                     pendingSend,
                     promptId,
@@ -1753,20 +1761,19 @@ ${this.pendingWorktreeNotice}
               // turn, so the emission lives in a finally that wraps the whole
               // turn. Daemon turns run autonomously in all approval modes.
               try {
-                const earlyExit = await this.#runModelTurnLoop(
+                const loopResult = await this.#runModelTurnLoop(
                   promptId,
                   { role: 'user', parts },
                   pendingSend,
-                  () => {
-                    turnCount++;
-                  },
-                  () => {
-                    retrySendStarted = true;
-                  },
                   isRetry && strippedRetryEntries.length > 0,
                 );
+                turnCount += loopResult.iterationsRun;
+                retrySendStarted = loopResult.sendStarted;
+                if (loopResult.error) {
+                  throw loopResult.error;
+                }
                 return (
-                  earlyExit ??
+                  loopResult.earlyExit ??
                   (await this.#finishTurn(
                     pendingSend,
                     promptId,
@@ -1804,163 +1811,179 @@ ${this.pendingWorktreeNotice}
     promptId: string,
     initialMessage: Content,
     pendingSend: AbortController,
-    onIteration?: () => void,
-    onSendStarted?: () => void,
     ownsInitialUnsentMessage = false,
-  ): Promise<{ stopReason: PromptResponse['stopReason'] } | null> {
+  ): Promise<ModelTurnLoopResult> {
     let nextMessage: Content | null = initialMessage;
+    let iterationsRun = 0;
+    let sendStarted = false;
     // Tracks the first loop iteration so a caller that restores the initial
     // message itself (continue-interrupted) can suppress the duplicate
     // functionResponse-only preservation for that one message.
     let isInitialMessage = true;
 
-    while (nextMessage !== null) {
-      onIteration?.();
-      if (pendingSend.signal.aborted) {
-        if (!(ownsInitialUnsentMessage && isInitialMessage)) {
-          this.#getCurrentChat().addHistory(nextMessage);
-        }
-        return { stopReason: 'cancelled' };
-      }
+    const result = (
+      earlyExit: ModelTurnLoopResult['earlyExit'],
+    ): ModelTurnLoopResult => ({
+      earlyExit,
+      iterationsRun,
+      sendStarted,
+    });
 
-      const functionCalls: FunctionCall[] = [];
-      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-      const streamStartTime = Date.now();
-
-      try {
-        const sendResult = await this.#sendMessageStreamWithAutoCompression(
-          promptId,
-          nextMessage?.parts ?? [],
-          pendingSend.signal,
-        );
-        if (!sendResult.responseStream) {
-          const wasCancelled = sendResult.stopReason === 'cancelled';
-          // If the continue path already stripped the initial orphaned entries,
-          // it restores those originals itself until a send really starts.
-          // That keeps max-token and pre-send cancellation exits from writing
-          // a merged replacement or duplicating functionResponse-only turns.
+    try {
+      while (nextMessage !== null) {
+        iterationsRun++;
+        if (pendingSend.signal.aborted) {
           if (!(ownsInitialUnsentMessage && isInitialMessage)) {
-            this.#preserveUnsentMessageHistory(nextMessage, wasCancelled);
+            this.#getCurrentChat().addHistory(nextMessage);
           }
-          return { stopReason: sendResult.stopReason };
-        }
-        const responseStream = sendResult.responseStream;
-        onSendStarted?.();
-        nextMessage = null;
-        isInitialMessage = false;
-
-        for await (const resp of responseStream) {
-          if (pendingSend.signal.aborted) {
-            return { stopReason: 'cancelled' };
-          }
-
-          if (
-            resp.type === StreamEventType.CHUNK &&
-            resp.value.candidates &&
-            resp.value.candidates.length > 0
-          ) {
-            const candidate = resp.value.candidates[0];
-            for (const part of candidate.content?.parts ?? []) {
-              if (!part.text) {
-                continue;
-              }
-
-              this.messageEmitter.emitMessage(
-                part.text,
-                'assistant',
-                part.thought,
-              );
-            }
-          }
-
-          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
-            usageMetadata = resp.value.usageMetadata;
-          }
-
-          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
-            functionCalls.push(...resp.value.functionCalls);
-          }
-        }
-      } catch (error) {
-        // Only explicit user cancellation maps to a normal cancelled turn.
-        // Other aborts/errors should surface so infra failures are not hidden
-        // as successful cancels.
-        if (
-          pendingSend.signal.aborted &&
-          pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
-          (this.#isAbortError(error) || error === USER_CANCEL_ABORT_REASON)
-        ) {
-          return { stopReason: 'cancelled' };
+          return result({ stopReason: 'cancelled' });
         }
 
-        // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-        const errorStatus = getErrorStatus(error);
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const errorType = classifyApiError({
-          message: errorMessage,
-          status: errorStatus,
-        });
+        const functionCalls: FunctionCall[] = [];
+        let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+        const streamStartTime = Date.now();
 
-        const hookSystem = this.config.getHookSystem?.();
-        const hooksEnabledForStopFailure = !this.config.getDisableAllHooks?.();
-        if (
-          hooksEnabledForStopFailure &&
-          hookSystem &&
-          this.config.hasHooksForEvent?.('StopFailure')
-        ) {
-          hookSystem
-            .fireStopFailureEvent(errorType, errorMessage)
-            .catch((err) => {
-              debugLogger.warn(`StopFailure hook failed: ${err}`);
-            });
-        }
-
-        if (errorStatus === 429) {
-          throw new RequestError(429, 'Rate limit exceeded. Try again later.');
-        }
-
-        throw error;
-      }
-
-      if (usageMetadata) {
-        this.#recordPromptTokenCount(usageMetadata);
-        if (this.messageRewriter) {
-          this.messageRewriter.flushTurn(pendingSend.signal);
-        }
-
-        const durationMs = Date.now() - streamStartTime;
-        await this.messageEmitter.emitUsageMetadata(
-          usageMetadata,
-          '',
-          durationMs,
-        );
-      }
-
-      if (functionCalls.length > 0) {
-        const toolRun = await this.runToolCalls(
-          pendingSend.signal,
-          promptId,
-          functionCalls,
-        );
-        if (toolRun.stopAfterPermissionCancel) {
-          await this.#preserveCancelledPermissionToolRun(
-            toolRun,
+        try {
+          const sendResult = await this.#sendMessageStreamWithAutoCompression(
+            promptId,
+            nextMessage?.parts ?? [],
             pendingSend.signal,
           );
-          return { stopReason: 'end_turn' };
-        }
-        nextMessage = {
-          role: 'user',
-          parts: [
-            ...toolRun.parts,
-            ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
-          ],
-        };
-      }
-    }
+          if (!sendResult.responseStream) {
+            const wasCancelled = sendResult.stopReason === 'cancelled';
+            // If the continue path already stripped the initial orphaned entries,
+            // it restores those originals itself until a send really starts.
+            // That keeps max-token and pre-send cancellation exits from writing
+            // a merged replacement or duplicating functionResponse-only turns.
+            if (!(ownsInitialUnsentMessage && isInitialMessage)) {
+              this.#preserveUnsentMessageHistory(nextMessage, wasCancelled);
+            }
+            return result({ stopReason: sendResult.stopReason });
+          }
+          const responseStream = sendResult.responseStream;
+          sendStarted = true;
+          nextMessage = null;
+          isInitialMessage = false;
 
-    return null;
+          for await (const resp of responseStream) {
+            if (pendingSend.signal.aborted) {
+              return result({ stopReason: 'cancelled' });
+            }
+
+            if (
+              resp.type === StreamEventType.CHUNK &&
+              resp.value.candidates &&
+              resp.value.candidates.length > 0
+            ) {
+              const candidate = resp.value.candidates[0];
+              for (const part of candidate.content?.parts ?? []) {
+                if (!part.text) {
+                  continue;
+                }
+
+                this.messageEmitter.emitMessage(
+                  part.text,
+                  'assistant',
+                  part.thought,
+                );
+              }
+            }
+
+            if (
+              resp.type === StreamEventType.CHUNK &&
+              resp.value.usageMetadata
+            ) {
+              usageMetadata = resp.value.usageMetadata;
+            }
+
+            if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
+              functionCalls.push(...resp.value.functionCalls);
+            }
+          }
+        } catch (error) {
+          // Only explicit user cancellation maps to a normal cancelled turn.
+          // Other aborts/errors should surface so infra failures are not hidden
+          // as successful cancels.
+          if (
+            pendingSend.signal.aborted &&
+            pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+            (this.#isAbortError(error) || error === USER_CANCEL_ABORT_REASON)
+          ) {
+            return result({ stopReason: 'cancelled' });
+          }
+
+          // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+          const errorStatus = getErrorStatus(error);
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          const errorType = classifyApiError({
+            message: errorMessage,
+            status: errorStatus,
+          });
+
+          const hookSystem = this.config.getHookSystem?.();
+          const hooksEnabledForStopFailure =
+            !this.config.getDisableAllHooks?.();
+          if (
+            hooksEnabledForStopFailure &&
+            hookSystem &&
+            this.config.hasHooksForEvent?.('StopFailure')
+          ) {
+            hookSystem
+              .fireStopFailureEvent(errorType, errorMessage)
+              .catch((err) => {
+                debugLogger.warn(`StopFailure hook failed: ${err}`);
+              });
+          }
+
+          if (errorStatus === 429) {
+            throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+          }
+
+          throw error;
+        }
+
+        if (usageMetadata) {
+          this.#recordPromptTokenCount(usageMetadata);
+          if (this.messageRewriter) {
+            this.messageRewriter.flushTurn(pendingSend.signal);
+          }
+
+          const durationMs = Date.now() - streamStartTime;
+          await this.messageEmitter.emitUsageMetadata(
+            usageMetadata,
+            '',
+            durationMs,
+          );
+        }
+
+        if (functionCalls.length > 0) {
+          const toolRun = await this.runToolCalls(
+            pendingSend.signal,
+            promptId,
+            functionCalls,
+          );
+          if (toolRun.stopAfterPermissionCancel) {
+            await this.#preserveCancelledPermissionToolRun(
+              toolRun,
+              pendingSend.signal,
+            );
+            return result({ stopReason: 'end_turn' });
+          }
+          nextMessage = {
+            role: 'user',
+            parts: [
+              ...toolRun.parts,
+              ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
+            ],
+          };
+        }
+      }
+
+      return result(null);
+    } catch (error) {
+      return { ...result(null), error };
+    }
   }
 
   /**

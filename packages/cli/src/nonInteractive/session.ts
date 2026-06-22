@@ -479,28 +479,48 @@ class Session {
     await this.waitForInitialization();
 
     if (this.isShuttingDown || this.abortController.signal.aborted) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: session is shutting down',
+      );
       return { accepted: false, interruption: 'none' };
     }
 
     const geminiClient = this.config.getGeminiClient();
     if (!geminiClient || !geminiClient.isInitialized()) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: gemini client is not ready',
+      );
       return { accepted: false, interruption: 'none' };
     }
 
-    const detection = detectTurnInterruption(
-      geminiClient
-        .getChat()
-        .getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
+    const chat = geminiClient.getChat();
+    const historyTail = (
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)
     );
+    const detection = detectTurnInterruption(historyTail);
+    debugLogger.info('[Session] requestContinueLastTurn detection', {
+      kind: detection.kind,
+    });
     if (detection.kind === 'none') {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: no interrupted turn',
+      );
       return { accepted: false, interruption: 'none' };
     }
     if (this.pendingContinueTurn || this.continueTurnInProgress) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: continuation already pending',
+        { kind: detection.kind },
+      );
       return { accepted: false, interruption: detection.kind };
     }
 
     this.pendingContinueTurn = true;
     this.ensureProcessingStarted();
+    debugLogger.info('[Session] continue_last_turn accepted', {
+      kind: detection.kind,
+    });
     return { accepted: true, interruption: detection.kind };
   }
 

@@ -330,16 +330,7 @@ export class Query implements AsyncIterable<SDKMessage> {
           }
         }
 
-        if (!this.closed) {
-          await this.close();
-          return;
-        }
-
-        if (this.abortController.signal.aborted) {
-          this.inputStream.error(new AbortError('Query aborted'));
-        } else {
-          this.inputStream.done();
-        }
+        this.finishTransportRead();
       } catch (error) {
         this.inputStream.error(
           error instanceof Error ? error : new Error(String(error)),
@@ -399,6 +390,30 @@ export class Query implements AsyncIterable<SDKMessage> {
 
     logger.warn('Unknown message type:', message);
     this.inputStream.enqueue(message as SDKMessage);
+  }
+
+  private finishTransportRead(): void {
+    const rejectionError =
+      this.transport.exitError ??
+      new Error('Transport closed before control response');
+
+    for (const pending of this.pendingControlRequests.values()) {
+      pending.abortController.abort();
+      clearTimeout(pending.timeout);
+      pending.reject(rejectionError);
+    }
+    this.pendingControlRequests.clear();
+
+    for (const pending of this.pendingMcpResponses.values()) {
+      pending.reject(rejectionError);
+    }
+    this.pendingMcpResponses.clear();
+
+    if (this.abortController.signal.aborted) {
+      this.inputStream.error(new AbortError('Query aborted'));
+    } else {
+      this.inputStream.done();
+    }
   }
 
   private async handleControlRequest(

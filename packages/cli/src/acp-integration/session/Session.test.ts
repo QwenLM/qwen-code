@@ -1318,7 +1318,9 @@ describe('Session', () => {
 
       expect(result.resumed).toBe(true);
       expect(result.interruption).toBe('interrupted_prompt');
-      expect(stripSpy).toHaveBeenCalledTimes(1);
+      expect(stripSpy).toHaveBeenCalledWith(
+        core.TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+      );
       // turn counter is NOT incremented — a continuation is the same
       // logical turn, with an attempt suffix so consecutive continuations
       // still have distinct telemetry ids.
@@ -1354,6 +1356,15 @@ describe('Session', () => {
         'qwen3-code-plus',
         expect.anything(),
         'test-session-id########0.c2',
+      );
+      expect(withInteractionSpanSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          messageType: 'acp_continue',
+          promptId: 'test-session-id########0.c1',
+        }),
+        expect.any(Function),
+        expect.any(Function),
       );
     });
 
@@ -1585,6 +1596,56 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         'test-session-id########0.c1',
+      );
+    });
+
+    it('uses Stop hook state captured before a continued turn completes', async () => {
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          success: true,
+          output: {},
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((eventName: string) => eventName === 'Stop');
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([
+          { role: 'model', parts: [{ text: 'continued response' }] },
+        ]);
+      mockChat.getLastModelMessageText = vi
+        .fn()
+        .mockReturnValue('continued response');
+      setHistoryTail([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      getStripSpy().mockReturnValue([]);
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+        return createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                { content: { parts: [{ text: 'continued response' }] } },
+              ],
+            },
+          },
+        ]);
+      });
+
+      await session.continueTurn();
+
+      expect(messageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'Stop',
+          input: expect.objectContaining({
+            last_assistant_message: 'continued response',
+          }),
+        }),
+        expect.anything(),
       );
     });
 
@@ -1821,6 +1882,41 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
+    it('reports the re-detected interruption when cancelled during background drain', async () => {
+      type NotificationInternals = {
+        notificationAbortController: AbortController | null;
+        notificationCompletion: Promise<void> | null;
+      };
+      let releaseNotification!: () => void;
+      const notificationCompletion = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      const notificationAbortController = new AbortController();
+      const internals = session as unknown as NotificationInternals;
+      internals.notificationAbortController = notificationAbortController;
+      internals.notificationCompletion = notificationCompletion;
+      (
+        mockChat as unknown as { getHistoryTail: ReturnType<typeof vi.fn> }
+      ).getHistoryTail = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+
+      const continuePromise = session.continueTurn();
+      await vi.waitFor(() => {
+        expect(notificationAbortController.signal.aborted).toBe(true);
+      });
+
+      await session.cancelPendingPrompt();
+      releaseNotification();
+
+      await expect(continuePromise).resolves.toEqual({
+        stopReason: 'cancelled',
+        resumed: false,
+        interruption: 'interrupted_prompt',
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('restarts queued notification work after a continuation failure', async () => {
       type NotificationInternals = {
         notificationQueue: Array<{
@@ -1866,6 +1962,52 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('clears pendingPrompt after interleaved prompts finish', async () => {
+      let releaseFirst!: () => void;
+      let firstSignal: AbortSignal | undefined;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(
+          async (
+            _model: string,
+            request: { config: { abortSignal: AbortSignal } },
+          ) => {
+            firstSignal = request.config.abortSignal;
+            await firstGate;
+            return createEmptyStream();
+          },
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      const firstPrompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      const secondPrompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+      await vi.waitFor(() => {
+        expect(firstSignal?.aborted).toBe(true);
+      });
+
+      releaseFirst();
+      await Promise.all([firstPrompt, secondPrompt]);
+
+      expect(
+        (session as unknown as { pendingPrompt: AbortController | null })
+          .pendingPrompt,
+      ).toBeNull();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
     it('records the latest file history snapshot after makeSnapshot', async () => {
       const latestSnapshot = {
         promptId: 'test-session-id########1',
