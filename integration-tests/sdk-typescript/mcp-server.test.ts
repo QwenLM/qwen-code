@@ -15,7 +15,6 @@ import {
   isSDKAssistantMessage,
   isSDKResultMessage,
   isSDKSystemMessage,
-  isSDKUserMessage,
   type SDKMessage,
   type ToolUseBlock,
   type SDKSystemMessage,
@@ -26,6 +25,7 @@ import {
   createMCPServer,
   extractText,
   findToolUseBlocks,
+  findToolResult,
   createSharedTestOptions,
   createResultWaiter,
 } from './test-helper.js';
@@ -34,6 +34,10 @@ const SHARED_TEST_OPTIONS = {
   ...createSharedTestOptions(),
   permissionMode: 'yolo' as const,
 };
+
+// MCP tool names are generated with the pattern: mcp__<serverName>__<toolName>
+const MCP_ADD_TOOL = 'mcp__test-math-server__add';
+const MCP_MULTIPLY_TOOL = 'mcp__test-math-server__multiply';
 
 describe('MCP Server Integration (E2E)', () => {
   let helper: SDKTestHelper;
@@ -82,7 +86,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'add');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -133,7 +137,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'multiply');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_MULTIPLY_TOOL);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -238,8 +242,8 @@ describe('MCP Server Integration (E2E)', () => {
         }
 
         // Validate both tools were called
-        expect(toolCalls).toContain('add');
-        expect(toolCalls).toContain('multiply');
+        expect(toolCalls).toContain(MCP_ADD_TOOL);
+        expect(toolCalls).toContain(MCP_MULTIPLY_TOOL);
 
         // Validate result: (10 + 5) * 2 = 30
         expect(assistantText).toMatch(/30/);
@@ -278,7 +282,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'add');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
             addToolCalls.push(...toolUseBlocks);
             assistantText += extractText(message.message.content);
           }
@@ -366,8 +370,8 @@ describe('MCP Server Integration (E2E)', () => {
           }
         }
 
-        expect(toolCalls).toContain('add');
-        expect(toolCalls).toContain('multiply');
+        expect(toolCalls).toContain(MCP_ADD_TOOL);
+        expect(toolCalls).toContain(MCP_MULTIPLY_TOOL);
         expect(assistantText).toMatch(/5/);
         expect(assistantText).toMatch(/20/);
 
@@ -454,10 +458,10 @@ describe('MCP Server Integration (E2E)', () => {
           }
         }
 
-        expect(toolCalls).toContain('add');
-        expect(toolCalls).toContain('multiply');
+        expect(toolCalls).toContain(MCP_ADD_TOOL);
+        expect(toolCalls).toContain(MCP_MULTIPLY_TOOL);
         expect(canUseToolCalls.map((call) => call.toolName)).toEqual(
-          expect.arrayContaining(['add', 'multiply']),
+          expect.arrayContaining([MCP_ADD_TOOL, MCP_MULTIPLY_TOOL]),
         );
         expect(assistantText).toMatch(/10/);
         expect(assistantText).toMatch(/12/);
@@ -473,7 +477,8 @@ describe('MCP Server Integration (E2E)', () => {
   describe('MCP Tool Message Flow', () => {
     it('should receive proper message sequence for MCP tool usage', async () => {
       const q = query({
-        prompt: 'Use add to calculate 2 + 3',
+        prompt:
+          'Use the add tool to calculate 2 + 3. You must call the tool. Just give me the result.',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
@@ -488,39 +493,30 @@ describe('MCP Server Integration (E2E)', () => {
       });
 
       const messageTypes: string[] = [];
-      let foundToolUse = false;
-      let foundToolResult = false;
+      const messages: SDKMessage[] = [];
+      let addToolUseId: string | undefined;
 
       try {
         for await (const message of q) {
+          messages.push(message);
           messageTypes.push(message.type);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message);
-            if (toolUseBlocks.length > 0) {
-              foundToolUse = true;
-              expect(toolUseBlocks[0].name).toBe('add');
-              expect(toolUseBlocks[0].input).toBeDefined();
-            }
-          }
-
-          if (isSDKUserMessage(message)) {
-            const content = message.message.content;
-            const contentArray = Array.isArray(content)
-              ? content
-              : [{ type: 'text', text: content }];
-            const toolResultBlock = contentArray.find(
-              (block) => block.type === 'tool_result',
-            );
-            if (toolResultBlock) {
-              foundToolResult = true;
+            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
+            const addToolUseBlock = toolUseBlocks[0];
+            if (addToolUseBlock) {
+              addToolUseId = addToolUseId ?? addToolUseBlock.id;
+              expect(addToolUseBlock.input).toBeDefined();
             }
           }
         }
 
         // Validate message flow
-        expect(foundToolUse).toBe(true);
-        expect(foundToolResult).toBe(true);
+        expect(addToolUseId).toBeDefined();
+        const addToolResult = addToolUseId
+          ? findToolResult(messages, addToolUseId)
+          : null;
+        expect(addToolResult).not.toBeNull();
         expect(messageTypes).toContain('system');
         expect(messageTypes).toContain('assistant');
         expect(messageTypes).toContain('user');

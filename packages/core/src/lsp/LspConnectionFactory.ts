@@ -6,11 +6,21 @@
 
 import * as cp from 'node:child_process';
 import * as net from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_LSP_REQUEST_TIMEOUT_MS } from './constants.js';
-import type { JsonRpcMessage } from './types.js';
+import type { JsonRpcMessage, LspProcessDiagnostics } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
+const MAX_STDERR_TAIL_BYTES = 8192;
+
+function trimTail(value: string, maxBytes: number): string {
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.byteLength <= maxBytes) {
+    return value;
+  }
+  return buffer.subarray(buffer.byteLength - maxBytes).toString('utf8');
+}
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -79,7 +89,11 @@ class JsonRpcConnection {
     }
     this.disposed = true;
     this.disposePending();
-    this.disposer?.();
+    try {
+      this.disposer?.();
+    } catch (error) {
+      debugLogger.warn('LSP disposer failed:', error);
+    }
   }
 
   private sendRequest(method: string, params: unknown): Promise<unknown> {
@@ -221,7 +235,12 @@ class JsonRpcConnection {
     }
     const json = JSON.stringify(message);
     const header = `Content-Length: ${Buffer.byteLength(json, 'utf8')}\r\n\r\n`;
-    this.writer(header + json);
+    try {
+      this.writer(header + json);
+    } catch (error) {
+      debugLogger.warn('LSP write failed:', error);
+      this.end();
+    }
   }
 
   private disposePending(error?: Error): void {
@@ -236,6 +255,7 @@ class JsonRpcConnection {
 interface LspConnection {
   connection: JsonRpcConnection;
   process?: cp.ChildProcess;
+  processDiagnostics?: LspProcessDiagnostics;
   socket?: net.Socket;
 }
 
@@ -260,6 +280,9 @@ export class LspConnectionFactory {
         stdio: 'pipe',
         ...options,
       };
+      const processDiagnostics: LspProcessDiagnostics = {
+        stderrTail: '',
+      };
       const processInstance = cp.spawn(command, args, spawnOptions);
 
       const timeoutId = setTimeout(() => {
@@ -282,18 +305,51 @@ export class LspConnectionFactory {
           return;
         }
 
+        const stderrDecoder = new StringDecoder('utf8');
+        processInstance.stderr?.on('data', (chunk: Buffer) => {
+          processDiagnostics.stderrTail = trimTail(
+            processDiagnostics.stderrTail + stderrDecoder.write(chunk),
+            MAX_STDERR_TAIL_BYTES,
+          );
+        });
+        processInstance.stderr?.on('end', () => {
+          processDiagnostics.stderrTail = trimTail(
+            processDiagnostics.stderrTail + stderrDecoder.end(),
+            MAX_STDERR_TAIL_BYTES,
+          );
+        });
+        processInstance.stderr?.on('error', (err) => {
+          debugLogger.warn(`LSP stderr stream error for ${command}:`, err);
+        });
+
         const connection = new JsonRpcConnection(
           (payload) => processInstance.stdin?.write(payload),
           () => processInstance.stdin?.end(),
         );
 
+        processInstance.stdin.on('error', (err) => {
+          debugLogger.warn(`LSP stdin stream error for ${command}:`, err);
+          connection.end();
+        });
+
         connection.listen(processInstance.stdout);
-        processInstance.once('exit', () => connection.end());
-        processInstance.once('close', () => connection.end());
+        const recordProcessExit = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ) => {
+          processDiagnostics.exitCode = code;
+          processDiagnostics.exitSignal = signal;
+        };
+        processInstance.once('exit', recordProcessExit);
+        processInstance.once('close', (code, signal) => {
+          recordProcessExit(code, signal);
+          connection.end();
+        });
 
         resolve({
           connection,
           process: processInstance,
+          processDiagnostics,
         });
       });
     });

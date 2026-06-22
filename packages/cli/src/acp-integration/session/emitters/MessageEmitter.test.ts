@@ -65,6 +65,66 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: 'I can help you with that.' },
       });
     });
+
+    it('should include subagent parent metadata when provided', async () => {
+      await emitter.emitAgentMessage('Subagent progress', undefined, {
+        parentToolCallId: 'agent-parent-1',
+        subagentType: 'general-purpose',
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Subagent progress' },
+        _meta: {
+          parentToolCallId: 'agent-parent-1',
+          subagentType: 'general-purpose',
+        },
+      });
+    });
+  });
+
+  describe('emitGoalTerminal', () => {
+    it('should send a goal terminal update in metadata', async () => {
+      const event = {
+        kind: 'achieved' as const,
+        condition: 'ship goal support',
+        iterations: 2,
+        durationMs: 1234,
+        lastReason: 'The requested support is complete.',
+      };
+
+      await emitter.emitGoalTerminal(event);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalTerminal: event,
+        },
+      });
+    });
+  });
+
+  describe('emitGoalStatus', () => {
+    it('should send a goal status update in metadata', async () => {
+      const status = {
+        kind: 'set' as const,
+        condition: 'ship goal support',
+        setAt: 1234,
+      };
+
+      await emitter.emitGoalStatus(status);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalStatus: status,
+        },
+      });
+    });
   });
 
   describe('emitAgentThought', () => {
@@ -75,6 +135,22 @@ describe('MessageEmitter', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Let me think about this...' },
+      });
+    });
+
+    it('should include subagent parent metadata when provided', async () => {
+      await emitter.emitAgentThought('Subagent thought', undefined, {
+        parentToolCallId: 'agent-parent-1',
+        subagentType: 'general-purpose',
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'Subagent thought' },
+        _meta: {
+          parentToolCallId: 'agent-parent-1',
+          subagentType: 'general-purpose',
+        },
       });
     });
   });
@@ -166,11 +242,11 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: '' },
         _meta: {
           usage: {
-            promptTokens: 100,
-            completionTokens: 50,
-            thoughtsTokens: 25,
+            inputTokens: 100,
+            outputTokens: 50,
             totalTokens: 175,
-            cachedTokens: 10,
+            thoughtTokens: 25,
+            cachedReadTokens: 10,
           },
         },
       });
@@ -192,14 +268,115 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: 'done' },
         _meta: {
           usage: {
-            promptTokens: 10,
-            completionTokens: 5,
-            thoughtsTokens: 2,
+            inputTokens: 10,
+            outputTokens: 5,
             totalTokens: 17,
-            cachedTokens: 1,
+            thoughtTokens: 2,
+            cachedReadTokens: 1,
           },
           durationMs: 1234,
         },
+      });
+    });
+
+    it('accumulates token counts and API time into the context cumulative usage', async () => {
+      const cumulativeUsage = {
+        promptTokens: 0,
+        cachedTokens: 0,
+        candidateTokens: 0,
+        apiTimeMs: 0,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      const e = new MessageEmitter(ctx);
+      await e.emitUsageMetadata(
+        {
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          cachedContentTokenCount: 10,
+        },
+        '',
+        800,
+      );
+      await e.emitUsageMetadata(
+        {
+          promptTokenCount: 30,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 5,
+        },
+        '',
+        200,
+      );
+
+      expect(cumulativeUsage).toEqual({
+        promptTokens: 130,
+        cachedTokens: 15,
+        candidateTokens: 70,
+        apiTimeMs: 1000,
+      });
+    });
+
+    it('accumulates tokens but not API time when no duration is provided (replay)', async () => {
+      const cumulativeUsage = {
+        promptTokens: 0,
+        cachedTokens: 0,
+        candidateTokens: 0,
+        apiTimeMs: 0,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      await new MessageEmitter(ctx).emitUsageMetadata({
+        promptTokenCount: 100,
+        candidatesTokenCount: 50,
+        cachedContentTokenCount: 10,
+      });
+
+      expect(cumulativeUsage).toEqual({
+        promptTokens: 100,
+        cachedTokens: 10,
+        candidateTokens: 50,
+        apiTimeMs: 0,
+      });
+    });
+
+    it('skips non-finite usage and durations so they do not poison the accumulator', async () => {
+      const cumulativeUsage = {
+        promptTokens: 5,
+        cachedTokens: 1,
+        candidateTokens: 2,
+        apiTimeMs: 100,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      // NaN survives `?? 0` (NaN ?? 0 === NaN); a non-finite duration or token
+      // would otherwise make every later snapshot NaN forever.
+      await new MessageEmitter(ctx).emitUsageMetadata(
+        {
+          promptTokenCount: Number.NaN,
+          candidatesTokenCount: 10,
+          cachedContentTokenCount: Number.POSITIVE_INFINITY,
+        },
+        '',
+        Number.NaN,
+      );
+
+      expect(cumulativeUsage).toEqual({
+        promptTokens: 5, // NaN skipped
+        cachedTokens: 1, // Infinity skipped
+        candidateTokens: 12, // 2 + 10
+        apiTimeMs: 100, // NaN duration skipped
       });
     });
   });

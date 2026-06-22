@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, useIsScreenReaderEnabled } from 'ink';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import { useCallback, useState } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
@@ -13,10 +13,10 @@ import { QueuedMessageDisplay } from './QueuedMessageDisplay.js';
 import { KeyboardShortcuts } from './KeyboardShortcuts.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
-import { ConfigInitDisplay } from '../components/ConfigInitDisplay.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
 
@@ -25,9 +25,30 @@ export const Composer = () => {
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
   const uiActions = useUIActions();
-  const { vimEnabled } = useVimMode();
+  const { vimEnabled } = useVimModeState();
 
-  const { showAutoAcceptIndicator } = uiState;
+  const {
+    showAutoAcceptIndicator,
+    streamingResponseLengthRef,
+    isReceivingContent,
+    responseCandidateTokens,
+    taskStartTokens,
+    taskStartStreamingChars,
+  } = uiState;
+
+  // Real-time token animation is performed inside LoadingIndicator itself, so
+  // the 100ms polling only re-renders that one component — keeping InputPrompt
+  // and Footer static avoids terminal flicker during streaming.
+  const isStreaming =
+    uiState.streamingState === StreamingState.Responding ||
+    uiState.streamingState === StreamingState.WaitingForConfirmation;
+  // `isStreaming` covers Responding|WaitingForConfirmation, but we only
+  // suppress during Responding (active token output). A confirmation prompt
+  // must remain visible regardless of width. Drop the redundant `isStreaming`
+  // guard so future expansions of `isStreaming` don't silently widen suppression.
+  const suppressBottomLoadingIndicator =
+    uiState.streamingState === StreamingState.Responding &&
+    uiState.terminalWidth <= 30;
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -35,39 +56,55 @@ export const Composer = () => {
     setShowShortcuts((prev) => !prev);
   }, []);
 
-  // State for suggestions visibility
+  // State for autocomplete-dropdown visibility (narrow signal). Drives the
+  // Footer / KeyboardShortcuts hide-when-dropdown-visible logic below; kept
+  // local to Composer because nothing outside this component needs the
+  // narrow signal.
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const handleSuggestionsVisibilityChange = useCallback(
-    (visible: boolean) => {
-      setShowSuggestions(visible);
-      // Also notify AppContainer for Tab key handling
-      uiActions.onSuggestionsVisibilityChange(visible);
+
+  // Broad signal — any input-area Tab consumer. Forwarded to AppContainer
+  // via UIActionsContext so useAutoAcceptIndicator's `shouldBlockTab` can
+  // suppress the Windows-only bare-Tab approval-mode fallback. See #4171.
+  const handleTabConsumerChange = useCallback(
+    (active: boolean) => {
+      uiActions.onTabConsumerChange(active);
     },
     [uiActions],
   );
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {!uiState.embeddedShellFocused && (
+      {!uiState.embeddedShellFocused && !suppressBottomLoadingIndicator && (
         <LoadingIndicator
           // Hide loading phrases when enableLoadingPhrases is explicitly false.
           // Using === false ensures phrases show by default when undefined.
-          thought={
-            uiState.streamingState === StreamingState.WaitingForConfirmation ||
-            config.getAccessibility()?.enableLoadingPhrases === false
-              ? undefined
-              : uiState.thought
-          }
           currentLoadingPhrase={
             config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
+          candidatesTokens={responseCandidateTokens}
+          taskStartTokens={taskStartTokens}
+          taskStartStreamingChars={taskStartStreamingChars}
+          streamingCharsRef={streamingResponseLengthRef}
+          isStreaming={isStreaming}
+          showResponseTokensPerSecond={config.getShowResponseTokensPerSecond()}
+          isReceivingContent={isReceivingContent}
         />
       )}
-
-      {!uiState.isConfigInitialized && <ConfigInitDisplay />}
+      {/*
+       * Narrow-terminal fallback: when the full LoadingIndicator is suppressed
+       * (≤30 cols, actively Responding) we still surface a minimal `esc to
+       * cancel` hint so users on ultra-narrow terminals retain the cancel
+       * affordance during long-running calls. The full timer/spinner/phrase
+       * UI is still suppressed to avoid layout breakage.
+       */}
+      {!uiState.embeddedShellFocused && suppressBottomLoadingIndicator && (
+        <Box paddingLeft={2}>
+          <Text color={theme.text.secondary}>({t('Esc to cancel')})</Text>
+        </Box>
+      )}
 
       <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
 
@@ -84,13 +121,15 @@ export const Composer = () => {
           config={config}
           slashCommands={uiState.slashCommands}
           commandContext={uiState.commandContext}
+          recentSlashCommands={uiState.recentSlashCommands}
           shellModeActive={uiState.shellModeActive}
           setShellModeActive={uiActions.setShellModeActive}
           approvalMode={showAutoAcceptIndicator}
           onEscapePromptChange={uiActions.onEscapePromptChange}
           onToggleShortcuts={handleToggleShortcuts}
           showShortcuts={showShortcuts}
-          onSuggestionsVisibilityChange={handleSuggestionsVisibilityChange}
+          onSuggestionsVisibilityChange={setShowSuggestions}
+          onTabConsumerChange={handleTabConsumerChange}
           focus={true}
           vimHandleInput={uiActions.vimHandleInput}
           isEmbeddedShellFocused={uiState.embeddedShellFocused}
@@ -99,11 +138,15 @@ export const Composer = () => {
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
               : '  ' + t('Type your message or @path/to/file')
           }
+          promptSuggestion={uiState.promptSuggestion}
+          onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
         />
       )}
 
       {/* Exclusive area: only one component visible at a time */}
-      {!showSuggestions &&
+      {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}
+      {uiState.isInputActive &&
+        !showSuggestions &&
         (showShortcuts ? (
           <KeyboardShortcuts />
         ) : (

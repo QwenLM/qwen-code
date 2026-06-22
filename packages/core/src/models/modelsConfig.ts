@@ -11,6 +11,8 @@ import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
+import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -301,6 +303,29 @@ export class ModelsConfig {
   }
 
   /**
+   * Get a fully resolved provider model config for the given authType/modelId.
+   * Returns undefined for raw runtime models that are not present in the registry.
+   */
+  getResolvedModel(
+    authType: AuthType,
+    modelId: string,
+  ): ResolvedModelConfig | undefined {
+    return this.modelRegistry.getModel(authType, modelId);
+  }
+
+  /**
+   * Get the display name for a model by its id.
+   * Looks up the model in the registry using the current authType and returns
+   * its resolved name. Falls back to the raw model id when the model is not
+   * found in the registry (e.g. runtime models or unknown models).
+   */
+  getModelDisplayName(modelId: string): string {
+    if (!this.currentAuthType) return modelId;
+    const resolved = this.modelRegistry.getModel(this.currentAuthType, modelId);
+    return resolved?.name ?? modelId;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Supports both registry models and raw model IDs.
    */
@@ -308,10 +333,11 @@ export class ModelsConfig {
     newModel: string,
     metadata?: ModelSwitchMetadata,
   ): Promise<void> {
-    // Special case: qwen-oauth VLM auto-switch - hot update in place
+    // Special case: qwen-oauth model switch - hot update in place
+    // coder-model supports vision capabilities and can be hot-updated
     if (
       this.currentAuthType === AuthType.QWEN_OAUTH &&
-      (newModel === DEFAULT_QWEN_MODEL || newModel === 'vision-model')
+      newModel === DEFAULT_QWEN_MODEL
     ) {
       this.strictModelProviderSelection = false;
       this._generationConfig.model = newModel;
@@ -337,12 +363,61 @@ export class ModelsConfig {
     }
 
     // Raw model override: update generation config in-place
-    this.strictModelProviderSelection = false;
-    this._generationConfig.model = newModel;
-    this.generationConfigSources['model'] = {
-      kind: 'programmatic',
-      detail: metadata?.reason || 'setModel',
-    };
+    const rollbackSnapshot = this.createStateSnapshotForRollback();
+    try {
+      this.strictModelProviderSelection = false;
+      this._generationConfig.model = newModel;
+      this.generationConfigSources['model'] = {
+        kind: 'programmatic',
+        detail: metadata?.reason || 'setModel',
+      };
+      this.applyRawModelDerivedDefaults(newModel);
+
+      if (this.onModelChange && this.currentAuthType) {
+        await this.onModelChange(this.currentAuthType, true);
+      }
+    } catch (error) {
+      this.rollbackToStateSnapshot(rollbackSnapshot);
+      throw error;
+    }
+  }
+
+  /**
+   * Raw model switches keep the current credentials, but model-derived
+   * generation defaults must follow the new model. Otherwise a switch from a
+   * multimodal registry model to a text-only raw model can keep stale image
+   * support and send unsupported inline media.
+   */
+  private applyRawModelDerivedDefaults(modelId: string): void {
+    if (this.shouldUpdateModelDerivedDefault('modalities')) {
+      this._generationConfig.modalities = defaultModalities(modelId);
+      this.generationConfigSources['modalities'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
+
+    if (this.shouldUpdateModelDerivedDefault('contextWindowSize')) {
+      this._generationConfig.contextWindowSize = tokenLimit(modelId, 'input');
+      this.generationConfigSources['contextWindowSize'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
+  }
+
+  private shouldUpdateModelDerivedDefault(
+    field: 'modalities' | 'contextWindowSize',
+  ): boolean {
+    const source = this.generationConfigSources[field];
+    return (
+      source === undefined ||
+      source.kind === 'computed' ||
+      source.kind === 'default' ||
+      source.kind === 'modelProviders' ||
+      source.kind === 'programmatic' ||
+      source.kind === 'unknown'
+    );
   }
 
   /**
@@ -359,7 +434,7 @@ export class ModelsConfig {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean },
+    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
   ): Promise<void> {
     // Check if this is a RuntimeModelSnapshot reference
     const runtimeModelSnapshotId = this.extractRuntimeModelSnapshotId(modelId);
@@ -377,24 +452,56 @@ export class ModelsConfig {
       const isAuthTypeChange = authType !== this.currentAuthType;
       this.currentAuthType = authType;
 
-      const model = this.modelRegistry.getModel(authType, modelId);
+      const model = this.modelRegistry.getModel(
+        authType,
+        modelId,
+        options?.baseUrl,
+      );
       if (!model) {
         throw new Error(
           `Model '${modelId}' not found for authType '${authType}'`,
         );
       }
 
+      const previousModelId = rollbackSnapshot.generationConfig.model || '';
+      const previousModel =
+        !isAuthTypeChange && previousModelId
+          ? (this.modelRegistry.getModel(
+              authType,
+              previousModelId,
+              rollbackSnapshot.generationConfig.baseUrl,
+            ) ?? this.modelRegistry.getModel(authType, previousModelId))
+          : undefined;
+      const canReusePreviousApiKey =
+        authType !== AuthType.QWEN_OAUTH &&
+        !isAuthTypeChange &&
+        !!rollbackSnapshot.generationConfig.apiKey &&
+        !!model.envKey &&
+        previousModel?.envKey === model.envKey &&
+        previousModel.baseUrl === model.baseUrl;
+      const previousApiKey = canReusePreviousApiKey
+        ? rollbackSnapshot.generationConfig.apiKey
+        : undefined;
+      const previousApiKeySource = canReusePreviousApiKey
+        ? rollbackSnapshot.generationConfigSources['apiKey']
+        : undefined;
+
       // Apply model defaults
       this.applyResolvedModelDefaults(model);
+      if (!this._generationConfig.apiKey && previousApiKey) {
+        this._generationConfig.apiKey = previousApiKey;
+        if (previousApiKeySource) {
+          this.generationConfigSources['apiKey'] =
+            ModelsConfig.deepClone(previousApiKeySource);
+        }
+      }
 
       // Clear active runtime model snapshot since we're now using a registry model
       this.activeRuntimeModelSnapshotId = undefined;
 
       const requiresRefresh = isAuthTypeChange
         ? true
-        : this.checkRequiresRefresh(
-            rollbackSnapshot.generationConfig.model || '',
-          );
+        : this.checkRequiresRefresh(previousModelId);
 
       if (this.onModelChange) {
         await this.onModelChange(authType, requiresRefresh);
@@ -405,12 +512,6 @@ export class ModelsConfig {
       throw error;
     }
   }
-
-  /**
-   * Prefix used to identify RuntimeModelSnapshot IDs.
-   * Chosen to avoid conflicts with real model IDs which may contain `-` or `:`.
-   */
-  private static readonly RUNTIME_SNAPSHOT_PREFIX = '$runtime|';
 
   /**
    * Build a RuntimeModelSnapshot ID from authType and modelId.
@@ -427,7 +528,7 @@ export class ModelsConfig {
     authType: AuthType,
     modelId: string,
   ): string {
-    return `${ModelsConfig.RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
+    return `${RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
   }
 
   /**
@@ -446,7 +547,7 @@ export class ModelsConfig {
    */
   private extractRuntimeModelSnapshotId(modelId: string): string | undefined {
     // Check if modelId starts with the runtime snapshot prefix
-    if (modelId.startsWith(ModelsConfig.RUNTIME_SNAPSHOT_PREFIX)) {
+    if (modelId.startsWith(RUNTIME_SNAPSHOT_PREFIX)) {
       // Verify the snapshot exists
       if (this.runtimeModelSnapshots.has(modelId)) {
         return modelId;
@@ -600,7 +701,7 @@ export class ModelsConfig {
     }
 
     // Check if model exists in registry - if so, don't create RuntimeModelSnapshot
-    if (this.modelRegistry.hasModel(currentAuthType, model)) {
+    if (this.modelRegistry.hasModel(currentAuthType, model, baseUrl)) {
       return;
     }
 
@@ -748,68 +849,32 @@ export class ModelsConfig {
       detail: 'baseUrl',
     };
 
-    // Generation config
+    // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
-    this._generationConfig.samplingParams = { ...(gc.samplingParams || {}) };
-    this.generationConfigSources['samplingParams'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.samplingParams',
-    };
-
-    this._generationConfig.timeout = gc.timeout;
-    this.generationConfigSources['timeout'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.timeout',
-    };
-
-    this._generationConfig.maxRetries = gc.maxRetries;
-    this.generationConfigSources['maxRetries'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.maxRetries',
-    };
-
-    this._generationConfig.enableCacheControl = gc.enableCacheControl;
-    this.generationConfigSources['enableCacheControl'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.enableCacheControl',
-    };
-
-    this._generationConfig.schemaCompliance = gc.schemaCompliance;
-    this.generationConfigSources['schemaCompliance'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.schemaCompliance',
-    };
-
-    this._generationConfig.reasoning = gc.reasoning;
-    this.generationConfigSources['reasoning'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.reasoning',
-    };
-
-    // Context window size: use provider value if set, otherwise auto-detect from model
-    if (gc.contextWindowSize !== undefined) {
-      this._generationConfig.contextWindowSize = gc.contextWindowSize;
-      this.generationConfigSources['contextWindowSize'] = {
+    for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._generationConfig as any)[field] = gc[field];
+      this.generationConfigSources[field] = {
         kind: 'modelProviders',
         authType: model.authType,
         modelId: model.id,
-        detail: 'generationConfig.contextWindowSize',
+        detail: `generationConfig.${field}`,
       };
-    } else {
+    }
+
+    // contextWindowSize fallback: auto-detect from model when not set by provider
+    if (gc.contextWindowSize === undefined) {
       this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
       this.generationConfigSources['contextWindowSize'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
+
+    // modalities fallback: auto-detect from model when not set by provider
+    if (gc.modalities === undefined) {
+      this._generationConfig.modalities = defaultModalities(model.id);
+      this.generationConfigSources['modalities'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
       };
@@ -827,7 +892,7 @@ export class ModelsConfig {
    * - We're checking if switching between two models within the SAME authType needs refresh
    *
    * Examples:
-   * - Qwen OAuth: coder-model -> vision-model (same authType, hot-update safe)
+   * - Qwen OAuth: coder-model switches (same authType, hot-update safe)
    * - OpenAI: model-a -> model-b with same envKey (same authType, hot-update safe)
    * - OpenAI: gpt-4 -> deepseek-chat with different envKey (same authType, needs refresh)
    *
@@ -844,19 +909,21 @@ export class ModelsConfig {
     }
 
     // For Qwen OAuth, model switches within the same authType can always be hot-updated
-    // (coder-model <-> vision-model don't require ContentGenerator recreation)
+    // (coder-model supports vision capabilities and doesn't require ContentGenerator recreation)
     if (authType === AuthType.QWEN_OAUTH) {
       return false;
     }
 
-    // Get previous and current model configs
-    const previousModel = this.modelRegistry.getModel(
-      authType,
-      previousModelId,
-    );
+    // Get previous and current model configs.
+    // Use current baseUrl to disambiguate when multiple models share the same id.
     const currentModel = this.modelRegistry.getModel(
       authType,
       this._generationConfig.model || '',
+      this._generationConfig.baseUrl || undefined,
+    );
+    const previousModel = this.modelRegistry.getModel(
+      authType,
+      previousModelId,
     );
 
     // If either model is not in registry, require refresh to be safe
@@ -888,24 +955,99 @@ export class ModelsConfig {
    * 4. If no default is available, leave the generationConfig incomplete and let
    *    resolveContentGeneratorConfigWithSources throw exceptions as expected.
    */
-  syncAfterAuthRefresh(authType: AuthType, modelId?: string): void {
+  syncAfterAuthRefresh(
+    authType: AuthType,
+    modelId?: string,
+    providerBaseUrlOverride?: string,
+  ): void {
     this.strictModelProviderSelection = false;
     const previousAuthType = this.currentAuthType;
     this.currentAuthType = authType;
 
     // Step 1: If modelId exists in registry, always use config from modelRegistry
-    // Manual credentials won't have a modelId that matches a provider model (handleAuthSelect prevents it),
+    // Manual credentials won't have a modelId that matches a provider model (the /auth provider-setup flow prevents it),
     // so if modelId exists in registry, we should always use provider config.
     // This handles provider switching even within the same authType.
-    if (modelId && this.modelRegistry.hasModel(authType, modelId)) {
-      const resolved = this.modelRegistry.getModel(authType, modelId);
-      if (resolved) {
-        this.applyResolvedModelDefaults(resolved);
-        this.strictModelProviderSelection = true;
-        // Clear active runtime model snapshot since we're now using a registry model
-        this.activeRuntimeModelSnapshotId = undefined;
-        return;
+    // Prefer exact match (id+baseUrl) when the current baseUrl was set by a
+    // model provider switch; fall back to any model with the same id.
+    const providerBaseUrl =
+      providerBaseUrlOverride ??
+      (this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
+        ? this._generationConfig.baseUrl
+        : undefined);
+    const resolved = modelId
+      ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
+        this.modelRegistry.getModel(authType, modelId))
+      : undefined;
+    if (resolved) {
+      // When authType and modelId haven't changed (startup/restart scenario),
+      // the current apiKey was already correctly resolved by
+      // resolveCliGenerationConfig. Save it so we can restore it if
+      // applyResolvedModelDefaults clears it (i.e. process.env[envKey] is
+      // absent). For cross-provider switches (different modelId), we must
+      // NOT preserve the previous key — it may belong to a different
+      // service. Also detect hot-reload scenarios where the provider
+      // config changed in place (same modelId, different envKey/baseUrl)
+      // by comparing fields that applyResolvedModelDefaults sets. Use
+      // baseUrl source === 'modelProviders' as the "has been applied"
+      // signal — it covers both envKey and no-envKey models, and avoids
+      // false positives when startup baseUrl differs from registry
+      // default. (See #3417)
+      const hasBeenApplied =
+        this.generationConfigSources['baseUrl']?.kind === 'modelProviders';
+      const isProviderChanged =
+        hasBeenApplied &&
+        (this._generationConfig.apiKeyEnvKey !== resolved.envKey ||
+          this._generationConfig.baseUrl !== resolved.baseUrl);
+      const isUnchanged =
+        previousAuthType === authType &&
+        this._generationConfig.model === modelId &&
+        !isProviderChanged;
+      const savedApiKey = isUnchanged
+        ? this._generationConfig.apiKey
+        : undefined;
+      const savedApiKeySource = isUnchanged
+        ? this.generationConfigSources['apiKey']
+          ? { ...this.generationConfigSources['apiKey'] }
+          : undefined
+        : undefined;
+      const baseUrlSource = this.generationConfigSources['baseUrl'];
+      const shouldPreserveResolvedBaseUrl =
+        isUnchanged &&
+        !!this._generationConfig.baseUrl &&
+        (baseUrlSource?.kind === 'cli' ||
+          baseUrlSource?.kind === 'env' ||
+          baseUrlSource?.kind === 'settings');
+      const savedBaseUrl = shouldPreserveResolvedBaseUrl
+        ? this._generationConfig.baseUrl
+        : undefined;
+      const savedBaseUrlSource = shouldPreserveResolvedBaseUrl
+        ? baseUrlSource
+          ? { ...baseUrlSource }
+          : undefined
+        : undefined;
+
+      this.applyResolvedModelDefaults(resolved);
+
+      // Restore the previously-resolved apiKey if applyResolvedModelDefaults
+      // cleared it (env var not found) and this is the same model.
+      if (isUnchanged && !this._generationConfig.apiKey && savedApiKey) {
+        this._generationConfig.apiKey = savedApiKey;
+        if (savedApiKeySource) {
+          this.generationConfigSources['apiKey'] = savedApiKeySource;
+        }
       }
+      if (savedBaseUrl) {
+        this._generationConfig.baseUrl = savedBaseUrl;
+        if (savedBaseUrlSource) {
+          this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
+        }
+      }
+
+      this.strictModelProviderSelection = true;
+      // Clear active runtime model snapshot since we're now using a registry model
+      this.activeRuntimeModelSnapshotId = undefined;
+      return;
     }
 
     // Step 2: Check if there are existing credentials from other sources (not modelProviders)
@@ -1002,7 +1144,7 @@ export class ModelsConfig {
     }
 
     // Check if model exists in registry - if so, it's not a runtime model
-    if (this.modelRegistry.hasModel(currentAuthType, currentModel)) {
+    if (this.modelRegistry.hasModel(currentAuthType, currentModel, baseUrl)) {
       // Current is a registry model, clear any previous RuntimeModelSnapshot for this authType
       this.clearRuntimeModelSnapshotForAuthType(currentAuthType);
       return undefined;
@@ -1219,5 +1361,17 @@ export class ModelsConfig {
     ) {
       this.activeRuntimeModelSnapshotId = undefined;
     }
+  }
+
+  /**
+   * Reload model providers configuration at runtime.
+   * This enables hot-reloading of modelProviders settings without restarting the CLI.
+   *
+   * @param modelProvidersConfig - The updated model providers configuration
+   */
+  reloadModelProvidersConfig(
+    modelProvidersConfig?: ModelProvidersConfig,
+  ): void {
+    this.modelRegistry.reloadModels(modelProvidersConfig);
   }
 }

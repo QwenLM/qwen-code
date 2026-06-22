@@ -6,7 +6,7 @@
 
 import { BaseEmitter } from './BaseEmitter.js';
 import type { TodoItem } from '../types.js';
-import type * as acp from '../../acp.js';
+import type { PlanEntry } from '@agentclientprotocol/sdk';
 
 /**
  * Handles emission of plan/todo updates.
@@ -22,15 +22,26 @@ export class PlanEmitter extends BaseEmitter {
    * @param todos - Array of todo items to send as plan entries
    */
   async emitPlan(todos: TodoItem[]): Promise<void> {
-    const entries: acp.PlanEntry[] = todos.map((todo) => ({
+    const entries: PlanEntry[] = todos.map((todo) => ({
       content: todo.content,
       priority: 'medium' as const, // Default priority since todos don't have priority
       status: todo.status,
     }));
 
+    // Snapshot the running cumulative usage as a per-snapshot baseline. The
+    // web-shell diffs consecutive snapshots to attribute tokens/API time to the
+    // task that ran between two todo updates. Copied so later accumulation
+    // doesn't mutate this snapshot.
+    //
+    // ORDERING INVARIANT: the turn's usage must have been folded into
+    // cumulativeUsage (MessageEmitter.emitUsageMetadata) before this snapshot —
+    // emitting a plan ahead of its turn's usage would record a stale baseline
+    // and zero out that task's stats.
+    const cumulative = this.ctx.cumulativeUsage;
     await this.sendUpdate({
       sessionUpdate: 'plan',
       entries,
+      ...(cumulative ? { _meta: { stats: { ...cumulative } } } : {}),
     });
   }
 

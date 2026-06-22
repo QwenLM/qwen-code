@@ -17,6 +17,7 @@ import {
 import type {
   SessionMetrics,
   ModelMetrics,
+  ModelMetricsCore,
   ToolCallStats,
 } from '@qwen-code/qwen-code-core';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core';
@@ -28,7 +29,10 @@ export enum ToolCallDecision {
   AUTO_ACCEPT = 'auto_accept',
 }
 
-function areModelMetricsEqual(a: ModelMetrics, b: ModelMetrics): boolean {
+function areModelMetricsCoreEqual(
+  a: ModelMetricsCore,
+  b: ModelMetricsCore,
+): boolean {
   if (
     a.api.totalRequests !== b.api.totalRequests ||
     a.api.totalErrors !== b.api.totalErrors ||
@@ -41,10 +45,26 @@ function areModelMetricsEqual(a: ModelMetrics, b: ModelMetrics): boolean {
     a.tokens.candidates !== b.tokens.candidates ||
     a.tokens.total !== b.tokens.total ||
     a.tokens.cached !== b.tokens.cached ||
-    a.tokens.thoughts !== b.tokens.thoughts ||
-    a.tokens.tool !== b.tokens.tool
+    a.tokens.thoughts !== b.tokens.thoughts
   ) {
     return false;
+  }
+  return true;
+}
+
+function areModelMetricsEqual(a: ModelMetrics, b: ModelMetrics): boolean {
+  if (!areModelMetricsCoreEqual(a, b)) return false;
+
+  const aKeys = Object.keys(a.bySource);
+  const bKeys = Object.keys(b.bySource);
+  if (aKeys.length !== bKeys.length) return false;
+
+  for (const key of aKeys) {
+    const aSource = a.bySource[key];
+    const bSource = b.bySource[key];
+    if (!bSource || !areModelMetricsCoreEqual(aSource, bSource)) {
+      return false;
+    }
   }
   return true;
 }
@@ -138,7 +158,7 @@ function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
   return true;
 }
 
-export type { SessionMetrics, ModelMetrics };
+export type { SessionMetrics, ModelMetrics, ModelMetricsCore };
 
 export interface SessionStatsState {
   sessionId: string;
@@ -171,6 +191,7 @@ interface SessionStatsContextValue {
   startNewSession: (sessionId: string) => void;
   startNewPrompt: () => void;
   getPromptCount: () => number;
+  seedPromptCount: (count: number) => void;
 }
 
 // --- Context Definition ---
@@ -251,14 +272,22 @@ export const SessionStatsProvider: React.FC<{
     [stats.promptCount],
   );
 
+  const seedPromptCount = useCallback((count: number) => {
+    setStats((prevState) => ({
+      ...prevState,
+      promptCount: Math.max(prevState.promptCount, count),
+    }));
+  }, []);
+
   const value = useMemo(
     () => ({
       stats,
       startNewSession,
       startNewPrompt,
       getPromptCount,
+      seedPromptCount,
     }),
-    [stats, startNewSession, startNewPrompt, getPromptCount],
+    [stats, startNewSession, startNewPrompt, getPromptCount, seedPromptCount],
   );
 
   return (

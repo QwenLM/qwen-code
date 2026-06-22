@@ -5,6 +5,8 @@
  */
 
 import { AuthType } from '../core/contentGenerator.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   type ModelConfig,
@@ -33,6 +35,19 @@ function validateAuthTypeKey(key: string): AuthType | undefined {
 
   // Invalid key
   return undefined;
+}
+
+function shouldUseCanonicalModalities(modelId: string): boolean {
+  return /^minimax-m3/i.test(modelId.trim().toLowerCase());
+}
+
+/**
+ * Build a composite registry key from model id and optional baseUrl.
+ * Two models with the same id but different baseUrls are distinct entries.
+ * When baseUrl is omitted/empty the key is just the id (backward compatible).
+ */
+export function modelRegistryKey(id: string, baseUrl?: string): string {
+  return baseUrl ? `${id}\0${baseUrl}` : id;
 }
 
 /**
@@ -82,7 +97,10 @@ export class ModelRegistry {
   }
 
   /**
-   * Register models for an authType
+   * Register models for an authType.
+   * Uniqueness is determined by the composite key (id + baseUrl).
+   * Two models with the same id but different baseUrls are treated as distinct.
+   * If multiple models share both id and baseUrl, the first one takes precedence.
    */
   private registerAuthTypeModels(
     authType: AuthType,
@@ -91,8 +109,15 @@ export class ModelRegistry {
     const modelMap = new Map<string, ResolvedModelConfig>();
 
     for (const config of models) {
+      const key = modelRegistryKey(config.id, config.baseUrl);
+      if (modelMap.has(key)) {
+        debugLogger.warn(
+          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for authType "${authType}". Using the first registered config.`,
+        );
+        continue;
+      }
       const resolved = this.resolveModelConfig(config, authType);
-      modelMap.set(config.id, resolved);
+      modelMap.set(key, resolved);
     }
 
     this.modelsByAuthType.set(authType, modelMap);
@@ -113,27 +138,52 @@ export class ModelRegistry {
       capabilities: model.capabilities,
       authType: model.authType,
       isVision: model.capabilities?.vision ?? false,
-      contextWindowSize: model.generationConfig.contextWindowSize,
+      contextWindowSize:
+        model.generationConfig.contextWindowSize ?? tokenLimit(model.id),
+      // `modalities` is auto-filled in `resolveModelConfig`, so it is
+      // always defined on `ResolvedModelConfig` — no fallback needed here.
+      modalities: model.generationConfig.modalities,
+      baseUrl: model.baseUrl,
+      envKey: model.envKey,
     }));
   }
 
   /**
-   * Get model configuration by authType and modelId
+   * Get model configuration by authType and modelId.
+   * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
+   * When baseUrl is omitted, tries the plain id first (backward compatible),
+   * then scans all entries for the first match by model id.
    */
   getModel(
     authType: AuthType,
     modelId: string,
+    baseUrl?: string,
   ): ResolvedModelConfig | undefined {
     const models = this.modelsByAuthType.get(authType);
-    return models?.get(modelId);
+    if (!models) return undefined;
+
+    if (baseUrl) {
+      return models.get(modelRegistryKey(modelId, baseUrl));
+    }
+
+    // Try plain id key first (models registered without explicit baseUrl)
+    const plain = models.get(modelId);
+    if (plain) return plain;
+
+    // Scan for the first entry with matching model id
+    for (const model of models.values()) {
+      if (model.id === modelId) return model;
+    }
+    return undefined;
   }
 
   /**
-   * Check if model exists for given authType
+   * Check if model exists for given authType.
+   * When baseUrl is provided, checks the exact composite key.
+   * When baseUrl is omitted, checks plain id and scans by model id.
    */
-  hasModel(authType: AuthType, modelId: string): boolean {
-    const models = this.modelsByAuthType.get(authType);
-    return models?.has(modelId) ?? false;
+  hasModel(authType: AuthType, modelId: string, baseUrl?: string): boolean {
+    return this.getModel(authType, modelId, baseUrl) !== undefined;
   }
 
   /**
@@ -161,12 +211,24 @@ export class ModelRegistry {
   ): ResolvedModelConfig {
     this.validateModelConfig(config, authType);
 
+    const generationConfig = { ...(config.generationConfig ?? {}) };
+    // Auto-fill modalities from the model name when the provider didn't set
+    // them explicitly. Without this, downstream consumers that read straight
+    // from the registry (e.g. sub-agents via getResolvedModel) would inherit
+    // the parent session's modalities instead of the agent's own.
+    if (
+      generationConfig.modalities === undefined ||
+      shouldUseCanonicalModalities(config.id)
+    ) {
+      generationConfig.modalities = defaultModalities(config.id);
+    }
+
     return {
       ...config,
       authType,
       name: config.name || config.id,
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
-      generationConfig: config.generationConfig ?? {},
+      generationConfig,
       capabilities: config.capabilities || {},
     };
   }
@@ -179,6 +241,41 @@ export class ModelRegistry {
       throw new Error(
         `Model config in authType '${authType}' missing required field: id`,
       );
+    }
+  }
+
+  /**
+   * Reload models from updated configuration.
+   * Clears existing user-configured models and re-registers from new config.
+   * Preserves hard-coded qwen-oauth models.
+   */
+  reloadModels(modelProvidersConfig?: ModelProvidersConfig): void {
+    // Clear existing user-configured models (preserve qwen-oauth)
+    for (const authType of this.modelsByAuthType.keys()) {
+      if (authType !== AuthType.QWEN_OAUTH) {
+        this.modelsByAuthType.delete(authType);
+      }
+    }
+
+    // Re-register user-configured models for other authTypes
+    if (modelProvidersConfig) {
+      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
+        const authType = validateAuthTypeKey(rawKey);
+
+        if (!authType) {
+          debugLogger.warn(
+            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
+          );
+          continue;
+        }
+
+        // Skip qwen-oauth as it uses hard-coded models
+        if (authType === AuthType.QWEN_OAUTH) {
+          continue;
+        }
+
+        this.registerAuthTypeModels(authType, models);
+      }
     }
   }
 }

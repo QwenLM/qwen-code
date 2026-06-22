@@ -12,10 +12,46 @@ Subagents are independent AI assistants that:
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
+## Fork Subagent
+
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent, which runs to completion and returns its result inline.
+
+### How Fork Differs from Named Subagents
+
+|               | Named Subagent                    | Fork Subagent                                         |
+| ------------- | --------------------------------- | ----------------------------------------------------- |
+| Context       | Starts fresh, no parent history   | Inherits parent's full conversation history           |
+| System prompt | Uses its own configured prompt    | Uses parent's exact system prompt (for cache sharing) |
+| Execution     | Blocks the parent until done      | Runs in background, parent continues immediately      |
+| Use case      | Specialized tasks (testing, docs) | Parallel tasks that need the current context          |
+
+### When Fork is Used
+
+The AI automatically uses fork when it needs to:
+
+- Run multiple research tasks in parallel (e.g., "investigate module A, B, and C")
+- Perform background work while continuing the main conversation
+- Delegate tasks that require understanding of the current conversation context
+
+### Prompt Cache Sharing
+
+All forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents.
+
+### Recursive Fork Prevention
+
+Fork children cannot create further forks. This is enforced at runtime — if a fork attempts to spawn another fork, it receives an error instructing it to execute tasks directly.
+
+### Current Limitations
+
+- **No result feedback**: Fork results are reflected in the UI progress display but are not automatically fed back into the main conversation. The parent AI sees a placeholder message and cannot act on the fork's output.
+- **No worktree isolation**: Forks share the parent's working directory. Concurrent file modifications from multiple forks may conflict.
+
 ## Key Benefits
 
 - **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
 - **Context Isolation**: Keep specialized work separate from your main conversation
+- **Context Inheritance**: Fork subagents inherit the full conversation for context-heavy parallel tasks
+- **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
 - **Reusability**: Save and reuse agent configurations across projects and sessions
 - **Controlled Access**: Limit which tools each agent can use for security and focus
 - **Progress Visibility**: Monitor agent execution with real-time progress updates
@@ -23,7 +59,7 @@ Subagents are independent AI assistants that:
 ## How Subagents Work
 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it wants to inherit the full conversation context and discard the intermediate output
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
 4. **Results**: They return results and execution summaries back to the main conversation
 
@@ -98,16 +134,207 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 ---
 name: agent-name
 description: Brief description of when and how to use this agent
-tools:
-	- tool1
-	- tool2
-	- tool3 # Optional
+model: inherit # Optional: inherit, fast, modelId, or authType:modelId
+approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo, bubble
+tools:         # Optional: allowlist of tools
+  - tool1
+  - tool2
+disallowedTools: # Optional: blocklist of tools
+  - tool3
 ---
 
 System prompt content goes here.
 Multiple paragraphs are supported.
-You can use ${variable} templating for dynamic content.
 ```
+
+#### Model Selection
+
+Use the optional `model` frontmatter field to control which model a subagent uses:
+
+- `inherit`: Use the same model as the main conversation.
+- Omit the field: Same as `inherit`.
+- `fast`: Use the configured `fastModel`. If no valid fast model is configured,
+  the subagent falls back to `inherit`.
+- `glm-5`: Use that model ID. Qwen Code first checks the main conversation's
+  auth type; if the model is not available there, it can resolve the model from
+  another configured provider.
+- `openai:gpt-4o`: Use an explicit provider and model ID. This is useful when a
+  subagent should run on a model registered under a different auth type from the
+  main conversation.
+
+For example:
+
+```
+---
+name: fast-reviewer
+description: Reviews small diffs with the configured fast model
+model: fast
+tools:
+  - read_file
+  - grep_search
+---
+```
+
+```
+---
+name: openai-researcher
+description: Uses an OpenAI-compatible provider for research tasks
+model: openai:gpt-4o
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+```
+
+The `fast` selector uses the same `fastModel` setting configured in
+`settings.json` or with `/model --fast`. That setting may itself refer to a
+model under another configured auth type, such as `openai:deepseek-v4-flash`.
+When the selector resolves to another auth type, Qwen Code creates a dedicated
+runtime provider for that subagent request and sends the provider only the bare
+model ID.
+
+#### Permission Mode
+
+Use the optional `approvalMode` frontmatter field to control how a subagent's tool calls are approved. Valid values:
+
+- `default`: Tools require interactive approval (same as the main session default)
+- `plan`: Analyze-only mode — the agent plans but does not execute changes
+- `auto-edit`: Tools are auto-approved without prompting (recommended for most agents)
+- `yolo`: All tools auto-approved, including potentially destructive ones
+- `bubble`: Background-agent tool approvals are surfaced in the parent session
+
+If you omit this field, the subagent's permission mode is determined automatically:
+
+- If the parent session is in **yolo** or **auto-edit** mode, the subagent inherits that mode. A permissive parent stays permissive.
+- If the parent session is in **plan** mode, the subagent stays in plan mode. An analyze-only session cannot mutate files through a delegated agent.
+- If the parent session is in **default** mode (in a trusted folder), the subagent gets **auto-edit** so it can work autonomously.
+
+When you do set `approvalMode`, the parent's permissive modes still take priority. For example, if the parent is in yolo mode, a subagent with `approvalMode: plan` will still run in yolo mode.
+
+```
+---
+name: cautious-reviewer
+description: Reviews code without making changes
+approvalMode: plan
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+
+You are a code reviewer. Analyze the code and report findings.
+Do not modify any files.
+```
+
+#### Tool Configuration
+
+Use `tools` and `disallowedTools` to control which tools a subagent can access.
+
+**`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
+
+```
+---
+name: reader
+description: Read-only agent for code exploration
+tools:
+  - read_file
+  - grep_search
+  - glob
+  - list_directory
+---
+```
+
+**`disallowedTools` (blocklist):** When specified, the listed tools are removed from the subagent's tool pool. This is useful when you want "everything except X" without listing every permitted tool.
+
+```
+---
+name: safe-worker
+description: Agent that cannot modify files
+disallowedTools:
+  - write_file
+  - edit
+  - run_shell_command
+---
+```
+
+If both `tools` and `disallowedTools` are set, the allowlist is applied first, then the blocklist removes from that set.
+
+**MCP tools** follow the same rules. If a subagent has no `tools` list, it inherits all MCP tools from the parent session. If a subagent has an explicit `tools` list, it only gets MCP tools that are explicitly named in that list.
+
+The `disallowedTools` field supports MCP server-level patterns:
+
+- `mcp__server__tool_name` — blocks a specific MCP tool
+- `mcp__server` — blocks all tools from that MCP server
+
+```
+---
+name: no-slack
+description: Agent without Slack access
+disallowedTools:
+  - mcp__slack
+---
+```
+
+#### Claude Code Compatibility Fields
+
+Qwen Code accepts the Claude Code 2.1.168 frontmatter fields below so you
+can drop a CC agent file into `.qwen/agents/` and have the supported fields
+parse identically. Optional fields with invalid values are silently dropped
+at parse time rather than rejected — the same lenient posture CC uses.
+
+| Field            | Type             | Notes                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                                                           |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins. The legacy nested value is pruned from the on-disk file on save to avoid two sources of truth.                                                           |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is preserved for backward compatibility. Other values are silently dropped on parse.                                         |
+| `mcpServers`     | record of specs  | Per-agent MCP server overrides. Merged with the session-level MCP server set when the agent spawns; on key collision the agent's spec wins (matching CC's `scope: 'agent'` semantics). Malformed entries are dropped per-key with a warning rather than failing the whole agent. |
+| `hooks`          | record of arrays | Per-agent hooks. Keys are CC hook event names (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, …); values are arrays of `{ matcher?, hooks: [...] }` definitions in the same shape as `settings.json`'s `hooks` field. Registered while the agent runs, removed when it stops.  |
+
+Example with all of the above:
+
+```
+---
+name: rigorous-reviewer
+description: Deep code review with a turn cap
+permissionMode: plan
+maxTurns: 50
+color: cyan
+tools:
+  - read_file
+  - grep_search
+  - glob
+mcpServers:
+  filesystem:
+    type: stdio
+    command: node
+    args: [/usr/local/lib/mcp-fs/server.js]
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: echo "review-agent about to run a shell command"
+---
+
+You are a code reviewer. Analyze the code thoroughly and report findings
+ordered by severity.
+```
+
+The remaining CC frontmatter fields — `effort`, `skills`, `initialPrompt`,
+`memory`, `isolation` — are documented in the declarative-agent design doc
+and land in follow-up PRs once the prerequisite infrastructure exists
+(`effort` needs a model-layer parameter; `memory` needs a scoped memory
+subsystem; `--agent` CLI flag enables `initialPrompt`; etc.).
+
+> **`hooks` v1 limitation.** While a subagent declaring `hooks` is running,
+> its hook entries fire for every matching event in the session, not only
+> for that subagent's own tool calls. If two subagents with different
+> per-agent hook sets run concurrently, both sets fire for both agents.
+> Per-agent scope filtering at hook-firing time is left to a follow-up;
+> for v1, prefer per-agent hooks that are safe to fire globally for the
+> duration of the agent's run (e.g. logging) over hooks that mutate
+> behavior.
 
 #### Example Usage
 
@@ -117,12 +344,7 @@ name: project-documenter
 description: Creates project documentation and README files
 ---
 
-You are a documentation specialist for the ${project_name} project.
-
-Your task: ${task_description}
-
-Working directory: ${current_directory}
-Generated on: ${timestamp}
+You are a documentation specialist.
 
 Focus on creating clear, comprehensive documentation that helps both
 new contributors and end users understand the project.
@@ -210,10 +432,9 @@ tools:
   - read_file
   - write_file
   - read_many_files
-  - web_search
 ---
 
-You are a technical documentation specialist for ${project_name}.
+You are a technical documentation specialist.
 
 Your role is to create clear, comprehensive documentation that serves both
 developers and end users. Focus on:
@@ -496,9 +717,21 @@ Always follow these standards:
 
 ## Security Considerations
 
-- **Tool Restrictions**: Subagents only have access to their configured tools
+- **Tool Restrictions**: Use `tools` to limit which tools a subagent can access, or `disallowedTools` to block specific tools while inheriting everything else
+- **Permission Mode**: Subagents inherit their parent's permission mode by default. Plan-mode sessions cannot escalate to auto-edit through delegated agents. Privileged modes (auto-edit, yolo) are blocked in untrusted folders.
+- **Provider Selection**: A subagent with `model: authType:modelId`, or
+  `model: fast` where `fastModel` resolves to another auth type, sends that
+  subagent's model requests to the selected provider. Make sure that provider is
+  appropriate for the subagent's task and data.
 - **Sandboxing**: All tool execution follows the same security model as direct tool use
 - **Audit Trail**: All Subagents actions are logged and visible in real-time
 - **Access Control**: Project and user-level separation provides appropriate boundaries
 - **Sensitive Information**: Avoid including secrets or credentials in agent configurations
 - **Production Environments**: Consider separate agents for production vs development environments
+
+## Limits
+
+The following soft warnings apply to Subagent configurations (no hard limits are enforced):
+
+- **Description Field**: A warning is shown for descriptions exceeding 1,000 characters
+- **System Prompt**: A warning is shown for system prompts exceeding 10,000 characters

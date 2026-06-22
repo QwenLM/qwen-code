@@ -48,6 +48,28 @@ exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a fenced code 
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a fenced code block without a language 1`] = `" 1 plain text"`;
 
+exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a single-column table 1`] = `
+"
+[38;2;108;112;134m┌───────┐[39m
+[38;2;108;112;134m│[39m [38;2;137;180;250m[1mName [22m[39m [38;2;108;112;134m│[39m
+[38;2;108;112;134m├───────┤[39m
+[38;2;108;112;134m│[39m Alice [38;2;108;112;134m│[39m
+[38;2;108;112;134m├───────┤[39m
+[38;2;108;112;134m│[39m Bob   [38;2;108;112;134m│[39m
+[38;2;108;112;134m└───────┘[39m
+"
+`;
+
+exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a single-column table with center alignment 1`] = `
+"
+[38;2;108;112;134m┌───────┐[39m
+[38;2;108;112;134m│[39m [38;2;137;180;250m[1mName [22m[39m [38;2;108;112;134m│[39m
+[38;2;108;112;134m├───────┤[39m
+[38;2;108;112;134m│[39m Alice [38;2;108;112;134m│[39m
+[38;2;108;112;134m└───────┘[39m
+"
+`;
+
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders headers with correct levels 1`] = `
 "Header 1
 Header 2
@@ -80,12 +102,13 @@ exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders ordered lists 
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders tables correctly 1`] = `
 "
-┌──────────┬──────────┐
-│ Header 1 │ Header 2 │
-├──────────┼──────────┤
-│ Cell 1   │ Cell 2   │
-│ Cell 3   │ Cell 4   │
-└──────────┴──────────┘
+[38;2;108;112;134m┌──────────┬──────────┐[39m
+[38;2;108;112;134m│[39m [38;2;137;180;250m[1mHeader 1[22m[39m [38;2;108;112;134m│[39m [38;2;137;180;250m[1mHeader 2[22m[39m [38;2;108;112;134m│[39m
+[38;2;108;112;134m├──────────┼──────────┤[39m
+[38;2;108;112;134m│[39m Cell 1   [38;2;108;112;134m│[39m  Cell 2  [38;2;108;112;134m│[39m
+[38;2;108;112;134m├──────────┼──────────┤[39m
+[38;2;108;112;134m│[39m Cell 3   [38;2;108;112;134m│[39m  Cell 4  [38;2;108;112;134m│[39m
+[38;2;108;112;134m└──────────┴──────────┘[39m
 "
 `;
 
@@ -136,6 +159,28 @@ exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a fenced co
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a fenced code block without a language 1`] = `" 1 plain text"`;
 
+exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a single-column table 1`] = `
+"
+[38;2;108;112;134m┌───────┐[39m
+[38;2;108;112;134m│[39m [38;2;137;180;250m[1mName [22m[39m [38;2;108;112;134m│[39m
+[38;2;108;112;134m├───────┤[39m
+[38;2;108;112;134m│[39m Alice [38;2;108;112;134m│[39m
+[38;2;108;112;134m├───────┤[39m
+[38;2;108;112;134m│[39m Bob   [38;2;108;112;134m│[39m
+[38;2;108;112;134m└───────┘[39m
+"
+`;
+
+exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a single-column table with center alignment 1`] = `
+"
+[38;2;108;112;134m┌───────┐[39m
+[38;2;108;112;134m│[39m [38;2;137;180;250m[1mName [22m[39m [38;2;108;112;134m│[39m
+[38;2;108;112;134m├───────┤[39m
+[38;2;108;112;134m│[39m Alice [38;2;108;112;134m│[39m
+[38;2;108;112;134m└───────┘[39m
+"
+`;
+
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders headers with correct levels 1`] = `
 "Header 1
 Header 2
@@ -168,12 +213,13 @@ exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders ordered lis
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders tables correctly 1`] = `
 "
-┌──────────┬──────────┐
-│ Header 1 │ Header 2 │
-├──────────┼──────────┤
-│ Cell 1   │ Cell 2   │
-│ Cell 3   │ Cell 4   │
-└──────────┴──────────┘
+[38;2;108;112;134m┌──────────┬──────────┐[39m
+[38;2;108;112;134m│[39m [38;2;137;180;250m[1mHeader 1[22m[39m [38;2;108;112;134m│[39m [38;2;137;180;250m[1mHeader 2[22m[39m [38;2;108;112;134m│[39m
+[38;2;108;112;134m├──────────┼──────────┤[39m
+[38;2;108;112;134m│[39m Cell 1   [38;2;108;112;134m│[39m  Cell 2  [38;2;108;112;134m│[39m
+[38;2;108;112;134m├──────────┼──────────┤[39m
+[38;2;108;112;134m│[39m Cell 3   [38;2;108;112;134m│[39m  Cell 4  [38;2;108;112;134m│[39m
+[38;2;108;112;134m└──────────┴──────────┘[39m
 "
 `;
 

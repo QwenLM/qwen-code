@@ -6,7 +6,6 @@
 
 import React from 'react';
 import { Text, Box } from 'ink';
-import { common, createLowlight } from 'lowlight';
 import type {
   Root,
   Element,
@@ -22,10 +21,64 @@ import {
 } from '../components/shared/MaxSizedBox.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  getLowlightInstance,
+  isLowlightCoolingDown,
+  loadLowlight,
+  type Lowlight,
+} from './lowlightLoader.js';
 
-// Configure theming and parsing utilities.
-const lowlight = createLowlight(common);
 const debugLogger = createDebugLogger('CODE_COLORIZER');
+
+// Regex for structural box-drawing characters that are strong indicators of
+// ASCII art/diagrams. These characters (│ ├ └ ┌ ┐ ┘ ┬ ┴ ┼) almost never
+// appear in real code — their presence is a reliable signal of diagram content.
+const STRUCTURAL_BOX_RE = /[│├└┌┐┘┬┴┼]/;
+
+// Regex for detecting high ratio of CJK characters (for Chinese text blocks).
+const CJK_RE = /[\u4E00-\u9FFF\u3400-\u4DBF]/g; // CJK Unified + Extension A
+
+/**
+ * Heuristic: detect lines that are unlikely to be real code and would confuse
+ * `lowlight.highlightAuto()`. Box-drawing characters in unlabeled code blocks
+ * (e.g., ASCII art timelines, diagrams) can trigger unexpected language
+ * grammars and produce anomalous HAST trees that crash the renderer.
+ *
+ * Detection strategy:
+ * 1. Any structural box-drawing char (│ ├ └ ┌ etc.) → almost certainly a diagram
+ * 2. High CJK ratio (>30%) → Chinese text block that confuses auto-detection
+ *
+ * Returns `true` if the line should skip `highlightAuto` and render as plain text.
+ */
+export function looksLikeDiagramOrArt(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return false;
+
+  // Strategy 1: Structural box-drawing characters are a strong signal.
+  // These characters (│ ├ └ ┌ ┐ ┘ ┬ ┴ ┼) almost never appear in real code.
+  if (STRUCTURAL_BOX_RE.test(trimmed)) {
+    return true;
+  }
+
+  // Strategy 2: High CJK ratio indicates a Chinese text block.
+  const cjkMatches = trimmed.match(CJK_RE) || [];
+  const totalChars = trimmed.replace(/\s/g, '').length;
+  if (totalChars > 0 && cjkMatches.length / totalChars > 0.3) {
+    return true;
+  }
+
+  return false;
+}
+
+// Lowlight is heavy (~1.5 MB bundled, ~36–60 ms V8 parse). It's loaded lazily
+// from `./lowlightLoader.js` via dynamic import so it lives in a separate
+// esbuild chunk that's only parsed once a code block actually needs
+// highlighting. To avoid leaving code blocks committed to ink's append-only
+// <Static> region as plain text for the rest of the session, AppContainer
+// fires `loadLowlight()` from a mount effect — in steady state the import
+// is already resolved by the time any colorize call lands. The fallback
+// below still handles the brief window before resolution and any
+// permanent-failure path (latched inside lowlightLoader).
 
 function renderHastNode(
   node: Root | Element | HastText | RootContent,
@@ -92,11 +145,48 @@ function renderHastNode(
   return null;
 }
 
+/**
+ * Fires the lazy `loadLowlight()` once if the instance isn't ready yet and
+ * we aren't inside the loader's failure cooldown. Returns the current
+ * instance (which may still be `null` if the load is in flight or cooling
+ * down). Centralising this here lets callers kick the load off-the-hot-path
+ * — `colorizeCode` fires once per block, not once per rendered line, which
+ * matters in the failure case: when the load is permanently broken, the
+ * loader rejects synchronously and a per-line trigger would emit hundreds
+ * of duplicate debug-log entries per code block.
+ */
+function ensureLowlightLoading(): Lowlight | null {
+  const ll = getLowlightInstance();
+  if (ll) return ll;
+  if (!isLowlightCoolingDown()) {
+    void loadLowlight().catch((err) => {
+      debugLogger.error('[CodeColorizer] failed to load lowlight:', err);
+    });
+  }
+  return null;
+}
+
 function highlightAndRenderLine(
   line: string,
   language: string | null,
   theme: Theme,
+  lowlight: Lowlight | null,
 ): React.ReactNode {
+  // Until lowlight resolves (or after a permanent failure), fall back to a
+  // plain-text rendering of the line. The next React render of the
+  // surrounding subtree will pick up the highlighted version on success.
+  if (!lowlight) {
+    return line;
+  }
+
+  // When language is unspecified (null), skip highlightAuto for lines that
+  // look like diagrams or ASCII art. Box-drawing + CJK + arrow characters
+  // can confuse lowlight's auto-detection, producing anomalous HAST trees
+  // that crash the renderer during React commit phase (Yoga layout).
+  if (!language && looksLikeDiagramOrArt(line)) {
+    return line;
+  }
+
   try {
     const getHighlightedLine = () =>
       !language || !lowlight.registered(language)
@@ -117,7 +207,12 @@ export function colorizeLine(
   theme?: Theme,
 ): React.ReactNode {
   const activeTheme = theme || themeManager.getActiveTheme();
-  return highlightAndRenderLine(line, language, activeTheme);
+  return highlightAndRenderLine(
+    line,
+    language,
+    activeTheme,
+    ensureLowlightLoading(),
+  );
 }
 
 /**
@@ -125,6 +220,7 @@ export function colorizeLine(
  *
  * @param code The code string to highlight.
  * @param language The language identifier (e.g., 'javascript', 'css', 'html')
+ * @param tabWidth The number of spaces to replace each tab character with, default is 4
  * @returns A React.ReactNode containing Ink <Text> elements for the highlighted code.
  */
 export function colorizeCode(
@@ -134,10 +230,18 @@ export function colorizeCode(
   maxWidth?: number,
   theme?: Theme,
   settings?: LoadedSettings,
+  tabWidth = 4,
 ): React.ReactNode {
-  const codeToHighlight = code.replace(/\n$/, '');
+  const codeToHighlight = code
+    .replace(/\n$/, '')
+    .replace(/\t/g, ' '.repeat(tabWidth));
   const activeTheme = theme || themeManager.getActiveTheme();
   const showLineNumbers = settings?.merged.ui?.showLineNumbers ?? true;
+  // Resolve the loader state once per block, not once per line. Triggers the
+  // lazy import on first use; subsequent renders pick up the highlighted
+  // output once the chunk lands. Hoisting this out of the per-line render
+  // loop also collapses duplicate failure logs to one per block.
+  const lowlight = ensureLowlightLoading();
 
   try {
     // Render the HAST tree using the adapted theme
@@ -169,6 +273,7 @@ export function colorizeCode(
             line,
             language,
             activeTheme,
+            lowlight,
           );
 
           return (

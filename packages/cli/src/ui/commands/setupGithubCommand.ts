@@ -99,10 +99,20 @@ export const setupGithubCommand: SlashCommand = {
     return t('Set up GitHub Actions');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   action: async (
     context: CommandContext,
   ): Promise<SlashCommandActionReturn> => {
     const abortController = new AbortController();
+
+    // If we have a context abort signal (from ESC cancellation), link it to our controller
+    if (context.abortSignal) {
+      context.abortSignal.addEventListener(
+        'abort',
+        () => abortController.abort(),
+        { once: true },
+      );
+    }
 
     if (!isGitHubRepository()) {
       throw new Error(

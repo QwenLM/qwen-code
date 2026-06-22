@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReactNode } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
-import type { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  Logger,
+  SessionListItem,
+} from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
   HistoryItem,
+  HistoryItemBtw,
   ConfirmationRequest,
 } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -44,11 +49,12 @@ export interface CommandContext {
     // TODO(abhipatel12): Ensure that config is never null.
     config: Config | null;
     settings: LoadedSettings;
-    git: GitService | undefined;
     logger: Logger | null;
   };
   // UI state and history management
   ui: {
+    /** The current history items. */
+    history: HistoryItem[];
     /** Adds a new item to the history display. */
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
@@ -66,15 +72,28 @@ export interface CommandContext {
      * @param item The history item to display as pending, or `null` to clear.
      */
     setPendingItem: (item: HistoryItemWithoutId | null) => void;
+    /** The current btw side-question item rendered in the fixed bottom area. */
+    btwItem: HistoryItemBtw | null;
+    /** Sets the btw item independently of the main pendingItem. */
+    setBtwItem: (item: HistoryItemBtw | null) => void;
+    /** Cancels a pending btw (aborts the in-flight API call and clears the btw area). */
+    cancelBtw: () => void;
+    /** Ref to the btw AbortController, set by btwCommand so cancelBtw can abort it. */
+    btwAbortControllerRef: MutableRefObject<AbortController | null>;
+    /** Ref to whether the agent stream is currently idle (no model turn in flight). */
+    isIdleRef: MutableRefObject<boolean>;
     /**
      * Loads a new set of history items, replacing the current history.
      *
      * @param history The array of history items to load.
      */
     loadHistory: UseHistoryManagerReturn['loadHistory'];
+    /** Refreshes the static history display in Ink. */
+    refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
-    reloadCommands: () => void;
+    reloadCommands: () => void | Promise<void>;
+    setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
     dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
     addConfirmUpdateExtensionRequest: (value: ConfirmationRequest) => void;
@@ -89,6 +108,8 @@ export interface CommandContext {
   };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;
+  /** Abort signal for cancelling long-running slash command operations via ESC. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -112,7 +133,7 @@ export interface QuitActionReturn {
  */
 export interface MessageActionReturn {
   type: 'message';
-  messageType: 'info' | 'error';
+  messageType: 'info' | 'warning' | 'error';
   content: string;
 }
 
@@ -123,7 +144,7 @@ export interface MessageActionReturn {
 export interface StreamMessagesActionReturn {
   type: 'stream_messages';
   messages: AsyncGenerator<
-    { messageType: 'info' | 'error'; content: string },
+    { messageType: 'info' | 'warning' | 'error'; content: string },
     void,
     unknown
   >;
@@ -135,18 +156,45 @@ export interface StreamMessagesActionReturn {
 export interface OpenDialogActionReturn {
   type: 'dialog';
 
+  /** Optional session ID to pass directly to the dialog handler (e.g., for /resume <id>). */
+  sessionId?: string;
+
+  /** Pre-filtered sessions for the picker (e.g., multiple title matches from /resume <title>). */
+  matchedSessions?: SessionListItem[];
+
+  /** Optional session name for /branch — passed through to handleBranch. */
+  name?: string;
+
   dialog:
     | 'help'
+    | 'arena_start'
+    | 'arena_select'
+    | 'arena_stop'
+    | 'arena_status'
     | 'auth'
     | 'theme'
     | 'editor'
     | 'settings'
+    | 'statusline'
+    | 'memory'
     | 'model'
+    | 'fast-model'
+    | 'voice-model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'skills_manage'
+    | 'trust'
     | 'permissions'
     | 'approval-mode'
-    | 'resume';
+    | 'resume'
+    | 'delete'
+    | 'branch'
+    | 'extensions_manage'
+    | 'hooks'
+    | 'mcp'
+    | 'rewind'
+    | 'diff'
+    | 'stats';
 }
 
 /**
@@ -166,6 +214,8 @@ export interface LoadHistoryActionReturn {
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
+  /** Optional callback invoked after the agent turn completes successfully. */
+  onComplete?: () => Promise<void>;
 }
 
 /**
@@ -207,12 +257,48 @@ export enum CommandKind {
   BUILT_IN = 'built-in',
   FILE = 'file',
   MCP_PROMPT = 'mcp-prompt',
+  SKILL = 'skill',
 }
+
+/**
+ * Execution mode for a slash command invocation.
+ * - interactive: React/Ink UI mode (terminal)
+ * - non_interactive: headless CLI mode (text/JSON output)
+ * - acp: ACP/Zed editor integration mode
+ */
+export type ExecutionMode = 'interactive' | 'non_interactive' | 'acp';
+
+/**
+ * The source of a slash command, used for Help grouping, completion badges,
+ * and ACP available-command metadata.
+ *
+ * Distinct from CommandKind: CommandKind drives loader logic (4 values);
+ * CommandSource drives display and user mental model (5+ values).
+ */
+export type CommandSource =
+  | 'builtin-command' // BuiltinCommandLoader
+  | 'bundled-skill' // BundledSkillLoader
+  | 'skill-dir-command' // FileCommandLoader (user/project, no extensionName)
+  | 'plugin-command' // FileCommandLoader (extension, extensionName set)
+  | 'mcp-prompt' // McpPromptLoader
+  | 'workflow-command'; // SavedWorkflowLoader (.qwen/workflows/<name>.js)
+// Reserved for future loaders (not implemented in Phase 1):
+// | 'plugin-skill'
+// | 'dynamic-skill'
+
+export type CommandSourceDetail =
+  | 'user'
+  | 'project'
+  | 'custom'
+  | 'extension'
+  | 'plugin';
 
 export interface CommandCompletionItem {
   value: string;
   label?: string;
   description?: string;
+  /** Whether the completion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
+  isDirectory?: boolean;
 }
 
 // The standardized contract for any command in the system.
@@ -221,11 +307,110 @@ export interface SlashCommand {
   altNames?: string[];
   description: string;
   hidden?: boolean;
+  /** Higher values win when slash completion candidates have comparable match quality. */
+  completionPriority?: number;
 
   kind: CommandKind;
 
   // Optional metadata for extension commands
   extensionName?: string;
+
+  // ── Phase 1: source & execution type ──────────────────────────────────
+  /**
+   * The source of this command. Set by the Loader, not by the command itself.
+   * Will replace CommandKind as the canonical source identifier in a future phase.
+   */
+  source?: CommandSource;
+
+  /**
+   * Human-readable source label for display in Help, completion badges, etc.
+   * - builtin-command → "Built-in"
+   * - bundled-skill   → "Skill"
+   * - skill-dir-command → "Custom"
+   * - plugin-command  → "Plugin: <extensionName>"
+   * - mcp-prompt      → "MCP: <serverName>"
+   * Set by the Loader; may be overridden by the command itself.
+   */
+  sourceLabel?: string;
+
+  /**
+   * Stable, non-localized source detail for semantic routing and badges.
+   * `sourceLabel` is user-visible display text and may be localized.
+   */
+  sourceDetail?: CommandSourceDetail;
+
+  // ── Phase 1: mode capability ───────────────────────────────────────────
+  /**
+   * Which execution modes this command is available in.
+   * Explicit declaration is always authoritative. If omitted, the system falls
+   * back to a conservative default based on CommandKind.
+   * See getEffectiveSupportedModes() in commandUtils.ts for the full logic.
+   */
+  supportedModes?: ExecutionMode[];
+
+  // ── Phase 1: visibility ────────────────────────────────────────────────
+  /**
+   * Whether users can invoke this command via a slash command.
+   * Defaults to true for all commands.
+   */
+  userInvocable?: boolean;
+
+  /**
+   * Whether the model can invoke this command via a tool call.
+   * Defaults to false. prompt-type commands (skills, file commands, MCP prompts)
+   * should be true. Built-in commands must always be false.
+   */
+  modelInvocable?: boolean;
+
+  // ── Phase 3 reserved: UX metadata (defined now, unused until Phase 3) ─
+  /**
+   * Argument hint shown after the command name in the completion menu.
+   * Example: "<model-id>" / "show|list|set <id>"
+   */
+  argumentHint?: string;
+
+  /**
+   * Whether command-picker clients should wait for additional user input before
+   * submitting this command. Defaults are inferred from command metadata.
+   */
+  acceptsInput?: boolean;
+
+  /**
+   * When true, accepting this command from the slash auto-completion popup
+   * (e.g. typing `/skil` and pressing Enter on the highlighted `skills`
+   * suggestion) submits `/<name>` immediately rather than just inserting
+   * the text and forcing a second Enter.
+   *
+   * Set this only on commands whose bare action takes no required argument
+   * — typically commands whose action just opens a dialog. Commands with
+   * subCommands or arg-based completion should leave this false so users
+   * can navigate further.
+   */
+  submitOnAccept?: boolean;
+
+  /**
+   * Describes when to use this command — injected into the model-visible
+   * description for modelInvocable commands.
+   */
+  whenToUse?: string;
+
+  /**
+   * Non-localized description reserved for model-visible metadata. Stays stable
+   * across UI locale changes; `description` is what the UI surface renders.
+   */
+  modelDescription?: string;
+
+  /** Usage examples shown in Help and completion. */
+  examples?: string[];
+
+  /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
+  skillDetail?: {
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+  };
 
   // The action to run. Optional for parent commands that only group sub-commands.
   action?: (

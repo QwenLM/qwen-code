@@ -12,7 +12,7 @@ npm install @qwen-code/sdk
 
 ## Requirements
 
-- Node.js >= 20.0.0
+- Node.js >= 22.0.0
 
 > From v0.1.1, the CLI is bundled with the SDK. So no standalone CLI installation is needed.
 
@@ -60,16 +60,22 @@ Creates a new query session with the Qwen Code.
 | `permissionMode`         | `'default' \| 'plan' \| 'auto-edit' \| 'yolo'` | `'default'`      | Permission mode controlling tool execution approval. See [Permission Modes](#permission-modes) for details.                                                                                                                                                                                                                                                                                                                                                                           |
 | `canUseTool`             | `CanUseTool`                                   | -                | Custom permission handler for tool execution approval. Invoked when a tool requires confirmation. Must respond within 60 seconds or the request will be auto-denied. See [Custom Permission Handler](#custom-permission-handler).                                                                                                                                                                                                                                                     |
 | `env`                    | `Record<string, string>`                       | -                | Environment variables to pass to the Qwen Code process. Merged with the current process environment.                                                                                                                                                                                                                                                                                                                                                                                  |
+| `systemPrompt`           | `string \| QuerySystemPromptPreset`            | -                | System prompt configuration for the main session. Use a string to fully override the built-in Qwen Code system prompt, or a preset object to keep the built-in prompt and append extra instructions.                                                                                                                                                                                                                                                                                  |
 | `mcpServers`             | `Record<string, McpServerConfig>`              | -                | MCP (Model Context Protocol) servers to connect. Supports external servers (stdio/SSE/HTTP) and SDK-embedded servers. External servers are configured with transport options like `command`, `args`, `url`, `httpUrl`, etc. SDK servers use `{ type: 'sdk', name: string, instance: Server }`.                                                                                                                                                                                        |
 | `abortController`        | `AbortController`                              | -                | Controller to cancel the query session. Call `abortController.abort()` to terminate the session and cleanup resources.                                                                                                                                                                                                                                                                                                                                                                |
 | `debug`                  | `boolean`                                      | `false`          | Enable debug mode for verbose logging from the CLI process.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `maxSessionTurns`        | `number`                                       | `-1` (unlimited) | Maximum number of conversation turns before the session automatically terminates. A turn consists of a user message and an assistant response.                                                                                                                                                                                                                                                                                                                                        |
-| `coreTools`              | `string[]`                                     | -                | Equivalent to `tool.core` in settings.json. If specified, only these tools will be available to the AI. Example: `['read_file', 'write_file', 'run_terminal_cmd']`.                                                                                                                                                                                                                                                                                                                   |
-| `excludeTools`           | `string[]`                                     | -                | Equivalent to `tool.exclude` in settings.json. Excluded tools return a permission error immediately. Takes highest priority over all other permission settings. Supports pattern matching: tool name (`'write_file'`), tool class (`'ShellTool'`), or shell command prefix (`'ShellTool(rm )'`).                                                                                                                                                                                      |
-| `allowedTools`           | `string[]`                                     | -                | Equivalent to `tool.allowed` in settings.json. Matching tools bypass `canUseTool` callback and execute automatically. Only applies when tool requires confirmation. Supports same pattern matching as `excludeTools`.                                                                                                                                                                                                                                                                 |
+| `coreTools`              | `string[]`                                     | -                | Equivalent to `permissions.allow` in settings.json as an allowlist. If specified, only these tools will be available to the AI (all other tools are disabled at registry level). Supports tool name aliases and pattern matching. Example: `['Read', 'Edit', 'Bash(git *)']`.                                                                                                                                                                                                         |
+| `excludeTools`           | `string[]`                                     | -                | Equivalent to `permissions.deny` in settings.json. Excluded tools return a permission error immediately. Takes highest priority over all other permission settings. Supports tool name aliases and pattern matching: tool name (`'write_file'`), shell command prefix (`'Bash(rm *)'`), or path patterns (`'Read(.env)'`, `'Edit(/src/**)'`).                                                                                                                                         |
+| `allowedTools`           | `string[]`                                     | -                | Equivalent to `permissions.allow` in settings.json. Matching tools bypass `canUseTool` callback and execute automatically. Only applies when tool requires confirmation. Supports same pattern matching as `excludeTools`. Example: `['ShellTool(git status)', 'ShellTool(npm test)']`.                                                                                                                                                                                               |
 | `authType`               | `'openai' \| 'qwen-oauth'`                     | `'openai'`       | Authentication type for the AI service. Using `'qwen-oauth'` in SDK is not recommended as credentials are stored in `~/.qwen` and may need periodic refresh.                                                                                                                                                                                                                                                                                                                          |
 | `agents`                 | `SubagentConfig[]`                             | -                | Configuration for subagents that can be invoked during the session. Subagents are specialized AI agents for specific tasks or domains.                                                                                                                                                                                                                                                                                                                                                |
 | `includePartialMessages` | `boolean`                                      | `false`          | When `true`, the SDK emits incomplete messages as they are being generated, allowing real-time streaming of the AI's response.                                                                                                                                                                                                                                                                                                                                                        |
+| `resume`                 | `string`                                       | -                | Resume a previous session by providing its session ID. Equivalent to CLI's `--resume` flag.                                                                                                                                                                                                                                                                                                                                                                                           |
+| `sessionId`              | `string`                                       | -                | Specify a session ID for the new session. Ensures SDK and CLI use the same ID without resuming history. Equivalent to CLI's `--session-id` flag.                                                                                                                                                                                                                                                                                                                                      |
+
+> [!tip]
+> If you need to configure `coreTools`, `excludeTools`, or `allowedTools`, it is **strongly recommended** to read the [permissions configuration documentation](../docs/users/configuration/settings.md#permissions) first, especially the **Tool name aliases** and **Rule syntax examples** sections, to understand the available aliases and pattern matching syntax (e.g., `Bash(git *)`, `Read(.env)`, `Edit(/src/**)`).
 
 ### Timeouts
 
@@ -93,6 +99,78 @@ const query = qwen.query('Your prompt', {
     streamClose: 15000, // 15 seconds for stream close wait
   },
 });
+```
+
+### Experimental Daemon Session Client
+
+`DaemonSessionClient` is an experimental wrapper for clients that talk to a
+running `qwen serve` daemon over HTTP + SSE. It binds one daemon session so TUI,
+channel, IDE, or web backend adapters do not need to pass `sessionId` into every
+call.
+
+```typescript
+import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
+
+const daemon = new DaemonClient({
+  baseUrl: 'http://127.0.0.1:4170',
+  token: process.env['QWEN_SERVER_TOKEN'],
+});
+
+const caps = await daemon.capabilities();
+const session = await DaemonSessionClient.createOrAttach(daemon, {
+  workspaceCwd: caps.workspaceCwd,
+});
+
+const eventController = new AbortController();
+const eventTask = (async () => {
+  for await (const event of session.events({
+    signal: eventController.signal,
+  })) {
+    console.log(event.type, event.data);
+  }
+})();
+
+const result = await session.prompt({
+  prompt: [{ type: 'text', text: 'Summarize this workspace.' }],
+});
+
+eventController.abort();
+await eventTask;
+console.log(result.stopReason);
+```
+
+`session.events()` tracks the last seen SSE event id and reuses it on the next
+subscription by default. Pass `{ resume: false }` to start a fresh subscription
+without sending `Last-Event-ID`.
+
+When `createOrAttach()` is called with `modelServiceId`, the returned session
+client seeds its first event subscription with `Last-Event-ID: 0`. This replays
+the daemon ring from the oldest available event so adapters can observe
+attach-time `model_switch_failed` or `model_switched` events that are not
+reported on the create/attach HTTP response. Raw `DaemonClient` callers should
+pass `{ lastEventId: 0 }` on their first `subscribeEvents()` call when they use
+`modelServiceId`.
+
+The raw event envelope remains available as `DaemonEvent` with `data: unknown`.
+Adapters that want a v1 typed view can layer the schema helpers on top without
+changing the wire stream:
+
+```typescript
+import {
+  asKnownDaemonEvent,
+  createDaemonSessionViewState,
+  reduceDaemonSessionEvent,
+} from '@qwen-code/sdk';
+
+let view = createDaemonSessionViewState();
+for await (const event of session.events()) {
+  view = reduceDaemonSessionEvent(view, event);
+
+  const known = asKnownDaemonEvent(event);
+  if (known?.type === 'permission_request') {
+    console.log(known.data.requestId);
+  }
+}
 ```
 
 ### Message Types
@@ -149,17 +227,22 @@ The SDK supports different permission modes for controlling tool execution:
 
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
-- **`auto-edit`**: Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+- **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Permission Priority Chain
 
-1. `excludeTools` - Blocks tools completely
-2. `permissionMode: 'plan'` - Blocks non-read-only tools
-3. `permissionMode: 'yolo'` - Auto-approves all tools
-4. `allowedTools` - Auto-approves matching tools
-5. `canUseTool` callback - Custom approval logic
-6. Default behavior - Auto-deny in SDK mode
+Decision priority (highest first): `deny` > `ask` > `allow` > _(default/interactive mode)_
+
+The first matching rule wins.
+
+1. `excludeTools` / `permissions.deny` - Blocks tools completely (returns permission error)
+2. `permissions.ask` - Always requires user confirmation
+3. `permissionMode: 'plan'` - Blocks all non-read-only tools
+4. `permissionMode: 'yolo'` - Auto-approves all tools
+5. `allowedTools` / `permissions.allow` - Auto-approves matching tools
+6. `canUseTool` callback - Custom approval logic (if provided, not called for allowed tools)
+7. Default behavior - Auto-deny in SDK mode (write tools require explicit approval)
 
 ## Examples
 
@@ -240,6 +323,36 @@ const result = query({
         args: ['path/to/mcp-server.js'],
         env: { PORT: '3000' },
       },
+    },
+  },
+});
+```
+
+### Override the System Prompt
+
+```typescript
+import { query } from '@qwen-code/sdk';
+
+const result = query({
+  prompt: 'Say hello in one sentence.',
+  options: {
+    systemPrompt: 'You are a terse assistant. Answer in exactly one sentence.',
+  },
+});
+```
+
+### Append to the Built-in System Prompt
+
+```typescript
+import { query } from '@qwen-code/sdk';
+
+const result = query({
+  prompt: 'Review the current directory.',
+  options: {
+    systemPrompt: {
+      type: 'preset',
+      preset: 'qwen_code',
+      append: 'Be terse and focus on concrete findings.',
     },
   },
 });
@@ -383,7 +496,7 @@ Version 0.1.0 requires [Qwen Code](https://github.com/QwenLM/qwen-code) **>= 0.4
 
 ```bash
 # Install Qwen Code globally
-npm install -g qwen-code@^0.4.0
+npm install -g @qwen-code/qwen-code@latest
 ```
 
 **Note**: From version **0.1.1** onwards, the CLI is bundled with the SDK, so no separate Qwen Code installation is needed.

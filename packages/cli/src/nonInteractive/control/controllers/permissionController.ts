@@ -19,6 +19,8 @@ import type {
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
   ApprovalMode,
+  TeammateApprovalRequestEvent,
+  ToolConfirmationPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   InputFormat,
@@ -35,6 +37,8 @@ import { BaseController } from './baseController.js';
 
 // Import ToolCallConfirmationDetails types for type alignment
 type ToolConfirmationType = 'edit' | 'exec' | 'mcp' | 'info' | 'plan';
+
+const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
 
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
@@ -146,6 +150,7 @@ export class PermissionController extends BaseController {
     switch (mode) {
       case 'yolo': // Allow all tools
       case 'auto-edit': // Auto-approve edit operations
+      case 'auto': // Auto-approve via LLM classifier — coreToolScheduler enforces the gate
       case 'plan': // Auto-approve planning operations
         return { allowed: true };
 
@@ -216,6 +221,7 @@ export class PermissionController extends BaseController {
       'default',
       'plan',
       'auto-edit',
+      'auto',
       'yolo',
     ];
 
@@ -287,11 +293,15 @@ export class PermissionController extends BaseController {
             label: 'Deny',
             description: 'Block this file edit',
           },
-          {
-            type: 'modify',
-            label: 'Review Changes',
-            description: 'Review the proposed changes before applying',
-          },
+          ...(details['hideModify'] === true
+            ? []
+            : [
+                {
+                  type: 'modify' as const,
+                  label: 'Review Changes',
+                  description: 'Review the proposed changes before applying',
+                },
+              ]),
         ];
 
       case 'plan': // ToolPlanConfirmationDetails
@@ -379,6 +389,111 @@ export class PermissionController extends BaseController {
   }
 
   /**
+   * Handle a teammate tool approval request routed via the
+   * TEAMMATE_APPROVAL_REQUEST team event. Stream-json only —
+   * non-stream-json sessions handle teammate approvals directly
+   * in `nonInteractiveCli.ts` (mode-aware fallback that warns on
+   * stderr and cancels). The caller in nonInteractiveCli only
+   * forwards events here when `options.controlService` is set,
+   * which is itself stream-json-only. Defensive guard remains
+   * in case that contract is ever broken.
+   */
+  async handleTeammateApproval(
+    event: TeammateApprovalRequestEvent,
+  ): Promise<void> {
+    try {
+      if (this.context.abortSignal?.aborted) {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      const inputFormat = this.context.config.getInputFormat?.();
+      if (inputFormat !== InputFormat.STREAM_JSON) {
+        // Should not happen under the current wiring; cancel
+        // safely rather than silently auto-proceeding.
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      // Stream-json mode: ask SDK for permission.
+      const callId = `teammate-${event.teammateName}-${event.timestamp}`;
+      const response = await this.sendControlRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: event.toolName,
+          tool_use_id: callId,
+          input: event.toolInput,
+          permission_suggestions: [],
+          blocked_path: null,
+        } as CLIControlPermissionRequest,
+        undefined,
+        this.context.abortSignal,
+      );
+
+      if (response.subtype !== 'success') {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      const payload = (response.response || {}) as Record<string, unknown>;
+      const behavior = String(payload['behavior'] || '').toLowerCase();
+
+      if (behavior === 'allow') {
+        // Forward `updatedInput` (the SDK's sanitised tool args)
+        // to the teammate's scheduler so a host that approves a
+        // command-with-stripped-flag, or a write-with-rewritten-
+        // path, actually runs the sanitised version. Without
+        // this, the teammate runs the original (un-sanitised)
+        // args and the host's policy is silently bypassed. The
+        // leader's same-process path mutates `request.args`
+        // directly; teammates can't reach across process so the
+        // payload carries the override instead.
+        const updatedInput = payload['updatedInput'];
+        const respondPayload: ToolConfirmationPayload | undefined =
+          updatedInput &&
+          typeof updatedInput === 'object' &&
+          !Array.isArray(updatedInput)
+            ? { updatedInput: updatedInput as Record<string, unknown> }
+            : undefined;
+        await event.respond(
+          ToolConfirmationOutcome.ProceedOnce,
+          respondPayload,
+        );
+      } else {
+        const cancelMessage =
+          typeof payload['message'] === 'string'
+            ? payload['message']
+            : undefined;
+        await event.respond(
+          ToolConfirmationOutcome.Cancel,
+          cancelMessage
+            ? ({ cancelMessage } as ToolConfirmationPayload)
+            : undefined,
+        );
+      }
+    } catch (error) {
+      this.debugLogger.error(
+        '[PermissionController] Teammate approval failed:',
+        error,
+      );
+      // Best-effort: respond() can itself reject (the teammate's
+      // scheduler re-throws, or the teammate terminated mid-request).
+      // Swallow it so handleTeammateApproval never rejects out of its
+      // own error path — call sites fire-and-forget this method, and
+      // an escaped rejection here is an unhandledRejection that can
+      // take down an SDK session.
+      try {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+      } catch (cancelError) {
+        this.debugLogger.error(
+          '[PermissionController] Teammate approval cancel failed:',
+          cancelError,
+        );
+      }
+    }
+  }
+
+  /**
    * Handle outgoing permission request
    *
    * Behavior depends on input format:
@@ -425,7 +540,7 @@ export class PermissionController extends BaseController {
           permission_suggestions: permissionSuggestions,
           blocked_path: null,
         } as CLIControlPermissionRequest,
-        undefined, // use default timeout
+        this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
         this.context.abortSignal,
       );
 

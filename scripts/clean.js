@@ -21,6 +21,7 @@ import { rmSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { globSync } from 'glob';
+import { getWorkspacePackageJsonPaths } from './workspaces.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -33,17 +34,17 @@ rmSync(join(root, 'packages/cli/src/generated/'), {
   force: true,
 });
 const RMRF_OPTIONS = { recursive: true, force: true };
-rmSync(join(root, 'bundle'), RMRF_OPTIONS);
 // Dynamically clean dist directories in all workspaces
 const rootPackageJson = JSON.parse(
   readFileSync(join(root, 'package.json'), 'utf-8'),
 );
-for (const workspace of rootPackageJson.workspaces) {
-  const packages = globSync(join(workspace, 'package.json'), { cwd: root });
-  for (const pkgPath of packages) {
-    const pkgDir = dirname(join(root, pkgPath));
-    rmSync(join(pkgDir, 'dist'), RMRF_OPTIONS);
-  }
+for (const pkgPath of getWorkspacePackageJsonPaths(
+  root,
+  rootPackageJson.workspaces,
+)) {
+  const pkgDir = dirname(join(root, pkgPath));
+  rmSync(join(pkgDir, 'dist'), RMRF_OPTIONS);
+  rmSync(join(pkgDir, 'tsconfig.tsbuildinfo'), { force: true });
 }
 
 // Clean up vscode-ide-companion package

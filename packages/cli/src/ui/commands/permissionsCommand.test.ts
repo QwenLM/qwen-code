@@ -18,7 +18,7 @@ describe('permissionsCommand', () => {
 
   it('should have the correct name and description', () => {
     expect(permissionsCommand.name).toBe('permissions');
-    expect(permissionsCommand.description).toBe('Manage folder trust settings');
+    expect(permissionsCommand.description).toBe('Manage permission rules');
   });
 
   it('should be a built-in command', () => {

@@ -52,12 +52,10 @@ export class JsonOutputAdapter
   }
 
   finalizeAssistantMessage(): CLIAssistantMessage {
-    const message = this.finalizeAssistantMessageInternal(
+    return this.finalizeAssistantMessageInternal(
       this.mainAgentMessageState,
       null,
     );
-    this.updateLastAssistantMessage(message);
-    return message;
   }
 
   emitResult(options: ResultOptions): void {
@@ -69,9 +67,9 @@ export class JsonOutputAdapter
 
     if (this.config.getOutputFormat() === 'text') {
       if (resultMessage.is_error) {
-        process.stderr.write(`${resultMessage.error?.message || ''}`);
+        process.stderr.write(`${resultMessage.error?.message || ''}\n`);
       } else {
-        process.stdout.write(`${resultMessage.result}`);
+        process.stdout.write(`${resultMessage.result}\n`);
       }
     } else {
       // Emit the entire messages array as JSON (includes all main agent + subagent messages)

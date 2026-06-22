@@ -246,6 +246,54 @@ describe('MCPOAuthProvider', () => {
       );
     });
 
+    it('should preserve expires_in=0 as an immediate expiry', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+
+      let callbackHandler: unknown;
+      vi.mocked(http.createServer).mockImplementation((handler) => {
+        callbackHandler = handler;
+        return mockHttpServer as unknown as http.Server;
+      });
+
+      mockHttpServer.listen.mockImplementation((port, callback) => {
+        callback?.();
+        setTimeout(() => {
+          const mockReq = {
+            url: '/oauth/callback?code=auth_code_123&state=bW9ja19zdGF0ZV8xNl9ieXRlcw',
+          };
+          const mockRes = {
+            writeHead: vi.fn(),
+            end: vi.fn(),
+          };
+          (callbackHandler as (req: unknown, res: unknown) => void)(
+            mockReq,
+            mockRes,
+          );
+        }, 10);
+      });
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          contentType: 'application/x-www-form-urlencoded',
+          text: 'access_token=access_token_123&token_type=Bearer&expires_in=0&refresh_token=refresh_token_456',
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.authenticate('test-server', mockConfig);
+
+      expect(result.expiresAt).toBe(1_700_000_000_000);
+      const tokenStorage = new MCPOAuthTokenStorage();
+      expect(tokenStorage.saveToken).toHaveBeenCalledWith(
+        'test-server',
+        expect.objectContaining({ expiresAt: 1_700_000_000_000 }),
+        'test-client-id',
+        'https://auth.example.com/token',
+        undefined,
+      );
+    });
+
     it('should handle OAuth discovery when no authorization URL provided', async () => {
       // Use a mutable config object
       const configWithoutAuth: MCPOAuthConfig = {
@@ -785,6 +833,52 @@ describe('MCPOAuthProvider', () => {
       );
     });
 
+    it('should normalize JSON string expires_in values', async () => {
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          contentType: 'application/json',
+          text: JSON.stringify({
+            access_token: 'new_access_token',
+            token_type: 'Bearer',
+            expires_in: '3600',
+          }),
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.refreshAccessToken(
+        mockConfig,
+        'refresh_token',
+        'https://auth.example.com/token',
+      );
+
+      expect(result.expires_in).toBe(3600);
+    });
+
+    it('should reject malformed JSON expires_in values', async () => {
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          contentType: 'application/json',
+          text: JSON.stringify({
+            access_token: 'new_access_token',
+            token_type: 'Bearer',
+            expires_in: '3600abc',
+          }),
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      await expect(
+        authProvider.refreshAccessToken(
+          mockConfig,
+          'refresh_token',
+          'https://auth.example.com/token',
+        ),
+      ).rejects.toThrow('Invalid expires_in value');
+    });
+
     it('should include client secret in refresh request when available', async () => {
       mockFetch.mockResolvedValueOnce(
         createMockResponse({
@@ -826,6 +920,25 @@ describe('MCPOAuthProvider', () => {
       ).rejects.toThrow(
         'Token refresh failed: invalid_request - Invalid refresh token',
       );
+    });
+
+    it('should reject malformed form-urlencoded expires_in values', async () => {
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          contentType: 'application/x-www-form-urlencoded',
+          text: 'access_token=new_access_token&token_type=Bearer&expires_in=3600abc',
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      await expect(
+        authProvider.refreshAccessToken(
+          mockConfig,
+          'refresh_token',
+          'https://auth.example.com/token',
+        ),
+      ).rejects.toThrow('Invalid expires_in value');
     });
   });
 
@@ -895,6 +1008,52 @@ describe('MCPOAuthProvider', () => {
       expect(tokenStorage.saveToken).toHaveBeenCalledWith(
         'test-server',
         expect.objectContaining({ accessToken: 'new_access_token' }),
+        'test-client-id',
+        'https://auth.example.com/token',
+        undefined,
+      );
+    });
+
+    it('should preserve expires_in=0 when refreshing an expired token', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockResolvedValue(
+        expiredCredentials,
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          contentType: 'application/json',
+          text: JSON.stringify({
+            access_token: 'new_access_token',
+            token_type: 'Bearer',
+            expires_in: 0,
+            refresh_token: 'new_refresh_token',
+          }),
+        }),
+      );
+
+      const authProvider = new MCPOAuthProvider();
+      const result = await authProvider.getValidToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(result).toBe('new_access_token');
+      expect(tokenStorage.saveToken).toHaveBeenCalledWith(
+        'test-server',
+        expect.objectContaining({ expiresAt: 1_700_000_000_000 }),
         'test-client-id',
         'https://auth.example.com/token',
         undefined,
@@ -1082,8 +1241,86 @@ describe('MCPOAuthProvider', () => {
       expect(capturedUrl!).toContain('code_challenge=code_challenge_mock');
       expect(capturedUrl!).toContain('code_challenge_method=S256');
       expect(capturedUrl!).toContain('scope=read+write');
+      // resource should be the full canonical URI per MCP spec / RFC 8707
       expect(capturedUrl!).toContain('resource=https%3A%2F%2Fauth.example.com');
       expect(capturedUrl!).toContain('audience=https%3A%2F%2Fapi.example.com');
+    });
+
+    // Regression test for https://github.com/QwenLM/qwen-code/issues/1749
+    // Scenario: user runs `qwen mcp add --transport http yuque https://mcp.alibaba-inc.com/yuque/mcp`
+    // then `/mcp auth yuque`. Per MCP spec / RFC 8707, the resource param should be the
+    // full canonical URI "https://mcp.alibaba-inc.com/yuque/mcp", not just the host.
+    it('should use full canonical URI as resource parameter (issue #1749)', async () => {
+      let capturedAuthUrl: string | undefined;
+      mockOpenBrowserSecurely.mockImplementation((url: string) => {
+        capturedAuthUrl = url;
+        return Promise.resolve();
+      });
+
+      let callbackHandler: unknown;
+      vi.mocked(http.createServer).mockImplementation((handler) => {
+        callbackHandler = handler;
+        return mockHttpServer as unknown as http.Server;
+      });
+
+      mockHttpServer.listen.mockImplementation((port, callback) => {
+        callback?.();
+        setTimeout(() => {
+          const mockReq = {
+            url: '/oauth/callback?code=auth_code_123&state=bW9ja19zdGF0ZV8xNl9ieXRlcw',
+          };
+          const mockRes = {
+            writeHead: vi.fn(),
+            end: vi.fn(),
+          };
+          (callbackHandler as (req: unknown, res: unknown) => void)(
+            mockReq,
+            mockRes,
+          );
+        }, 10);
+      });
+
+      // Capture the token exchange request to verify resource param there too
+      let capturedTokenBody: string | undefined;
+      mockFetch.mockImplementation(
+        (url: string, options?: { body?: string }) => {
+          if (options?.body) {
+            capturedTokenBody = options.body;
+          }
+          return Promise.resolve(
+            createMockResponse({
+              ok: true,
+              contentType: 'application/json',
+              text: JSON.stringify(mockTokenResponse),
+              json: mockTokenResponse,
+            }),
+          );
+        },
+      );
+
+      const authProvider = new MCPOAuthProvider();
+
+      // Simulating what mcpCommand.ts does:
+      // serverName = "yuque" (the name the user gave)
+      // mcpServerUrl = "https://mcp.alibaba-inc.com/yuque/mcp" (server.httpUrl || server.url)
+      const serverName = 'yuque';
+      const mcpServerUrl = 'https://mcp.alibaba-inc.com/yuque/mcp';
+
+      await authProvider.authenticate(serverName, mockConfig, mcpServerUrl);
+
+      // Verify the authorization URL contains the full canonical URI as resource
+      expect(capturedAuthUrl).toBeDefined();
+      const authUrl = new URL(capturedAuthUrl!);
+      const resourceInAuthUrl = authUrl.searchParams.get('resource');
+      expect(resourceInAuthUrl).toBe('https://mcp.alibaba-inc.com/yuque/mcp');
+
+      // Verify the token exchange request also uses the full canonical URI
+      expect(capturedTokenBody).toBeDefined();
+      const tokenParams = new URLSearchParams(capturedTokenBody!);
+      const resourceInTokenExchange = tokenParams.get('resource');
+      expect(resourceInTokenExchange).toBe(
+        'https://mcp.alibaba-inc.com/yuque/mcp',
+      );
     });
 
     it('should correctly append parameters to an authorization URL that already has query params', async () => {

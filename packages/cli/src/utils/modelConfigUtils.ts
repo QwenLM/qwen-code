@@ -6,14 +6,63 @@
 
 import {
   AuthType,
+  MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
   resolveModelConfig,
   type ModelConfigSourcesInput,
   type ProviderModelConfig,
+  stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
-import { writeStderrLine } from './stdioHelpers.js';
+
+/**
+ * Env var names that hold model selections for each auth type.
+ * Mirrors the model-var mappings in core's AUTH_ENV_MAPPINGS.
+ */
+const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
+  [AuthType.USE_OPENAI]: ['OPENAI_MODEL', 'QWEN_MODEL'],
+  [AuthType.USE_GEMINI]: ['GEMINI_MODEL'],
+  [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
+  [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
+  [AuthType.QWEN_OAUTH]: [],
+};
+
+function getIgnoredTopLevelGenerationConfigFields(
+  settingsGenerationConfig: Partial<ContentGeneratorConfig> | undefined,
+  modelProvider: ProviderModelConfig | undefined,
+): string[] {
+  if (!settingsGenerationConfig || !modelProvider) {
+    return [];
+  }
+
+  const providerGenerationConfig = modelProvider.generationConfig ?? {};
+  return MODEL_GENERATION_CONFIG_FIELDS.filter(
+    (field) =>
+      Object.hasOwn(settingsGenerationConfig, field) &&
+      !Object.hasOwn(providerGenerationConfig, field),
+  );
+}
+
+function buildIgnoredTopLevelGenerationConfigWarning(
+  authType: AuthType,
+  modelProvider: ProviderModelConfig,
+  ignoredFields: string[],
+): string | undefined {
+  if (ignoredFields.length === 0) {
+    return undefined;
+  }
+
+  const fieldList = ignoredFields
+    .map((field) => `model.generationConfig.${field}`)
+    .join(', ');
+  const isSingular = ignoredFields.length === 1;
+  const verb = isSingular ? 'is' : 'are';
+  const fieldReference = isSingular ? 'this field' : 'these fields';
+  const pronoun = isSingular ? 'it' : 'them';
+
+  return `Warning: ${fieldList} ${verb} ignored for provider model "${modelProvider.id}" from modelProviders.${authType}. Move ${fieldReference} to modelProviders.${authType}[].generationConfig for that model if you want ${pronoun} to apply.`;
+}
 
 export interface CliGenerationConfigInputs {
   argv: {
@@ -42,6 +91,8 @@ export interface ResolvedCliGenerationConfig {
   generationConfig: Partial<ContentGeneratorConfig>;
   /** Source attribution for each resolved field */
   sources: ContentGeneratorConfigSources;
+  /** Warnings generated during resolution */
+  warnings: string[];
 }
 
 export function getAuthTypeFromEnv(): AuthType | undefined {
@@ -79,12 +130,19 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
 /**
  * Unified resolver for CLI generation config.
  *
- * Precedence (for OpenAI auth):
- * - model: argv.model > OPENAI_MODEL > QWEN_MODEL > settings.model.name
- * - apiKey: argv.openaiApiKey > OPENAI_API_KEY > settings.security.auth.apiKey
- * - baseUrl: argv.openaiBaseUrl > OPENAI_BASE_URL > settings.security.auth.baseUrl
+ * Model precedence (all auth types):
+ * - argv.model > settings.model.name > auth-specific env model vars
  *
- * For non-OpenAI auth, only argv.model override is respected at CLI layer.
+ * Env var mapping by auth type (mirrors core's AUTH_ENV_MAPPINGS):
+ * - USE_OPENAI: OPENAI_MODEL, QWEN_MODEL
+ * - USE_GEMINI: GEMINI_MODEL
+ * - USE_VERTEX_AI: GOOGLE_MODEL
+ * - USE_ANTHROPIC: ANTHROPIC_MODEL
+ *
+ * When model is resolved from argv or settings, all model env vars are stripped
+ * from the env passed to core's resolveModelConfig to prevent incorrect overrides.
+ * When model is resolved from an auth-specific env var, only that env var is
+ * kept in the filtered env so core can access the provider metadata.
  */
 export function resolveCliGenerationConfig(
   inputs: CliGenerationConfigInputs,
@@ -94,18 +152,95 @@ export function resolveCliGenerationConfig(
 
   const authType = selectedAuthType;
 
-  // Find modelProvider from settings.modelProviders based on authType and model
+  // Resolve the target model based on strict precedence:
+  // argv.model > settings.model.name > auth-specific env model vars
+  // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
+  let resolvedModel: string | undefined;
+  let sourceEnvVar: string | undefined;
+  // Whether the model came from settings.model.name (vs argv/env). The persisted
+  // settings.model.baseUrl disambiguator only applies to this case.
+  let resolvedFromSettings = false;
+  if (argv.model) {
+    resolvedModel = argv.model;
+  } else if (settings.model?.name) {
+    // Self-heal configs already corrupted by older builds.
+    resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
+    resolvedFromSettings = true;
+  } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
+    // Only check env vars for the current auth type
+    for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
+      if (env[envVar]) {
+        resolvedModel = env[envVar];
+        sourceEnvVar = envVar;
+        break;
+      }
+    }
+  }
+
+  // Find a matching provider for the resolved model (for metadata: generationConfig, envKey, etc.)
+  // When resolvedModel is from settings and matches a provider, modelProvider.id == settings.model.name,
+  // so the resolver correctly uses the settings-selected model (no override occurs).
+  // The old candidate-loop code that fell through to OPENAI_MODEL is gone.
   let modelProvider: ProviderModelConfig | undefined;
-  if (authType && settings.modelProviders) {
+  let disambiguationWarning: string | undefined;
+  if (resolvedModel && authType && settings.modelProviders) {
     const providers = settings.modelProviders[authType];
     if (providers && Array.isArray(providers)) {
-      // Try to find by requested model (from CLI or settings)
-      const requestedModel = argv.model || settings.model?.name;
-      if (requestedModel) {
-        modelProvider = providers.find((p) => p.id === requestedModel) as
-          | ProviderModelConfig
-          | undefined;
+      // When multiple providers share the same id, disambiguate by the
+      // persisted settings.model.baseUrl (written by the model picker). This
+      // only applies when the model itself came from settings.model.name.
+      // Fall back to the first id match if the paired provider was edited or
+      // removed (and for the legacy id-only case where no baseUrl was saved),
+      // mirroring auth.ts:findModelConfig.
+      //
+      // Note: `settings` is already merged across user/workspace/system scopes.
+      // Every writer of model.name (the picker, /model, ACP, provider install)
+      // also writes model.baseUrl in the SAME scope — a real URL, or an empty
+      // string tombstone when there is none. The tombstone matters because an
+      // omitted key cannot override a stale model.baseUrl in a lower-priority
+      // scope on merge, but '' (a present value) can. Empty string is treated
+      // as "no disambiguator" here. The only remaining desync is a hand-edited
+      // config that sets model.name in a higher scope with no baseUrl key at
+      // all; the id-only fallback bounds the blast radius to a same-id provider.
+      const persistedBaseUrl = settings.model?.baseUrl;
+      if (resolvedFromSettings && persistedBaseUrl) {
+        const exactMatch = providers.find(
+          (p) => p.id === resolvedModel && p.baseUrl === persistedBaseUrl,
+        );
+        modelProvider =
+          exactMatch ?? providers.find((p) => p.id === resolvedModel);
+        // Surface the silent fallback: the paired provider was removed or its
+        // baseUrl changed, so traffic now routes to a different same-id provider.
+        if (!exactMatch && modelProvider) {
+          disambiguationWarning =
+            `Persisted model.baseUrl '${persistedBaseUrl}' no longer matches any provider ` +
+            `for model '${resolvedModel}' (authType '${authType}'); using the first id match ` +
+            `('${modelProvider.baseUrl ?? '(default baseUrl)'}'). Re-select the model to update it.`;
+        }
+      } else {
+        modelProvider = providers.find((p) => p.id === resolvedModel);
       }
+    }
+  }
+
+  // Filter env to prevent auth-specific model env vars from overriding higher-priority sources.
+  // sourceEnvVar is only set when the model was actually resolved from an env var (lines 119-128),
+  // so this is source-based filtering, not value-based. If model came from argv or settings,
+  // sourceEnvVar is undefined and ALL model env vars are stripped.
+  // Build a list of ALL model env vars across all auth types.
+  const allModelEnvVars = Object.values(AUTH_ENV_MODEL_VARS).flat();
+  const filteredEnv = { ...env };
+  if (sourceEnvVar) {
+    // Keep only the env var that was actually used
+    for (const envVar of allModelEnvVars) {
+      if (envVar !== sourceEnvVar) {
+        delete filteredEnv[envVar];
+      }
+    }
+  } else {
+    // Model was not resolved from env - strip ALL model env vars
+    for (const envVar of allModelEnvVars) {
+      delete filteredEnv[envVar];
     }
   }
 
@@ -117,7 +252,9 @@ export function resolveCliGenerationConfig(
       baseUrl: argv.openaiBaseUrl,
     },
     settings: {
-      model: settings.model?.name,
+      model: settings.model?.name
+        ? stripRuntimeSnapshotPrefix(settings.model.name)
+        : undefined,
       apiKey: settings.security?.auth?.apiKey,
       baseUrl: settings.security?.auth?.baseUrl,
       generationConfig: settings.model?.generationConfig as
@@ -125,15 +262,26 @@ export function resolveCliGenerationConfig(
         | undefined,
     },
     modelProvider,
-    env,
+    env: filteredEnv,
   };
 
   const resolved = resolveModelConfig(configSources);
 
-  // Log warnings if any
-  for (const warning of resolved.warnings) {
-    writeStderrLine(warning);
-  }
+  // Provider-backed models are synced again during Config.refreshAuth(), which
+  // reapplies provider defaults after the initial resolver fallback.
+  const ignoredGenerationConfigWarning =
+    authType && modelProvider
+      ? buildIgnoredTopLevelGenerationConfigWarning(
+          authType,
+          modelProvider,
+          getIgnoredTopLevelGenerationConfigFields(
+            settings.model?.generationConfig as
+              | Partial<ContentGeneratorConfig>
+              | undefined,
+            modelProvider,
+          ),
+        )
+      : undefined;
 
   // Resolve OpenAI logging config (CLI-specific, not part of core resolver)
   const enableOpenAILogging =
@@ -158,5 +306,12 @@ export function resolveCliGenerationConfig(
     baseUrl: resolved.config.baseUrl || '',
     generationConfig,
     sources: resolved.sources,
+    warnings: [
+      ...resolved.warnings,
+      ...(disambiguationWarning ? [disambiguationWarning] : []),
+      ...(ignoredGenerationConfigWarning
+        ? [ignoredGenerationConfigWarning]
+        : []),
+    ],
   };
 }

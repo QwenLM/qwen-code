@@ -17,6 +17,7 @@ import {
   detectSystemLanguage,
   getLanguageNameFromLocale,
 } from '../i18n/index.js';
+import { SUPPORTED_LANGUAGES } from '../i18n/languages.js';
 
 const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
 const LLM_OUTPUT_LANGUAGE_MARKER_PREFIX = 'qwen-code:llm-output-language:';
@@ -37,14 +38,34 @@ export function isAutoLanguage(value: string | undefined | null): boolean {
  * Unknown inputs are returned as-is to support any language name.
  */
 export function normalizeOutputLanguage(language: string): string {
-  const lowered = language.toLowerCase();
-  const fullName = getLanguageNameFromLocale(lowered);
-  // getLanguageNameFromLocale returns 'English' as default for unknown codes.
-  // Only use the result if it's a known code or explicitly 'en'.
-  if (fullName !== 'English' || lowered === 'en') {
-    return fullName;
+  const normalized = language.trim().replace(/_/g, '-').toLowerCase();
+  const knownLanguageName = SUPPORTED_LANGUAGES.find(
+    (supportedLanguage) =>
+      supportedLanguage.fullName.toLowerCase() === normalized,
+  );
+  if (knownLanguageName) {
+    return knownLanguageName.fullName;
   }
-  return language;
+
+  const knownLocaleCode = SUPPORTED_LANGUAGES.some((supportedLanguage) => {
+    const code = supportedLanguage.code.toLowerCase();
+    const id = supportedLanguage.id.toLowerCase();
+    return (
+      normalized === code ||
+      normalized === id ||
+      normalized.startsWith(`${code}-`) ||
+      normalized.startsWith(`${id}-`) ||
+      normalized.startsWith(`${code}.`) ||
+      normalized.startsWith(`${id}.`) ||
+      normalized.startsWith(`${code}@`) ||
+      normalized.startsWith(`${id}@`)
+    );
+  });
+  if (!knownLocaleCode) {
+    return language;
+  }
+
+  return getLanguageNameFromLocale(normalized);
 }
 
 /**
@@ -63,7 +84,7 @@ export function resolveOutputLanguage(
 /**
  * Returns the path to the LLM output language rule file (~/.qwen/output-language.md).
  */
-function getOutputLanguageFilePath(): string {
+export function getOutputLanguageFilePath(): string {
   return path.join(
     Storage.getGlobalQwenDir(),
     LLM_OUTPUT_LANGUAGE_RULE_FILENAME,
@@ -89,16 +110,17 @@ function generateOutputLanguageFileContent(language: string): string {
   return `# Output language preference: ${language}
 <!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${safeLanguage} -->
 
-## Goal
-Prefer responding in **${language}** for normal assistant messages and explanations.
+## Rule
+You MUST always respond in **${language}** regardless of the user's input language.
+This is a mandatory requirement, not a preference.
+
+## Exception
+If the user **explicitly** requests a response in a specific language (e.g., "please reply in English", "用中文回答"), switch to the user's requested language for the remainder of the conversation.
 
 ## Keep technical artifacts unchanged
 Do **not** translate or rewrite:
 - Code blocks, CLI commands, file paths, stack traces, logs, JSON keys, identifiers
 - Exact quoted text from the user (keep quotes verbatim)
-
-## When a conflict exists
-If higher-priority instructions (system/developer) require a different behavior, follow them.
 
 ## Tool / system outputs
 Raw tool/system outputs may contain fixed-format English. Preserve them verbatim, and if needed, add a short **${language}** explanation below.
@@ -150,9 +172,16 @@ function readOutputLanguageFromFile(): string | null {
 
 /**
  * Writes the output language rule file with the given language.
+ *
+ * @param targetPath - When provided, write to this path instead of the
+ *   global default.  Callers should pass `config.getOutputLanguageFilePath()`
+ *   so the file that the session actually reads is the one being updated.
  */
-export function writeOutputLanguageFile(language: string): void {
-  const filePath = getOutputLanguageFilePath();
+export function writeOutputLanguageFile(
+  language: string,
+  targetPath?: string,
+): void {
+  const filePath = targetPath ?? getOutputLanguageFilePath();
   const content = generateOutputLanguageFileContent(language);
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
@@ -162,10 +191,38 @@ export function writeOutputLanguageFile(language: string): void {
 /**
  * Updates the LLM output language rule file based on the setting value.
  * Resolves 'auto' to the detected system language before writing.
+ *
+ * @param targetPath - Forwarded to {@link writeOutputLanguageFile}.
  */
-export function updateOutputLanguageFile(settingValue: string): void {
+export function updateOutputLanguageFile(
+  settingValue: string,
+  targetPath?: string,
+): void {
   const resolved = resolveOutputLanguage(settingValue);
-  writeOutputLanguageFile(resolved);
+  writeOutputLanguageFile(resolved, targetPath);
+}
+
+/**
+ * Writes the output-language file to the correct (config-bound) path and,
+ * when no path was known yet (first-time creation), registers the global
+ * default on the config so subsequent reads are consistent.
+ *
+ * This encapsulates the get-path → write → register-fallback sequence
+ * that was previously duplicated across acpAgent, languageCommand, and
+ * SettingsDialog.
+ */
+export function writeOutputLanguageAndRegisterPath(
+  settingValue: string,
+  config?: {
+    getOutputLanguageFilePath(): string | undefined;
+    setOutputLanguageFilePath(p: string): void;
+  } | null,
+): void {
+  const targetPath = config?.getOutputLanguageFilePath();
+  updateOutputLanguageFile(settingValue, targetPath);
+  if (!targetPath) {
+    config?.setOutputLanguageFilePath(getOutputLanguageFilePath());
+  }
 }
 
 /**
@@ -174,17 +231,19 @@ export function updateOutputLanguageFile(settingValue: string): void {
  * @param outputLanguage - The output language setting value (e.g., 'auto', 'Chinese', etc.)
  *
  * Behavior:
- * - Resolves the setting value ('auto' -> detected system language, or use as-is)
- * - Ensures the rule file matches the resolved language
- * - Creates the file if it doesn't exist
+ * - If the rule file already exists and contains a valid language setting, do nothing (preserve user modifications)
+ * - If the rule file doesn't exist, create it with the resolved language ('auto' -> detected system language, or use as-is)
  */
 export function initializeLlmOutputLanguage(outputLanguage?: string): void {
-  // Resolve 'auto' or undefined to the detected system language
-  const resolved = resolveOutputLanguage(outputLanguage);
+  // Check if the file already exists and has valid content
   const currentFileLanguage = readOutputLanguageFromFile();
 
-  // Only write if the file doesn't match the resolved language
-  if (currentFileLanguage !== resolved) {
-    writeOutputLanguageFile(resolved);
+  // If file exists with valid language, preserve user's setting - do nothing
+  if (currentFileLanguage) {
+    return;
   }
+
+  // File doesn't exist or has invalid content, create it with resolved language
+  const resolved = resolveOutputLanguage(outputLanguage);
+  writeOutputLanguageFile(resolved);
 }

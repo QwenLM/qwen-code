@@ -1,5 +1,9 @@
-# Reporting Security Issues
+# Security Policy
 
-Please report any security issue or Higress crash report to [ASRC](https://security.alibaba.com/) (Alibaba Security Response Center) where the issue will be triaged appropriately.
+## Reporting a Vulnerability
 
-Thank you for helping keep our project secure.
+If you believe you have discovered a security vulnerability, please report it to us through the following portal: [Report Security Issue](https://yundun.console.aliyun.com/?p=xznew#/taskmanagement/tasks/detail/151)
+
+> **Note:** This channel is strictly for reporting security-related issues. Non-security vulnerabilities or general bug reports will not be addressed here.
+
+We sincerely appreciate your responsible disclosure and your contribution to helping us keep our project secure.

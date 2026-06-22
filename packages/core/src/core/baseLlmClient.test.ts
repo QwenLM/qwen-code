@@ -39,6 +39,24 @@ vi.mock('../utils/generateContentResponseUtilities.js', () => ({
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
+  isUnattendedMode: vi.fn(() => false),
+}));
+
+const mockCreateContentGenerator = vi.fn();
+vi.mock('./contentGenerator.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./contentGenerator.js')>();
+  return {
+    ...actual,
+    createContentGenerator: (
+      ...args: Parameters<typeof actual.createContentGenerator>
+    ) => mockCreateContentGenerator(...args),
+  };
+});
+
+const mockBuildAgentContentGeneratorConfig = vi.fn();
+vi.mock('../models/content-generator-config.js', () => ({
+  buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
+    mockBuildAgentContentGeneratorConfig(...args),
 }));
 
 const mockGenerateContent = vi.fn();
@@ -55,6 +73,11 @@ const mockConfig = {
     .fn()
     .mockReturnValue({ authType: AuthType.USE_GEMINI }),
   getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
+  // Default test model — matches `defaultOptions.model` so resolveForModel
+  // returns the constructor-injected ContentGenerator without trying to
+  // build a per-model one.
+  getModel: vi.fn().mockReturnValue('test-model'),
+  getModelsConfig: vi.fn().mockReturnValue(undefined),
 } as unknown as Mocked<Config>;
 
 // Helper to create a mock GenerateContentResponse with function call
@@ -94,6 +117,19 @@ const createMockResponseWithoutFunctionCall = (): GenerateContentResponse =>
     ],
   }) as GenerateContentResponse;
 
+const createMockTextResponse = (text: string): GenerateContentResponse =>
+  ({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [{ text }],
+        },
+        index: 0,
+      },
+    ],
+  }) as GenerateContentResponse;
+
 describe('BaseLlmClient', () => {
   let client: BaseLlmClient;
   let abortController: AbortController;
@@ -101,6 +137,10 @@ describe('BaseLlmClient', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      model: 'test-model',
+      authType: AuthType.USE_GEMINI,
+    });
     // Reset the mocked implementation for getErrorMessage for accurate error message assertions
     vi.mocked(getErrorMessage).mockImplementation((e) =>
       e instanceof Error ? e.message : String(e),
@@ -290,9 +330,78 @@ describe('BaseLlmClient', () => {
       );
     });
 
+    it('should pass configured retry error codes to retryWithBackoff', async () => {
+      const retryErrorCodes = [4999];
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+        retryErrorCodes,
+      });
+      const mockResponse = createMockResponseWithFunctionCall({
+        color: 'green',
+      });
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'green' } },
+      ]);
+
+      await client.generateJson(defaultOptions);
+
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          extraRetryErrorCodes: retryErrorCodes,
+        }),
+      );
+    });
+
     it('should return empty object when no function calls are returned', async () => {
       const mockResponse = createMockResponseWithoutFunctionCall();
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
+
+    it('should parse a loose JSON object from text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('Result:\n{"color":"purple","count":2}\nDone.'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'purple', count: 2 });
+    });
+
+    it('should parse fenced JSON text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":"orange"}\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'orange' });
+    });
+
+    it('should ignore malformed loose JSON text', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
+
+    it('should reject loose JSON arrays', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('[{"color":"blue"}]'),
+      );
       vi.mocked(getFunctionCalls).mockReturnValue(undefined);
 
       const result = await client.generateJson(defaultOptions);
@@ -308,7 +417,7 @@ describe('BaseLlmClient', () => {
       mockGenerateContent.mockRejectedValue(apiError);
 
       await expect(client.generateJson(defaultOptions)).rejects.toThrow(
-        'Failed to generate JSON content: Service Unavailable (503)',
+        'Failed to generate JSON content (test-prompt-id): Service Unavailable (503)',
       );
 
       // Verify generic error reporting
@@ -441,6 +550,363 @@ describe('BaseLlmClient', () => {
 
       await expect(client.generateEmbedding(texts)).rejects.toThrow(
         'API Failure',
+      );
+    });
+  });
+
+  describe('per-model resolution', () => {
+    const fastModel = 'fast-model';
+    const fastGenerateContent = vi.fn();
+    const fastContentGenerator = {
+      generateContent: fastGenerateContent,
+      embedContent: vi.fn(),
+    } as unknown as Mocked<ContentGenerator>;
+
+    const getResolvedModel = vi.fn();
+    let crossProviderConfig: Mocked<Config>;
+
+    beforeEach(() => {
+      vi.mocked(retryWithBackoff).mockImplementation(
+        async (fn) => await (fn as () => Promise<unknown>)(),
+      );
+      fastGenerateContent.mockReset();
+      mockCreateContentGenerator.mockReset();
+      mockBuildAgentContentGeneratorConfig.mockReset();
+      getResolvedModel.mockReset();
+
+      mockCreateContentGenerator.mockResolvedValue(fastContentGenerator);
+      mockBuildAgentContentGeneratorConfig.mockReturnValue({
+        model: fastModel,
+        authType: AuthType.USE_ANTHROPIC,
+      });
+
+      crossProviderConfig = {
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+        getContentGeneratorConfig: vi
+          .fn()
+          .mockReturnValue({ authType: AuthType.QWEN_OAUTH }),
+        getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
+        getModel: vi.fn().mockReturnValue('main-model'),
+        getFastModel: vi.fn().mockReturnValue(undefined),
+        getAllConfiguredModels: vi.fn((authTypes?: AuthType[]) =>
+          authTypes?.includes(AuthType.QWEN_OAUTH)
+            ? []
+            : [
+                {
+                  id: fastModel,
+                  authType: AuthType.USE_ANTHROPIC,
+                },
+              ],
+        ),
+        getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
+      } as unknown as Mocked<Config>;
+    });
+
+    it('returns the constructor-injected generator when model matches main', async () => {
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('main-model');
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
+      expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the active runtime generator when model matches the runtime view', async () => {
+      const runtimeContentGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      crossProviderConfig.getContentGenerator = vi
+        .fn()
+        .mockReturnValue(runtimeContentGenerator);
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-model',
+      });
+      vi.mocked(crossProviderConfig.getModel).mockReturnValue('runtime-model');
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('runtime-model');
+
+      expect(resolved.contentGenerator).toBe(runtimeContentGenerator);
+      expect(resolved.retryAuthType).toBe(AuthType.USE_OPENAI);
+      expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('builds a per-model generator when model differs and is registered under another authType', async () => {
+      // Main authType is QWEN_OAUTH; fast model only resolves under USE_ANTHROPIC.
+      getResolvedModel.mockImplementation((authType: string, model: string) => {
+        if (authType === AuthType.QWEN_OAUTH) return undefined;
+        if (authType === AuthType.USE_ANTHROPIC && model === fastModel) {
+          return {
+            authType: AuthType.USE_ANTHROPIC,
+            envKey: 'ANTHROPIC_API_KEY',
+            baseUrl: 'https://api.anthropic.com',
+          };
+        }
+        return undefined;
+      });
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel(fastModel);
+
+      expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(resolved.retryAuthType).toBe(AuthType.USE_ANTHROPIC);
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        fastModel,
+        expect.objectContaining({
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+        }),
+      );
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches the per-model generator across resolveForModel calls', async () => {
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.resolveForModel(fastModel);
+      await c.resolveForModel(fastModel);
+
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('clearPerModelGeneratorCache forces a rebuild on the next call', async () => {
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+      await c.resolveForModel(fastModel);
+      c.clearPerModelGeneratorCache();
+      await c.resolveForModel(fastModel);
+
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back to the main generator when the target model is not in the registry', async () => {
+      getResolvedModel.mockReturnValue(undefined);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+      const resolved = await c.resolveForModel('unknown-model');
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      // Falls back to main authType for retry classification.
+      expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
+      // Unregistered selector: createContentGeneratorForModel falls back to
+      // getCurrentContentGenerator(). The runtime view changes between calls
+      // — caching would pin the first call's generator under the selector
+      // key and return it on the second call after the view has unwound.
+      getResolvedModel.mockReturnValue(undefined);
+
+      const firstRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const secondRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const getContentGenerator = vi
+        .fn()
+        .mockReturnValueOnce(firstRuntimeGenerator)
+        .mockReturnValueOnce(secondRuntimeGenerator);
+      crossProviderConfig.getContentGenerator = getContentGenerator;
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const first = await c.resolveForModel('unknown-model');
+      const second = await c.resolveForModel('unknown-model');
+
+      expect(first.contentGenerator).toBe(firstRuntimeGenerator);
+      expect(second.contentGenerator).toBe(secondRuntimeGenerator);
+      expect(getContentGenerator).toHaveBeenCalledTimes(2);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the main generator when createContentGenerator throws', async () => {
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+      mockCreateContentGenerator.mockRejectedValue(
+        new Error('SDK init failed'),
+      );
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+      const resolved = await c.resolveForModel(fastModel);
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      // retryAuthType still reflects the target provider — failure to build
+      // the generator does not change which provider's retry policy applies.
+      expect(resolved.retryAuthType).toBe(AuthType.USE_ANTHROPIC);
+    });
+
+    it('generateJson routes through the per-model generator and forwards retry authType', async () => {
+      const retryErrorCodes = [4999];
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+        generationConfig: {
+          retryErrorCodes,
+        },
+      });
+      fastGenerateContent.mockResolvedValue(
+        createMockResponseWithFunctionCall({ ok: true }),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { ok: true } },
+      ]);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.generateJson({
+        contents: [{ role: 'user', parts: [{ text: 'go' }] }],
+        schema: { type: 'object' },
+        model: fastModel,
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(fastGenerateContent).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({
+          authType: AuthType.USE_ANTHROPIC,
+          extraRetryErrorCodes: retryErrorCodes,
+        }),
+      );
+    });
+
+    it('generateJson accepts authType-qualified selectors and sends the bare model id', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) => {
+        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
+          return {
+            id: 'shared-model',
+            authType: AuthType.USE_OPENAI,
+            envKey: 'OPENAI_API_KEY',
+          };
+        }
+        return undefined;
+      });
+      fastGenerateContent.mockResolvedValue(
+        createMockResponseWithFunctionCall({ ok: true }),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { ok: true } },
+      ]);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.generateJson({
+        contents: [{ role: 'user', parts: [{ text: 'go' }] }],
+        schema: { type: 'object' },
+        model: 'openai:shared-model',
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'shared-model',
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      );
+      expect(fastGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'shared-model' }),
+        'test',
+      );
+    });
+
+    it('generateJson resolves fast selectors through the configured fast model', async () => {
+      crossProviderConfig.getFastModel.mockReturnValue('openai:shared-model');
+      getResolvedModel.mockImplementation((authType: string, model: string) => {
+        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
+          return {
+            id: 'shared-model',
+            authType: AuthType.USE_OPENAI,
+            envKey: 'OPENAI_API_KEY',
+          };
+        }
+        return undefined;
+      });
+      fastGenerateContent.mockResolvedValue(
+        createMockResponseWithFunctionCall({ ok: true }),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { ok: true } },
+      ]);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.generateJson({
+        contents: [{ role: 'user', parts: [{ text: 'go' }] }],
+        schema: { type: 'object' },
+        model: 'fast',
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'shared-model',
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      );
+      expect(fastGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'shared-model' }),
+        'test',
+      );
+    });
+
+    it('generateText routes through the per-model generator and forwards retry authType', async () => {
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+      fastGenerateContent.mockResolvedValue({
+        candidates: [
+          { content: { role: 'model', parts: [{ text: 'hi' }] }, index: 0 },
+        ],
+      });
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const result = await c.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'say hi' }] }],
+        model: fastModel,
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(result.text).toBe('hi');
+      expect(fastGenerateContent).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
       );
     });
   });

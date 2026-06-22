@@ -18,10 +18,13 @@ export function getDecisionFromOutcome(
 ): ToolCallDecision {
   switch (outcome) {
     case ToolConfirmationOutcome.ProceedOnce:
+    case ToolConfirmationOutcome.RestorePrevious:
       return ToolCallDecision.ACCEPT;
     case ToolConfirmationOutcome.ProceedAlways:
     case ToolConfirmationOutcome.ProceedAlwaysServer:
     case ToolConfirmationOutcome.ProceedAlwaysTool:
+    case ToolConfirmationOutcome.ProceedAlwaysProject:
+    case ToolConfirmationOutcome.ProceedAlwaysUser:
       return ToolCallDecision.AUTO_ACCEPT;
     case ToolConfirmationOutcome.ModifyWithEditor:
       return ToolCallDecision.MODIFY;

@@ -18,13 +18,12 @@ vi.mock('os', async (importOriginal) => {
   };
 });
 
-// Mock './settings.js' to ensure it uses the mocked 'os.homedir()' for its internal constants.
-vi.mock('./settings.js', async (importActual) => {
-  const originalModule = await importActual<typeof import('./settings.js')>();
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof osActual>();
   return {
-    __esModule: true, // Ensure correct module shape
-    ...originalModule, // Re-export all original members
-    // We are relying on originalModule's USER_SETTINGS_PATH being constructed with mocked os.homedir()
+    ...actualOs,
+    homedir: vi.fn(() => '/mock/home/user'),
+    platform: vi.fn(() => 'linux'),
   };
 });
 
@@ -46,28 +45,53 @@ import {
   afterEach,
   type Mocked,
   type Mock,
-  fail,
 } from 'vitest';
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import * as commentJsonUtils from '../utils/commentJson.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
   getSettingsWarnings,
   loadSettings,
-  USER_SETTINGS_PATH, // This IS the mocked path.
+  getUserSettingsPath,
   getSystemSettingsPath,
   getSystemDefaultsPath,
+  SettingScope,
   SETTINGS_DIRECTORY_NAME, // This is from the original module, but used by the mock.
-  migrateSettingsToV1,
-  needsMigration,
   type Settings,
   loadEnvironment,
   SETTINGS_VERSION,
   SETTINGS_VERSION_KEY,
+  resetHomeEnvBootstrapForTesting,
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
 } from './settings.js';
-import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { needsMigration } from './migration/index.js';
+import { QWEN_DIR } from '@qwen-code/qwen-code-core';
+
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: () => mockDebugLogger,
+  };
+});
+
+// Resolve the (mocked) user-settings path once at module load. Tests mock
+// `os.homedir`, so the value is stable across the suite. Production callers
+// must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
+// resolved from `~/.env` after module load.
+const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
 // Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
@@ -84,6 +108,25 @@ type TestSettings = Settings & {
   nestedObj?: { [key: string]: unknown };
 };
 
+vi.mock('node:fs', async (importOriginal) => {
+  // Get all the functions from the real 'fs' module
+  const actualFs = await importOriginal<typeof fs>();
+
+  return {
+    ...actualFs, // Keep all the real functions
+    // Now, just override the ones we need for the test
+    existsSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
+    realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
+  };
+});
+
+// Also mock 'fs' for compatibility
 vi.mock('fs', async (importOriginal) => {
   // Get all the functions from the real 'fs' module
   const actualFs = await importOriginal<typeof fs>();
@@ -95,8 +138,10 @@ vi.mock('fs', async (importOriginal) => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
-    realpathSync: (p: string) => p,
+    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
+    realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
 
@@ -107,6 +152,21 @@ vi.mock('./extension.js', () => ({
 vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
+
+vi.mock('../utils/commentJson.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/commentJson.js')>();
+  return {
+    ...original,
+    // Wrap with vi.fn so tests can spy/mock, but default to calling through
+    // to the real implementation (which uses writeWithBackupSync).
+    updateSettingsFilePreservingFormat: vi.fn((...args: unknown[]) =>
+      original.updateSettingsFilePreservingFormat(
+        ...(args as [string, Record<string, unknown>, boolean]),
+      ),
+    ),
+  };
+});
 
 describe('Settings Loading and Merging', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
@@ -126,11 +186,17 @@ describe('Settings Loading and Merging', () => {
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}'); // Return valid empty JSON
+    (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
+      p.toString(),
+    );
     (mockFsMkdirSync as Mock).mockImplementation(() => undefined);
     vi.mocked(isWorkspaceTrusted).mockReturnValue({
       isTrusted: true,
       source: 'file',
     });
+    resetHomeEnvBootstrapForTesting();
+    // Ensure the mock delegates to the real implementation by default
+    // (set up in vi.mock factory above).
   });
 
   afterEach(() => {
@@ -144,6 +210,37 @@ describe('Settings Loading and Merging', () => {
       expect(settings.user.settings).toEqual({});
       expect(settings.workspace.settings).toEqual({});
       expect(settings.merged).toEqual({});
+    });
+
+    describe('home directory workspace scope', () => {
+      it('should mark workspace settings inactive when workspace is the home directory', () => {
+        const homeDir = '/mock/home/user';
+        vi.mocked(osActual.homedir).mockReturnValue(homeDir);
+        const homeSettingsPath = pathActual.join(
+          homeDir,
+          SETTINGS_DIRECTORY_NAME,
+          'settings.json',
+        );
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p.toString() === homeSettingsPath,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() =>
+          JSON.stringify({ ui: { theme: 'Default' } }),
+        );
+        (fs.realpathSync as Mock).mockImplementation(() => homeDir);
+
+        const settings = loadSettings(homeDir);
+
+        expect(settings.workspaceSettingsActive).toBe(false);
+        expect(settings.user.settings.ui).toEqual({ theme: 'Default' });
+        expect(settings.workspace.settings).toEqual({});
+      });
+
+      it('should keep workspace settings active outside the home directory', () => {
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.workspaceSettingsActive).toBe(true);
+      });
     });
 
     it('should load system settings if only system file exists', () => {
@@ -343,7 +440,7 @@ describe('Settings Loading and Merging', () => {
           fileName: 'WORKSPACE_CONTEXT.md',
         },
         mcp: {
-          allowed: ['server1', 'server2'],
+          allowed: ['server1', 'server2', 'server3', 'server1', 'server2'],
         },
       });
     });
@@ -448,7 +545,7 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
-    it('should warn about unknown top-level keys in a v2 settings file', () => {
+    it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
       );
@@ -466,13 +563,7 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(getSettingsWarnings(settings)).toEqual(
-        expect.arrayContaining([
-          expect.stringContaining(
-            "Unknown setting 'someUnknownKey' will be ignored",
-          ),
-        ]),
-      );
+      expect(getSettingsWarnings(settings)).toEqual([]);
     });
 
     it('should not warn for valid v2 container keys', () => {
@@ -487,6 +578,100 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH)
             return JSON.stringify(userSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([]);
+    });
+
+    it('should warn when trusted workspace empty modelProviders overrides user modelProviders', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        modelProviders: {},
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("defines an empty 'modelProviders' object"),
+          expect.stringContaining('has no effect with current merge behavior'),
+          expect.stringContaining('may indicate a configuration error'),
+        ]),
+      );
+    });
+
+    it('should not warn when workspace does not define modelProviders', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        model: { name: 'workspace-model' },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([]);
+    });
+
+    it('should not warn when workspace is untrusted', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        modelProviders: {},
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
           return '{}';
         },
       );
@@ -536,8 +721,15 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Verify that fs.writeFileSync was called with migrated settings including version
+      // writeWithBackupSync writes to a .tmp file first, then renames
       expect(fs.writeFileSync).toHaveBeenCalled();
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error('Expected temp write call for migrated settings');
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
       expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
     });
@@ -594,19 +786,22 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
-      // Verify that fs.writeFileSync was called (to add version)
-      // but NOT fs.renameSync (no backup needed, just adding version)
-      expect(fs.renameSync).not.toHaveBeenCalled();
-      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
-
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
-      const writtenPath = writeCall[0];
+      // Version normalization uses writeWithBackupSync (temp write + rename)
+      // Verify that writeFileSync was called with the temp file path
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error('Expected temp write call for version normalization');
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
 
-      expect(writtenPath).toBe(USER_SETTINGS_PATH);
       expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
       expect(writtenContent.ui?.theme).toBe('dark');
       expect(writtenContent.model?.name).toBe('qwen-coder');
+      // Verify writeWithBackupSync was called by checking temp file write
+      expect(fs.writeFileSync).toHaveBeenCalled();
     });
 
     it('should correctly handle partially migrated settings without version field', () => {
@@ -631,8 +826,17 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Verify that the migrated settings preserve the model object correctly
+      // writeWithBackupSync writes to a .tmp file first, then renames
       expect(fs.writeFileSync).toHaveBeenCalled();
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error(
+          'Expected temp write call for partially migrated settings',
+        );
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
 
       // Model should remain as an object, not double-nested
@@ -734,12 +938,85 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Version should be bumped to 3 even though no keys needed migration
+      // writeWithBackupSync writes to a .tmp file first, then renames
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
-        (call: unknown[]) => call[0] === USER_SETTINGS_PATH,
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );
       expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error('Expected temp write call for V2->V3 version bump');
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
       expect(writtenContent.$version).toBe(SETTINGS_VERSION);
+    });
+
+    it('should normalize invalid version metadata when no migration is applicable', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const invalidVersionSettings = {
+        $version: 'invalid-version',
+        general: {
+          enableAutoUpdate: true,
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(invalidVersionSettings);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Version normalization uses writeWithBackupSync (temp write + rename)
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error(
+          'Expected temp write call for invalid version normalization',
+        );
+      }
+      const writtenContent = JSON.parse(writeCall[1] as string);
+      expect(writtenContent.$version).toBe(SETTINGS_VERSION);
+      expect(writtenContent.general?.enableAutoUpdate).toBe(true);
+    });
+
+    it('should normalize legacy numeric version when no migration can execute', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const staleVersionSettings = {
+        $version: 1,
+        // No V1/V2 indicators recognized by migrations
+        customOnlyKey: 'value',
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(staleVersionSettings);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Version normalization uses writeWithBackupSync (temp write + rename)
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error(
+          'Expected temp write call for stale version normalization',
+        );
+      }
+      const writtenContent = JSON.parse(writeCall[1] as string);
+      expect(writtenContent.$version).toBe(SETTINGS_VERSION);
+      expect(writtenContent.customOnlyKey).toBe('value');
     });
 
     it('should correctly merge and migrate legacy array properties from multiple scopes', () => {
@@ -784,6 +1061,34 @@ describe('Settings Loading and Merging', () => {
         expect.arrayContaining(['USER_VAR', 'WORKSPACE_VAR']),
       );
       expect(settings.merged.advanced?.excludedEnvVars).toHaveLength(2);
+    });
+
+    it('should UNION-merge slashCommands.disabled across user and workspace scopes', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettings = {
+        slashCommands: { disabled: ['auth', 'quit'] },
+      };
+      const workspaceSettings = {
+        // Workspace overlaps with user and adds one entry. UNION de-dupes the
+        // overlap and merges the new entry; it cannot remove user entries.
+        slashCommands: { disabled: ['quit', 'clear'] },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(userSettings);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettings);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const disabled = settings.merged.slashCommands?.disabled ?? [];
+      expect(disabled).toEqual(
+        expect.arrayContaining(['auth', 'quit', 'clear']),
+      );
+      expect(disabled).toHaveLength(3);
     });
 
     it('should merge all settings files with the correct precedence', () => {
@@ -1222,14 +1527,17 @@ describe('Settings Loading and Merging', () => {
           args: ['--user-arg'],
           description: 'User MCP server',
         },
+        // Workspace-sourced servers are stamped with provenance scope (#4615).
         'workspace-server': {
           command: 'workspace-command',
           args: ['--workspace-arg'],
           description: 'Workspace MCP server',
+          scope: 'workspace',
         },
         'shared-server': {
           command: 'workspace-shared-command',
           description: 'Workspace shared server config',
+          scope: 'workspace',
         },
       });
     });
@@ -1288,6 +1596,36 @@ describe('Settings Loading and Merging', () => {
         'workspace-only-server': {
           command: 'workspace-only-command',
           description: 'Workspace only server',
+          scope: 'workspace',
+        },
+      });
+    });
+
+    it('should force workspace MCP server scope even if settings declare another scope', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const workspaceSettingsContent = {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-command',
+            scope: 'system',
+          },
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.mcpServers).toEqual({
+        'workspace-server': {
+          command: 'workspace-command',
+          scope: 'workspace',
         },
       });
     });
@@ -1355,13 +1693,18 @@ describe('Settings Loading and Merging', () => {
         },
         'workspace-server': {
           command: 'workspace-command',
+          scope: 'workspace',
         },
+        // system-sourced servers are stamped 'system' (ungated, highest
+        // precedence) (#4615).
         'system-only-server': {
           command: 'system-only-command',
+          scope: 'system',
         },
         'shared-server': {
           command: 'system-command',
           args: ['--system-arg'],
+          scope: 'system',
         },
       });
     });
@@ -1401,8 +1744,8 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
       expect(settings.merged.mcp).toEqual({
-        allowed: ['system-allowed'],
-        excluded: ['workspace-excluded'],
+        allowed: ['user-allowed', 'workspace-allowed', 'system-allowed'],
+        excluded: ['user-excluded', 'workspace-excluded'],
       });
     });
 
@@ -1587,55 +1930,291 @@ describe('Settings Loading and Merging', () => {
       ]);
     });
 
-    it('should handle JSON parsing errors gracefully', () => {
-      (mockFsExistsSync as Mock).mockReturnValue(true); // Both files "exist"
+    it('should handle JSON parsing errors gracefully by renaming corrupted file', () => {
       const invalidJsonContent = 'invalid json';
       const userReadError = new SyntaxError(
         "Expected ',' or '}' after property value in JSON at position 10",
       );
-      const workspaceReadError = new SyntaxError(
-        'Unexpected token i in JSON at position 0',
-      );
+
+      // No .orig backup available
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (pathStr.endsWith('.orig')) return false;
+        return true;
+      });
 
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH) {
-            // Simulate JSON.parse throwing for user settings
             vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
               throw userReadError;
             });
-            return invalidJsonContent; // Content that would cause JSON.parse to throw
-          }
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
-            // Simulate JSON.parse throwing for workspace settings
-            vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
-              throw workspaceReadError;
-            });
             return invalidJsonContent;
           }
-          return '{}'; // Default for other reads
+          return '{}';
         },
       );
 
-      try {
-        loadSettings(MOCK_WORKSPACE_DIR);
-        fail('loadSettings should have thrown a FatalConfigError');
-      } catch (e) {
-        expect(e).toBeInstanceOf(FatalConfigError);
-        const error = e as FatalConfigError;
-        expect(error.message).toContain(
-          `Error in ${USER_SETTINGS_PATH}: ${userReadError.message}`,
-        );
-        expect(error.message).toContain(
-          `Error in ${MOCK_WORKSPACE_SETTINGS_PATH}: ${workspaceReadError.message}`,
-        );
-        expect(error.message).toContain(
-          'Please fix the configuration file(s) and try again.',
-        );
-      }
+      // Should NOT throw — corrupted settings degrade gracefully
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
 
-      // Restore JSON.parse mock if it was spied on specifically for this test
-      vi.restoreAllMocks(); // Or more targeted restore if needed
+      // Verify the corrupted file was copied to .corrupted
+      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
+      const corruptedCopy = copyCalls.find(
+        (call: unknown[]) =>
+          call[0] === USER_SETTINGS_PATH &&
+          String(call[1]).includes('.corrupted'),
+      );
+      expect(corruptedCopy).toBeDefined();
+
+      // Corrupted dialog is driven by corruptedPath, not by migrationWarnings
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      expect(result.wasRecovered).toBe(false);
+
+      vi.restoreAllMocks();
+    });
+
+    it('should ignore a stale .orig backup and reset to empty when settings.json is corrupted', () => {
+      // `.orig` is no longer used for recovery — writeWithBackupSync removes it
+      // on success, so any leftover is stale and must not be restored from.
+      const invalidJsonContent = 'invalid json';
+      const staleBackupContent = JSON.stringify({
+        $version: SETTINGS_VERSION,
+        model: { id: 'backup-model' },
+      });
+
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          if (p === `${USER_SETTINGS_PATH}.orig`) return staleBackupContent;
+          return '{}';
+        },
+      );
+
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+
+      // The stale backup must NOT be written back to the original path.
+      const writeCalls = (fs.writeFileSync as Mock).mock.calls;
+      const restoreWrite = writeCalls.find(
+        (call: unknown[]) =>
+          call[0] === USER_SETTINGS_PATH && call[1] === staleBackupContent,
+      );
+      expect(restoreWrite).toBeUndefined();
+
+      // Settings are reset to empty and corruption is reported, not recovered.
+      expect(result.wasRecovered).toBe(false);
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      const resetWrites = writeCalls.filter(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      );
+      expect(resetWrites.length).toBeGreaterThan(0);
+
+      vi.restoreAllMocks();
+    });
+
+    it('should degrade gracefully when both settings.json and backup are corrupted', () => {
+      const invalidJsonContent = 'invalid json';
+      const invalidBackupContent = 'also invalid';
+
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (
+          pathStr === USER_SETTINGS_PATH ||
+          pathStr === `${USER_SETTINGS_PATH}.orig`
+        )
+          return true;
+        return false;
+      });
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          if (p === `${USER_SETTINGS_PATH}.orig`) return invalidBackupContent;
+          return '{}';
+        },
+      );
+
+      // Should NOT throw — falls through to rename-and-degrade
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      expect(result.wasRecovered).toBe(false);
+      const resetWrites = (fs.writeFileSync as Mock).mock.calls.filter(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      );
+      expect(resetWrites.length).toBeGreaterThan(0);
+
+      // Verify the corrupted file was copied to .corrupted
+      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
+      expect(
+        copyCalls.some(
+          (call: unknown[]) =>
+            call[0] === USER_SETTINGS_PATH &&
+            String(call[1]).includes('.corrupted'),
+        ),
+      ).toBe(true);
+
+      vi.restoreAllMocks();
+    });
+
+    it('should start with empty settings when copy of corrupted file fails', () => {
+      const invalidJsonContent = 'invalid json';
+
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (pathStr.endsWith('.orig')) return false;
+        return true;
+      });
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          return '{}';
+        },
+      );
+
+      // Simulate copy failure (e.g., permission denied)
+      (fs.copyFileSync as Mock).mockImplementation(() => {
+        throw new Error('EACCES: permission denied');
+      });
+
+      // Should still NOT throw — proceeds with empty settings
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+
+      // Corruption warning no longer goes through migrationWarnings —
+      // copy failed so corruptedPath is undefined too
+      const warnings = getSettingsWarnings(result);
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
+      expect(result.corruptedPath).toBeUndefined();
+
+      vi.restoreAllMocks();
+    });
+
+    it('should return warnings suitable for early stderr emission when settings.json has invalid JSON', () => {
+      const invalidJsonContent = '{ broken json!!!';
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          return '{}';
+        },
+      );
+      (fs.renameSync as Mock).mockImplementation(() => {});
+
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(result);
+
+      // Corruption warning no longer goes through migrationWarnings —
+      // it is emitted via settings.corruptedPath check in gemini.tsx
+      // early stderr path instead. Verify corruptedPath is set.
+      expect(result.corruptedPath).toBeDefined();
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
+
+      vi.restoreAllMocks();
+    });
+
+    describe('corruption env var propagation', () => {
+      afterEach(() => {
+        delete process.env[ENV_CORRUPTED_PATH];
+        delete process.env[ENV_WAS_RECOVERED];
+      });
+
+      it('should propagate corruptedPath/wasRecovered from env vars', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+        expect(result.wasRecovered).toBe(true);
+      });
+
+      it('should delete env vars after reading so subsequent calls do not re-trigger', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '0';
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+        expect(process.env[ENV_CORRUPTED_PATH]).toBeUndefined();
+        expect(process.env[ENV_WAS_RECOVERED]).toBeUndefined();
+      });
+
+      it('should only consume env vars for SettingScope.User', () => {
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+          const s = p.toString();
+          return s === USER_SETTINGS_PATH || s === MOCK_WORKSPACE_SETTINGS_PATH;
+        });
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+
+        // env vars consumed in User scope — scope guard exercised
+        expect(process.env[ENV_CORRUPTED_PATH]).toBeUndefined();
+        expect(process.env[ENV_WAS_RECOVERED]).toBeUndefined();
+        expect(result.corruptedPath).toBeDefined();
+      });
+
+      it('should map wasRecovered="0" to false', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '0';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(result.wasRecovered).toBe(false);
+      });
+
+      it('should not consume env vars when consumeCorruptionEnvVars=false', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        loadSettings(MOCK_WORKSPACE_DIR, false);
+        // env vars should remain untouched so child processes can still read them
+        expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+          `${USER_SETTINGS_PATH}.corrupted`,
+        );
+        expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+      });
+
+      it('should reject mismatched ENV_CORRUPTED_PATH', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = '/some/other/path.corrupted';
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+
+        // Guard rejected — corruptedPath not propagated
+        expect(result.corruptedPath).toBeUndefined();
+        // Env vars not consumed because guard failed
+        expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+          '/some/other/path.corrupted',
+        );
+      });
     });
 
     it('should resolve environment variables in user settings', () => {
@@ -1782,6 +2361,256 @@ describe('Settings Loading and Merging', () => {
       delete process.env['USER_VAR'];
       delete process.env['WORKSPACE_VAR'];
       delete process.env['SHARED_VAR'];
+    });
+
+    it('should resolve ${VAR} in settings from home-level .env file (#4466)', () => {
+      const homeQwenEnvPath = path.join(
+        path.dirname(USER_SETTINGS_PATH),
+        '.env',
+      );
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${MY_SECRET_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === homeQwenEnvPath)
+            return 'MY_SECRET_TOKEN=secret_from_dotenv';
+          return '{}';
+        },
+      );
+
+      delete process.env['MY_SECRET_TOKEN'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer secret_from_dotenv',
+      );
+
+      delete process.env['MY_SECRET_TOKEN'];
+    });
+
+    it('should not override process.env values with home .env file (#4466)', () => {
+      const homeQwenEnvPath = path.join(
+        path.dirname(USER_SETTINGS_PATH),
+        '.env',
+      );
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${MY_SECRET_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === homeQwenEnvPath) return 'MY_SECRET_TOKEN=from_dotenv';
+          return '{}';
+        },
+      );
+
+      process.env['MY_SECRET_TOKEN'] = 'from_process_env';
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer from_process_env',
+      );
+
+      delete process.env['MY_SECRET_TOKEN'];
+    });
+
+    it('should not search dirname(qwenDir)/.env when QWEN_HOME is set (#4466)', () => {
+      const customHome = '/custom/qwen/home';
+      process.env['QWEN_HOME'] = customHome;
+      const customSettingsPath = path.join(customHome, 'settings.json');
+      const dirnameEnvPath = path.join(path.dirname(customHome), '.env');
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${MY_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === customSettingsPath || p === dirnameEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === customSettingsPath)
+            return JSON.stringify(userSettingsContent);
+          if (p === dirnameEnvPath) return 'MY_TOKEN=should_not_be_found';
+          return '{}';
+        },
+      );
+
+      delete process.env['MY_TOKEN'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer ${MY_TOKEN}',
+      );
+
+      delete process.env['MY_TOKEN'];
+      delete process.env['QWEN_HOME'];
+    });
+
+    it('should resolve ${VAR} from ~/.env when QWEN_HOME is not set (#4466)', () => {
+      const homeEnvPath = path.join(
+        path.dirname(path.dirname(USER_SETTINGS_PATH)),
+        '.env',
+      );
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${HOME_ENV_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === homeEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === homeEnvPath) return 'HOME_ENV_TOKEN=from_home_env';
+          return '{}';
+        },
+      );
+
+      delete process.env['HOME_ENV_TOKEN'];
+      delete process.env['QWEN_HOME'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer from_home_env',
+      );
+
+      delete process.env['HOME_ENV_TOKEN'];
+    });
+
+    it('should prefer ~/.qwen/.env over ~/.env for the same key (first-write-wins) (#4466)', () => {
+      const qwenEnvPath = path.join(path.dirname(USER_SETTINGS_PATH), '.env');
+      const homeEnvPath = path.join(
+        path.dirname(path.dirname(USER_SETTINGS_PATH)),
+        '.env',
+      );
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${PRECEDENCE_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === qwenEnvPath || p === homeEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === qwenEnvPath) return 'PRECEDENCE_TOKEN=from_qwen_dir';
+          if (p === homeEnvPath) return 'PRECEDENCE_TOKEN=from_home_dir';
+          return '{}';
+        },
+      );
+
+      delete process.env['PRECEDENCE_TOKEN'];
+      delete process.env['QWEN_HOME'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer from_qwen_dir',
+      );
+
+      delete process.env['PRECEDENCE_TOKEN'];
+    });
+
+    it('should succeed with unresolved placeholder when .env read throws (#4466)', () => {
+      const qwenEnvPath = path.join(path.dirname(USER_SETTINGS_PATH), '.env');
+      const userSettingsContent = {
+        mcpServers: {
+          myServer: {
+            headers: {
+              Authorization: 'Bearer ${ERROR_TOKEN}',
+            },
+          },
+        },
+      };
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === qwenEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === qwenEnvPath) throw new Error('EACCES: permission denied');
+          return '{}';
+        },
+      );
+
+      delete process.env['ERROR_TOKEN'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mcpServers = settings.merged.mcpServers as Record<
+        string,
+        { headers?: Record<string, string> }
+      >;
+      expect(mcpServers?.['myServer']?.headers?.['Authorization']).toBe(
+        'Bearer ${ERROR_TOKEN}',
+      );
+
+      delete process.env['ERROR_TOKEN'];
     });
 
     it('should correctly merge dnsResolutionOrder with workspace taking precedence', () => {
@@ -2054,6 +2883,36 @@ describe('Settings Loading and Merging', () => {
         });
       });
     });
+
+    it('should log error when updateSettingsFilePreservingFormat returns false during migration', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ theme: 'dark' });
+          return '{}';
+        },
+      );
+      // Simulate the write-back being refused (e.g. validation failure)
+      const mockFn =
+        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValue(false);
+
+      // Should not throw — the error is caught and logged internally
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).not.toThrow();
+
+      // The mock should have been called (the migration path was reached)
+      expect(mockFn).toHaveBeenCalled();
+
+      // Verify the error was logged via debugLogger
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'updateSettingsFilePreservingFormat returned false',
+        ),
+      );
+    });
   });
 
   describe('excludedProjectEnvVars integration', () => {
@@ -2261,382 +3120,391 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
-  describe('migrateSettingsToV1', () => {
-    it('should handle an empty object', () => {
-      const v2Settings = {};
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({});
+  describe('reloadScopeFromDisk', () => {
+    it('reloads a scope from disk and resolves home env vars', () => {
+      const homeQwenEnvPath = path.join(
+        path.dirname(USER_SETTINGS_PATH),
+        '.env',
+      );
+      const initialUserSettingsContent = {
+        ui: {
+          theme: 'dark',
+          statusLine: {
+            type: 'preset',
+            items: ['model'],
+          },
+        },
+      };
+      const reloadedUserSettingsContent = {
+        ui: {
+          theme: '${RELOADED_THEME}',
+          statusLine: {
+            type: 'command',
+            command: 'echo reloaded',
+          },
+        },
+      };
+      let currentUserSettingsContent = JSON.stringify(
+        initialUserSettingsContent,
+      );
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          if (p === homeQwenEnvPath) {
+            return 'RELOADED_THEME=light';
+          }
+          return '{}';
+        },
+      );
+      delete process.env['RELOADED_THEME'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = JSON.stringify(reloadedUserSettingsContent);
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.user.settings.ui?.theme).toBe('light');
+      expect(settings.user.originalSettings.ui?.theme).toBe(
+        '${RELOADED_THEME}',
+      );
+      expect(settings.user.rawJson).toBe(currentUserSettingsContent);
+      expect(settings.merged.ui?.statusLine).toEqual({
+        type: 'command',
+        command: 'echo reloaded',
+      });
+
+      delete process.env['RELOADED_THEME'];
     });
 
-    it('should migrate a simple v2 settings object to v1', () => {
-      const v2Settings = {
-        general: {
-          preferredEditor: 'vscode',
-          vimMode: true,
-        },
+    it('clears a scope when its settings file is removed', () => {
+      const userSettingsContent = {
         ui: {
           theme: 'dark',
         },
       };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        preferredEditor: 'vscode',
-        vimMode: true,
-        theme: 'dark',
-      });
+      let userSettingsExists = true;
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH && userSettingsExists,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify(userSettingsContent);
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      userSettingsExists = false;
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.user.settings).toEqual({});
+      expect(settings.user.originalSettings).toEqual({});
+      expect(settings.user.rawJson).toBeUndefined();
+      expect(settings.merged.ui).toBeUndefined();
     });
 
-    it('should handle nested properties correctly', () => {
-      const v2Settings = {
-        security: {
-          folderTrust: {
-            enabled: true,
-          },
-          auth: {
-            selectedType: 'oauth',
-          },
-        },
-        advanced: {
-          autoConfigureMemory: true,
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        folderTrust: true,
-        selectedAuthType: 'oauth',
-        autoConfigureMaxOldSpaceSize: true,
-      });
-    });
-
-    it('should preserve mcpServers at the top level', () => {
-      const v2Settings = {
-        general: {
-          preferredEditor: 'vscode',
-        },
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        preferredEditor: 'vscode',
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-      });
-    });
-
-    it('should carry over unrecognized top-level properties', () => {
-      const v2Settings = {
-        general: {
-          vimMode: false,
-        },
-        unrecognized: 'value',
-        another: {
-          nested: true,
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        vimMode: false,
-        unrecognized: 'value',
-        another: {
-          nested: true,
-        },
-      });
-    });
-
-    it('should handle a complex object with mixed properties', () => {
-      const v2Settings = {
-        general: {
-          disableAutoUpdate: true,
-        },
-        ui: {
-          hideTips: true,
-          customThemes: {
-            myTheme: {},
-          },
-        },
-        model: {
-          name: 'gemini-pro',
-          chatCompression: {
-            contextPercentageThreshold: 0.5,
-          },
-        },
-        mcpServers: {
-          'server-1': {
-            command: 'node server.js',
-          },
-        },
-        unrecognized: {
-          should: 'be-preserved',
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        disableAutoUpdate: true,
-        hideTips: true,
-        customThemes: {
-          myTheme: {},
-        },
-        model: 'gemini-pro',
-        chatCompression: {
-          contextPercentageThreshold: 0.5,
-        },
-        mcpServers: {
-          'server-1': {
-            command: 'node server.js',
-          },
-        },
-        unrecognized: {
-          should: 'be-preserved',
-        },
-      });
-    });
-
-    it('should not migrate a v1 settings object', () => {
-      const v1Settings = {
-        preferredEditor: 'vscode',
-        vimMode: true,
-        theme: 'dark',
-      };
-      const migratedSettings = migrateSettingsToV1(v1Settings);
-      expect(migratedSettings).toEqual({
-        preferredEditor: 'vscode',
-        vimMode: true,
-        theme: 'dark',
-      });
-    });
-
-    it('should migrate a full v2 settings object to v1', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          preferredEditor: 'code',
-          vimMode: true,
-        },
+    it('ignores top-level array settings during reload', () => {
+      const initialUserSettingsContent = {
         ui: {
           theme: 'dark',
         },
-        privacy: {
-          usageStatisticsEnabled: false,
+      };
+      let currentUserSettingsContent = JSON.stringify(
+        initialUserSettingsContent,
+      );
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = '[]';
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.user.settings).toEqual({
+        ...initialUserSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.merged.ui?.theme).toBe('dark');
+    });
+
+    it('keeps existing settings and logs when reload JSON parsing fails', () => {
+      const initialUserSettingsContent = {
+        ui: {
+          theme: 'dark',
+        },
+      };
+      let currentUserSettingsContent = JSON.stringify(
+        initialUserSettingsContent,
+      );
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = '{bad json';
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.merged.ui?.theme).toBe('dark');
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('reloadScopeFromDisk(User):'),
+      );
+    });
+  });
+
+  describe('setValue persistence', () => {
+    it('preserves models added to settings.json after startup when updating model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+
+      const initialUserSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        modelProviders: {
+          openai: [
+            {
+              id: 'existing-model',
+              name: 'Existing Model',
+              baseUrl: 'https://example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
         },
         model: {
-          name: 'gemini-pro',
-          chatCompression: {
-            contextPercentageThreshold: 0.8,
+          name: 'existing-model',
+        },
+      };
+
+      const externallyModifiedUserSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        modelProviders: {
+          openai: [
+            {
+              id: 'existing-model',
+              name: 'Existing Model',
+              baseUrl: 'https://example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+            {
+              id: 'manually-added-model',
+              name: 'Manually Added Model',
+              baseUrl: 'https://example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+        model: {
+          name: 'existing-model',
+        },
+      };
+
+      let currentUserSettingsContent = JSON.stringify(
+        initialUserSettingsContent,
+      );
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = JSON.stringify(
+        externallyModifiedUserSettingsContent,
+      );
+
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        'manually-added-model',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      expect(writeCall).toBeDefined();
+
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('manually-added-model');
+      expect(writtenContent.modelProviders.openai).toEqual(
+        externallyModifiedUserSettingsContent.modelProviders.openai,
+      );
+    });
+
+    it('strips a runtime snapshot prefix before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
+    });
+
+    it('collapses stacked runtime snapshot prefixes before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
+    });
+
+    it('persists removed MCP servers when replacing the top-level mcpServers object', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        ui: {
+          theme: 'dark',
+        },
+        mcpServers: {
+          keep: {
+            command: 'node',
+          },
+          remove: {
+            command: 'python',
           },
         },
-        context: {
-          fileName: 'CONTEXT.md',
-          includeDirectories: ['/src'],
+      };
+
+      let currentUserSettingsContent = JSON.stringify(userSettingsContent);
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
         },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = JSON.stringify(userSettingsContent);
+
+      settings.setValue(SettingScope.User, 'mcpServers', {
+        keep: {
+          command: 'node',
+        },
+      });
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      expect(writeCall).toBeDefined();
+
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.ui).toEqual({ theme: 'dark' });
+      expect(writtenContent.mcpServers).toEqual({
+        keep: {
+          command: 'node',
+        },
+      });
+    });
+
+    it('preserves sibling keys for non-MCP top-level object updates', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         tools: {
-          sandbox: true,
-          exclude: ['toolA'],
-        },
-        mcp: {
-          allowed: ['server1'],
-        },
-        security: {
-          folderTrust: {
-            enabled: true,
-          },
-        },
-        advanced: {
-          dnsResolutionOrder: 'ipv4first',
-          excludedEnvVars: ['SECRET'],
-        },
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-        unrecognizedTopLevel: {
-          value: 'should be preserved',
+          approvalMode: 'default',
+          disabled: ['shell'],
         },
       };
 
-      const v1Settings = migrateSettingsToV1(v2Settings);
+      let currentUserSettingsContent = JSON.stringify(userSettingsContent);
 
-      expect(v1Settings).toEqual({
-        preferredEditor: 'code',
-        vimMode: true,
-        theme: 'dark',
-        usageStatisticsEnabled: false,
-        model: 'gemini-pro',
-        chatCompression: {
-          contextPercentageThreshold: 0.8,
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
         },
-        contextFileName: 'CONTEXT.md',
-        includeDirectories: ['/src'],
-        sandbox: true,
-        excludeTools: ['toolA'],
-        allowMCPServers: ['server1'],
-        folderTrust: true,
-        dnsResolutionOrder: 'ipv4first',
-        excludedProjectEnvVars: ['SECRET'],
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-        unrecognizedTopLevel: {
-          value: 'should be preserved',
-        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = JSON.stringify(userSettingsContent);
+
+      settings.setValue(SettingScope.User, 'tools', {
+        disabled: ['read-file'],
+      });
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      expect(writeCall).toBeDefined();
+
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.tools).toEqual({
+        approvalMode: 'default',
+        disabled: ['read-file'],
       });
     });
 
-    it('should handle partial v2 settings', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          vimMode: false,
+    it('logs when setValue persistence is refused', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+            });
+          }
+          return '{}';
         },
-        ui: {},
-        model: {
-          name: 'gemini-1.5-pro',
-        },
-        unrecognized: 'value',
-      };
+      );
 
-      const v1Settings = migrateSettingsToV1(v2Settings);
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mockFn =
+        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValueOnce(false);
 
-      expect(v1Settings).toEqual({
-        vimMode: false,
-        model: 'gemini-1.5-pro',
-        unrecognized: 'value',
-      });
-    });
+      settings.setValue(SettingScope.User, 'mcpServers', {});
 
-    it('should handle settings with different data types', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          vimMode: false,
-        },
-        model: {
-          maxSessionTurns: -1,
-        },
-        context: {
-          includeDirectories: [],
-        },
-        security: {
-          folderTrust: {
-            enabled: false,
-          },
-        },
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        vimMode: false,
-        maxSessionTurns: -1,
-        includeDirectories: [],
-        folderTrust: false,
-      });
-    });
-
-    it('should preserve unrecognized top-level keys', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          vimMode: true,
-        },
-        customTopLevel: {
-          a: 1,
-          b: [2],
-        },
-        anotherOne: 'hello',
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        vimMode: true,
-        customTopLevel: {
-          a: 1,
-          b: [2],
-        },
-        anotherOne: 'hello',
-      });
-    });
-
-    it('should handle an empty v2 settings object', () => {
-      const v2Settings = {};
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({});
-    });
-
-    it('should correctly handle mcpServers at the top level', () => {
-      const v2Settings: TestSettings = {
-        mcpServers: {
-          serverA: { command: 'a' },
-        },
-        mcp: {
-          allowed: ['serverA'],
-        },
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        mcpServers: {
-          serverA: { command: 'a' },
-        },
-        allowMCPServers: ['serverA'],
-      });
-    });
-
-    it('should correctly migrate customWittyPhrases', () => {
-      const v2Settings: Partial<Settings> = {
-        ui: {
-          customWittyPhrases: ['test phrase'],
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings as Settings);
-      expect(v1Settings).toEqual({
-        customWittyPhrases: ['test phrase'],
-      });
-    });
-
-    it('should remove version field when migrating to V1', () => {
-      const v2Settings = {
-        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
-        ui: {
-          theme: 'dark',
-        },
-        model: {
-          name: 'qwen-coder',
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      // Version field should not be present in V1 settings
-      expect(v1Settings[SETTINGS_VERSION_KEY]).toBeUndefined();
-      // Other fields should be properly migrated
-      expect(v1Settings).toEqual({
-        theme: 'dark',
-        model: 'qwen-coder',
-      });
-    });
-
-    it('should handle version field in unrecognized properties', () => {
-      const v2Settings = {
-        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
-        general: {
-          vimMode: true,
-        },
-        someUnrecognizedKey: 'value',
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      // Version field should be filtered out
-      expect(v1Settings[SETTINGS_VERSION_KEY]).toBeUndefined();
-      // Unrecognized keys should be preserved
-      expect(v1Settings['someUnrecognizedKey']).toBe('value');
-      expect(v1Settings['vimMode']).toBe(true);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'saveSettings: updateSettingsFilePreservingFormat returned false',
+        ),
+      );
     });
   });
 
@@ -2685,11 +3553,715 @@ describe('Settings Loading and Merging', () => {
       expect(process.env['TESTTEST']).toEqual('1234');
     });
 
-    it('does not load env files from untrusted spaces', () => {
-      setup({ isFolderTrustEnabled: true, isWorkspaceTrustedValue: false });
+    it('does not load project .env files from untrusted workspaces', () => {
+      delete process.env['PROJECT_ENV_VAR'];
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValue(MOCK_WORKSPACE_DIR);
+
+      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
+      );
+      const userSettingsContent: Settings = {
+        ui: {
+          theme: 'dark',
+        },
+        security: {
+          folderTrust: {
+            enabled: true,
+          },
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
+          return '{}';
+        },
+      );
+
       loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
-      expect(process.env['TESTTEST']).not.toEqual('1234');
+      // Project .env should NOT be loaded when workspace is untrusted
+      expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+      cwdSpy.mockRestore();
+    });
+
+    describe('settings.env field', () => {
+      const originalEnv = { ...process.env };
+
+      beforeEach(() => {
+        process.env = { ...originalEnv };
+        delete process.env['ENV_FROM_SETTINGS'];
+        delete process.env['ENV_OVERRIDE_TEST'];
+        delete process.env['SYSTEM_ENV_VAR'];
+        delete process.env['MULTI_VAR_A'];
+        delete process.env['MULTI_VAR_B'];
+        delete process.env['MULTI_VAR_C'];
+        delete process.env['USER_ENV_VAR'];
+        delete process.env['WORKSPACE_ENV_VAR'];
+      });
+
+      afterEach(() => {
+        process.env = originalEnv;
+      });
+
+      it('should load environment variables from settings.env as fallback', () => {
+        const userSettingsContent: Settings = {
+          env: {
+            ENV_FROM_SETTINGS: 'settings_value',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with userSettings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['ENV_FROM_SETTINGS']).toEqual('settings_value');
+      });
+
+      it('should allow .env file to override settings.env values', () => {
+        const geminiEnvPath = path.resolve(path.join(QWEN_DIR, '.env'));
+        const userSettingsContent: Settings = {
+          env: {
+            ENV_OVERRIDE_TEST: 'from_settings',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, geminiEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === geminiEnvPath) return 'ENV_OVERRIDE_TEST=from_dotenv';
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with merged settings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        // .env file has higher priority than settings.env (loaded first, no-override)
+        expect(process.env['ENV_OVERRIDE_TEST']).toEqual('from_dotenv');
+      });
+
+      it('should not override existing system environment variables', () => {
+        process.env['SYSTEM_ENV_VAR'] = 'system_value';
+
+        const geminiEnvPath = path.resolve(path.join(QWEN_DIR, '.env'));
+        const userSettingsContent: Settings = {
+          env: {
+            SYSTEM_ENV_VAR: 'from_settings',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, geminiEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === geminiEnvPath) return 'SYSTEM_ENV_VAR=from_dotenv';
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with userSettings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        // System environment variable should have highest priority
+        expect(process.env['SYSTEM_ENV_VAR']).toEqual('system_value');
+      });
+
+      it('should support multiple env variables in settings.env', () => {
+        const userSettingsContent: Settings = {
+          env: {
+            MULTI_VAR_A: 'value_a',
+            MULTI_VAR_B: 'value_b',
+            MULTI_VAR_C: 'value_c',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with userSettings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['MULTI_VAR_A']).toEqual('value_a');
+        expect(process.env['MULTI_VAR_B']).toEqual('value_b');
+        expect(process.env['MULTI_VAR_C']).toEqual('value_c');
+      });
+
+      it('should never set QWEN_HOME or QWEN_RUNTIME_DIR from settings.env', () => {
+        // Storage-routing vars must not come from settings.json — even at
+        // user scope — because a workspace settings.json could otherwise
+        // redirect global state after the path bootstrap has run.
+        delete process.env['QWEN_HOME'];
+        delete process.env['QWEN_RUNTIME_DIR'];
+
+        const userSettingsContent: Settings = {
+          env: {
+            QWEN_HOME: '/redirected/by/settings',
+            QWEN_RUNTIME_DIR: '/redirected/runtime',
+            HARMLESS_VAR: 'ok',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['QWEN_HOME']).toBeUndefined();
+        expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
+        expect(process.env['HARMLESS_VAR']).toEqual('ok');
+      });
+
+      it('should load settings.env from both user and workspace settings', () => {
+        const workspaceSettingsContent = {
+          env: {
+            WORKSPACE_ENV_VAR: 'workspace_value',
+          },
+        };
+        const userSettingsContent: Settings = {
+          env: {
+            USER_ENV_VAR: 'user_value',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(
+            p.toString(),
+          ),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify(workspaceSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with merged settings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        // Both user-level and workspace-level env should be loaded
+        expect(process.env['USER_ENV_VAR']).toEqual('user_value');
+        expect(process.env['WORKSPACE_ENV_VAR']).toEqual('workspace_value');
+      });
+
+      it('should load user-level settings.env even when workspace is untrusted', () => {
+        const userSettingsContent: Settings = {
+          env: {
+            USER_ENV_VAR: 'user_value',
+          },
+        };
+        const workspaceSettingsContent = {
+          env: {
+            WORKSPACE_ENV_VAR: 'workspace_value',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(
+            p.toString(),
+          ),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify(workspaceSettingsContent);
+            return '{}';
+          },
+        );
+
+        // Workspace is untrusted
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: false,
+          source: 'file',
+        });
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        // User-level settings.env should still be loaded even when untrusted
+        expect(process.env['USER_ENV_VAR']).toEqual('user_value');
+        // Workspace-level settings.env should NOT be loaded (filtered by mergeSettings)
+        expect(process.env['WORKSPACE_ENV_VAR']).toBeUndefined();
+      });
+    });
+
+    describe('QWEN_HOME custom directory', () => {
+      const originalQwenHome = process.env['QWEN_HOME'];
+
+      beforeEach(() => {
+        delete process.env['DEBUG'];
+        delete process.env['DEBUG_MODE'];
+        delete process.env['QWEN_HOME_TEST_VAR'];
+      });
+
+      afterEach(() => {
+        if (originalQwenHome === undefined) {
+          delete process.env['QWEN_HOME'];
+        } else {
+          process.env['QWEN_HOME'] = originalQwenHome;
+        }
+        delete process.env['DEBUG'];
+        delete process.env['DEBUG_MODE'];
+        delete process.env['QWEN_HOME_TEST_VAR'];
+      });
+
+      it('does not exclude DEBUG/DEBUG_MODE from .env in a QWEN_HOME dir not named .qwen', () => {
+        const customHome = '/tmp/qwen-home-custom';
+        process.env['QWEN_HOME'] = customHome;
+        const customGlobalEnvPath = path.join(customHome, '.env');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, customGlobalEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === customGlobalEnvPath)
+              return 'DEBUG=true\nDEBUG_MODE=1\nQWEN_HOME_TEST_VAR=hello';
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // All three should be set — DEBUG and DEBUG_MODE must NOT be excluded
+        // because the .env lives inside the user-level QWEN_HOME directory.
+        expect(process.env['DEBUG']).toEqual('true');
+        expect(process.env['DEBUG_MODE']).toEqual('1');
+        expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('hello');
+      });
+
+      it('ignores global-state paths set in a project .env', () => {
+        delete process.env['QWEN_HOME'];
+        delete process.env['QWEN_RUNTIME_DIR'];
+        delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
+        const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === projectEnvPath)
+              return [
+                'QWEN_HOME=/tmp/hijack',
+                'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
+                'QWEN_CODE_MCP_APPROVALS_PATH=/tmp/preapproved.json',
+                'OTHER_VAR=ok',
+              ].join('\n');
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // A project .env must never redirect global state.
+        expect(process.env['QWEN_HOME']).toBeUndefined();
+        expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
+        expect(process.env['QWEN_CODE_MCP_APPROVALS_PATH']).toBeUndefined();
+        // Other vars from the same project .env still load.
+        expect(process.env['OTHER_VAR']).toEqual('ok');
+
+        delete process.env['OTHER_VAR'];
+        cwdSpy.mockRestore();
+      });
+
+      it('still honors QWEN_HOME from a user-level .env (~/.qwen/.env)', () => {
+        delete process.env['QWEN_HOME'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue('/mock/home/user');
+        const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, userQwenEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === userQwenEnvPath) return 'QWEN_HOME=/tmp/from-user-env';
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        expect(process.env['QWEN_HOME']).toEqual('/tmp/from-user-env');
+        cwdSpy.mockRestore();
+      });
+
+      it('does not exclude DEBUG/DEBUG_MODE from a workspace .qwen/.env', () => {
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
+        const workspaceQwenEnvPath = path.join(
+          MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, workspaceQwenEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === workspaceQwenEnvPath)
+              return 'DEBUG=true\nDEBUG_MODE=1\nQWEN_HOME_TEST_VAR=hello';
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // Per docs, `.qwen/.env` files are never filtered by excludedEnvVars,
+        // even when nested inside a workspace.
+        expect(process.env['DEBUG']).toEqual('true');
+        expect(process.env['DEBUG_MODE']).toEqual('1');
+        expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('hello');
+        cwdSpy.mockRestore();
+      });
+
+      it('still blocks QWEN_HOME from a workspace .qwen/.env', () => {
+        delete process.env['QWEN_HOME'];
+        delete process.env['QWEN_RUNTIME_DIR'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
+        const workspaceQwenEnvPath = path.join(
+          MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, workspaceQwenEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === workspaceQwenEnvPath)
+              return [
+                'QWEN_HOME=/tmp/hijack',
+                'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
+                'OTHER_VAR=ok',
+              ].join('\n');
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // A workspace `.qwen/.env` is exempt from `excludedEnvVars` but must
+        // still be blocked from redirecting global state.
+        expect(process.env['QWEN_HOME']).toBeUndefined();
+        expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
+        expect(process.env['OTHER_VAR']).toEqual('ok');
+
+        delete process.env['OTHER_VAR'];
+        cwdSpy.mockRestore();
+      });
+
+      it('redirects user settings path when QWEN_HOME is set in ~/.qwen/.env', () => {
+        delete process.env['QWEN_HOME'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
+        const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+        const customSettingsPath = path.join(
+          '/tmp/from-user-env',
+          'settings.json',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [userQwenEnvPath, customSettingsPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === userQwenEnvPath) return 'QWEN_HOME=/tmp/from-user-env';
+            if (p === customSettingsPath) return JSON.stringify({});
+            return '{}';
+          },
+        );
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        // The pre-pass propagates QWEN_HOME from ~/.qwen/.env into
+        // process.env so subsequent path getters (which now read it lazily)
+        // route to /tmp/from-user-env consistently.
+        expect(process.env['QWEN_HOME']).toEqual('/tmp/from-user-env');
+        expect(loaded.user.path).toEqual(customSettingsPath);
+        cwdSpy.mockRestore();
+      });
+
+      it('warns when QWEN_HOME redirects but the legacy ~/.qwen still has settings', () => {
+        const customHome = '/tmp/qwen-home-fresh';
+        process.env['QWEN_HOME'] = customHome;
+        const legacySettings = path.join(
+          '/mock/home/user',
+          QWEN_DIR,
+          'settings.json',
+        );
+        // Active QWEN_HOME has nothing yet; legacy ~/.qwen has settings.json.
+        const customSettingsPath = path.join(customHome, 'settings.json');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+          const s = p.toString();
+          // Legacy settings exist, active QWEN_HOME settings do not.
+          if (s === legacySettings) return true;
+          if (s === customSettingsPath) return false;
+          return false;
+        });
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        const warningMatch = loaded.migrationWarnings.find((w) =>
+          w.includes('QWEN_HOME points to'),
+        );
+        expect(warningMatch).toBeDefined();
+        expect(warningMatch).toContain(customHome);
+        expect(warningMatch).toContain(path.join('/mock/home/user', QWEN_DIR));
+      });
+
+      it('does not warn when QWEN_HOME points to a directory with settings.json', () => {
+        const customHome = '/tmp/qwen-home-migrated';
+        process.env['QWEN_HOME'] = customHome;
+        const customSettingsPath = path.join(customHome, 'settings.json');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [customSettingsPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        const warningMatch = loaded.migrationWarnings.find((w) =>
+          w.includes('QWEN_HOME points to'),
+        );
+        expect(warningMatch).toBeUndefined();
+      });
+
+      it('does not warn when QWEN_HOME is unset (default ~/.qwen)', () => {
+        delete process.env['QWEN_HOME'];
+        const legacySettings = path.join(
+          '/mock/home/user',
+          QWEN_DIR,
+          'settings.json',
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [legacySettings].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+
+        const warningMatch = loaded.migrationWarnings.find((w) =>
+          w.includes('QWEN_HOME points to'),
+        );
+        expect(warningMatch).toBeUndefined();
+      });
+
+      it('prefers QWEN_HOME/.env over ~/.env at the home-dir step', () => {
+        const customHome = '/tmp/qwen-home-custom';
+        process.env['QWEN_HOME'] = customHome;
+        const customGlobalEnvPath = path.join(customHome, '.env');
+        const homeEnvPath = path.join('/mock/home/user', '.env');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, customGlobalEnvPath, homeEnvPath].includes(
+            p.toString(),
+          ),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === customGlobalEnvPath)
+              return 'QWEN_HOME_TEST_VAR=fromQwenHome';
+            if (p === homeEnvPath) return 'QWEN_HOME_TEST_VAR=fromHomeDir';
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        // QWEN_HOME/.env must win — without the precedence fix, ~/.env would
+        // be returned by the walk-up before the QWEN_HOME fallback was ever
+        // consulted.
+        expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('fromQwenHome');
+      });
+
+      it('falls back to legacy ~/.qwen/.env for non-routing keys when <QWEN_HOME>/.env is absent', () => {
+        // User keeps OPENAI_API_KEY in ~/.qwen/.env and adds QWEN_HOME to the
+        // same file. Adding the redirect must not silently drop credentials
+        // sitting in that file when the new dir hasn't been populated yet.
+        delete process.env['QWEN_HOME'];
+        delete process.env['OPENAI_API_KEY'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue('/mock/home/user');
+        const customHome = '/tmp/qwen-home-fresh-fallback';
+        const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+        const customSettingsPath = path.join(customHome, 'settings.json');
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        // Only the legacy ~/.qwen/.env exists; <QWEN_HOME>/.env, the active
+        // settings.json under <QWEN_HOME>, and ~/.env all do not.
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, customSettingsPath, userQwenEnvPath].includes(
+            p.toString(),
+          ),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === customSettingsPath) return JSON.stringify({});
+            if (p === userQwenEnvPath)
+              return [
+                `QWEN_HOME=${customHome}`,
+                'OPENAI_API_KEY=secret-from-legacy',
+              ].join('\n');
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        expect(process.env['QWEN_HOME']).toEqual(customHome);
+        expect(process.env['OPENAI_API_KEY']).toEqual('secret-from-legacy');
+
+        delete process.env['OPENAI_API_KEY'];
+        cwdSpy.mockRestore();
+      });
     });
   });
 

@@ -37,11 +37,20 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
     const onTimeout = () => {
       timeoutId = undefined;
       process.stdin.removeListener('data', handleData);
-      if (!originalRawMode) {
-        process.stdin.setRawMode(false);
-      }
-      detectionComplete = true;
-      resolve(false);
+
+      // Keep a drain handler briefly to consume any late-arriving terminal
+      // responses that would otherwise leak into the application input.
+      const drainHandler = () => {};
+      process.stdin.on('data', drainHandler);
+
+      setTimeout(() => {
+        process.stdin.removeListener('data', drainHandler);
+        if (!originalRawMode) {
+          process.stdin.setRawMode(false);
+        }
+        detectionComplete = true;
+        resolve(false);
+      }, 100);
     };
 
     const handleData = (data: Buffer) => {
@@ -77,9 +86,11 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
           protocolSupported = true;
           protocolEnabled = true;
 
-          // Set up cleanup on exit
+          // Set up cleanup on exit (exit covers process.exit() calls,
+          // SIGTERM/SIGINT cover signal-based terminations).
           process.on('exit', disableProtocol);
           process.on('SIGTERM', disableProtocol);
+          process.on('SIGINT', disableProtocol);
         }
 
         detectionComplete = true;
@@ -105,6 +116,15 @@ function disableProtocol() {
     process.stdout.write('\x1b[<u');
     protocolEnabled = false;
   }
+}
+
+/**
+ * Explicitly disables the Kitty keyboard protocol. Should be called during
+ * application cleanup before process.exit() to ensure the terminal is restored
+ * even if the 'exit' event handler does not fire in time (e.g. on SIGKILL).
+ */
+export function disableKittyProtocol(): void {
+  disableProtocol();
 }
 
 export function isKittyProtocolEnabled(): boolean {

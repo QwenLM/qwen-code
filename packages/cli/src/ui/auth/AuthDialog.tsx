@@ -5,161 +5,365 @@
  */
 
 import type React from 'react';
-import { useState } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
-import { Colors } from '../colors.js';
+import Link from 'ink-link';
+import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
+import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
+import {
+  findProviderById,
+  findProviderByCredentials,
+  customProvider,
+  ALIBABA_PROVIDERS,
+  THIRD_PARTY_PROVIDERS,
+  type ProviderConfig,
+} from '@qwen-code/qwen-code-core';
+import { useProviderSetupFlow } from './useProviderSetupFlow.js';
+import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
-function parseDefaultAuthType(
-  defaultAuthType: string | undefined,
-): AuthType | null {
-  if (
-    defaultAuthType &&
-    Object.values(AuthType).includes(defaultAuthType as AuthType)
-  ) {
-    return defaultAuthType as AuthType;
-  }
-  return null;
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type ViewLevel =
+  | 'main'
+  | 'alibaba-select'
+  | 'thirdparty-select'
+  | 'provider-setup';
+
+type MainOption =
+  | 'ALIBABA_MODELSTUDIO'
+  | 'THIRD_PARTY_PROVIDERS'
+  | 'CUSTOM_PROVIDER';
+
+// ---------------------------------------------------------------------------
+// Static data
+// ---------------------------------------------------------------------------
+
+const MAIN_ITEMS = [
+  {
+    key: 'ALIBABA_MODELSTUDIO',
+    title: t('Alibaba ModelStudio'),
+    label: t('Alibaba ModelStudio'),
+    description: t(
+      'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
+    ),
+    value: 'ALIBABA_MODELSTUDIO' as MainOption,
+  },
+  {
+    key: 'THIRD_PARTY_PROVIDERS',
+    title: t('Third-party Providers'),
+    label: t('Third-party Providers'),
+    description: t('Choose a built-in provider and connect with an API key'),
+    value: 'THIRD_PARTY_PROVIDERS' as MainOption,
+  },
+  {
+    key: 'CUSTOM_PROVIDER',
+    title: t('Custom Provider'),
+    label: t('Custom Provider'),
+    description: t(
+      'Manually connect a local server, proxy, or unsupported provider',
+    ),
+    value: 'CUSTOM_PROVIDER' as MainOption,
+  },
+];
+
+function providerToItem(config: ProviderConfig) {
+  return {
+    key: config.id,
+    title: t(config.label),
+    label: t(config.label),
+    description: t(config.description),
+    value: config.id,
+  };
 }
 
+// ---------------------------------------------------------------------------
+// Step label for provider-setup title bar
+// ---------------------------------------------------------------------------
+
+function getStepLabel(step: string | null, p: ProviderConfig): string {
+  if (step === 'protocol') return t('Protocol');
+  if (step === 'baseUrl') {
+    if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
+    return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
+  }
+  if (step === 'apiKey') return t('API Key');
+  if (step === 'models') return t('Model IDs');
+  if (step === 'advancedConfig') return t('Advanced Config');
+  if (step === 'review') return t('Review');
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// View titles
+// ---------------------------------------------------------------------------
+
+const VIEW_TITLES: Record<string, string> = {
+  main: t('Connect a Provider'),
+  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': t('Third-party Providers · Provider'),
+};
+
+// ---------------------------------------------------------------------------
+// AuthDialog
+// ---------------------------------------------------------------------------
+
 export function AuthDialog(): React.JSX.Element {
-  const { pendingAuthType, authError } = useUIState();
-  const { handleAuthSelect: onAuthSelect } = useUIActions();
+  const {
+    auth: { authError },
+  } = useUIState();
+  const {
+    auth: { closeAuthDialog, handleProviderSubmit, onAuthError },
+  } = useUIActions();
   const config = useConfig();
+  const settings = useSettings();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
+  const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
-  const items = [
-    {
-      key: AuthType.QWEN_OAUTH,
-      label: t('Qwen OAuth'),
-      value: AuthType.QWEN_OAUTH,
-    },
-    {
-      key: AuthType.USE_OPENAI,
-      label: t('OpenAI'),
-      value: AuthType.USE_OPENAI,
-    },
-  ];
+  const [mainIndex, setMainIndex] = useState<number | null>(null);
+  const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
-  const initialAuthIndex = Math.max(
-    0,
-    items.findIndex((item) => {
-      // Priority 1: pendingAuthType
-      if (pendingAuthType) {
-        return item.value === pendingAuthType;
-      }
+  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
 
-      // Priority 2: config.getAuthType() - the source of truth
-      const currentAuthType = config.getAuthType();
-      if (currentAuthType) {
-        return item.value === currentAuthType;
-      }
+  // -- Navigation -----------------------------------------------------------
 
-      // Priority 3: QWEN_DEFAULT_AUTH_TYPE env var
-      const defaultAuthType = parseDefaultAuthType(
-        process.env['QWEN_DEFAULT_AUTH_TYPE'],
-      );
-      if (defaultAuthType) {
-        return item.value === defaultAuthType;
-      }
+  const clearErrors = () => {
+    setErrorMessage(null);
+    onAuthError(null);
+  };
 
-      // Priority 4: default to QWEN_OAUTH
-      return item.value === AuthType.QWEN_OAUTH;
-    }),
+  const pushView = (view: ViewLevel) => {
+    setViewStack((prev) => [...prev, viewLevel]);
+    setViewLevel(view);
+  };
+
+  const goBack = () => {
+    clearErrors();
+
+    if (viewLevel === 'provider-setup') {
+      if (setupFlow.goBack()) return;
+    }
+
+    setViewStack((prev) => {
+      const next = [...prev];
+      const parent = next.pop() ?? 'main';
+      setViewLevel(parent);
+      return next;
+    });
+  };
+
+  // -- Sub-menu definitions (data-driven) -----------------------------------
+
+  const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
+  const thirdPartyItems = useMemo(
+    () => THIRD_PARTY_PROVIDERS.map(providerToItem),
+    [],
   );
 
-  const hasApiKey = Boolean(config.getContentGeneratorConfig()?.apiKey);
-  const currentSelectedAuthType =
-    selectedIndex !== null
-      ? items[selectedIndex]?.value
-      : items[initialAuthIndex]?.value;
+  const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const handleAuthSelect = async (authMethod: AuthType) => {
-    setErrorMessage(null);
-    await onAuthSelect(authMethod);
+  const handleProviderSelect = (providerId: string) => {
+    clearErrors();
+    const providerConfig = findProviderById(providerId);
+    if (!providerConfig) return;
+    setupFlow.start(providerConfig, undefined, existingEnv);
+    pushView('provider-setup');
   };
 
-  const handleHighlight = (authMethod: AuthType) => {
-    const index = items.findIndex((item) => item.value === authMethod);
-    setSelectedIndex(index);
+  const subMenus: Record<
+    string,
+    {
+      items: Array<ReturnType<typeof providerToItem>>;
+      onSelect: (v: string) => void;
+    }
+  > = {
+    'alibaba-select': {
+      items: alibabaItems,
+      onSelect: handleProviderSelect,
+    },
+    'thirdparty-select': {
+      items: thirdPartyItems,
+      onSelect: handleProviderSelect,
+    },
   };
+
+  const activeSubMenu = subMenus[viewLevel];
+
+  // -- Default main index from current auth state ---------------------------
+
+  const contentGenConfig = config.getContentGeneratorConfig();
+  const matchedProvider = findProviderByCredentials(
+    contentGenConfig?.baseUrl,
+    contentGenConfig?.apiKeyEnvKey,
+  );
+
+  // Land on the tab that matches the active provider's uiGroup so a DeepSeek
+  // / MiniMax / OpenRouter user opens Third-party Providers, not Alibaba.
+  // (resolveMetadataKey returns config.id for *any* provider with a static
+  // models[], so it can't be used to detect "Alibaba" specifically.)
+  const defaultMainIndex = useMemo(() => {
+    if (matchedProvider?.uiGroup === 'third-party') return 1;
+    if (matchedProvider?.uiGroup === 'custom') return 2;
+    return 0;
+  }, [matchedProvider]);
+
+  // -- Handlers -------------------------------------------------------------
+
+  const handleMainSelect = (value: MainOption) => {
+    clearErrors();
+    switch (value) {
+      case 'ALIBABA_MODELSTUDIO':
+        pushView('alibaba-select');
+        break;
+      case 'THIRD_PARTY_PROVIDERS':
+        pushView('thirdparty-select');
+        break;
+      case 'CUSTOM_PROVIDER':
+        setupFlow.start(customProvider, undefined, existingEnv);
+        pushView('provider-setup');
+        break;
+      default:
+        break;
+    }
+  };
+
+  // -- Keyboard handling ----------------------------------------------------
 
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        // Prevent exit if there is an error message.
-        // This means they user is not authenticated yet.
-        if (errorMessage) {
+        if (viewLevel !== 'main') {
+          goBack();
           return;
         }
+        if (errorMessage) return;
         if (config.getAuthType() === undefined) {
-          // Prevent exiting if no auth method is set
           setErrorMessage(
             t(
-              'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+              'You must connect a provider to proceed. Press Ctrl+C again to exit.',
             ),
           );
           return;
         }
-        onAuthSelect(undefined);
+        closeAuthDialog();
       }
     },
     { isActive: true },
   );
 
+  // -- View title -----------------------------------------------------------
+
+  const viewTitle = useMemo(() => {
+    if (viewLevel !== 'provider-setup') {
+      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
+    }
+    const p = setupFlow.state.provider;
+    if (!p) return t('Provider Setup');
+    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const { stepIndex, totalSteps, step } = setupFlow.state;
+    return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
+      flowTitle,
+      step: String(stepIndex),
+      total: String(totalSteps),
+      stepLabel: getStepLabel(step, p),
+    });
+  }, [viewLevel, setupFlow.state]);
+
+  // -- Render ---------------------------------------------------------------
+
   return (
     <Box
-      borderStyle="round"
-      borderColor={Colors.Gray}
+      borderStyle="single"
+      borderColor={theme?.border?.default}
       flexDirection="column"
       padding={1}
       width="100%"
     >
-      <Text bold>{t('Get started')}</Text>
-      <Box marginTop={1}>
-        <Text>{t('How would you like to authenticate for this project?')}</Text>
-      </Box>
-      <Box marginTop={1}>
-        <RadioButtonSelect
-          items={items}
-          initialIndex={initialAuthIndex}
-          onSelect={handleAuthSelect}
-          onHighlight={handleHighlight}
-        />
-      </Box>
+      <Text bold>{viewTitle}</Text>
+
+      {viewLevel === 'main' && (
+        <Box marginTop={1}>
+          <DescriptiveRadioButtonSelect
+            items={MAIN_ITEMS}
+            initialIndex={mainIndex != null ? mainIndex : defaultMainIndex}
+            onSelect={handleMainSelect}
+            onHighlight={(value) => {
+              setMainIndex(
+                MAIN_ITEMS.findIndex((item) => item.value === value),
+              );
+            }}
+            itemGap={1}
+          />
+        </Box>
+      )}
+
+      {activeSubMenu && (
+        <>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={activeSubMenu.items}
+              initialIndex={subMenuIndex[viewLevel] ?? 0}
+              onSelect={activeSubMenu.onSelect}
+              onHighlight={(value) => {
+                setSubMenuIndex((prev) => ({
+                  ...prev,
+                  [viewLevel]: activeSubMenu.items.findIndex(
+                    (i) => i.value === value,
+                  ),
+                }));
+              }}
+              itemGap={1}
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme?.text?.secondary}>
+              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+
+      {viewLevel === 'provider-setup' && (
+        <ProviderSetupSteps flow={setupFlow} />
+      )}
+
       {(authError || errorMessage) && (
         <Box marginTop={1}>
-          <Text color={Colors.AccentRed}>{authError || errorMessage}</Text>
+          <Text color={theme.status.error}>{authError || errorMessage}</Text>
         </Box>
       )}
-      <Box marginTop={1}>
-        <Text color={Colors.AccentPurple}>{t('(Use Enter to Set Auth)')}</Text>
-      </Box>
-      {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
-        <Box marginTop={1}>
-          <Text color={Colors.Gray}>
-            {t(
-              'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
-            )}
-          </Text>
-        </Box>
+
+      {viewLevel === 'main' && (
+        <>
+          <Box marginY={1}>
+            <Text color={theme.border.default}>{'─'.repeat(80)}</Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.primary}>
+              {t('Terms of Services and Privacy Notice')}:
+            </Text>
+          </Box>
+          <Box>
+            <Link
+              url="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
+              fallback={false}
+            >
+              <Text color={theme.text.secondary} underline>
+                https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
+              </Text>
+            </Link>
+          </Box>
+        </>
       )}
-      <Box marginTop={1}>
-        <Text>{t('Terms of Services and Privacy Notice for Qwen Code')}</Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={Colors.AccentBlue}>
-          {'https://github.com/QwenLM/Qwen3-Coder/blob/main/README.md'}
-        </Text>
-      </Box>
     </Box>
   );
 }

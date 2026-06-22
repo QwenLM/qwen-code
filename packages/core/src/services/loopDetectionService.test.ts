@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import type { GeminiClient } from '../core/client.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import type {
   ServerGeminiContentEvent,
   ServerGeminiStreamEvent,
+  ServerGeminiThoughtEvent,
   ServerGeminiToolCallRequestEvent,
 } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
@@ -26,6 +25,12 @@ vi.mock('../telemetry/loggers.js', () => ({
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
+// Mirrored from loopDetectionService.ts. Kept local so the test is
+// self-describing and failures point to the constant that changed.
+const FILE_READ_WINDOW = 15;
+const GLOBAL_DUPLICATE_THRESHOLD = 6;
+const ALTERNATING_PATTERN_CYCLES = 3;
+const TURN_TOOL_CALL_CAP = 100;
 
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
@@ -56,6 +61,14 @@ describe('LoopDetectionService', () => {
   const createContentEvent = (content: string): ServerGeminiContentEvent => ({
     type: GeminiEventType.Content,
     value: content,
+  });
+
+  const createThoughtEvent = (
+    subject: string,
+    description = '',
+  ): ServerGeminiThoughtEvent => ({
+    type: GeminiEventType.Thought,
+    value: { subject, description },
   });
 
   const createRepetitiveContent = (id: number, length: number): string => {
@@ -117,7 +130,7 @@ describe('LoopDetectionService', () => {
         param: 'value',
       });
       const otherEvent = {
-        type: 'thought',
+        type: GeminiEventType.UserCancelled,
       } as unknown as ServerGeminiStreamEvent;
 
       // Send events just below the threshold
@@ -131,6 +144,70 @@ describe('LoopDetectionService', () => {
       // Send the tool call event again, which should now trigger the loop
       expect(service.addAndCheck(toolCallEvent)).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('resets the consecutive tool-call counter on retry', () => {
+      const event = createToolCallRequestEvent('testTool', { param: 'value' });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
+      }
+
+      expect(
+        service.checkAlwaysOnSafeties({
+          type: GeminiEventType.Retry,
+        } as ServerGeminiStreamEvent),
+      ).toBe(false);
+
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should expose the current consecutive tool-call count', () => {
+      const event = createToolCallRequestEvent('testTool', { param: 'value' });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        service.checkAlwaysOnSafeties(event);
+      }
+
+      expect(service.getConsecutiveToolCallCount()).toBe(
+        TOOL_CALL_LOOP_THRESHOLD - 1,
+      );
+      expect(service.checkAlwaysOnSafeties(event)).toBe(true);
+      expect(service.getConsecutiveToolCallCount()).toBe(
+        TOOL_CALL_LOOP_THRESHOLD,
+      );
+    });
+
+    it('halts consecutive identical calls via the always-on guard', () => {
+      // The consecutive guard lives in checkAlwaysOnSafeties, so it fires
+      // independently of the skipLoopDetection gate (which only gates the
+      // heuristic path at the client layer).
+      const event = createToolCallRequestEvent('stuck_tool', { p: 'same' });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
+      }
+      expect(service.checkAlwaysOnSafeties(event)).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'consecutive_identical_tool_calls',
+        }),
+      );
+    });
+
+    it('always-on consecutive guard honors an in-session disable', () => {
+      service.disableForSession();
+      const event = createToolCallRequestEvent('stuck_tool', { p: 'same' });
+      // Well past the threshold, but an explicit in-session disable suppresses
+      // the consecutive guard (unlike the per-turn cap, which is unconditional).
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD + 2; i++) {
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
     it('should not detect a loop when disabled for session', () => {
@@ -622,143 +699,698 @@ describe('LoopDetectionService', () => {
       expect(service.addAndCheck(otherEvent)).toBe(false);
     });
   });
-});
 
-describe('LoopDetectionService LLM Checks', () => {
-  let service: LoopDetectionService;
-  let mockConfig: Config;
-  let mockGeminiClient: GeminiClient;
-  let mockBaseLlmClient: BaseLlmClient;
-  let abortController: AbortController;
+  describe('Repetitive Thoughts Detection', () => {
+    it('should detect repetitive thoughts pattern', () => {
+      service.reset('');
 
-  beforeEach(() => {
-    mockGeminiClient = {
-      getHistory: vi.fn().mockReturnValue([]),
-    } as unknown as GeminiClient;
+      for (let i = 0; i < 3; i++) {
+        service.addAndCheck(
+          createThoughtEvent('Plan', 'Inspect the migration script.'),
+        );
+      }
 
-    mockBaseLlmClient = {
-      generateJson: vi.fn(),
-    } as unknown as BaseLlmClient;
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'repetitive_thoughts',
+        }),
+      );
+    });
 
-    mockConfig = {
-      getGeminiClient: () => mockGeminiClient,
-      getBaseLlmClient: () => mockBaseLlmClient,
-      getDebugMode: () => false,
-      getDebugLogger: () => ({
-        debug: () => {},
-        info: () => {},
-        warn: () => {},
-        error: () => {},
-      }),
-      getTelemetryEnabled: () => true,
-      getModel: () => 'test-model',
-    } as unknown as Config;
+    it('should not detect loop with varied thoughts', () => {
+      service.reset('');
 
-    service = new LoopDetectionService(mockConfig);
-    abortController = new AbortController();
-    vi.clearAllMocks();
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Check migration risks.'),
+      );
+      service.addAndCheck(
+        createThoughtEvent('Plan', 'Evaluate rollout alternatives.'),
+      );
+
+      const isLoop = service.addAndCheck(
+        createThoughtEvent('Next', 'Draft the fix.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should not detect a loop when an earlier thought reappears after progress', () => {
+      service.reset('');
+
+      // Regression: earlier counting-based implementation fired as soon as
+      // any thought appeared >= THRESHOLD times anywhere in the retained
+      // history. A healthy long-running session where the model revisits
+      // the same phrase after making progress on unrelated steps should
+      // *not* trip this detector — only a sustained consecutive run does.
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Consider migration.'),
+      );
+      service.addAndCheck(createThoughtEvent('Analysis', 'Review indexes.'));
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Consider rollout risks.'),
+      );
+      const isLoop = service.addAndCheck(
+        createThoughtEvent('Plan', 'Inspect the schema.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('clears thought history across tool-call roundtrips within a turn', () => {
+      service.reset('');
+
+      // Regression: thoughtHistory previously persisted across ToolCallRequest
+      // events within a single prompt. Three identical thoughts separated by
+      // real tool-call progress would incorrectly fire REPETITIVE_THOUGHTS.
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'a.sql' }),
+      );
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'b.sql' }),
+      );
+      const isLoop = service.addAndCheck(
+        createThoughtEvent('Plan', 'Inspect the schema.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('ignores hedge phrases in Content events (thought detection is Thought-only)', () => {
+      service.reset('');
+
+      // Content events used to feed a substring-matched hedge-phrase list
+      // into thoughtHistory, which conflated prose with the model's actual
+      // reasoning channel. Thought detection now runs only on Thought events.
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(
+          createContentEvent('I should check the config, maybe it helps.'),
+        );
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'repetitive_thoughts' }),
+      );
+    });
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  describe('Read File Loop Detection', () => {
+    // Cold-start exemption: a prompt that has not yet fired any non-read-like
+    // tool is still in its opening-exploration phase, so the detector gives
+    // it an initial pass. Tests that want to exercise the detector must
+    // fire a non-read tool first so subsequent reads are judged normally.
+    const primeNonReadTool = () => {
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'prime.txt',
+          content: '',
+        }),
+      );
+    };
+
+    it('should detect excessive file read operations', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // FILE_READ_THRESHOLD reads in the window trigger the loop. The first
+      // (THRESHOLD - 1) reads must not fire; the THRESHOLD-th does.
+      for (let i = 0; i < 7; i++) {
+        const event = createToolCallRequestEvent('read_file', {
+          path: `file${i}.txt`,
+        });
+        const isLoop = service.addAndCheck(event);
+        expect(isLoop).toBe(false);
+      }
+
+      const event = createToolCallRequestEvent('read_file', {
+        path: 'file7.txt',
+      });
+      const isLoop = service.addAndCheck(event);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'read_file_loop',
+        }),
+      );
+    });
+
+    it('should exempt opening exploration from READ_FILE_LOOP (cold start)', () => {
+      service.reset('');
+
+      // Regression for PR #3236 review: a prompt like "summarize this
+      // project" opens with parallel read_file / list_directory calls and
+      // must not trip READ_FILE_LOOP before any write/execute action has
+      // fired. This exercises FILE_READ_WINDOW+ consecutive reads with no
+      // prior non-read tool — nothing should fire.
+      for (let i = 0; i < 20; i++) {
+        const name = i % 2 === 0 ? 'read_file' : 'list_directory';
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(name, { path: `f${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
+    it('should activate READ_FILE_LOOP once a non-read tool lands mid-prompt', () => {
+      service.reset('');
+
+      // No firing before the cold-start gate flips.
+      for (let i = 0; i < 7; i++) {
+        service.addAndCheck(
+          createToolCallRequestEvent('read_file', { path: `pre${i}.txt` }),
+        );
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+
+      // A non-read tool lands — gate opens.
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'out.txt',
+          content: 'x',
+        }),
+      );
+
+      // Now a window of reads should eventually trip READ_FILE_LOOP. As new
+      // reads push the write_file out of the FILE_READ_WINDOW-sized history
+      // and FILE_READ_THRESHOLD read-likes accumulate, detection fires.
+      let detected = false;
+      for (let i = 0; i < FILE_READ_WINDOW + 2 && !detected; i++) {
+        detected = service.addAndCheck(
+          createToolCallRequestEvent('read_file', { path: `post${i}.txt` }),
+        );
+      }
+      expect(detected).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
+    it('should detect other read-like operations (exact names + read_/list_ prefixes)', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // Mix of read-like tool names that either appear in the exact allowlist
+      // (read_file, read_many_files, list_directory) or match the read_/list_
+      // prefix fallback used for MCP-provided tools.
+      service.addAndCheck(
+        createToolCallRequestEvent('read_many_files', {
+          paths: ['file1.txt'],
+        }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('list_directory', { path: '.' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_resource', { uri: 'a' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+      );
+      service.addAndCheck(createToolCallRequestEvent('list_projects', {}));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file5.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_many_files', {
+          paths: ['file6.txt'],
+        }),
+      );
+
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('list_directory', { path: 'nested' }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'read_file_loop',
+        }),
+      );
+    });
+
+    it('should not treat tools that merely contain read-like substrings as file reads', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // Regression: the earlier substring heuristic treated any name
+      // containing 'read'/'cat'/'view'/'list' as a file read, so `review`
+      // (contains 'view') and `concat_chunks` (contains 'cat') contributed
+      // to READ_FILE_LOOP even though no file-read loop was happening.
+      const nonReadLikeNames = [
+        'review',
+        'concat_chunks',
+        'viewport_set',
+        'listener_bind',
+      ];
+      for (let i = 0; i < 6; i++) {
+        const name = nonReadLikeNames[i % nonReadLikeNames.length];
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(name, { i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
+    it('should not detect loop with mixed operations', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // Mix of read and non-read operations
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file1.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'file2.txt',
+          content: 'test',
+        }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('execute', { command: 'ls' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file4.txt' }),
+      );
+
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file5.txt' }),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
   });
 
-  const advanceTurns = async (count: number) => {
-    for (let i = 0; i < count; i++) {
-      await service.turnStarted(abortController.signal);
-    }
-  };
+  describe('Action Stagnation Detection', () => {
+    // Stagnation fires when the same tool *name* is called STAGNATION_THRESHOLD
+    // times consecutively regardless of arguments. This is distinct from
+    // CONSECUTIVE_IDENTICAL_TOOL_CALLS (same name AND args) and from
+    // READ_FILE_LOOP (high proportion of read-like tools in the window),
+    // so we exercise it with a non-read-like tool and varying args.
+    it('should detect action stagnation when the same tool is repeated with varying args', () => {
+      service.reset('');
 
-  it('should not trigger LLM check before LLM_CHECK_AFTER_TURNS', async () => {
-    await advanceTurns(29);
-    expect(mockBaseLlmClient.generateJson).not.toHaveBeenCalled();
+      // STAGNATION_THRESHOLD - 1 calls must not fire
+      for (let i = 0; i < 7; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `term${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+
+      // THRESHOLD-th consecutive same-name call triggers stagnation
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('search_code', { query: 'term7' }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'action_stagnation' }),
+      );
+    });
+
+    it('should reset stagnation streak when a different tool is called', () => {
+      service.reset('');
+
+      // Accumulate 5 consecutive same-name calls (below threshold)
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `a${i}` }),
+        );
+      }
+
+      // A different tool resets the streak
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'out.txt',
+          content: 'x',
+        }),
+      );
+
+      // 5 more calls of the original tool: streak only reaches 5, below threshold
+      for (let i = 0; i < 5; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `b${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+    });
   });
 
-  it('should trigger LLM check on the 30th turn', async () => {
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.1 });
-    await advanceTurns(30);
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledWith(
-      expect.objectContaining({
-        systemInstruction: expect.any(String),
-        contents: expect.any(Array),
-        model: expect.any(String),
-        schema: expect.any(Object),
-        promptId: expect.any(String),
-      }),
-    );
+  describe('Turn Tool Call Cap (Always-On Circuit Breaker)', () => {
+    it('should not fire when total calls are below the cap', () => {
+      service.reset('');
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        const isLoop = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', { i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+    });
+
+    it('should fire on the call that exceeds the cap', () => {
+      service.reset('');
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', { i }),
+        );
+      }
+      const isLoop = service.checkAlwaysOnSafeties(
+        createToolCallRequestEvent('any_tool', { extra: true }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+      // The turn cap reports its own loop type, not consecutive-identical.
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'turn_tool_call_cap',
+        }),
+      );
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    it('should fire regardless of disabledForSession', () => {
+      service.reset('');
+      service.disableForSession();
+      // disableForSession prevents heuristic checks, but not the turn cap
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', { i }),
+        );
+      }
+      const isLoop = service.checkAlwaysOnSafeties(
+        createToolCallRequestEvent('any_tool', { extra: true }),
+      );
+      // disabledForSession blocks non-ToolCallRequest events in
+      // checkAlwaysOnSafeties, but this IS a ToolCallRequest so the cap
+      // still fires.
+      expect(isLoop).toBe(true);
+    });
+
+    const retryEvent = {
+      type: GeminiEventType.Retry,
+    } as ServerGeminiStreamEvent;
+    const finishedEvent = {
+      type: GeminiEventType.Finished,
+      value: { reason: 'STOP' },
+    } as unknown as ServerGeminiStreamEvent;
+
+    it('rolls back a failed attempt on retry so its calls do not count', () => {
+      service.reset('');
+      // Attempt makes 60 calls, then the API retries (no round-trip committed
+      // yet, so the rollback floor is 0).
+      for (let i = 0; i < 60; i++) {
+        service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
+      }
+      service.checkAlwaysOnSafeties(retryEvent);
+      // The 60 discarded calls must not count: a full cap's worth of fresh
+      // calls stays under the limit, and only the (cap+1)-th fires.
+      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { j: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves committed round-trip counts when a later attempt retries', () => {
+      service.reset('');
+      // Round-trip 1: 60 calls, then Finished commits them as the floor.
+      for (let i = 0; i < 60; i++) {
+        service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
+      }
+      service.checkAlwaysOnSafeties(finishedEvent);
+      // Round-trip 2: 30 calls, then a retry discards only these 30.
+      for (let i = 0; i < 30; i++) {
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { k: i }),
+        );
+      }
+      service.checkAlwaysOnSafeties(retryEvent);
+      // Total is back to the committed 60 (NOT zero): 40 more reach exactly the
+      // cap without firing, and the next call trips it.
+      for (let i = 0; i < TURN_TOOL_CALL_CAP - 60; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { m: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+    });
+
+    it('still accumulates across committed round-trips to trip the cap', () => {
+      service.reset('');
+      let fired = false;
+      // 11 calls/round-trip; the cap (100) is crossed partway through.
+      for (let rt = 0; rt < 12 && !fired; rt++) {
+        for (let i = 0; i < 11 && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', { rt, i }),
+          );
+        }
+        if (!fired) {
+          service.checkAlwaysOnSafeties(finishedEvent);
+        }
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
   });
 
-  it('should detect a cognitive loop when confidence is high', async () => {
-    // First check at turn 30
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.85, reasoning: 'Repetitive actions' });
-    await advanceTurns(30);
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
+  describe('Global Tool Call Duplicate Detection', () => {
+    it('should not fire when same call appears fewer than threshold times', () => {
+      service.reset('');
+      const event = createToolCallRequestEvent('stuck_tool', {
+        param: 'same',
+      });
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        const isLoop = service.addAndCheckHeuristicLoops(event);
+        expect(isLoop).toBe(false);
+      }
+    });
 
-    // The confidence of 0.85 will result in a low interval.
-    // The interval will be: 5 + (15 - 5) * (1 - 0.85) = 5 + 10 * 0.15 = 6.5 -> rounded to 7
-    await advanceTurns(6); // advance to turn 36
+    it('should fire when same (tool, args) appears threshold times non-consecutively', () => {
+      service.reset('');
+      const stuckEvent = createToolCallRequestEvent('stuck_tool', {
+        param: 'same',
+      });
+      const otherEvents = [
+        createToolCallRequestEvent('other_a', { x: 1 }),
+        createToolCallRequestEvent('other_b', { y: 2 }),
+        createToolCallRequestEvent('other_c', { z: 3 }),
+      ];
 
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.95, reasoning: 'Repetitive actions' });
-    const finalResult = await service.turnStarted(abortController.signal); // This is turn 37
+      // Interleave: stuck, other_a, stuck, other_b, stuck, other_c, ...
+      // GLOBAL_DUPLICATE_THRESHOLD total stuck calls with different calls between
+      let otherIdx = 0;
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuckEvent)).toBe(false);
+        expect(
+          service.addAndCheckHeuristicLoops(
+            otherEvents[otherIdx % otherEvents.length],
+          ),
+        ).toBe(false);
+        otherIdx++;
+      }
+      // The threshold-th stuck call should fire
+      const isLoop = service.addAndCheckHeuristicLoops(stuckEvent);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'global_tool_call_duplicate',
+        }),
+      );
+      // getLastLoopType() is the getter the client uses to populate the
+      // bubbled LoopDetected event, so assert it too — not just the logged one.
+      expect(service.getLastLoopType()).toBe(
+        LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      );
+    });
 
-    expect(finalResult).toBe(true);
-    expect(loggers.logLoopDetected).toHaveBeenCalledWith(
-      mockConfig,
-      expect.objectContaining({
-        'event.name': 'loop_detected',
-        loop_type: LoopType.LLM_DETECTED_LOOP,
-      }),
-    );
+    it('should not fire for different (tool, args) pairs', () => {
+      service.reset('');
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD; i++) {
+        const isLoop = service.addAndCheckHeuristicLoops(
+          createToolCallRequestEvent('stuck_tool', { param: i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('global-duplicate also fires for a consecutive identical run', () => {
+      // checkGlobalDuplicate runs on every ToolCallRequest independently of the
+      // always-on consecutive guard (which lives in checkAlwaysOnSafeties, not
+      // this heuristic path). Exercised directly, the heuristic path fires
+      // global-duplicate once a consecutive identical run reaches its threshold.
+      service.reset('');
+      const event = createToolCallRequestEvent('stuck_tool', {
+        param: 'same',
+      });
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        service.addAndCheckHeuristicLoops(event);
+      }
+      const isLoop = service.addAndCheckHeuristicLoops(event);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'global_tool_call_duplicate',
+        }),
+      );
+    });
+
+    it('does not count a retried replay toward the global-duplicate threshold', () => {
+      service.reset('');
+      const stuck = createToolCallRequestEvent('stuck_tool', { param: 'same' });
+      const retry = { type: GeminiEventType.Retry } as ServerGeminiStreamEvent;
+      // Failed attempt streams (threshold - 3) identical calls, then retries.
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);
+      }
+      service.addAndCheckHeuristicLoops(retry);
+      // The replay streams the same calls again. Without the Retry reset the
+      // pre- and post-retry counts would sum to the threshold and false-fire.
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
+        expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
   });
 
-  it('should not detect a loop when confidence is low', async () => {
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.5, reasoning: 'Looks okay' });
-    await advanceTurns(30);
-    const result = await service.turnStarted(abortController.signal);
-    expect(result).toBe(false);
-    expect(loggers.logLoopDetected).not.toHaveBeenCalled();
-  });
+  describe('Alternating Tool Call Pattern Detection', () => {
+    it('should fire for a clean ABABAB alternating pattern', () => {
+      service.reset('');
+      const eventA = createToolCallRequestEvent('tool_a', { param: 'a' });
+      const eventB = createToolCallRequestEvent('tool_b', { param: 'b' });
 
-  it('should adjust the check interval based on confidence', async () => {
-    // Confidence is 0.0, so interval should be MAX_LLM_CHECK_INTERVAL (15)
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.0 });
-    await advanceTurns(30); // First check at turn 30
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
+      // ALTERNATING_PATTERN_CYCLES cycles = 2*CYCLES calls. Build up to
+      // one call short of the trigger.
+      const totalCycles = ALTERNATING_PATTERN_CYCLES;
+      for (let i = 0; i < totalCycles - 1; i++) {
+        expect(service.addAndCheckHeuristicLoops(eventA)).toBe(false);
+        expect(service.addAndCheckHeuristicLoops(eventB)).toBe(false);
+      }
+      // First call of the final cycle
+      expect(service.addAndCheckHeuristicLoops(eventA)).toBe(false);
+      // Second call of the final cycle completes the pattern
+      const isLoop = service.addAndCheckHeuristicLoops(eventB);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'alternating_tool_call_pattern',
+        }),
+      );
+      expect(service.getLastLoopType()).toBe(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+      );
+    });
 
-    await advanceTurns(14); // Advance to turn 44
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
+    it('should not fire when calls alternate but with varying keys', () => {
+      service.reset('');
+      // Alternating tool names but different args each time → different
+      // keys → no clean ABAB because the keys keep changing.
+      const totalCycles = ALTERNATING_PATTERN_CYCLES + 2;
+      for (let i = 0; i < totalCycles; i++) {
+        expect(
+          service.addAndCheckHeuristicLoops(
+            createToolCallRequestEvent('tool_a', { param: i }),
+          ),
+        ).toBe(false);
+        expect(
+          service.addAndCheckHeuristicLoops(
+            createToolCallRequestEvent('tool_b', { param: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
 
-    await service.turnStarted(abortController.signal); // Turn 45
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(2);
-  });
+    it('should not fire for a single tool repeated (consecutive, not alternating)', () => {
+      service.reset('');
+      const event = createToolCallRequestEvent('tool_a', { param: 'a' });
+      const totalCalls = 2 * ALTERNATING_PATTERN_CYCLES;
+      for (let i = 0; i < totalCalls; i++) {
+        // The consecutive identical detector would fire at threshold 5,
+        // but we only check the heuristic path here. At 6 calls the
+        // global duplicate detector fires. This test just confirms the
+        // alternating detector doesn't false-positive on a repeated key.
+        service.addAndCheckHeuristicLoops(event);
+      }
+      // Either global_duplicate or consecutive_identical fires — we just
+      // verify the alternating pattern detector didn't fire.
+      const logged = vi.mocked(loggers.logLoopDetected).mock.calls;
+      const alternatingFired = logged.some((call) => {
+        const event = call[1] as unknown as Record<string, unknown>;
+        return 'loop_type' in event
+          ? event['loop_type'] === 'alternating_tool_call_pattern'
+          : false;
+      });
+      expect(alternatingFired).toBe(false);
+    });
 
-  it('should handle errors from generateJson gracefully', async () => {
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockRejectedValue(new Error('API error'));
-    await advanceTurns(30);
-    const result = await service.turnStarted(abortController.signal);
-    expect(result).toBe(false);
-    expect(loggers.logLoopDetected).not.toHaveBeenCalled();
-  });
+    it('should reset alternating window after a different third pattern', () => {
+      service.reset('');
+      const eventA = createToolCallRequestEvent('tool_a', { param: 'a' });
+      const eventB = createToolCallRequestEvent('tool_b', { param: 'b' });
+      const eventC = createToolCallRequestEvent('tool_c', { param: 'c' });
 
-  it('should not trigger LLM check when disabled for session', async () => {
-    service.disableForSession();
-    expect(loggers.logLoopDetectionDisabled).toHaveBeenCalledTimes(1);
-    await advanceTurns(30);
-    const result = await service.turnStarted(abortController.signal);
-    expect(result).toBe(false);
-    expect(mockBaseLlmClient.generateJson).not.toHaveBeenCalled();
+      // Build up ABAB
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      // Insert C to break the pattern
+      service.addAndCheckHeuristicLoops(eventC);
+      // Restart ABAB from here — need 6 calls (3 cycles) after the break
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      service.addAndCheckHeuristicLoops(eventA);
+      service.addAndCheckHeuristicLoops(eventB);
+      expect(service.addAndCheckHeuristicLoops(eventA)).toBe(false);
+      const isLoop = service.addAndCheckHeuristicLoops(eventB);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'alternating_tool_call_pattern',
+        }),
+      );
+    });
   });
 });

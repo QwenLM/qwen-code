@@ -10,6 +10,11 @@ export interface TextMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  turnIndex?: number;
+  kind?: 'image';
+  imagePath?: string;
+  imageSrc?: string;
+  imageMissing?: boolean;
   fileContext?: {
     fileName: string;
     filePath: string;
@@ -54,13 +59,20 @@ export const useMessageHandling = () => {
     setMessages((prev) => {
       // Record index of the placeholder to update on chunks
       streamingMessageIndexRef.current = prev.length;
+      const maxExistingTimestamp = prev.reduce(
+        (max, message) => Math.max(max, message.timestamp || 0),
+        0,
+      );
+      const placeholderTimestamp = Math.max(
+        typeof timestamp === 'number' ? timestamp : Date.now(),
+        maxExistingTimestamp + 2,
+      );
       return [
         ...prev,
         {
           role: 'assistant',
           content: '',
-          // Use provided timestamp (from extension) to keep ordering stable
-          timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+          timestamp: placeholderTimestamp,
         },
       ];
     });
@@ -107,24 +119,17 @@ export const useMessageHandling = () => {
     streamingMessageIndexRef.current = null;
   }, []);
 
+  const breakThinkingSegment = useCallback(() => {
+    thinkingMessageIndexRef.current = null;
+  }, []);
+
   /**
    * End streaming response
    */
   const endStreaming = useCallback(() => {
-    // Finalize streaming; content already lives in the placeholder message
     setIsStreaming(false);
     streamingMessageIndexRef.current = null;
-    // Remove the thinking message if it exists (collapse thoughts)
-    setMessages((prev) => {
-      const idx = thinkingMessageIndexRef.current;
-      thinkingMessageIndexRef.current = null;
-      if (idx === null || idx < 0 || idx >= prev.length) {
-        return prev;
-      }
-      const next = prev.slice();
-      next.splice(idx, 1);
-      return next;
-    });
+    thinkingMessageIndexRef.current = null;
   }, []);
 
   /**
@@ -168,7 +173,20 @@ export const useMessageHandling = () => {
         if (idx === null) {
           idx = next.length;
           thinkingMessageIndexRef.current = idx;
-          next.push({ role: 'thinking', content: '', timestamp: Date.now() });
+          // Use a timestamp just before the assistant placeholder so thinking
+          // sorts above the response text when messages are ordered by time.
+          const assistantIdx = streamingMessageIndexRef.current;
+          const assistantTs =
+            assistantIdx !== null &&
+            assistantIdx >= 0 &&
+            assistantIdx < next.length
+              ? next[assistantIdx].timestamp
+              : Date.now();
+          next.push({
+            role: 'thinking',
+            content: '',
+            timestamp: assistantTs - 1,
+          });
         }
         if (idx >= 0 && idx < next.length) {
           const target = next[idx];
@@ -178,18 +196,10 @@ export const useMessageHandling = () => {
       });
     },
     clearThinking: () => {
-      setMessages((prev) => {
-        const idx = thinkingMessageIndexRef.current;
-        thinkingMessageIndexRef.current = null;
-        if (idx === null || idx < 0 || idx >= prev.length) {
-          return prev;
-        }
-        const next = prev.slice();
-        next.splice(idx, 1);
-        return next;
-      });
+      thinkingMessageIndexRef.current = null;
     },
     breakAssistantSegment,
+    breakThinkingSegment,
     setWaitingForResponse,
     clearWaitingForResponse,
     setMessages,

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/sdk",
-  "version": "0.1.4",
+  "version": "0.1.8",
   "description": "TypeScript SDK for programmatic access to qwen-code CLI",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -12,7 +12,15 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
     },
+    "./daemon": {
+      "types": "./dist/daemon/index.d.ts",
+      "import": "./dist/daemon/index.js",
+      "require": "./dist/daemon/index.cjs"
+    },
     "./package.json": "./package.json"
+  },
+  "bin": {
+    "qwen-serve-mcp": "./dist/daemon-mcp/serve-bridge/bin.js"
   },
   "files": [
     "dist",
@@ -43,14 +51,15 @@
   "author": "Qwen Team",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^7.13.0",
     "@typescript-eslint/parser": "^7.13.0",
     "@vitest/coverage-v8": "^1.6.0",

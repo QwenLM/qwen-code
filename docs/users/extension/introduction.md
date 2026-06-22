@@ -12,17 +12,21 @@ We offer a suite of extension management tools using both `qwen extensions` CLI 
 
 You can manage extensions at runtime within the interactive CLI using `/extensions` slash commands. These commands support hot-reloading, meaning changes take effect immediately without restarting the application.
 
-| Command                                                | Description                                                       |
-| ------------------------------------------------------ | ----------------------------------------------------------------- |
-| `/extensions` or `/extensions list`                    | List all installed extensions with their status                   |
-| `/extensions install <source>`                         | Install an extension from a git URL, local path, or marketplace   |
-| `/extensions uninstall <name>`                         | Uninstall an extension                                            |
-| `/extensions enable <name> --scope <user\|workspace>`  | Enable an extension                                               |
-| `/extensions disable <name> --scope <user\|workspace>` | Disable an extension                                              |
-| `/extensions update <name>`                            | Update a specific extension                                       |
-| `/extensions update --all`                             | Update all extensions with available updates                      |
-| `/extensions detail <name>`                            | Show details of an extension                                      |
-| `/extensions explore [source]`                         | Open extensions source page(Gemini or ClaudeCode) in your browser |
+| Command                               | Description                                                                                          |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `/extensions` or `/extensions manage` | Manage all installed extensions                                                                      |
+| `/extensions install <source>`        | Install an extension from a git URL, local path or archive, archive URL, npm package, or marketplace |
+| `/extensions explore [source]`        | Open extensions source page(Gemini or ClaudeCode) in your browser                                    |
+
+#### The interactive extension manager
+
+Running `/extensions` (or `/extensions manage`) opens an interactive manager with three tabs. Press `Tab` or the `←`/`→` arrows to switch between them.
+
+- **Discover** — browse plugins from your configured marketplace sources. Type to search, `Enter` to view a plugin's details, and install it (you'll be asked to choose an install scope). Press `Ctrl+R` to re-fetch the listings, and `Esc` to go back.
+- **Installed** — your installed extensions, grouped by scope (**User level**, **Project level**, and favorites). Use `↑`/`↓` to navigate, `Space` to enable/disable an extension, `f` to favorite it, and `Enter` to open its details. MCP servers bundled by an extension appear nested under their parent extension with live connection status; you can enable or disable each server individually from there.
+- **Sources** — manage the marketplace sources that feed the Discover tab. Use `↑`/`↓` to navigate, `Enter` to select a source, and `d` to remove one. These are the same sources managed by the `qwen extensions sources` CLI commands described below.
+
+Changes made here hot-reload immediately, without restarting Qwen Code.
 
 ### CLI Extension Management
 
@@ -95,6 +99,34 @@ Gemini extensions are automatically converted to Qwen Code format during install
 - TOML command files are automatically migrated to Markdown format
 - MCP servers, context files, and settings are preserved
 
+#### From npm Registry
+
+Qwen Code supports installing extensions from npm registries using scoped package names. This is ideal for teams with private registries that already have auth, versioning, and publishing infrastructure in place.
+
+```bash
+# Install the latest version
+qwen extensions install @scope/my-extension
+
+# Install a specific version
+qwen extensions install @scope/my-extension@1.2.0
+
+# Install from a custom registry
+qwen extensions install @scope/my-extension --registry https://your-registry.com
+```
+
+Only scoped packages (`@scope/package-name`) are supported to avoid ambiguity with the `owner/repo` GitHub shorthand format.
+
+**Registry resolution** follows this priority:
+
+1. `--registry` CLI flag (explicit override)
+2. Scoped registry from `.npmrc` (e.g. `@scope:registry=https://...`)
+3. Default registry from `.npmrc`
+4. Fallback: `https://registry.npmjs.org/`
+
+**Authentication** is handled automatically via the `NPM_TOKEN` environment variable or registry-specific `_authToken` entries in your `.npmrc` file.
+
+> **Note:** npm extensions must include a `qwen-extension.json` file at the package root, following the same format as any other Qwen Code extension. See [Extension Releasing](./extension-releasing.md#releasing-through-npm-registry) for packaging details.
+
 #### From Git Repository
 
 ```bash
@@ -109,7 +141,53 @@ This will install the github mcp server extension.
 qwen extensions install /path/to/your/extension
 ```
 
+Local `.zip` and `.tar.gz` archives are also supported:
+
+```bash
+qwen extensions install /path/to/your/extension.zip
+qwen extensions install /path/to/your/extension.tar.gz
+```
+
+The archive must contain a complete extension at its root, or a single top-level directory containing the extension.
+
 Note that we create a copy of the installed extension, so you will need to run `qwen extensions update` to pull in changes from both locally-defined extensions and those on GitHub.
+
+#### From Archive URL
+
+```bash
+qwen extensions install https://example.com/your/extension.zip
+qwen extensions install https://example.com/your/extension.tar.gz
+```
+
+Archive URLs can be updated later as long as the URL continues to point at a newer archive for the same extension.
+
+#### Choosing an install scope
+
+By default, an installed extension is enabled globally (user scope). Pass `--scope project` to enable it only for the current workspace:
+
+```bash
+qwen extensions install <source> --scope project
+```
+
+`--scope workspace` is accepted as an alias of `--scope project`. This matches the scope choice offered when installing from the `/extensions manage` Discover tab.
+
+### Managing marketplace sources
+
+Marketplace sources (Claude plugin marketplaces) power the Discover tab in `/extensions manage`. You can manage them from the CLI as well:
+
+```bash
+# Add a marketplace (owner/repo, git URL, https URL to marketplace.json, or local path)
+qwen extensions sources add <source>
+
+# List configured marketplaces
+qwen extensions sources list
+
+# Re-fetch a marketplace's plugin listing
+qwen extensions sources update <name>
+
+# Remove a marketplace
+qwen extensions sources remove <name>
+```
 
 ### Uninstalling an extension
 
@@ -133,7 +211,7 @@ This is useful if you have an extension disabled at the top-level and only enabl
 
 ### Updating an extension
 
-For extensions installed from a local path or a git repository, you can explicitly update to the latest version (as reflected in the `qwen-extension.json` `version` field) with `qwen extensions update extension-name`.
+For extensions installed from a local path or archive, an archive URL, a git repository, or an npm registry, you can explicitly update to the latest version with `qwen extensions update extension-name`. For npm extensions installed without a version pin (e.g. `@scope/pkg`), updates check the `latest` dist-tag. For those installed with a specific dist-tag (e.g. `@scope/pkg@beta`), updates track that tag. Extensions pinned to an exact version (e.g. `@scope/pkg@1.2.0`) are always considered up-to-date.
 
 You can update all extensions with:
 
@@ -162,6 +240,12 @@ The `qwen-extension.json` file contains the configuration for the extension. The
       "command": "node my-server.js"
     }
   },
+  "channels": {
+    "my-platform": {
+      "entry": "dist/index.js",
+      "displayName": "My Platform Channel"
+    }
+  },
   "contextFileName": "QWEN.md",
   "commands": "commands",
   "skills": "skills",
@@ -181,6 +265,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 - `version`: The version of the extension.
 - `mcpServers`: A map of MCP servers to configure. The key is the name of the server, and the value is the server configuration. These servers will be loaded on startup just like MCP servers configured in a [`settings.json` file](./cli/configuration.md). If both an extension and a `settings.json` file configure an MCP server with the same name, the server defined in the `settings.json` file takes precedence.
   - Note that all MCP server configuration options are supported except for `trust`.
+- `channels`: A map of custom channel adapters. The key is the channel type name, and the value has an `entry` (path to compiled JS entry point) and optional `displayName`. The entry point must export a `plugin` object conforming to the `ChannelPlugin` interface. See [Channel Plugins](../features/channels/plugins) for a full guide.
 - `contextFileName`: The name of the file that contains the context for the extension. This will be used to load the context from the extension directory. If this property is not used but a `QWEN.md` file is present in your extension directory, then that file will be loaded.
 - `commands`: The directory containing custom commands (default: `commands`). Commands are `.md` files that define prompts.
 - `skills`: The directory containing custom skills (default: `skills`). Skills are discovered automatically and become available via the `/skills` command.

@@ -11,11 +11,10 @@
  */
 
 import type {
-  AcpSessionUpdate,
-  SessionUpdateMeta,
-  ModelInfo,
+  SessionNotification,
   AvailableCommand,
-} from '../types/acpTypes.js';
+} from '@agentclientprotocol/sdk';
+import type { SessionUpdateMeta } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type {
   QwenAgentCallbacks,
@@ -47,41 +46,86 @@ export class QwenSessionUpdateHandler {
    *
    * @param data - ACP session update data
    */
-  handleSessionUpdate(data: AcpSessionUpdate): void {
+  handleSessionUpdate(data: SessionNotification): void {
     const update = data.update;
+    const sessionUpdate = (update as { sessionUpdate?: string }).sessionUpdate;
     console.log(
       '[SessionUpdateHandler] Processing update type:',
-      update.sessionUpdate,
+      sessionUpdate,
     );
 
-    switch (update.sessionUpdate) {
-      case 'user_message_chunk':
-        if (update.content?.text && this.callbacks.onStreamChunk) {
-          this.callbacks.onStreamChunk(update.content.text);
+    switch (sessionUpdate) {
+      case 'user_message_chunk': {
+        const text = this.getTextContent(
+          (update as { content?: unknown }).content,
+        );
+        if (text && this.callbacks.onStreamChunk) {
+          this.callbacks.onStreamChunk(text);
         }
         break;
+      }
 
-      case 'agent_message_chunk':
-        if (update.content?.text && this.callbacks.onStreamChunk) {
-          this.callbacks.onStreamChunk(update.content.text);
+      case 'agent_message_chunk': {
+        const text = this.getTextContent(
+          (update as { content?: unknown }).content,
+        );
+        const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+        // When MessageRewriteMiddleware is active it emits a rewritten summary
+        // (_meta.rewritten === true) in addition to the original chunk, and
+        // both carry qwenDiscreteMessage. Persist only the original here so the
+        // notification is not stored twice; the rewritten copy falls through to
+        // onStreamChunk like any other streamed text.
+        const isDiscreteMessage =
+          (meta?.qwenDiscreteMessage === true ||
+            meta?.source === 'background_notification') &&
+          meta?.rewritten !== true;
+        if (text && isDiscreteMessage && this.callbacks.onMessage) {
+          const source =
+            typeof meta?.source === 'string' ? meta.source : undefined;
+          // Forward the originating ACP session id so the webview can persist
+          // background-notification follow-ups against the conversation that
+          // owns the session, not whichever conversation happens to be active
+          // in the panel right now. Without this, switching conversations
+          // between triggering a background task and receiving its reply leaks
+          // the reply (and its full chat-history context) into the wrong
+          // conversation's persisted message store.
+          const sessionId =
+            typeof data.sessionId === 'string' ? data.sessionId : undefined;
+          this.callbacks.onMessage({
+            role: 'assistant',
+            content: text,
+            timestamp:
+              typeof meta?.timestamp === 'number' ? meta.timestamp : Date.now(),
+            ...(source ? { source } : {}),
+            ...(sessionId ? { sessionId } : {}),
+          });
+        } else if (text && this.callbacks.onStreamChunk) {
+          this.callbacks.onStreamChunk(text);
         }
-        this.emitUsageMeta(update._meta);
+        this.emitUsageMeta(meta);
         break;
+      }
 
-      case 'agent_thought_chunk':
-        if (update.content?.text) {
+      case 'agent_thought_chunk': {
+        const text = this.getTextContent(
+          (update as { content?: unknown }).content,
+        );
+        if (text) {
           if (this.callbacks.onThoughtChunk) {
-            this.callbacks.onThoughtChunk(update.content.text);
+            this.callbacks.onThoughtChunk(text);
           } else if (this.callbacks.onStreamChunk) {
             // Fallback to regular stream processing
             console.log(
               '[SessionUpdateHandler] 🧠 Falling back to onStreamChunk',
             );
-            this.callbacks.onStreamChunk(update.content.text);
+            this.callbacks.onStreamChunk(text);
           }
         }
-        this.emitUsageMeta(update._meta);
+        this.emitUsageMeta(
+          (update as { _meta?: SessionUpdateMeta | null })._meta,
+        );
         break;
+      }
 
       case 'tool_call': {
         // Handle new tool call
@@ -95,6 +139,7 @@ export class QwenSessionUpdateHandler {
             title: (update.title as string) || undefined,
             status: (update.status as string) || undefined,
             rawInput: update.rawInput,
+            rawOutput: (update as { rawOutput?: unknown }).rawOutput,
             content: update.content as
               | Array<Record<string, unknown>>
               | undefined,
@@ -118,6 +163,7 @@ export class QwenSessionUpdateHandler {
             title: (update.title as string) || undefined,
             status: (update.status as string) || undefined,
             rawInput: update.rawInput,
+            rawOutput: (update as { rawOutput?: unknown }).rawOutput,
             content: update.content as
               | Array<Record<string, unknown>>
               | undefined,
@@ -159,30 +205,15 @@ export class QwenSessionUpdateHandler {
       case 'current_mode_update': {
         // Notify UI about mode change
         try {
-          const modeId = (update as unknown as { modeId?: ApprovalModeValue })
-            .modeId;
+          const modeId = (
+            update as unknown as { currentModeId?: ApprovalModeValue }
+          ).currentModeId;
           if (modeId && this.callbacks.onModeChanged) {
             this.callbacks.onModeChanged(modeId);
           }
         } catch (err) {
           console.warn(
             '[SessionUpdateHandler] Failed to handle mode update',
-            err,
-          );
-        }
-        break;
-      }
-
-      case 'current_model_update': {
-        // Notify UI about model change
-        try {
-          const model = (update as unknown as { model?: ModelInfo }).model;
-          if (model && this.callbacks.onModelChanged) {
-            this.callbacks.onModelChanged(model);
-          }
-        } catch (err) {
-          console.warn(
-            '[SessionUpdateHandler] Failed to handle model update',
             err,
           );
         }
@@ -197,6 +228,11 @@ export class QwenSessionUpdateHandler {
           ).availableCommands;
           if (commands && this.callbacks.onAvailableCommands) {
             this.callbacks.onAvailableCommands(commands);
+          }
+
+          const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+          if (this.callbacks.onAvailableSkills) {
+            this.callbacks.onAvailableSkills(meta?.availableSkills ?? []);
           }
         } catch (err) {
           console.warn(
@@ -213,13 +249,58 @@ export class QwenSessionUpdateHandler {
     }
   }
 
-  private emitUsageMeta(meta?: SessionUpdateMeta): void {
+  private getTextContent(content: unknown): string | undefined {
+    if (!content || typeof content !== 'object') {
+      return undefined;
+    }
+    const text = (content as { text?: unknown }).text;
+    return typeof text === 'string' ? text : undefined;
+  }
+
+  private emitUsageMeta(meta?: SessionUpdateMeta | null): void {
     if (!meta || !this.callbacks.onUsageUpdate) {
       return;
     }
 
+    const raw = meta.usage as Record<string, unknown> | null | undefined;
+    const usage = raw
+      ? {
+          // SDK field names
+          inputTokens:
+            (raw['inputTokens'] as number | null | undefined) ??
+            (raw['promptTokens'] as number | null | undefined),
+          outputTokens:
+            (raw['outputTokens'] as number | null | undefined) ??
+            (raw['completionTokens'] as number | null | undefined),
+          thoughtTokens:
+            (raw['thoughtTokens'] as number | null | undefined) ??
+            (raw['thoughtsTokens'] as number | null | undefined),
+          totalTokens: raw['totalTokens'] as number | null | undefined,
+          cachedReadTokens:
+            (raw['cachedReadTokens'] as number | null | undefined) ??
+            (raw['cachedTokens'] as number | null | undefined),
+          cachedWriteTokens: raw['cachedWriteTokens'] as
+            | number
+            | null
+            | undefined,
+          // Legacy compat
+          promptTokens:
+            (raw['promptTokens'] as number | null | undefined) ??
+            (raw['inputTokens'] as number | null | undefined),
+          completionTokens:
+            (raw['completionTokens'] as number | null | undefined) ??
+            (raw['outputTokens'] as number | null | undefined),
+          thoughtsTokens:
+            (raw['thoughtsTokens'] as number | null | undefined) ??
+            (raw['thoughtTokens'] as number | null | undefined),
+          cachedTokens:
+            (raw['cachedTokens'] as number | null | undefined) ??
+            (raw['cachedReadTokens'] as number | null | undefined),
+        }
+      : undefined;
+
     const payload: UsageStatsPayload = {
-      usage: meta.usage || undefined,
+      usage,
       durationMs: meta.durationMs ?? undefined,
     };
 

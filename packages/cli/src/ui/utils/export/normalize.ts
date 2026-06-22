@@ -5,8 +5,9 @@
  */
 
 import type { Part } from '@google/genai';
-import { ExitPlanModeTool, ToolNames } from '@qwen-code/qwen-code-core';
+import { ToolNames } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
+import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 import type { ExportMessage, ExportSessionData } from './types.js';
 
 /**
@@ -25,6 +26,14 @@ export function normalizeSessionData(
   normalized.forEach((message, index) => {
     if (message.type === 'tool_call' && message.toolCall?.toolCallId) {
       toolCallIndexById.set(message.toolCall.toolCallId, index);
+    }
+  });
+
+  // Build index of assistant messages by uuid for usageMetadata merging
+  const assistantMessageIndexByUuid = new Map<string, number>();
+  normalized.forEach((message, index) => {
+    if (message.type === 'assistant') {
+      assistantMessageIndexByUuid.set(message.uuid, index);
     }
   });
 
@@ -56,6 +65,20 @@ export function normalizeSessionData(
     }
 
     mergeToolCallData(existingMessage.toolCall, toolCallMessage.toolCall);
+  }
+
+  // Merge usageMetadata from assistant records
+  for (const record of originalRecords) {
+    if (record.type !== 'assistant') continue;
+    if (!record.usageMetadata) continue;
+
+    const existingIndex = assistantMessageIndexByUuid.get(record.uuid);
+    if (existingIndex !== undefined) {
+      // Only set if not already present from collect phase
+      if (!normalized[existingIndex].usageMetadata) {
+        normalized[existingIndex].usageMetadata = record.usageMetadata;
+      }
+    }
   }
 
   return {
@@ -222,7 +245,11 @@ function resolveToolMetadata(
  * Maps tool kind to allowed export kinds.
  */
 function mapToolKind(kind: Kind | undefined, toolName?: string): string {
-  if (toolName && toolName === ExitPlanModeTool.Name) {
+  if (
+    toolName &&
+    (toolName === ToolNames.EXIT_PLAN_MODE ||
+      toolName === ToolNames.ENTER_PLAN_MODE)
+  ) {
     return 'switch_mode';
   }
 
@@ -261,6 +288,18 @@ function extractDiffContent(
 
   const display = resultDisplay as Record<string, unknown>;
   if ('fileName' in display && 'newContent' in display) {
+    if (display['truncatedForSession'] === true) {
+      return [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: buildTruncatedDiffPreviewText(display),
+          },
+        },
+      ];
+    }
+
     return [
       {
         type: 'diff',

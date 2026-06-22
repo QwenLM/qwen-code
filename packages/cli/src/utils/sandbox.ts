@@ -11,14 +11,21 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { quote, parse } from 'shell-quote';
 import {
-  USER_SETTINGS_DIR,
+  getUserSettingsDir,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'node:util';
 import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import { FatalSandboxError } from '@qwen-code/qwen-code-core';
+import {
+  FatalSandboxError,
+  Storage,
+  isSubpath,
+} from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
+import { parseSandboxImageName } from './sandboxImageName.js';
+import { isContainerPathWithinWorkdir } from './sandbox-path.js';
+import { parseSandboxMountSpec } from './sandboxMounts.js';
 
 const execAsync = promisify(exec);
 
@@ -33,6 +40,13 @@ function getContainerPath(hostPath: string): string {
     return `/${match[1].toLowerCase()}/${match[2]}`;
   }
   return hostPath;
+}
+
+function ensureDirectoryAndGetRealPath(dir: string): string {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return fs.realpathSync(dir);
 }
 
 const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'qwen-code-sandbox';
@@ -91,14 +105,6 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   return false;
 }
 
-// docker does not allow container names to contain ':' or '/', so we
-// parse those out to shorten the name
-function parseImageName(image: string): string {
-  const [fullName, tag] = image.split(':');
-  const name = fullName.split('/').at(-1) ?? 'unknown-image';
-  return tag ? `${name}-${tag}` : name;
-}
-
 function ports(): string[] {
   return (process.env['SANDBOX_PORTS'] ?? '')
     .split(',')
@@ -117,9 +123,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pathSuffix += `:${containerPath}`;
       }
     }
@@ -133,9 +137,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PYTHONPATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pythonPathSuffix += `:${containerPath}`;
       }
     }
@@ -210,6 +212,15 @@ export async function start_sandbox(
       ...nodeArgs,
     ].join(' ');
 
+    // Canonicalize via realpathSync so seatbelt's `subpath` matcher sees the
+    // same path the kernel will. mkdirSync first because realpathSync throws
+    // on missing dirs and a custom QWEN_HOME / QWEN_RUNTIME_DIR may not exist
+    // yet on first run.
+    const qwenDir = Storage.getGlobalQwenDir();
+    const runtimeDir = Storage.getRuntimeBaseDir();
+    fs.mkdirSync(qwenDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+
     const args = [
       '-D',
       `TARGET_DIR=${fs.realpathSync(process.cwd())}`,
@@ -219,6 +230,10 @@ export async function start_sandbox(
       `HOME_DIR=${fs.realpathSync(os.homedir())}`,
       '-D',
       `CACHE_DIR=${fs.realpathSync(execSync(`getconf DARWIN_USER_CACHE_DIR`).toString().trim())}`,
+      '-D',
+      `QWEN_DIR=${fs.realpathSync(qwenDir)}`,
+      '-D',
+      `RUNTIME_DIR=${fs.realpathSync(runtimeDir)}`,
     ];
 
     // Add included directories from the workspace context
@@ -263,8 +278,8 @@ export async function start_sandbox(
         ...finalArgv.map((arg) => quote([arg])),
       ].join(' '),
     );
-    // start and set up proxy if GEMINI_SANDBOX_PROXY_COMMAND is set
-    const proxyCommand = process.env['GEMINI_SANDBOX_PROXY_COMMAND'];
+    // start and set up proxy if QWEN_SANDBOX_PROXY_COMMAND is set
+    const proxyCommand = process.env['QWEN_SANDBOX_PROXY_COMMAND'];
     let proxyProcess: ChildProcess | undefined = undefined;
     let sandboxProcess: ChildProcess | undefined = undefined;
     const sandboxEnv = { ...process.env };
@@ -301,10 +316,7 @@ export async function start_sandbox(
       process.on('SIGINT', stopProxy);
       process.on('SIGTERM', stopProxy);
 
-      // commented out as it disrupts ink rendering
-      // proxyProcess.stdout?.on('data', (data) => {
-      //   console.info(data.toString());
-      // });
+      // Proxy stdout is intentionally not piped — it disrupts ink rendering.
       proxyProcess.stderr?.on('data', (data) => {
         writeStderrLine(data.toString());
       });
@@ -337,7 +349,7 @@ export async function start_sandbox(
 
   writeStderrLine(`hopping into sandbox (command: ${config.command}) ...`);
 
-  // determine full path for gemini-cli to distinguish linked vs installed setting
+  // determine full path for qwen-code to distinguish linked vs installed setting
   const gcPath = fs.realpathSync(process.argv[1]);
 
   const projectSandboxDockerfile = path.join(
@@ -350,9 +362,9 @@ export async function start_sandbox(
   const workdir = path.resolve(process.cwd());
   const containerWorkdir = getContainerPath(workdir);
 
-  // if BUILD_SANDBOX is set, then call scripts/build_sandbox.js under gemini-cli repo
+  // if BUILD_SANDBOX is set, then call scripts/build_sandbox.js under qwen-code repo
   //
-  // note this can only be done with binary linked from gemini-cli repo
+  // note this can only be done with binary linked from qwen-code repo
   if (process.env['BUILD_SANDBOX']) {
     if (!gcPath.includes('qwen-code/packages/')) {
       throw new FatalSandboxError(
@@ -378,7 +390,7 @@ export async function start_sandbox(
           stdio: 'inherit',
           env: {
             ...process.env,
-            GEMINI_SANDBOX: config.command, // in case sandbox is enabled via flags (see config.ts under cli package)
+            QWEN_SANDBOX: config.command, // in case sandbox is enabled via flags (see config.ts under cli package)
           },
         },
       );
@@ -389,8 +401,8 @@ export async function start_sandbox(
   if (!(await ensureSandboxImageIsPresent(config.command, image))) {
     const remedy =
       image === LOCAL_DEV_SANDBOX_IMAGE_NAME
-        ? 'Try running `npm run build:all` or `npm run build:sandbox` under the gemini-cli repo to build it locally, or check the image name and your network connection.'
-        : 'Please check the image name, your network connection, or notify gemini-cli-dev@google.com if the issue persists.';
+        ? 'Try running `npm run build:all` or `npm run build:sandbox` under the qwen-code repo to build it locally, or check the image name and your network connection.'
+        : 'Please check the image name, your network connection, or notify qwen-code-dev@service.alibaba.com if the issue persists.';
     throw new FatalSandboxError(
       `Sandbox image '${image}' is missing or could not be pulled. ${remedy}`,
     );
@@ -419,21 +431,64 @@ export async function start_sandbox(
   // mount current directory as working directory in sandbox (set via --workdir)
   args.push('--volume', `${workdir}:${containerWorkdir}`);
 
-  // mount user settings directory inside container, after creating if missing
-  // note user/home changes inside sandbox and we mount at BOTH paths for consistency
-  const userSettingsDirOnHost = USER_SETTINGS_DIR;
+  // Mount user settings at /home/node/.qwen and at the canonical host path
+  // used by QWEN_HOME, unless that host path is already covered by a broader
+  // runtime-dir mount below.
+  const userSettingsDirOnHost = getUserSettingsDir();
+  const runtimeBaseDirOnHost = Storage.getRuntimeBaseDir();
+  const userSettingsDirRealPath = ensureDirectoryAndGetRealPath(
+    userSettingsDirOnHost,
+  );
+  const runtimeBaseDirRealPath =
+    ensureDirectoryAndGetRealPath(runtimeBaseDirOnHost);
   const userSettingsDirInSandbox = getContainerPath(
     `/home/node/${SETTINGS_DIRECTORY_NAME}`,
   );
-  if (!fs.existsSync(userSettingsDirOnHost)) {
-    fs.mkdirSync(userSettingsDirOnHost);
-  }
-  args.push('--volume', `${userSettingsDirOnHost}:${userSettingsDirInSandbox}`);
-  if (userSettingsDirInSandbox !== userSettingsDirOnHost) {
+  const userSettingsDirContainerPath = getContainerPath(
+    userSettingsDirRealPath,
+  );
+  const runtimeBaseDirContainerPath = getContainerPath(runtimeBaseDirRealPath);
+  const runtimeCoveredByUserSettings = isSubpath(
+    userSettingsDirRealPath,
+    runtimeBaseDirRealPath,
+  );
+  const userSettingsCoveredByRuntime = isSubpath(
+    runtimeBaseDirRealPath,
+    userSettingsDirRealPath,
+  );
+  const runtimeSameAsUserSettings =
+    runtimeCoveredByUserSettings && userSettingsCoveredByRuntime;
+
+  args.push(
+    '--volume',
+    `${userSettingsDirRealPath}:${userSettingsDirInSandbox}`,
+  );
+  if (
+    (!userSettingsCoveredByRuntime || runtimeSameAsUserSettings) &&
+    userSettingsDirInSandbox !== userSettingsDirContainerPath
+  ) {
     args.push(
       '--volume',
-      `${userSettingsDirOnHost}:${getContainerPath(userSettingsDirOnHost)}`,
+      `${userSettingsDirRealPath}:${userSettingsDirContainerPath}`,
     );
+  }
+
+  // Pass QWEN_HOME so the sandboxed CLI resolves the global qwen dir to the
+  // same path the host did, instead of relying on the /home/node/.qwen mount
+  // being the default fallback.
+  args.push('--env', `QWEN_HOME=${userSettingsDirContainerPath}`);
+
+  // Mount the runtime base dir and pass QWEN_RUNTIME_DIR when it diverges
+  // from the global qwen dir; otherwise the existing user-settings mount
+  // already covers it.
+  if (!runtimeCoveredByUserSettings) {
+    args.push(
+      '--volume',
+      `${runtimeBaseDirRealPath}:${runtimeBaseDirContainerPath}`,
+    );
+  }
+  if (!runtimeSameAsUserSettings) {
+    args.push('--env', `QWEN_RUNTIME_DIR=${runtimeBaseDirContainerPath}`);
   }
 
   // mount os.tmpdir() as os.tmpdir() inside container
@@ -465,9 +520,7 @@ export async function start_sandbox(
     for (let mount of process.env['SANDBOX_MOUNTS'].split(',')) {
       if (mount.trim()) {
         // parse mount as from:to:opts
-        let [from, to, opts] = mount.trim().split(':');
-        to = to || from; // default to mount at same path inside container
-        opts = opts || 'ro'; // default to read-only
+        const { from, to, opts } = parseSandboxMountSpec(mount);
         mount = `${from}:${to}:${opts}`;
         // check that from path is absolute
         if (!path.isAbsolute(from)) {
@@ -498,8 +551,8 @@ export async function start_sandbox(
 
   // copy proxy environment variables, replacing localhost with SANDBOX_PROXY_NAME
   // copy as both upper-case and lower-case as is required by some utilities
-  // GEMINI_SANDBOX_PROXY_COMMAND implies HTTPS_PROXY unless HTTP_PROXY is set
-  const proxyCommand = process.env['GEMINI_SANDBOX_PROXY_COMMAND'];
+  // QWEN_SANDBOX_PROXY_COMMAND implies HTTPS_PROXY unless HTTP_PROXY is set
+  const proxyCommand = process.env['QWEN_SANDBOX_PROXY_COMMAND'];
 
   if (proxyCommand) {
     let proxy =
@@ -539,12 +592,12 @@ export async function start_sandbox(
   }
 
   // name container after image, plus random suffix to avoid conflicts
-  const imageName = parseImageName(image);
+  const imageName = parseSandboxImageName(image);
   const isIntegrationTest =
-    process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true';
+    process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
   if (isIntegrationTest) {
-    containerName = `gemini-cli-integration-test-${randomBytes(4).toString(
+    containerName = `qwen-code-integration-test-${randomBytes(4).toString(
       'hex',
     )}`;
     writeStderrLine(`ContainerName: ${containerName}`);
@@ -563,11 +616,27 @@ export async function start_sandbox(
   }
   args.push('--name', containerName, '--hostname', containerName);
 
-  // copy GEMINI_CLI_TEST_VAR for integration tests
-  if (process.env['GEMINI_CLI_TEST_VAR']) {
+  // copy QWEN_CODE_TEST_VAR for integration tests
+  if (process.env['QWEN_CODE_TEST_VAR']) {
     args.push(
       '--env',
-      `GEMINI_CLI_TEST_VAR=${process.env['GEMINI_CLI_TEST_VAR']}`,
+      `QWEN_CODE_TEST_VAR=${process.env['QWEN_CODE_TEST_VAR']}`,
+    );
+  }
+  for (const envVar of [
+    'QWEN_DEBUG_LOG_FILE',
+    'QWEN_CODE_LEGACY_MCP_BLOCKING',
+  ] as const) {
+    if (process.env[envVar]) {
+      args.push('--env', `${envVar}=${process.env[envVar]}`);
+    }
+  }
+  if (process.env['QWEN_CODE_MCP_APPROVALS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_MCP_APPROVALS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_MCP_APPROVALS_PATH'],
+      )}`,
     );
   }
 
@@ -582,10 +651,6 @@ export async function start_sandbox(
   // copy OPENAI_API_KEY and related env vars for Qwen
   if (process.env['OPENAI_API_KEY']) {
     args.push('--env', `OPENAI_API_KEY=${process.env['OPENAI_API_KEY']}`);
-  }
-  // copy TAVILY_API_KEY for web search tool
-  if (process.env['TAVILY_API_KEY']) {
-    args.push('--env', `TAVILY_API_KEY=${process.env['TAVILY_API_KEY']}`);
   }
   if (process.env['OPENAI_BASE_URL']) {
     args.push('--env', `OPENAI_BASE_URL=${process.env['OPENAI_BASE_URL']}`);
@@ -654,8 +719,13 @@ export async function start_sandbox(
   // also mount-replace VIRTUAL_ENV directory with <project_settings>/sandbox.venv
   // sandbox can then set up this new VIRTUAL_ENV directory using sandbox.bashrc (see below)
   // directory will be empty if not set up, which is still preferable to having host binaries
+  const virtualEnv = process.env['VIRTUAL_ENV'];
   if (
-    process.env['VIRTUAL_ENV']?.toLowerCase().startsWith(workdir.toLowerCase())
+    virtualEnv &&
+    isContainerPathWithinWorkdir(
+      getContainerPath(workdir),
+      getContainerPath(virtualEnv),
+    )
   ) {
     const sandboxVenvPath = path.resolve(
       SETTINGS_DIRECTORY_NAME,
@@ -664,14 +734,8 @@ export async function start_sandbox(
     if (!fs.existsSync(sandboxVenvPath)) {
       fs.mkdirSync(sandboxVenvPath, { recursive: true });
     }
-    args.push(
-      '--volume',
-      `${sandboxVenvPath}:${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
-    args.push(
-      '--env',
-      `VIRTUAL_ENV=${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
+    args.push('--volume', `${sandboxVenvPath}:${getContainerPath(virtualEnv)}`);
+    args.push('--env', `VIRTUAL_ENV=${getContainerPath(virtualEnv)}`);
   }
 
   // copy additional environment variables from SANDBOX_ENV
@@ -716,10 +780,15 @@ export async function start_sandbox(
   let userFlag = '';
   const finalEntrypoint = entrypoint(workdir, cliArgs);
 
-  if (process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true') {
-    args.push('--user', 'root');
-    userFlag = '--user root';
-  } else if (await shouldUseCurrentUserInSandbox()) {
+  // Check if we should use current user's UID/GID in sandbox
+  // In integration test mode, we still respect SANDBOX_SET_UID_GID to allow
+  // tests that need to access host's ~/.qwen (e.g., --resume functionality)
+  const useCurrentUser = await shouldUseCurrentUserInSandbox();
+
+  if (useCurrentUser) {
+    // SANDBOX_SET_UID_GID is enabled: create user with host's UID/GID
+    // This includes integration test mode with SANDBOX_SET_UID_GID=true,
+    // allowing tests that need to access host's ~/.qwen (e.g., --resume) to work.
     // For the user-creation logic to work, the container must start as root.
     // The entrypoint script then handles dropping privileges to the correct user.
     args.push('--user', 'root');
@@ -729,10 +798,10 @@ export async function start_sandbox(
 
     // Instead of passing --user to the main sandbox container, we let it
     // start as root, then create a user with the host's UID/GID, and
-    // finally switch to that user to run the gemini process. This is
+    // finally switch to that user to run the qwen process. This is
     // necessary on Linux to ensure the user exists within the
     // container's /etc/passwd file, which is required by os.userInfo().
-    const username = 'gemini';
+    const username = 'qwen';
     const homeDir = getContainerPath(os.homedir());
 
     const setupUserCommands = [
@@ -755,7 +824,12 @@ export async function start_sandbox(
     userFlag = `--user ${uid}:${gid}`;
     // When forcing a UID in the sandbox, $HOME can be reset to '/', so we copy $HOME as well.
     args.push('--env', `HOME=${os.homedir()}`);
+  } else if (isIntegrationTest) {
+    // Integration test mode with UID/GID matching disabled: use root
+    args.push('--user', 'root');
+    userFlag = '--user root';
   }
+  // else: non-IT mode with UID/GID matching disabled - use image default user (node)
 
   // push container image name
   args.push(image);
@@ -763,7 +837,7 @@ export async function start_sandbox(
   // push container entrypoint (including args)
   args.push(...finalEntrypoint);
 
-  // start and set up proxy if GEMINI_SANDBOX_PROXY_COMMAND is set
+  // start and set up proxy if QWEN_SANDBOX_PROXY_COMMAND is set
   let proxyProcess: ChildProcess | undefined = undefined;
   let sandboxProcess: ChildProcess | undefined = undefined;
 
@@ -790,10 +864,7 @@ export async function start_sandbox(
     process.on('SIGINT', stopProxy);
     process.on('SIGTERM', stopProxy);
 
-    // commented out as it disrupts ink rendering
-    // proxyProcess.stdout?.on('data', (data) => {
-    //   console.info(data.toString());
-    // });
+    // Proxy stdout is intentionally not piped — it disrupts ink rendering.
     proxyProcess.stderr?.on('data', (data) => {
       writeStderrLine(data.toString().trim());
     });
@@ -860,12 +931,9 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
       resolve(false);
     });
 
-    checkProcess.on('close', (code) => {
-      // Non-zero code might indicate docker daemon not running, etc.
+    checkProcess.on('close', () => {
+      // Non-zero exit code may indicate docker daemon not running, etc.
       // The primary success indicator is non-empty stdoutData.
-      if (code !== 0) {
-        // console.warn(`'${sandbox} images -q ${image}' exited with code ${code}.`);
-      }
       resolve(stdoutData.trim() !== '');
     });
   });

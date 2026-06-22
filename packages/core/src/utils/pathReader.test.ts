@@ -20,6 +20,10 @@ const createMockConfig = (
   cwd: string,
   otherDirs: string[] = [],
   mockFileService?: FileDiscoveryService,
+  fileFilteringOptions?: {
+    respectGitIgnore: boolean;
+    respectQwenIgnore: boolean;
+  },
 ): Config => {
   const workspace = new WorkspaceContext(cwd, otherDirs);
   const fileSystemService = new StandardFileSystemService();
@@ -29,8 +33,16 @@ const createMockConfig = (
     getTargetDir: () => cwd,
     getFileSystemService: () => fileSystemService,
     getFileService: () => mockFileService,
+    getFileFilteringOptions: () =>
+      fileFilteringOptions ?? {
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      },
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
+    getContentGeneratorConfig: () => ({
+      modalities: { image: true, pdf: true, audio: true, video: true },
+    }),
   } as unknown as Config;
 };
 
@@ -337,6 +349,29 @@ describe('readPathFromWorkspace', () => {
       expect(resultText).not.toContain('invisible');
       expect(mockFileService.filterFiles).toHaveBeenCalled();
     });
+
+    it('should pass respectGitIgnore: false from config to filterFiles', async () => {
+      mock({
+        [CWD]: {
+          'ignored.txt': 'ignored content',
+        },
+      });
+      const mockFileService = {
+        filterFiles: vi.fn((files) => files),
+      } as unknown as FileDiscoveryService;
+      const config = createMockConfig(CWD, [], mockFileService, {
+        respectGitIgnore: false,
+        respectQwenIgnore: true,
+      });
+      await readPathFromWorkspace('ignored.txt', config);
+      expect(mockFileService.filterFiles).toHaveBeenCalledWith(
+        ['ignored.txt'],
+        {
+          respectGitIgnore: false,
+          respectQwenIgnore: true,
+        },
+      );
+    });
   });
 
   it('should throw an error for an absolute path outside the workspace', async () => {
@@ -365,8 +400,10 @@ describe('readPathFromWorkspace', () => {
     ).rejects.toThrow('Path not found in workspace: not-found.txt');
   });
 
-  // mock-fs permission simulation is unreliable on Windows.
-  it.skipIf(process.platform === 'win32')(
+  // mock-fs permission simulation is unreliable on Windows and when running as root.
+  it.skipIf(
+    process.platform === 'win32' || (process.getuid && process.getuid() === 0),
+  )(
     'should return an error string if reading a file with no permissions',
     async () => {
       mock({
@@ -392,8 +429,8 @@ describe('readPathFromWorkspace', () => {
   );
 
   it('should return an error string for files exceeding the size limit', async () => {
-    // Mock a file slightly larger than the 20MB limit defined in fileUtils.ts
-    const largeContent = 'a'.repeat(21 * 1024 * 1024); // 21MB
+    // Mock a file slightly larger than the 10MB limit defined in fileUtils.ts
+    const largeContent = 'a'.repeat(11 * 1024 * 1024); // 11MB
     mock({
       [CWD]: {
         'large.txt': largeContent,
@@ -406,6 +443,6 @@ describe('readPathFromWorkspace', () => {
     const result = await readPathFromWorkspace('large.txt', config);
     const textResult = result[0] as string;
     // The error message comes directly from processSingleFileContent
-    expect(textResult).toBe('File size exceeds the 20MB limit.');
+    expect(textResult).toBe('File size exceeds the 10MB limit.');
   });
 });

@@ -5,6 +5,7 @@
  */
 
 import type { IBufferCell, Terminal } from '@xterm/headless';
+
 export interface AnsiToken {
   text: string;
   bold: boolean;
@@ -18,6 +19,49 @@ export interface AnsiToken {
 
 export type AnsiLine = AnsiToken[];
 export type AnsiOutput = AnsiLine[];
+
+export interface SerializeTerminalToObjectOptions {
+  unwrapWrappedLines?: boolean;
+}
+
+const canMergeAnsiTokens = (left: AnsiToken, right: AnsiToken): boolean =>
+  left.bold === right.bold &&
+  left.italic === right.italic &&
+  left.underline === right.underline &&
+  left.dim === right.dim &&
+  left.inverse === right.inverse &&
+  left.fg === right.fg &&
+  left.bg === right.bg;
+
+const appendAnsiLineTokens = (target: AnsiLine, source: AnsiLine) => {
+  for (const token of source) {
+    const previous = target[target.length - 1];
+    if (previous && canMergeAnsiTokens(previous, token)) {
+      previous.text += token.text;
+    } else {
+      target.push({ ...token });
+    }
+  }
+};
+
+export function serializeTerminalToText(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    const lineContent = line ? line.translateToString(true) : '';
+
+    if (line?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += lineContent;
+      continue;
+    }
+
+    lines.push(lineContent);
+  }
+
+  return lines.join('\n').trimEnd();
+}
 
 const enum Attribute {
   inverse = 1,
@@ -131,17 +175,27 @@ class Cell {
   }
 }
 
-export function serializeTerminalToObject(terminal: Terminal): AnsiOutput {
+export function serializeTerminalToObject(
+  terminal: Terminal,
+  scrollOffset: number = 0,
+  options: SerializeTerminalToObjectOptions = {},
+): AnsiOutput {
   const buffer = terminal.buffer.active;
-  const cursorX = buffer.cursorX;
-  const cursorY = buffer.cursorY;
   const defaultFg = '';
   const defaultBg = '';
+
+  // Clamp scrollOffset to valid range [0, viewportY]
+  const clampedOffset = Math.max(0, Math.min(scrollOffset, buffer.viewportY));
+  const startRow = buffer.viewportY - clampedOffset;
+
+  // Only show cursor when viewing the live viewport (no scroll)
+  const cursorX = clampedOffset === 0 ? buffer.cursorX : -1;
+  const cursorY = clampedOffset === 0 ? buffer.cursorY : -1;
 
   const result: AnsiOutput = [];
 
   for (let y = 0; y < terminal.rows; y++) {
-    const line = buffer.getLine(buffer.viewportY + y);
+    const line = buffer.getLine(startRow + y);
     const currentLine: AnsiLine = [];
     if (!line) {
       result.push(currentLine);
@@ -190,7 +244,11 @@ export function serializeTerminalToObject(terminal: Terminal): AnsiOutput {
       currentLine.push(token);
     }
 
-    result.push(currentLine);
+    if (options.unwrapWrappedLines && line.isWrapped && result.length > 0) {
+      appendAnsiLineTokens(result[result.length - 1], currentLine);
+    } else {
+      result.push(currentLine);
+    }
   }
 
   return result;

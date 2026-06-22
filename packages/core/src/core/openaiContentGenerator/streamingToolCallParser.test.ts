@@ -541,7 +541,7 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Tool call ID collision detection and mapping', () => {
-    it('should handle tool call ID reuse correctly', () => {
+    it('should ignore replay chunks after a tool call ID completes', () => {
       // First tool call with ID 'call_1' at index 0
       const result1 = parser.addChunk(
         0,
@@ -551,24 +551,41 @@ describe('StreamingToolCallParser', () => {
       );
       expect(result1.complete).toBe(true);
 
-      // Second tool call with same ID 'call_1' should reuse the same internal index
-      // and append to the buffer (this is the actual behavior)
+      // Once the ID has complete JSON, later chunks with the same ID are
+      // provider replay and must not mutate the surviving call.
       const result2 = parser.addChunk(
         0,
         '{"param2": "value2"}',
         'call_1',
         'function2',
       );
-      expect(result2.complete).toBe(false); // Not complete because buffer is malformed
+      expect(result2.complete).toBe(false);
 
-      // Should have updated the metadata but appended to buffer
       expect(parser.getToolCallMeta(0)).toEqual({
         id: 'call_1',
-        name: 'function2',
+        name: 'function1',
       });
-      expect(parser.getBuffer(0)).toBe(
-        '{"param1": "value1"}{"param2": "value2"}',
-      );
+      expect(parser.getBuffer(0)).toBe('{"param1": "value1"}');
+    });
+
+    it('should ignore metadata-only replay chunks after a tool call ID completes', () => {
+      parser.addChunk(0, '{"file_path": "a.ts"}', 'call_1', 'read_file');
+
+      const result = parser.addChunk(0, '', 'call_1', 'shell');
+
+      expect(result.complete).toBe(false);
+      expect(parser.getToolCallMeta(0)).toEqual({
+        id: 'call_1',
+        name: 'read_file',
+      });
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_1',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+          index: 0,
+        },
+      ]);
     });
 
     it('should detect index collision and find new index', () => {
@@ -788,6 +805,77 @@ describe('StreamingToolCallParser', () => {
       const call2 = completed.find((tc) => tc.id === 'call_2');
       expect(call1?.args).toEqual({ param1: 'value1' });
       expect(call2?.args).toEqual({ param2: 'value2' });
+    });
+  });
+
+  describe('hasIncompleteToolCalls', () => {
+    it('should return false when no tool calls exist', () => {
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should return false when all tool calls have complete JSON', () => {
+      parser.addChunk(0, '{"key": "value"}', 'call_1', 'write_file');
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should return true when a tool call has depth > 0 (unclosed braces)', () => {
+      parser.addChunk(
+        0,
+        '{"file_path": "/tmp/test.txt", "content": "partial',
+        'call_1',
+        'write_file',
+      );
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+    });
+
+    it('should return true when a tool call is inside a string literal', () => {
+      // Simulate truncation mid-string: {"file_path": "/tmp/test.txt", "content": "some text
+      parser.addChunk(
+        0,
+        '{"file_path": "/tmp/test.txt"',
+        'call_1',
+        'write_file',
+      );
+      parser.addChunk(0, ', "content": "some text');
+      const state = parser.getState(0);
+      expect(state.inString).toBe(true);
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+    });
+
+    it('should return false for tool calls without name metadata', () => {
+      // Tool calls without a name should be ignored
+      parser.addChunk(0, '{"key": "incomplete', undefined, undefined);
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should detect incomplete among multiple tool calls', () => {
+      // First tool call is complete
+      parser.addChunk(0, '{"key": "value"}', 'call_1', 'func_a');
+      // Second tool call is incomplete
+      parser.addChunk(1, '{"key": "val', 'call_2', 'func_b');
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+    });
+
+    it('should return false after reset', () => {
+      parser.addChunk(0, '{"key": "incomplete', 'call_1', 'write_file');
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+      parser.reset();
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should detect real-world truncation: write_file with only file_path', () => {
+      // Reproduces the actual bug: LLM output truncated mid-JSON,
+      // only file_path key received, content never arrived.
+      // Buffer: {"file_path": "/path/to/file.cpp"
+      // depth=1 because outer brace is unclosed
+      parser.addChunk(
+        0,
+        '{"file_path": "/path/to/file.cpp"',
+        'call_1',
+        'write_file',
+      );
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+      expect(parser.getState(0).depth).toBe(1);
     });
   });
 });

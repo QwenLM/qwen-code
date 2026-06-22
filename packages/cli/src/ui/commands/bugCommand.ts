@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import open from 'open';
 import {
   type CommandContext,
   type SlashCommand,
   CommandKind,
 } from './types.js';
-import { MessageType } from '../types.js';
+import { openBrowserSecurely } from '@qwen-code/qwen-code-core';
+import { MessageType, type HistoryItem } from '../types.js';
 import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
 import { getSystemInfoFields } from '../../utils/systemInfoFields.js';
 import { t } from '../../i18n/index.js';
@@ -21,6 +21,8 @@ export const bugCommand: SlashCommand = {
     return t('submit a bug report');
   },
   kind: CommandKind.BUILT_IN,
+  argumentHint: '<description>',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const bugDescription = (args || '').trim();
     const systemInfo = await getExtendedSystemInfo(context);
@@ -43,16 +45,17 @@ export const bugCommand: SlashCommand = {
       .replace('{title}', encodeURIComponent(bugDescription))
       .replace('{info}', encodeURIComponent(`\n${info}\n`));
 
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: `To submit your bug report, please open the following URL in your browser:\n${bugReportUrl}`,
-      },
-      Date.now(),
-    );
+    const bugReportItem: Omit<Extract<HistoryItem, { type: 'info' }>, 'id'> = {
+      type: MessageType.INFO,
+      text: 'To submit your bug report, please open the following URL in your browser:',
+      linkUrl: bugReportUrl,
+      linkText: 'Open GitHub bug report form',
+    };
+
+    context.ui.addItem(bugReportItem, Date.now());
 
     try {
-      await open(bugReportUrl);
+      await openBrowserSecurely(bugReportUrl);
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);

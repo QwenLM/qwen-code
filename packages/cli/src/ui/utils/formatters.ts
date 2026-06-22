@@ -55,7 +55,29 @@ export const formatRelativeTime = (timestamp: number): string => {
   return 'just now';
 };
 
-export const formatDuration = (milliseconds: number): string => {
+export const formatTokenCount = (count: number): string => {
+  if (count < 1000) {
+    return `${count}`;
+  }
+  if (count < 10000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return `${Math.floor(count / 1000)}k`;
+};
+
+export interface FormatDurationOptions {
+  /**
+   * When true, drops a trailing `.0` in the sub-minute range so that whole
+   * seconds render as `5s` rather than `5.0s`. Non-integer values keep their
+   * decimal (e.g. `5.5s`). Matches Claude Code's `ShellTimeDisplay` style.
+   */
+  hideTrailingZeros?: boolean;
+}
+
+export const formatDuration = (
+  milliseconds: number,
+  options?: FormatDurationOptions,
+): string => {
   if (milliseconds <= 0) {
     return '0s';
   }
@@ -67,7 +89,17 @@ export const formatDuration = (milliseconds: number): string => {
   const totalSeconds = milliseconds / 1000;
 
   if (totalSeconds < 60) {
-    return `${totalSeconds.toFixed(1)}s`;
+    const formatted = totalSeconds.toFixed(1);
+    // toFixed can round up across the minute boundary (e.g. 59.95s -> "60.0"),
+    // which is not a valid sub-minute reading. Render it as the minute it
+    // rounds to, matching formatDuration(60000) === '1m'.
+    if (parseFloat(formatted) >= 60) {
+      return '1m';
+    }
+    if (options?.hideTrailingZeros && formatted.endsWith('.0')) {
+      return `${formatted.slice(0, -2)}s`;
+    }
+    return `${formatted}s`;
   }
 
   const hours = Math.floor(totalSeconds / 3600);

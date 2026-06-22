@@ -7,7 +7,15 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+  vi,
+} from 'vitest';
 import {
   escapePath,
   resolvePath,
@@ -17,6 +25,9 @@ import {
   isSubpath,
   shortenPath,
   tildeifyPath,
+  expandHomeDir,
+  getProjectHash,
+  _resetValidatePathCacheForTest,
 } from './paths.js';
 import type { Config } from '../config/config.js';
 
@@ -175,88 +186,104 @@ describe('escapePath', () => {
   });
 
   it('should handle paths with only special characters', () => {
-    expect(escapePath(' ()[]{};&|*?$`\'"#!~<>')).toBe(
-      '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
+    expect(escapePath(' ()[]{};&|*?$`\'"#!~<>,')).toBe(
+      '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>\\,',
     );
   });
 });
 
 describe('unescapePath', () => {
-  it('should unescape spaces', () => {
-    expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
-  });
+  const isWindows = process.platform === 'win32';
 
-  it('should unescape tabs', () => {
-    expect(unescapePath('file\\\twith\\\ttabs.txt')).toBe(
-      'file\twith\ttabs.txt',
+  // On Windows, backslashes are path separators, not shell escape chars.
+  // unescapePath is intentionally a no-op on win32.
+  it.skipIf(!isWindows)('should be a no-op on Windows', () => {
+    expect(unescapePath('C:\\Users\\my file.txt')).toBe(
+      'C:\\Users\\my file.txt',
+    );
+    expect(unescapePath('C:\\(v2)\\file.txt')).toBe('C:\\(v2)\\file.txt');
+    expect(unescapePath('path\\to\\file\\ name.txt')).toBe(
+      'path\\to\\file\\ name.txt',
     );
   });
 
-  it('should unescape parentheses', () => {
-    expect(unescapePath('file\\(1\\).txt')).toBe('file(1).txt');
-  });
-
-  it('should unescape square brackets', () => {
-    expect(unescapePath('file\\[backup\\].txt')).toBe('file[backup].txt');
-  });
-
-  it('should unescape curly braces', () => {
-    expect(unescapePath('file\\{temp\\}.txt')).toBe('file{temp}.txt');
-  });
-
-  it('should unescape multiple special characters', () => {
-    expect(unescapePath('my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt')).toBe(
-      'my file (backup) [v1.2].txt',
-    );
-  });
-
-  it('should handle paths without escaped characters', () => {
-    expect(unescapePath('normalfile.txt')).toBe('normalfile.txt');
-    expect(unescapePath('path/to/normalfile.txt')).toBe(
-      'path/to/normalfile.txt',
-    );
-  });
-
-  it('should handle all special characters', () => {
-    expect(
-      unescapePath(
-        '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
-      ),
-    ).toBe(' ()[]{};&|*?$`\'"#!~<>');
-  });
-
-  it('should be the inverse of escapePath', () => {
-    const testCases = [
-      'my file.txt',
-      'file(1).txt',
-      'file[backup].txt',
-      'My Documents/Project (2024)/file [backup].txt',
-      'file with $special &chars!.txt',
-      ' ()[]{};&|*?$`\'"#!~<>',
-      'file\twith\ttabs.txt',
-    ];
-
-    testCases.forEach((testCase) => {
-      expect(unescapePath(escapePath(testCase))).toBe(testCase);
+  describe.skipIf(isWindows)('on Unix', () => {
+    it('should unescape spaces', () => {
+      expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
     });
-  });
 
-  it('should handle empty strings', () => {
-    expect(unescapePath('')).toBe('');
-  });
+    it('should unescape tabs', () => {
+      expect(unescapePath('file\\\twith\\\ttabs.txt')).toBe(
+        'file\twith\ttabs.txt',
+      );
+    });
 
-  it('should not affect backslashes not followed by special characters', () => {
-    expect(unescapePath('file\\name.txt')).toBe('file\\name.txt');
-    expect(unescapePath('path\\to\\file.txt')).toBe('path\\to\\file.txt');
-  });
+    it('should unescape parentheses', () => {
+      expect(unescapePath('file\\(1\\).txt')).toBe('file(1).txt');
+    });
 
-  it('should handle escaped backslashes in unescaping', () => {
-    // Should correctly unescape when there are escaped backslashes
-    expect(unescapePath('path\\\\\\ file.txt')).toBe('path\\\\ file.txt');
-    expect(unescapePath('path\\\\\\\\\\ file.txt')).toBe(
-      'path\\\\\\\\ file.txt',
-    );
-    expect(unescapePath('file\\\\\\(test\\).txt')).toBe('file\\\\(test).txt');
+    it('should unescape square brackets', () => {
+      expect(unescapePath('file\\[backup\\].txt')).toBe('file[backup].txt');
+    });
+
+    it('should unescape curly braces', () => {
+      expect(unescapePath('file\\{temp\\}.txt')).toBe('file{temp}.txt');
+    });
+
+    it('should unescape multiple special characters', () => {
+      expect(unescapePath('my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt')).toBe(
+        'my file (backup) [v1.2].txt',
+      );
+    });
+
+    it('should handle paths without escaped characters', () => {
+      expect(unescapePath('normalfile.txt')).toBe('normalfile.txt');
+      expect(unescapePath('path/to/normalfile.txt')).toBe(
+        'path/to/normalfile.txt',
+      );
+    });
+
+    it('should handle all special characters', () => {
+      expect(
+        unescapePath(
+          '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
+        ),
+      ).toBe(' ()[]{};&|*?$`\'"#!~<>');
+    });
+
+    it('should be the inverse of escapePath', () => {
+      const testCases = [
+        'my file.txt',
+        'file(1).txt',
+        'file[backup].txt',
+        'My Documents/Project (2024)/file [backup].txt',
+        'file with $special &chars!.txt',
+        ' ()[]{};&|*?$`\'"#!~<>',
+        'file\twith\ttabs.txt',
+      ];
+
+      testCases.forEach((testCase) => {
+        expect(unescapePath(escapePath(testCase))).toBe(testCase);
+      });
+    });
+
+    it('should handle empty strings', () => {
+      expect(unescapePath('')).toBe('');
+    });
+
+    it('should not affect backslashes not followed by special characters', () => {
+      expect(unescapePath('file\\name.txt')).toBe('file\\name.txt');
+      expect(unescapePath('path\\to\\file.txt')).toBe('path\\to\\file.txt');
+    });
+
+    it('should handle escaped backslashes in unescaping', () => {
+      // Should correctly unescape when there are escaped backslashes
+      expect(unescapePath('path\\\\\\ file.txt')).toBe('path\\\\ file.txt');
+      expect(unescapePath('path\\\\\\\\\\ file.txt')).toBe(
+        'path\\\\\\\\ file.txt',
+      );
+      expect(unescapePath('file\\\\\\(test\\).txt')).toBe('file\\\\(test).txt');
+    });
   });
 });
 
@@ -430,6 +457,14 @@ describe('validatePath', () => {
     });
   });
 
+  beforeEach(() => {
+    // Module-level isDirectory cache persists across tests; tests here
+    // mutate the same absolute paths between cases (create file, remove,
+    // re-create as potentially-different type) so we reset to avoid stale
+    // lookups masking regressions.
+    _resetValidatePathCacheForTest();
+  });
+
   afterAll(() => {
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   });
@@ -479,6 +514,36 @@ describe('validatePath', () => {
 
   it('validates paths at workspace root', () => {
     expect(() => validatePath(config, workspaceRoot)).not.toThrow();
+  });
+
+  it('does not cache ENOENT — recreating the path between calls succeeds', () => {
+    // Regression guard: a path that's missing at first-check, then created,
+    // must NOT be rejected on the second call. Positive stats are cached;
+    // ENOENT paths are not. This lets the model create a file with Edit
+    // and then have the next tool call see it.
+    const ephemeralDir = path.join(workspaceRoot, 'late-created');
+    expect(() => validatePath(config, ephemeralDir)).toThrowError(
+      /Path does not exist:/,
+    );
+    fs.mkdirSync(ephemeralDir);
+    try {
+      expect(() => validatePath(config, ephemeralDir)).not.toThrow();
+    } finally {
+      fs.rmSync(ephemeralDir, { recursive: true, force: true });
+    }
+  });
+
+  it('caches positive isDirectory — repeat call does not re-stat', () => {
+    const spy = vi.spyOn(fs, 'statSync');
+    const dir = path.join(workspaceRoot, 'subdir');
+    try {
+      validatePath(config, dir);
+      const afterFirst = spy.mock.calls.length;
+      validatePath(config, dir);
+      expect(spy.mock.calls.length).toBe(afterFirst);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('validates paths in allowed directories', () => {
@@ -602,8 +667,8 @@ describe('resolveAndValidatePath', () => {
 describe('tildeifyPath', () => {
   it('replaces home directory with tilde', () => {
     const homeDir = os.homedir();
-    const result = tildeifyPath(`${homeDir}/documents/file.txt`);
-    expect(result).toBe('~/documents/file.txt');
+    const result = tildeifyPath(path.join(homeDir, 'documents', 'file.txt'));
+    expect(result).toBe(`~${path.sep}documents${path.sep}file.txt`);
   });
 
   it('returns path unchanged if it does not start with home directory', () => {
@@ -615,6 +680,13 @@ describe('tildeifyPath', () => {
     const homeDir = os.homedir();
     const result = tildeifyPath(homeDir);
     expect(result).toBe('~');
+  });
+
+  it('does not replace paths that only share the home directory prefix', () => {
+    const homeDir = os.homedir();
+    const siblingPath = `${homeDir}2${path.sep}project${path.sep}file.txt`;
+    const result = tildeifyPath(siblingPath);
+    expect(result).toBe(siblingPath);
   });
 
   it('handles paths with home directory in the middle', () => {
@@ -768,5 +840,124 @@ describe('shortenPath', () => {
       new RegExp(`^${sepForRegex}path${sepForRegex}\\.\\.\\..+file\\.txt$`),
     );
     expect(result.length).toBeLessThanOrEqual(35);
+  });
+});
+
+describe('getProjectHash', () => {
+  it('should generate consistent hashes for the same path', () => {
+    const projectRoot = '/test/project';
+    const hash1 = getProjectHash(projectRoot);
+    const hash2 = getProjectHash(projectRoot);
+
+    expect(hash1).toBe(hash2);
+    expect(hash1).toHaveLength(64); // SHA256 produces 64 hex characters
+  });
+
+  it('should generate different hashes for different paths', () => {
+    const hash1 = getProjectHash('/test/project1');
+    const hash2 = getProjectHash('/test/project2');
+
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('should generate case-insensitive hashes on Windows', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+
+    // Simulate Windows platform
+    platformSpy.mockReturnValue('win32');
+
+    const lowerCasePath = 'c:\\users\\test\\project';
+    const upperCasePath = 'C:\\Users\\Test\\Project';
+    const mixedCasePath = 'c:\\Users\\TEST\\project';
+
+    const hash1 = getProjectHash(lowerCasePath);
+    const hash2 = getProjectHash(upperCasePath);
+    const hash3 = getProjectHash(mixedCasePath);
+
+    // On Windows, all different case variations should produce the same hash
+    expect(hash1).toBe(hash2);
+    expect(hash2).toBe(hash3);
+
+    platformSpy.mockRestore();
+  });
+
+  it('should generate case-sensitive hashes on non-Windows platforms', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+
+    // Simulate Unix/Linux platform
+    platformSpy.mockReturnValue('linux');
+
+    const lowerCasePath = '/home/user/project';
+    const upperCasePath = '/HOME/USER/PROJECT';
+
+    const hash1 = getProjectHash(lowerCasePath);
+    const hash2 = getProjectHash(upperCasePath);
+
+    // On non-Windows platforms, different case should produce different hashes
+    expect(hash1).not.toBe(hash2);
+
+    platformSpy.mockRestore();
+  });
+
+  it('should handle Windows drive letter variations', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+    platformSpy.mockReturnValue('win32');
+
+    // Common Windows scenarios where users might have different drive letter cases
+    const scenarios = [
+      ['e:\\work', 'E:\\work'],
+      ['e:\\work', 'E:\\WORK'],
+      ['c:\\projects\\myapp', 'C:\\Projects\\MyApp'],
+    ];
+
+    for (const [path1, path2] of scenarios) {
+      const hash1 = getProjectHash(path1);
+      const hash2 = getProjectHash(path2);
+      expect(hash1).toBe(hash2);
+    }
+
+    platformSpy.mockRestore();
+  });
+});
+
+describe('expandHomeDir', () => {
+  const homeDir = os.homedir();
+
+  it('should return empty string for empty input', () => {
+    expect(expandHomeDir('')).toBe('');
+  });
+
+  it('should expand ~ to home directory', () => {
+    expect(expandHomeDir('~')).toBe(path.normalize(homeDir));
+  });
+
+  it('should expand ~/path to home directory path', () => {
+    expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should not expand ~path (no slash)', () => {
+    expect(expandHomeDir('~documents')).toBe('~documents');
+  });
+
+  it('should expand %userprofile% (case-insensitive) to home directory', () => {
+    expect(expandHomeDir('%userprofile%')).toBe(path.normalize(homeDir));
+    expect(expandHomeDir('%USERPROFILE%')).toBe(path.normalize(homeDir));
+  });
+
+  it('should expand %userprofile%\\path to home directory path', () => {
+    const result = expandHomeDir('%userprofile%\\documents');
+    expect(result).toBe(path.normalize(homeDir + '\\documents'));
+  });
+
+  it('should return regular absolute path unchanged (but normalized)', () => {
+    expect(expandHomeDir('/absolute/path')).toBe(
+      path.normalize('/absolute/path'),
+    );
+  });
+
+  it('should return relative path unchanged (but normalized)', () => {
+    expect(expandHomeDir('relative/path')).toBe(
+      path.normalize('relative/path'),
+    );
   });
 });

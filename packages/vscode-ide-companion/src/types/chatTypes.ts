@@ -4,16 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type {
-  AcpPermissionRequest,
   ModelInfo,
   AvailableCommand,
+  RequestPermissionRequest,
+} from '@agentclientprotocol/sdk';
+import type {
+  AskUserQuestionRequest,
+  SlashCommandNotification,
 } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  source?: string;
+  /**
+   * The ACP session id that produced this message, if known. The webview
+   * persists messages keyed by the local conversation id, which equals the
+   * ACP session id once a session is bound (see SessionMessageHandler.
+   * updateCurrentConversationId). Forwarding the originating session id with
+   * the message lets receivers attribute it to the conversation that owns
+   * the work even if the user has since switched the active panel to a
+   * different conversation (e.g. for background notification follow-ups).
+   */
+  sessionId?: string;
 }
 
 export interface PlanEntry {
@@ -28,6 +43,7 @@ export interface ToolCallUpdateData {
   title?: string;
   status?: string;
   rawInput?: unknown;
+  rawOutput?: unknown;
   content?: Array<Record<string, unknown>>;
   locations?: Array<{ path: string; line?: number | null }>;
   timestamp?: number;
@@ -35,10 +51,17 @@ export interface ToolCallUpdateData {
 
 export interface UsageStatsPayload {
   usage?: {
+    // SDK field names (primary)
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    thoughtTokens?: number | null;
+    totalTokens?: number | null;
+    cachedReadTokens?: number | null;
+    cachedWriteTokens?: number | null;
+    // Legacy field names (compat with older CLI builds)
     promptTokens?: number | null;
     completionTokens?: number | null;
     thoughtsTokens?: number | null;
-    totalTokens?: number | null;
     cachedTokens?: number | null;
   } | null;
   durationMs?: number | null;
@@ -51,8 +74,11 @@ export interface QwenAgentCallbacks {
   onThoughtChunk?: (chunk: string) => void;
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
-  onPermissionRequest?: (request: AcpPermissionRequest) => Promise<string>;
-  onEndTurn?: (reason?: string) => void;
+  onPermissionRequest?: (request: RequestPermissionRequest) => Promise<string>;
+  onAskUserQuestion?: (
+    request: AskUserQuestionRequest,
+  ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
+  onEndTurn?: (reason?: string, source?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;
     availableModes?: Array<{
@@ -66,7 +92,10 @@ export interface QwenAgentCallbacks {
   onModelInfo?: (info: ModelInfo) => void;
   onModelChanged?: (model: ModelInfo) => void;
   onAvailableCommands?: (commands: AvailableCommand[]) => void;
+  onAvailableSkills?: (skills: string[]) => void;
   onAvailableModels?: (models: ModelInfo[]) => void;
+  onDisconnected?: (code: number | null, signal: string | null) => void;
+  onSlashCommandNotification?: (event: SlashCommandNotification) => void;
 }
 
 export interface ToolCallUpdate {
@@ -76,6 +105,7 @@ export interface ToolCallUpdate {
   title?: string;
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   rawInput?: unknown;
+  rawOutput?: unknown;
   content?: Array<{
     type: 'content' | 'diff';
     content?: {

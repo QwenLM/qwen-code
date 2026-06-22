@@ -5,7 +5,7 @@
  */
 
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { t, ta } from '../../i18n/index.js';
+import { t, ta, getCurrentLanguage } from '../../i18n/index.js';
 
 export const WITTY_LOADING_PHRASES: string[] = ["I'm Feeling Lucky"];
 
@@ -23,6 +23,7 @@ export const usePhraseCycler = (
   customPhrases?: string[],
 ) => {
   // Get phrases from translations if available
+  const currentLanguage = getCurrentLanguage();
   const loadingPhrases = useMemo(() => {
     if (customPhrases && customPhrases.length > 0) {
       return customPhrases;
@@ -31,7 +32,8 @@ export const usePhraseCycler = (
     return translatedPhrases.length > 0
       ? translatedPhrases
       : WITTY_LOADING_PHRASES;
-  }, [customPhrases]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customPhrases, currentLanguage]);
 
   const [currentLoadingPhrase, setCurrentLoadingPhrase] = useState(
     loadingPhrases[0],

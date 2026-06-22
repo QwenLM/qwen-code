@@ -30,7 +30,20 @@ export interface BaseSelectionListProps<
   showNumbers?: boolean;
   showScrollArrows?: boolean;
   maxItemsToShow?: number;
+  /** Gap (in rows) between each item. */
+  itemGap?: number;
   renderItem: (item: TItem, context: RenderItemContext) => React.ReactNode;
+}
+
+function getScrollOffsetForIndex(
+  activeIndex: number,
+  itemCount: number,
+  maxItemsToShow: number,
+): number {
+  return Math.max(
+    0,
+    Math.min(activeIndex - maxItemsToShow + 1, itemCount - maxItemsToShow),
+  );
 }
 
 /**
@@ -59,6 +72,7 @@ export function BaseSelectionList<
   showNumbers = true,
   showScrollArrows = false,
   maxItemsToShow = 10,
+  itemGap = 0,
   renderItem,
 }: BaseSelectionListProps<T, TItem>): React.JSX.Element {
   const { activeIndex } = useSelectionList({
@@ -70,13 +84,16 @@ export function BaseSelectionList<
     showNumbers,
   });
 
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(() =>
+    getScrollOffsetForIndex(activeIndex, items.length, maxItemsToShow),
+  );
 
   // Handle scrolling for long lists
   useEffect(() => {
-    const newScrollOffset = Math.max(
-      0,
-      Math.min(activeIndex - maxItemsToShow + 1, items.length - maxItemsToShow),
+    const newScrollOffset = getScrollOffsetForIndex(
+      activeIndex,
+      items.length,
+      maxItemsToShow,
     );
     if (activeIndex < scrollOffset) {
       setScrollOffset(activeIndex);
@@ -89,7 +106,7 @@ export function BaseSelectionList<
   const numberColumnWidth = String(items.length).length;
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" gap={itemGap}>
       {/* Use conditional coloring instead of conditional rendering */}
       {showScrollArrows && (
         <Text
@@ -135,7 +152,7 @@ export function BaseSelectionList<
                 color={isSelected ? theme.status.success : theme.text.primary}
                 aria-hidden
               >
-                {isSelected ? '●' : ' '}
+                {isSelected ? '›' : ' '}
               </Text>
             </Box>
 

@@ -7,10 +7,11 @@ exports[`LoopDetectionConfirmation > renders correctly 1`] = `
  │ This can happen due to repetitive tool calls or other model behavior. Do you want to keep loop   │
  │ detection enabled or disable it for this session?                                                │
  │                                                                                                  │
- │ ● 1. Keep loop detection enabled (esc)                                                           │
+ │ › 1. Keep loop detection enabled (esc)                                                           │
  │   2. Disable loop detection for this session                                                     │
  │                                                                                                  │
- │ Note: To disable loop detection checks for all future sessions, set "model.skipLoopDetection" to │
- │  true in your settings.json.                                                                     │
+ │ Note: Setting "model.skipLoopDetection" to true in your settings.json disables only the          │
+ │ heuristic loop checks for future sessions; the always-on guard against consecutive identical     │
+ │ tool calls cannot be turned off there. Disabling for this session above suppresses both.         │
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;

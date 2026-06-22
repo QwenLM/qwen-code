@@ -58,6 +58,40 @@ qwen --resume 123e4567-e89b-12d3-a456-426614174000 -p "Apply the follow-up refac
 > - Session data is project-scoped JSONL under `~/.qwen/projects/<sanitized-cwd>/chats`.
 > - Restores conversation history, tool outputs, and chat-compression checkpoints before sending the new prompt.
 
+## Customize the Main Session Prompt
+
+You can change the main session system prompt for a single CLI run without editing shared memory files.
+
+### Override the Built-in System Prompt
+
+Use `--system-prompt` to replace Qwen Code's built-in main-session prompt for the current run:
+
+```bash
+qwen -p "Review this patch" --system-prompt "You are a terse release reviewer. Report only blocking issues."
+```
+
+### Append Extra Instructions
+
+Use `--append-system-prompt` to keep the built-in prompt and add extra instructions for this run:
+
+```bash
+qwen -p "Review this patch" --append-system-prompt "Be terse and focus on concrete findings."
+```
+
+You can combine both flags when you want a custom base prompt plus an extra run-specific instruction:
+
+```bash
+qwen -p "Summarize this repository" \
+  --system-prompt "You are a migration planner." \
+  --append-system-prompt "Return exactly three bullets."
+```
+
+> [!note]
+>
+> - `--system-prompt` applies only to the current run's main session.
+> - Loaded memory and context files such as `QWEN.md` are still appended after `--system-prompt`.
+> - `--append-system-prompt` is applied after the built-in prompt and loaded memory, and can be used together with `--system-prompt`.
+
 ## Output Formats
 
 Qwen Code supports multiple output formats for different use cases:
@@ -189,21 +223,55 @@ qwen -p "Write code" --output-format stream-json --include-partial-messages | jq
 
 Key command-line options for headless usage:
 
-| Option                       | Description                                         | Example                                                                  |
-| ---------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------ |
-| `--prompt`, `-p`             | Run in headless mode                                | `qwen -p "query"`                                                        |
-| `--output-format`, `-o`      | Specify output format (text, json, stream-json)     | `qwen -p "query" --output-format json`                                   |
-| `--input-format`             | Specify input format (text, stream-json)            | `qwen --input-format text --output-format stream-json`                   |
-| `--include-partial-messages` | Include partial messages in stream-json output      | `qwen -p "query" --output-format stream-json --include-partial-messages` |
-| `--debug`, `-d`              | Enable debug mode                                   | `qwen -p "query" --debug`                                                |
-| `--all-files`, `-a`          | Include all files in context                        | `qwen -p "query" --all-files`                                            |
-| `--include-directories`      | Include additional directories                      | `qwen -p "query" --include-directories src,docs`                         |
-| `--yolo`, `-y`               | Auto-approve all actions                            | `qwen -p "query" --yolo`                                                 |
-| `--approval-mode`            | Set approval mode                                   | `qwen -p "query" --approval-mode auto_edit`                              |
-| `--continue`                 | Resume the most recent session for this project     | `qwen --continue -p "Pick up where we left off"`                         |
-| `--resume [sessionId]`       | Resume a specific session (or choose interactively) | `qwen --resume 123e... -p "Finish the refactor"`                         |
+| Option                       | Description                                                              | Example                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `--prompt`, `-p`             | Run in headless mode                                                     | `qwen -p "query"`                                                        |
+| `--output-format`, `-o`      | Specify output format (text, json, stream-json)                          | `qwen -p "query" --output-format json`                                   |
+| `--input-format`             | Specify input format (text, stream-json)                                 | `qwen --input-format text --output-format stream-json`                   |
+| `--include-partial-messages` | Include partial messages in stream-json output                           | `qwen -p "query" --output-format stream-json --include-partial-messages` |
+| `--system-prompt`            | Override the main session system prompt for this run                     | `qwen -p "query" --system-prompt "You are a terse reviewer."`            |
+| `--append-system-prompt`     | Append extra instructions to the main session system prompt for this run | `qwen -p "query" --append-system-prompt "Focus on concrete findings."`   |
+| `--debug`, `-d`              | Enable debug mode                                                        | `qwen -p "query" --debug`                                                |
+| `--all-files`, `-a`          | Include all files in context                                             | `qwen -p "query" --all-files`                                            |
+| `--include-directories`      | Include additional directories                                           | `qwen -p "query" --include-directories src,docs`                         |
+| `--yolo`, `-y`               | Auto-approve all actions                                                 | `qwen -p "query" --yolo`                                                 |
+| `--approval-mode`            | Set approval mode                                                        | `qwen -p "query" --approval-mode auto_edit`                              |
+| `--continue`                 | Resume the most recent session for this project                          | `qwen --continue -p "Pick up where we left off"`                         |
+| `--resume [sessionId]`       | Resume a specific session (or choose interactively)                      | `qwen --resume 123e... -p "Finish the refactor"`                         |
+| `--max-session-turns`        | Cap the number of user/model/tool turns in the run                       | `qwen -p "..." --max-session-turns 30`                                   |
+| `--max-wall-time`            | Wall-clock budget; accepts `90` (s), `30s`, `5m`, `1h`, `1.5h`           | `qwen -p "..." --max-wall-time 10m`                                      |
+| `--max-tool-calls`           | Cumulative tool-call budget for the run                                  | `qwen -p "..." --max-tool-calls 50`                                      |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
+
+## Safety in unattended runs
+
+Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call, including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at the host process's privilege level. When Qwen Code detects this combination with no sandbox configured, it prints a one-line warning to stderr at startup. Suppress the warning with `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` once you've reviewed the trade-off.
+
+### Run-level budgets
+
+Qwen Code can abort an unattended run when it crosses one of the following thresholds. Each is `-1` (unlimited) by default; setting any one is enough to bound runaway behavior. They are enforced cooperatively against the same `AbortController` that already carries SIGINT, so a budget abort emits a structured `FatalBudgetExceededError` (exit code **55**) — distinct from the turn-cap exit code 53 and SIGINT's 130 so CI scripts can branch on the reason.
+
+| Flag                  | Settings key               | What it bounds                                                                                                                                                                                                |
+| --------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--max-wall-time`     | `model.maxWallTimeSeconds` | Wall-clock duration of the whole run. Flag accepts `90` (s), `30s`, `5m`, `1h`, `1.5h` (fractional units supported). Minimum 1s — sub-second values are rejected as typos. Settings is seconds.               |
+| `--max-tool-calls`    | `model.maxToolCalls`       | Cumulative top-level tool calls dispatched by the main run loop (counts successes _and_ failures — the model still consumes tokens on errors). See "Scope" below for subagent / structured-output exemptions. |
+| `--max-session-turns` | `model.maxSessionTurns`    | Number of user/model/tool turns; pre-existing. Exits with code 53 on overrun (distinct from budget exit 55).                                                                                                  |
+
+#### Scope
+
+- **`--max-tool-calls` counts top-level dispatches only.** When the model calls the `agent` tool, the dispatch counts as **1**; inner tool calls performed by the spawned subagent are **not** counted. A model that funnels work through subagents can do unbounded inner work under a small top-level budget. Combine with `--exclude-tools agent` if you need a tighter cap.
+- **`structured_output` is exempt from `--max-tool-calls`.** Under `--json-schema`, the model's terminal `structured_output` call is the "I'm done" contract, not real work — it doesn't count against `--max-tool-calls` so a budget-edge completion isn't aborted as a false positive. The exemption is unconditional (including failed Ajv validations), so a model stuck in a malformed-output retry loop is NOT bounded by `--max-tool-calls`; combine with `--max-session-turns` or `--max-wall-time` to cap retries.
+- **`structured_output` is NOT exempt from `--max-session-turns`.** That counter is pre-existing and bumps for every turn including the terminal contract. Size `--max-session-turns` to `N+1` if you want to allow `N` real-work turns under `--json-schema`.
+- **Single-shot vs `--input-format stream-json`:** in stream-json input mode the daemon resets the budget counters at the start of every user message; the budget is per-message, not per-process.
+- **`qwen serve` / ACP sessions:** the daemon ACP session path does NOT currently consult `--max-wall-time` / `--max-tool-calls` from settings.json. These budgets only apply to single-shot `qwen -p` runs and to `--input-format stream-json` sessions. (`qwen serve` does emit the YOLO-no-sandbox warning at boot if `tools.approvalMode: 'yolo'` is set in settings.)
+
+### Recommended combinations
+
+- **Trusted, isolated environment (ephemeral CI runner, container):** `qwen -p "..." --yolo --max-session-turns N --max-wall-time 10m --output-format json`. Pin a turn budget and a wall-clock budget so a stuck agent can't burn through your CI minutes, and capture `--output-format json` for post-run usage / tool-call auditing.
+- **Local machine or shared infra:** also pass `--sandbox` (or set `QWEN_SANDBOX=1`) so shell / write / edit tools run inside the sandbox image.
+- **Long-running CI with retry-on-rate-limit:** combine `QWEN_CODE_UNATTENDED_RETRY=1` with `--max-wall-time`. The retry env keeps the run alive past transient 429 / 529 responses; the wall-clock budget ensures a persistently-failing provider can't extend the job indefinitely.
+- **Bounded auditing / exploration:** for read-only tasks, `--max-tool-calls 25` caps how aggressively the model can grep / read. Combine with `--exclude-tools shell,write,edit` to make the bound meaningful.
 
 ## Examples
 
@@ -273,6 +341,67 @@ echo "$result" | jq -r '.response' > schema-docs.md
 echo "Recent usage trends:"
 tail -5 usage.log
 ```
+
+## Persistent Retry Mode
+
+When Qwen Code runs in CI/CD pipelines or as a background daemon, a brief API outage (rate limiting or overload) should not kill a multi-hour task. **Persistent retry mode** makes Qwen Code retry transient API errors indefinitely until the service recovers.
+
+### How it works
+
+- **Transient errors only**: HTTP 429 (Rate Limit) and 529 (Overloaded) are retried indefinitely. Other errors (400, 500, etc.) still fail normally.
+- **Exponential backoff with cap**: Retry delays grow exponentially but are capped at **5 minutes** per retry.
+- **Heartbeat keepalive**: During long waits, a status line is printed to stderr every **30 seconds** to prevent CI runners from killing the process due to inactivity.
+- **Graceful degradation**: Non-transient errors and interactive mode are completely unaffected.
+
+### Activation
+
+Set the `QWEN_CODE_UNATTENDED_RETRY` environment variable to `true` or `1` (strict match, case-sensitive):
+
+```bash
+export QWEN_CODE_UNATTENDED_RETRY=1
+```
+
+> [!important]
+> Persistent retry requires an **explicit opt-in**. `CI=true` alone does **not** activate it — silently turning a fast-fail CI job into an infinite-wait job would be dangerous. Always set `QWEN_CODE_UNATTENDED_RETRY` explicitly in your pipeline configuration.
+
+### Examples
+
+#### GitHub Actions
+
+```yaml
+- name: Automated code review
+  env:
+    QWEN_CODE_UNATTENDED_RETRY: '1'
+  run: |
+    qwen -p "Review all files in src/ for security issues" \
+      --output-format json \
+      --yolo > review.json
+```
+
+#### Overnight batch processing
+
+```bash
+export QWEN_CODE_UNATTENDED_RETRY=1
+qwen -p "Migrate all callback-style functions to async/await in src/" --yolo
+```
+
+#### Background daemon
+
+```bash
+QWEN_CODE_UNATTENDED_RETRY=1 nohup qwen -p "Audit all dependencies for known CVEs" \
+  --output-format json > audit.json 2> audit.log &
+```
+
+### Monitoring
+
+During persistent retry, heartbeat messages are printed to **stderr**:
+
+```
+[qwen-code] Waiting for API capacity... attempt 3, retry in 45s
+[qwen-code] Waiting for API capacity... attempt 3, retry in 15s
+```
+
+These messages keep CI runners alive and let you monitor progress. They do not appear in stdout, so JSON output piped to other tools remains clean.
 
 ## Resources
 

@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { QwenSessionUpdateHandler } from './qwenSessionUpdateHandler.js';
-import type { AcpSessionUpdate } from '../types/acpTypes.js';
+import type { SessionNotification } from '@agentclientprotocol/sdk';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { QwenAgentCallbacks } from '../types/chatTypes.js';
 
@@ -20,6 +20,7 @@ describe('QwenSessionUpdateHandler', () => {
       onThoughtChunk: vi.fn(),
       onToolCall: vi.fn(),
       onPlan: vi.fn(),
+      onMessage: vi.fn(),
       onModeChanged: vi.fn(),
       onModelChanged: vi.fn(),
       onUsageUpdate: vi.fn(),
@@ -28,81 +29,15 @@ describe('QwenSessionUpdateHandler', () => {
     handler = new QwenSessionUpdateHandler(mockCallbacks);
   });
 
-  describe('current_model_update handling', () => {
-    it('calls onModelChanged callback with model info', () => {
-      const modelUpdate: AcpSessionUpdate = {
-        sessionId: 'test-session',
-        update: {
-          sessionUpdate: 'current_model_update',
-          model: {
-            modelId: 'qwen3-coder-plus',
-            name: 'Qwen3 Coder Plus',
-            description: 'A powerful coding model',
-          },
-        },
-      } as AcpSessionUpdate;
-
-      handler.handleSessionUpdate(modelUpdate);
-
-      expect(mockCallbacks.onModelChanged).toHaveBeenCalledWith({
-        modelId: 'qwen3-coder-plus',
-        name: 'Qwen3 Coder Plus',
-        description: 'A powerful coding model',
-      });
-    });
-
-    it('handles model update with _meta field', () => {
-      const modelUpdate: AcpSessionUpdate = {
-        sessionId: 'test-session',
-        update: {
-          sessionUpdate: 'current_model_update',
-          model: {
-            modelId: 'test-model',
-            name: 'Test Model',
-            _meta: { contextLimit: 128000 },
-          },
-        },
-      } as AcpSessionUpdate;
-
-      handler.handleSessionUpdate(modelUpdate);
-
-      expect(mockCallbacks.onModelChanged).toHaveBeenCalledWith({
-        modelId: 'test-model',
-        name: 'Test Model',
-        _meta: { contextLimit: 128000 },
-      });
-    });
-
-    it('does not call callback when onModelChanged is not set', () => {
-      const handlerWithoutCallback = new QwenSessionUpdateHandler({});
-
-      const modelUpdate: AcpSessionUpdate = {
-        sessionId: 'test-session',
-        update: {
-          sessionUpdate: 'current_model_update',
-          model: {
-            modelId: 'qwen3-coder',
-            name: 'Qwen3 Coder',
-          },
-        },
-      } as AcpSessionUpdate;
-
-      // Should not throw
-      expect(() =>
-        handlerWithoutCallback.handleSessionUpdate(modelUpdate),
-      ).not.toThrow();
-    });
-  });
-
   describe('current_mode_update handling', () => {
     it('calls onModeChanged callback with mode id', () => {
-      const modeUpdate: AcpSessionUpdate = {
+      const modeUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'current_mode_update',
-          modeId: 'auto-edit' as ApprovalModeValue,
+          currentModeId: 'auto-edit' as ApprovalModeValue,
         },
-      } as AcpSessionUpdate;
+      } as SessionNotification;
 
       handler.handleSessionUpdate(modeUpdate);
 
@@ -112,7 +47,7 @@ describe('QwenSessionUpdateHandler', () => {
 
   describe('agent_message_chunk handling', () => {
     it('calls onStreamChunk callback with text content', () => {
-      const messageUpdate: AcpSessionUpdate = {
+      const messageUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'agent_message_chunk',
@@ -128,8 +63,82 @@ describe('QwenSessionUpdateHandler', () => {
       expect(mockCallbacks.onStreamChunk).toHaveBeenCalledWith('Hello, world!');
     });
 
+    it('routes background notification chunks as discrete assistant messages', () => {
+      const messageUpdate: SessionNotification = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Background agent "worker" completed.',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            timestamp: 1234,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      expect(mockCallbacks.onMessage).toHaveBeenCalledWith({
+        role: 'assistant',
+        content: 'Background agent "worker" completed.',
+        timestamp: 1234,
+        source: 'background_notification',
+        sessionId: 'test-session',
+      });
+      expect(mockCallbacks.onStreamChunk).not.toHaveBeenCalled();
+    });
+
+    it('forwards the originating sessionId on discrete messages so the receiver can attribute notifications to the owning conversation', () => {
+      const messageUpdate: SessionNotification = {
+        sessionId: 'session-A',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Task done.' },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            timestamp: 5000,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      expect(mockCallbacks.onMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'session-A' }),
+      );
+    });
+
+    it('omits sessionId on the emitted message when the notification has no sessionId', () => {
+      const messageUpdate: SessionNotification = {
+        // Cast: SessionNotification.sessionId is required by the SDK type but
+        // we want to verify defensive handling if a malformed update arrives.
+        sessionId: undefined as unknown as string,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'No session id.' },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            timestamp: 7000,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      const onMessage = vi.mocked(mockCallbacks.onMessage!);
+      const call = onMessage.mock.calls[0]?.[0];
+      expect(call).toBeDefined();
+      expect(call).not.toHaveProperty('sessionId');
+    });
+
     it('emits usage metadata when present', () => {
-      const messageUpdate: AcpSessionUpdate = {
+      const messageUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'agent_message_chunk',
@@ -152,18 +161,66 @@ describe('QwenSessionUpdateHandler', () => {
 
       expect(mockCallbacks.onUsageUpdate).toHaveBeenCalledWith({
         usage: {
+          inputTokens: 100,
+          outputTokens: 50,
+          thoughtTokens: undefined,
+          totalTokens: 150,
+          cachedReadTokens: undefined,
+          cachedWriteTokens: undefined,
           promptTokens: 100,
           completionTokens: 50,
-          totalTokens: 150,
+          thoughtsTokens: undefined,
+          cachedTokens: undefined,
         },
         durationMs: 1234,
+      });
+    });
+
+    it('maps SDK usage field names to both SDK and legacy fields', () => {
+      const messageUpdate: SessionNotification = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Response',
+          },
+          _meta: {
+            usage: {
+              inputTokens: 200,
+              outputTokens: 80,
+              thoughtTokens: 30,
+              totalTokens: 310,
+              cachedReadTokens: 10,
+            } as never,
+            durationMs: 500,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      expect(mockCallbacks.onUsageUpdate).toHaveBeenCalledWith({
+        usage: {
+          inputTokens: 200,
+          outputTokens: 80,
+          thoughtTokens: 30,
+          totalTokens: 310,
+          cachedReadTokens: 10,
+          cachedWriteTokens: undefined,
+          promptTokens: 200,
+          completionTokens: 80,
+          thoughtsTokens: 30,
+          cachedTokens: 10,
+        },
+        durationMs: 500,
       });
     });
   });
 
   describe('tool_call handling', () => {
     it('calls onToolCall callback with tool call data', () => {
-      const toolCallUpdate: AcpSessionUpdate = {
+      const toolCallUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'tool_call',
@@ -187,11 +244,53 @@ describe('QwenSessionUpdateHandler', () => {
         locations: undefined,
       });
     });
+
+    it('forwards rawOutput for structured agent execution updates', () => {
+      const rawOutput = {
+        type: 'task_execution',
+        subagentName: 'Explore',
+        taskDescription: 'Explore auth logic',
+        taskPrompt: 'Inspect auth flow implementation',
+        status: 'running',
+        toolCalls: [
+          {
+            callId: 'child-1',
+            name: 'read',
+            status: 'executing',
+          },
+        ],
+      };
+
+      const toolCallUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-agent',
+          kind: 'other',
+          title: 'Launch agent',
+          status: 'in_progress',
+          rawOutput,
+        },
+      } as SessionNotification;
+
+      handler.handleSessionUpdate(toolCallUpdate);
+
+      expect(mockCallbacks.onToolCall).toHaveBeenCalledWith({
+        toolCallId: 'call-agent',
+        kind: 'other',
+        title: 'Launch agent',
+        status: 'in_progress',
+        rawInput: undefined,
+        rawOutput,
+        content: undefined,
+        locations: undefined,
+      });
+    });
   });
 
   describe('plan handling', () => {
     it('calls onPlan callback with plan entries', () => {
-      const planUpdate: AcpSessionUpdate = {
+      const planUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'plan',
@@ -215,7 +314,7 @@ describe('QwenSessionUpdateHandler', () => {
         onStreamChunk: vi.fn(),
       });
 
-      const planUpdate: AcpSessionUpdate = {
+      const planUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'plan',
@@ -231,7 +330,7 @@ describe('QwenSessionUpdateHandler', () => {
 
   describe('available_commands_update handling', () => {
     it('calls onAvailableCommands callback with commands', () => {
-      const commandsUpdate: AcpSessionUpdate = {
+      const commandsUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'available_commands_update',
@@ -253,7 +352,7 @@ describe('QwenSessionUpdateHandler', () => {
             },
           ],
         },
-      } as AcpSessionUpdate;
+      } as SessionNotification;
 
       handler.handleSessionUpdate(commandsUpdate);
 
@@ -269,7 +368,7 @@ describe('QwenSessionUpdateHandler', () => {
     });
 
     it('handles commands with input hint', () => {
-      const commandsUpdate: AcpSessionUpdate = {
+      const commandsUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'available_commands_update',
@@ -281,7 +380,7 @@ describe('QwenSessionUpdateHandler', () => {
             },
           ],
         },
-      } as AcpSessionUpdate;
+      } as SessionNotification;
 
       handler.handleSessionUpdate(commandsUpdate);
 
@@ -297,7 +396,7 @@ describe('QwenSessionUpdateHandler', () => {
     it('does not call callback when onAvailableCommands is not set', () => {
       const handlerWithoutCallback = new QwenSessionUpdateHandler({});
 
-      const commandsUpdate: AcpSessionUpdate = {
+      const commandsUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'available_commands_update',
@@ -305,7 +404,7 @@ describe('QwenSessionUpdateHandler', () => {
             { name: 'compress', description: 'Compress', input: null },
           ],
         },
-      } as AcpSessionUpdate;
+      } as SessionNotification;
 
       // Should not throw
       expect(() =>
@@ -314,13 +413,13 @@ describe('QwenSessionUpdateHandler', () => {
     });
 
     it('handles empty commands list', () => {
-      const commandsUpdate: AcpSessionUpdate = {
+      const commandsUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'available_commands_update',
           availableCommands: [],
         },
-      } as AcpSessionUpdate;
+      } as SessionNotification;
 
       handler.handleSessionUpdate(commandsUpdate);
 
@@ -328,29 +427,66 @@ describe('QwenSessionUpdateHandler', () => {
     });
   });
 
-  describe('updateCallbacks', () => {
-    it('updates callbacks and uses new ones', () => {
-      const newOnModelChanged = vi.fn();
-      handler.updateCallbacks({
-        ...mockCallbacks,
-        onModelChanged: newOnModelChanged,
-      });
+  describe('available skills handling', () => {
+    it('reads available skills from available_commands_update metadata', () => {
+      mockCallbacks.onAvailableSkills = vi.fn();
 
-      const modelUpdate: AcpSessionUpdate = {
+      const commandsUpdate = {
         sessionId: 'test-session',
         update: {
-          sessionUpdate: 'current_model_update',
-          model: {
-            modelId: 'new-model',
-            name: 'New Model',
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: {
+            availableSkills: ['code-review-expert', 'verification-pack'],
           },
         },
-      } as AcpSessionUpdate;
+      } as unknown as SessionNotification;
 
-      handler.handleSessionUpdate(modelUpdate);
+      handler.handleSessionUpdate(commandsUpdate);
 
-      expect(newOnModelChanged).toHaveBeenCalled();
-      expect(mockCallbacks.onModelChanged).not.toHaveBeenCalled();
+      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([
+        'code-review-expert',
+        'verification-pack',
+      ]);
+    });
+
+    it('clears available skills when metadata is absent', () => {
+      mockCallbacks.onAvailableSkills = vi.fn();
+
+      const commandsUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+        },
+      } as unknown as SessionNotification;
+
+      handler.handleSessionUpdate(commandsUpdate);
+
+      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([]);
+    });
+  });
+
+  describe('updateCallbacks', () => {
+    it('updates mode callback and uses new one', () => {
+      const newOnModeChanged = vi.fn();
+      handler.updateCallbacks({
+        ...mockCallbacks,
+        onModeChanged: newOnModeChanged,
+      });
+
+      const modeUpdate: SessionNotification = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'current_mode_update',
+          currentModeId: 'yolo' as ApprovalModeValue,
+        },
+      } as SessionNotification;
+
+      handler.handleSessionUpdate(modeUpdate);
+
+      expect(newOnModeChanged).toHaveBeenCalled();
+      expect(mockCallbacks.onModeChanged).not.toHaveBeenCalled();
     });
 
     it('updates onAvailableCommands callback', () => {
@@ -360,7 +496,7 @@ describe('QwenSessionUpdateHandler', () => {
         onAvailableCommands: newOnAvailableCommands,
       });
 
-      const commandsUpdate: AcpSessionUpdate = {
+      const commandsUpdate: SessionNotification = {
         sessionId: 'test-session',
         update: {
           sessionUpdate: 'available_commands_update',
@@ -368,7 +504,7 @@ describe('QwenSessionUpdateHandler', () => {
             { name: 'test', description: 'Test command', input: null },
           ],
         },
-      } as AcpSessionUpdate;
+      } as SessionNotification;
 
       handler.handleSessionUpdate(commandsUpdate);
 

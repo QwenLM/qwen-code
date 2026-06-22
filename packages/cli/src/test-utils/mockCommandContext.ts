@@ -7,7 +7,6 @@
 import { vi } from 'vitest';
 import type { CommandContext } from '../ui/commands/types.js';
 import type { LoadedSettings } from '../config/settings.js';
-import type { GitService } from '@qwen-code/qwen-code-core';
 import type { SessionStatsState } from '../ui/contexts/SessionContext.js';
 import { ToolCallDecision } from '../ui/contexts/SessionContext.js';
 
@@ -29,6 +28,7 @@ export const createMockCommandContext = (
   overrides: DeepPartial<CommandContext> = {},
 ): CommandContext => {
   const defaultMocks: CommandContext = {
+    executionMode: 'interactive',
     invocation: {
       raw: '',
       name: '',
@@ -40,7 +40,6 @@ export const createMockCommandContext = (
         merged: {},
         setValue: vi.fn(),
       } as unknown as LoadedSettings,
-      git: undefined as GitService | undefined,
       logger: {
         log: vi.fn(),
         logMessage: vi.fn(),
@@ -50,16 +49,24 @@ export const createMockCommandContext = (
       } as any, // Cast because Logger is a class.
     },
     ui: {
+      history: [],
       addItem: vi.fn(),
       clear: vi.fn(),
       setDebugMessage: vi.fn(),
       pendingItem: null,
       setPendingItem: vi.fn(),
+      btwItem: null,
+      setBtwItem: vi.fn(),
+      cancelBtw: vi.fn(),
+      btwAbortControllerRef: { current: null },
+      isIdleRef: { current: true },
       loadHistory: vi.fn(),
+      refreshStatic: vi.fn(),
       toggleVimEnabled: vi.fn(),
       extensionsUpdateState: new Map(),
       setExtensionsUpdateState: vi.fn(),
       reloadCommands: vi.fn(),
+      setSessionName: vi.fn(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any,
     session: {

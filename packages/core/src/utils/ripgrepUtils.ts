@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
+import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
 import { createDebugLogger } from './debugLogger.js';
@@ -47,9 +48,15 @@ export interface RipgrepRunResult {
   error?: Error;
 }
 
-let cachedSelection: RipgrepSelection | null = null;
+const cachedSelections = new Map<boolean, RipgrepSelection>();
 let cachedHealth: RipgrepHealth | null = null;
 let macSigningAttempted = false;
+
+export function _resetRipgrepUtilsCachesForTest(): void {
+  cachedSelections.clear();
+  cachedHealth = null;
+  macSigningAttempted = false;
+}
 
 function wslTimeout(): number {
   return process.platform === 'linux' && process.env['WSL_INTEROP']
@@ -57,9 +64,21 @@ function wslTimeout(): number {
     : RIPGREP_RUN_TIMEOUT_MS;
 }
 
-// Get the directory of the current module
+// Resolved at module load to the directory that should anchor sibling-asset
+// lookups (here: the vendored ripgrep binary copied to `dist/vendor/`). See
+// `resolveBundleDir` for the rationale behind stripping a trailing `chunks/`
+// segment when this module is hoisted into a shared esbuild chunk.
+//
+// `__filename` is needed separately by `getBuiltinRipgrep` to decide whether
+// it's running from source / transpiled / bundled output (each requires a
+// different `..`-traversal count). It is NOT just `path.join(__dirname,
+// basename)` because in bundled mode esbuild rewrites every bare `__filename`
+// reference to `__qwen_filename` (the shim chunk's path), which would make
+// the heuristic always pick `levelsUp = 0` by accident; the explicit local
+// shadow keeps the lookup correct in source/transpiled/dev modes too, where
+// node ESM leaves `__filename` undefined.
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = resolveBundleDir(import.meta.url);
 
 type Platform = 'darwin' | 'linux' | 'win32';
 type Architecture = 'x64' | 'arm64';
@@ -132,22 +151,25 @@ export function getBuiltinRipgrep(): string | null {
 export async function resolveRipgrep(
   useBuiltin: boolean = true,
 ): Promise<RipgrepSelection | null> {
+  const cachedSelection = cachedSelections.get(useBuiltin);
   if (cachedSelection) return cachedSelection;
 
   if (useBuiltin) {
     // Try bundled ripgrep first
     const rgPath = getBuiltinRipgrep();
     if (rgPath && (await fileExists(rgPath))) {
-      cachedSelection = { mode: 'builtin', command: rgPath };
-      return cachedSelection;
+      const selection = { mode: 'builtin' as const, command: rgPath };
+      cachedSelections.set(useBuiltin, selection);
+      return selection;
     }
     // Fallback to system rg if bundled binary is not available
   }
 
   const { available, error } = isCommandAvailable(RIPGREP_COMMAND);
   if (available) {
-    cachedSelection = { mode: 'system', command: RIPGREP_COMMAND };
-    return cachedSelection;
+    const selection = { mode: 'system' as const, command: RIPGREP_COMMAND };
+    cachedSelections.set(useBuiltin, selection);
+    return selection;
   }
 
   if (error) {
@@ -239,14 +261,16 @@ export async function canUseRipgrep(
  * Runs ripgrep with the provided arguments
  * @param args The arguments to pass to ripgrep
  * @param signal The signal to abort the ripgrep process
+ * @param useBuiltin Whether to try the bundled ripgrep before falling back to system ripgrep
  * @returns The result of running ripgrep
  * @throws {Error} If an error occurs while running ripgrep.
  */
 export async function runRipgrep(
   args: string[],
   signal?: AbortSignal,
+  useBuiltin: boolean = true,
 ): Promise<RipgrepRunResult> {
-  const selection = await resolveRipgrep();
+  const selection = await resolveRipgrep(useBuiltin);
   if (!selection) {
     throw new Error('ripgrep not found.');
   }

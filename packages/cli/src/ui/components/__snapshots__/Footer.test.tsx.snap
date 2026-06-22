@@ -1,5 +1,8 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`<Footer /> > footer rendering (golden snapshots) > renders complete footer on narrow terminal > complete-footer-narrow 1`] = `"  ? for shortcuts                                                                        0.1% used"`;
+exports[`<Footer /> > footer rendering (golden snapshots) > renders complete footer on narrow terminal > complete-footer-narrow 1`] = `
+"  ? for shortcuts
+  0.1% used"
+`;
 
 exports[`<Footer /> > footer rendering (golden snapshots) > renders complete footer on wide terminal > complete-footer-wide 1`] = `"  ? for shortcuts                                                                0.1% context used"`;

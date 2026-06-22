@@ -215,13 +215,12 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         expect(errorMessage).toContain('Reduce input length or complexity');
         expect(errorMessage).toContain('Increase timeout in config');
         expect(errorMessage).toContain('Check network connectivity');
-        expect(errorMessage).toContain('Consider using streaming mode');
       }
     });
   });
 
   describe('generateContentStream timeout handling', () => {
-    it('should handle streaming timeout errors', async () => {
+    it('should handle streaming timeout errors with the shared timeout message', async () => {
       const timeoutError = new Error('Streaming timeout');
       mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
 
@@ -233,11 +232,11 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
       await expect(
         generator.generateContentStream(request, 'test-prompt-id'),
       ).rejects.toThrow(
-        /Streaming request timeout after \d+s\. Try reducing input length or increasing timeout in config\./,
+        /Request timeout after \d+s\. Try reducing input length or increasing timeout in config\./,
       );
     });
 
-    it('should include streaming-specific troubleshooting tips', async () => {
+    it('should include the shared troubleshooting tips for streaming timeouts', async () => {
       const timeoutError = new Error('request timed out');
       mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
 
@@ -251,9 +250,10 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
       } catch (error: unknown) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        expect(errorMessage).toContain('Streaming timeout troubleshooting:');
+        expect(errorMessage).toContain('Troubleshooting tips:');
+        expect(errorMessage).toContain('Reduce input length or complexity');
+        expect(errorMessage).toContain('Increase timeout in config');
         expect(errorMessage).toContain('Check network connectivity');
-        expect(errorMessage).toContain('Consider using non-streaming mode');
       }
     });
   });

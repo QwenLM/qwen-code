@@ -27,15 +27,53 @@ import {
   detectFileType,
   processSingleFileContent,
   detectBOM,
+  decodeBufferWithEncodingInfo,
   readFileWithEncoding,
+  readFileWithEncodingInfo,
+  detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },
   getType: vi.fn(),
 }));
+
+// Mock execFile so isPdftotextAvailable does not spawn a real process.
+// On platforms where pdftotext is not installed (e.g. Windows CI),
+// the 5-second execFile timeout can exceed the default 5s test timeout.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFile: vi.fn(
+      (
+        _command: string,
+        _args: string[],
+        _optionsOrCallback: unknown,
+        _callback?: unknown,
+      ) => {
+        // Resolve the callback (supports both signatures of execFile)
+        const cb =
+          typeof _optionsOrCallback === 'function'
+            ? _optionsOrCallback
+            : _callback;
+        const error = Object.assign(new Error('Command not found'), {
+          code: 'ENOENT',
+        });
+        if (typeof cb === 'function') {
+          setImmediate(() => cb(error, '', ''));
+        }
+        return {
+          kill: vi.fn(),
+          on: vi.fn(),
+        } as unknown as import('node:child_process').ChildProcess;
+      },
+    ),
+  };
+});
 
 const mockMimeGetType = mime.getType as Mock;
 
@@ -50,10 +88,17 @@ describe('fileUtils', () => {
   let nonexistentFilePath: string;
   let directoryPath: string;
 
+  const fsService = new StandardFileSystemService();
+
   const mockConfig = {
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
     getTargetDir: () => tempRootDir,
+    getModel: () => 'qwen3.5-plus',
+    getContentGeneratorConfig: () => ({
+      modalities: { image: true, video: true },
+    }),
+    getFileSystemService: () => fsService,
   } as unknown as Config;
 
   beforeEach(() => {
@@ -407,6 +452,178 @@ describe('fileUtils', () => {
         const result = await readFileWithEncoding(filePath);
         expect(result).toBe('');
       });
+
+      it('should read GBK-encoded file with Chinese characters correctly', async () => {
+        // GBK encoding of "你好世界这是中文内容用于测试编码检测"
+        // Needs enough content for chardet to reliably detect the encoding
+        const gbkBuffer = Buffer.from([
+          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
+          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
+          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
+          0xec, 0xb2, 0xe2,
+        ]);
+        const filePath = path.join(testDir, 'gbk-chinese.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const result = await readFileWithEncoding(filePath);
+        expect(result).toBe('你好世界这是中文内容用于测试编码检测');
+      });
+
+      it('should read GBK-encoded file with mixed ASCII and Chinese correctly', async () => {
+        // GBK encoding of "// 这是注释内容用于测试\nhello你好世界测试中文编码检测\n函数返回值正确"
+        // Needs enough Chinese content for chardet to reliably detect as GB18030/GBK
+        const gbkBuffer = Buffer.from([
+          0x2f, 0x2f, 0x20, 0xd5, 0xe2, 0xca, 0xc7, 0xd7, 0xa2, 0xca, 0xcd,
+          0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3, 0xd3, 0xda, 0xb2, 0xe2, 0xca,
+          0xd4, 0x0a, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xc4, 0xe3, 0xba, 0xc3,
+          0xca, 0xc0, 0xbd, 0xe7, 0xb2, 0xe2, 0xca, 0xd4, 0xd6, 0xd0, 0xce,
+          0xc4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc, 0xec, 0xb2, 0xe2, 0x0a, 0xba,
+          0xaf, 0xca, 0xfd, 0xb7, 0xb5, 0xbb, 0xd8, 0xd6, 0xb5, 0xd5, 0xfd,
+          0xc8, 0xb7,
+        ]);
+        const filePath = path.join(testDir, 'gbk-mixed.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const result = await readFileWithEncoding(filePath);
+        expect(result).toContain('hello');
+        expect(result).toContain('你好世界');
+        expect(result).toContain('函数返回值正确');
+      });
+    });
+
+    describe('readFileWithEncodingInfo', () => {
+      it('should decode plain UTF-8 buffers without reading from a path', () => {
+        const result = decodeBufferWithEncodingInfo(
+          Buffer.from('Hello', 'utf8'),
+        );
+        expect(result).toEqual({
+          content: 'Hello',
+          encoding: 'utf-8',
+          bom: false,
+        });
+      });
+
+      it('should decode UTF-8 BOM buffers without reading from a path', () => {
+        const result = decodeBufferWithEncodingInfo(
+          Buffer.concat([
+            Buffer.from([0xef, 0xbb, 0xbf]),
+            Buffer.from('Hello', 'utf8'),
+          ]),
+        );
+        expect(result).toEqual({
+          content: 'Hello',
+          encoding: 'utf-8',
+          bom: true,
+        });
+      });
+
+      it('should return bom: false and encoding utf-8 for plain UTF-8 file', async () => {
+        const filePath = path.join(testDir, 'info-utf8.txt');
+        await fsPromises.writeFile(filePath, 'Hello', 'utf8');
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.content).toBe('Hello');
+        expect(result.encoding).toBe('utf-8');
+        expect(result.bom).toBe(false);
+      });
+
+      it('should return bom: true and encoding utf-8 for UTF-8 BOM file', async () => {
+        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
+        const filePath = path.join(testDir, 'info-utf8-bom.txt');
+        await fsPromises.writeFile(
+          filePath,
+          Buffer.concat([utf8Bom, Buffer.from('Hello', 'utf8')]),
+        );
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.content).toBe('Hello');
+        expect(result.encoding).toBe('utf-8');
+        expect(result.bom).toBe(true);
+      });
+
+      it('should return bom: true and encoding utf-16le for UTF-16LE BOM file', async () => {
+        const utf16leBom = Buffer.from([0xff, 0xfe]);
+        const utf16leContent = Buffer.from('Hi', 'utf16le');
+        const filePath = path.join(testDir, 'info-utf16le.txt');
+        await fsPromises.writeFile(
+          filePath,
+          Buffer.concat([utf16leBom, utf16leContent]),
+        );
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.content).toBe('Hi');
+        expect(result.encoding).toBe('utf-16le');
+        // Non-UTF-8 BOM should also be flagged so it is preserved on write-back
+        expect(result.bom).toBe(true);
+      });
+
+      it('should return bom: false for GBK file (no BOM)', async () => {
+        const gbkBuffer = Buffer.from([
+          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
+          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
+          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
+          0xec, 0xb2, 0xe2,
+        ]);
+        const filePath = path.join(testDir, 'info-gbk.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.bom).toBe(false);
+        expect(result.encoding).toBe('gb18030');
+        expect(result.content).toBe('你好世界这是中文内容用于测试编码检测');
+      });
+    });
+
+    describe('detectFileEncoding', () => {
+      it('should detect UTF-8 for plain ASCII file', async () => {
+        const filePath = path.join(testDir, 'ascii.txt');
+        await fsPromises.writeFile(filePath, 'Hello World', 'utf8');
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
+      });
+
+      it('should detect UTF-8 for file with UTF-8 BOM', async () => {
+        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
+        const content = Buffer.from('Hello', 'utf8');
+        const filePath = path.join(testDir, 'utf8-bom-detect.txt');
+        await fsPromises.writeFile(filePath, Buffer.concat([utf8Bom, content]));
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
+      });
+
+      it('should detect GBK encoding for Chinese text in GBK', async () => {
+        // GBK encoding of "你好世界这是中文内容用于测试编码检测"
+        // Needs enough content for chardet to reliably detect
+        const gbkBuffer = Buffer.from([
+          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
+          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
+          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
+          0xec, 0xb2, 0xe2,
+        ]);
+        const filePath = path.join(testDir, 'gbk-detect.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const encoding = await detectFileEncoding(filePath);
+        // chardet detects GBK as 'gb18030' (its superset)
+        expect(encoding).toBe('gb18030');
+      });
+
+      it('should return utf-8 for empty file', async () => {
+        const filePath = path.join(testDir, 'empty-detect.txt');
+        await fsPromises.writeFile(filePath, '');
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
+      });
+
+      it('should return utf-8 for non-existent file', async () => {
+        const filePath = path.join(testDir, 'nonexistent-detect.txt');
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
+      });
     });
 
     describe('isBinaryFile with BOM awareness', () => {
@@ -645,10 +862,149 @@ describe('fileUtils', () => {
       expect(await detectFileType(filePathForDetectTest)).toBe('binary');
     });
 
+    it('should detect .ipynb as notebook', async () => {
+      expect(await detectFileType('analysis.ipynb')).toBe('notebook');
+    });
+
     it('should default to text if mime type is unknown and content is not binary', async () => {
       mockMimeGetType.mockReturnValueOnce(false); // Unknown mime type
       // filePathForDetectTest is already a text file by default from beforeEach
       expect(await detectFileType(filePathForDetectTest)).toBe('text');
+    });
+
+    it('uses content detection for text-looking .dat files', async () => {
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'controller.dat');
+      actualNodeFs.writeFileSync(
+        filePath,
+        '<?php\nfunction handleRequest() {\n  return true;\n}\n',
+      );
+      try {
+        expect(await detectFileType(filePath)).toBe('text');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
+    it('still treats binary-looking .dat files as binary', async () => {
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'payload.dat');
+      actualNodeFs.writeFileSync(filePath, Buffer.from([0x00, 0xff, 0x00]));
+      try {
+        expect(await detectFileType(filePath)).toBe('binary');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
+    it('returns text for files with a text/* mime even when the content looks binary (issue #3964 encrypted FS)', async () => {
+      // Frank-Shaw-FS reports `.cpp` / `.c` / `.h` source files on
+      // Windows encrypted / DRM-protected file systems being
+      // misclassified as binary. The OS surfaces encrypted bytes
+      // to `fs.open()` random-access reads, so the 4 KB
+      // `isBinaryFile` heuristic sees nulls / non-printables and
+      // concludes binary. The extension already declares a text
+      // mime, so we must trust that and skip the content sample.
+      mockMimeGetType.mockReturnValueOnce('text/x-c');
+      const filePath = path.join(tempRootDir, 'encrypted.cpp');
+      // Mimic the encrypted-FS sample: leading nulls and high
+      // bytes that would trip isBinaryFile (>30% non-printable
+      // and at least one null).
+      const fakeEncrypted = Buffer.alloc(64);
+      for (let i = 0; i < fakeEncrypted.length; i++) {
+        fakeEncrypted[i] = i % 4 === 0 ? 0 : 0xff;
+      }
+      actualNodeFs.writeFileSync(filePath, fakeEncrypted);
+      try {
+        expect(await detectFileType(filePath)).toBe('text');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
+    it('returns text for application/javascript and similar text-like application mimes', async () => {
+      mockMimeGetType.mockReturnValueOnce('application/javascript');
+      expect(await detectFileType('script.js')).toBe('text');
+      mockMimeGetType.mockReturnValueOnce('application/json');
+      expect(await detectFileType('data.json')).toBe('text');
+      mockMimeGetType.mockReturnValueOnce('application/toml');
+      expect(await detectFileType('config.toml')).toBe('text');
+    });
+
+    it('returns text for +xml and +json structured-data mime suffixes', async () => {
+      // Covers e.g. application/atom+xml, application/ld+json,
+      // application/rls-services+xml (Rust's registered mime).
+      mockMimeGetType.mockReturnValueOnce('application/rls-services+xml');
+      expect(await detectFileType('lib.rs')).toBe('text');
+      mockMimeGetType.mockReturnValueOnce('application/ld+json');
+      expect(await detectFileType('schema.jsonld')).toBe('text');
+    });
+
+    it('returns text for known source-code extensions even when content looks binary (mime/lite gap)', async () => {
+      // `mime/lite`'s registry omits most languages: `.py`, `.kt`,
+      // `.go`, `.rb`, `.swift`, ... all return null. Without a
+      // curated extension override, an encrypted-volume read whose
+      // 4 KB sample looks binary would misclassify these as binary
+      // even though the extension is unambiguously text.
+      const looksBinary = Buffer.alloc(64);
+      for (let i = 0; i < looksBinary.length; i++) {
+        looksBinary[i] = i % 4 === 0 ? 0 : 0xff;
+      }
+      for (const ext of ['.py', '.kt', '.go', '.rb', '.swift']) {
+        mockMimeGetType.mockReturnValueOnce(null);
+        const filePath = path.join(tempRootDir, `encrypted${ext}`);
+        actualNodeFs.writeFileSync(filePath, looksBinary);
+        try {
+          expect(await detectFileType(filePath)).toBe('text');
+        } finally {
+          actualNodeFs.unlinkSync(filePath);
+        }
+      }
+    });
+
+    it('returns text for extensionless build/config basenames (Dockerfile, Makefile, go.mod, …)', async () => {
+      // Build / config / lockfile conventions carry no extension (or
+      // only an ambiguous one like .mod). `path.extname` returns `''`,
+      // so the extension allowlist misses them, and an encrypted-volume
+      // read whose 4 KB sample looks binary would misclassify these as
+      // binary even though the basename is unambiguously text.
+      const looksBinary = Buffer.alloc(64);
+      for (let i = 0; i < looksBinary.length; i++) {
+        looksBinary[i] = i % 4 === 0 ? 0 : 0xff;
+      }
+      for (const basename of [
+        'Dockerfile',
+        'Makefile',
+        'Jenkinsfile',
+        'go.mod',
+        'package-lock.json',
+        '.gitignore',
+        'LICENSE',
+      ]) {
+        mockMimeGetType.mockReturnValueOnce(null);
+        const filePath = path.join(tempRootDir, basename);
+        actualNodeFs.writeFileSync(filePath, looksBinary);
+        try {
+          expect(await detectFileType(filePath)).toBe('text');
+        } finally {
+          actualNodeFs.unlinkSync(filePath);
+        }
+      }
+    });
+
+    it('still classifies files in BINARY_EXTENSIONS as binary even with text-looking content', async () => {
+      // The extension overrides win-list must not weaken the
+      // existing binary-extension pre-empt. A `.png` whose first
+      // bytes happen to be ASCII still gets classified as binary
+      // because the extension is in BINARY_EXTENSIONS.
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'looksLikeText.png');
+      actualNodeFs.writeFileSync(filePath, 'PNGheader plain text');
+      try {
+        expect(await detectFileType(filePath)).toBe('binary');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
     });
   });
 
@@ -689,7 +1045,7 @@ describe('fileUtils', () => {
     it('should handle read errors for text files', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'content'); // File must exist for initial statSync
       const readError = new Error('Simulated read error');
-      vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce(readError);
 
       const result = await processSingleFileContent(
         testTextFilePath,
@@ -738,29 +1094,145 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: image.png');
     });
 
-    it('should process a PDF file', async () => {
+    it('should reject image files when model does not support image', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigNoImage,
+      );
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('Unsupported image file');
+      expect(result.llmContent).toContain('does not support image input');
+      expect(result.returnDisplay).toContain('Skipped image file');
+    });
+
+    it('should fall back to pdftotext when model does not support PDF', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { image: true },
+        }),
+      } as unknown as Config;
+
       const result = await processSingleFileContent(
         testPdfFilePath,
-        mockConfig,
+        mockConfigNoPdf,
       );
-      expect(
-        (result.llmContent as { inlineData: unknown }).inlineData,
-      ).toBeDefined();
+      expect(typeof result.llmContent).toBe('string');
+      // When pdftotext is not installed, should return a helpful error
+      // rather than silently skipping
+      expect(result.llmContent).toContain('Cannot extract text from PDF');
+      expect(result.returnDisplay).toContain('Failed to read pdf');
+    });
+
+    it('should skip the 10MB size gate when extracting PDF text by pages', async () => {
+      // Tiny file on disk — the fs.stat spy below reports a size >10MB so
+      // the upstream size gate would reject if it still ran. With the
+      // text-extraction path we want pdftotext to handle oversized PDFs,
+      // since it streams the file and the output is capped downstream.
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 15 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          undefined,
+          undefined,
+          '1-5',
+        );
+
+        // Must not be rejected by the generic 10MB gate.
+        expect(result.error ?? '').not.toContain('10MB limit');
+        expect(result.llmContent).not.toMatch(/exceeds the 10MB limit/i);
+        // Routed into the pdftotext path — either success or the
+        // install-guidance error, never "File size exceeds the 10MB limit".
+        expect(result.returnDisplay ?? '').toMatch(/pdf/i);
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should still reject oversized PDFs when routing to the native base64 path', async () => {
+      // When the model supports PDF modality and no pages arg is provided,
+      // the base64 path applies and the 10MB inline-data cap still matters.
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 15 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigWithPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigWithPdf,
+        );
+
+        expect(result.error).toContain('10MB limit');
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should accept PDF files when model supports PDF', async () => {
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      const mockConfigWithPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { image: true, pdf: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigWithPdf,
+      );
+      expect(result.llmContent).toHaveProperty('inlineData');
       expect(
         (result.llmContent as { inlineData: { mimeType: string } }).inlineData
           .mimeType,
       ).toBe('application/pdf');
-      expect(
-        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
-      ).toBe(fakePdfData.toString('base64'));
-      expect(
-        (result.llmContent as { inlineData: { displayName?: string } })
-          .inlineData.displayName,
-      ).toBe('document.pdf');
-      expect(result.returnDisplay).toContain('Read pdf file: document.pdf');
+      expect(result.returnDisplay).toContain('Read pdf file');
     });
 
     it('should read an SVG file as text when under 1MB', async () => {
@@ -799,6 +1271,19 @@ describe('fileUtils', () => {
         'Cannot display content of binary file',
       );
       expect(result.returnDisplay).toContain('Skipped binary file: app.exe');
+    });
+
+    it('should read text-looking .dat files as text', async () => {
+      const filePath = path.join(tempRootDir, 'legacy-controller.dat');
+      const content = '<?php echo "ok";\n';
+      actualNodeFs.writeFileSync(filePath, content);
+      mockMimeGetType.mockReturnValueOnce(null);
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.llmContent).toBe(content);
+      expect(result.returnDisplay).toBe('');
+      expect(result.error).toBeUndefined();
     });
 
     it('should handle path being a directory', async () => {
@@ -948,14 +1433,15 @@ describe('fileUtils', () => {
       );
     });
 
-    it('should return an error if the file size exceeds 20MB', async () => {
+    it('should return an error if the file size exceeds 10MB', async () => {
       // Create a small test file
       actualNodeFs.writeFileSync(testTextFilePath, 'test content');
 
       // Spy on fs.promises.stat to return a large file size
       const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 21 * 1024 * 1024,
+        size: 11 * 1024 * 1024,
         isDirectory: () => false,
+        isFile: () => true,
       } as fs.Stats);
 
       try {
@@ -964,11 +1450,75 @@ describe('fileUtils', () => {
           mockConfig,
         );
 
-        expect(result.error).toContain('File size exceeds the 20MB limit');
+        expect(result.error).toContain('File size exceeds the 10MB limit');
         expect(result.returnDisplay).toContain(
-          'File size exceeds the 20MB limit',
+          'File size exceeds the 10MB limit',
         );
-        expect(result.llmContent).toContain('File size exceeds the 20MB limit');
+        expect(result.llmContent).toContain('File size exceeds the 10MB limit');
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should reject PDFs that exceed the text-extraction size cap (100MB)', async () => {
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      // 200MB PDF — text-extraction path skips the 10MB gate but still
+      // needs a sane ceiling so pdftotext can't be asked to stream GBs
+      // until the 30s timeout fires.
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 200 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          undefined,
+          undefined,
+          '1-5',
+        );
+
+        expect(result.error).toMatch(/exceeds extraction size limit/i);
+        expect(result.returnDisplay).toMatch(/PDF file too large/i);
+        expect(result.errorType).toBeDefined();
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should reject non-regular files (FIFOs, devices, sockets)', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'placeholder');
+
+      // A FIFO / socket / /dev/zero shows up as a non-file, non-directory
+      // stat entry. stats.size is typically 0 or meaningless, so without
+      // this guard a caller could accidentally stream /dev/zero through
+      // pdftotext until the timeout fires.
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 0,
+        isDirectory: () => false,
+        isFile: () => false,
+      } as fs.Stats);
+
+      try {
+        const result = await processSingleFileContent(
+          testTextFilePath,
+          mockConfig,
+        );
+
+        expect(result.error).toMatch(/not a regular file/i);
+        expect(result.returnDisplay).toMatch(/not a regular file/i);
       } finally {
         statSpy.mockRestore();
       }

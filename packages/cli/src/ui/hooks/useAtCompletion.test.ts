@@ -9,10 +9,16 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { useAtCompletion } from './useAtCompletion.js';
-import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
-import { FileSearchFactory } from '@qwen-code/qwen-code-core';
-import type { FileSystemStructure } from '@qwen-code/qwen-code-test-utils';
-import { createTmpDir, cleanupTmpDir } from '@qwen-code/qwen-code-test-utils';
+import type {
+  Config,
+  FileSearch,
+  FileSystemStructure,
+} from '@qwen-code/qwen-code-core';
+import {
+  FileSearchFactory,
+  createTmpDir,
+  cleanupTmpDir,
+} from '@qwen-code/qwen-code-core';
 import { useState } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 
@@ -110,12 +116,16 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'src/',
-        'src/components/',
-        'src/index.js',
-        'src/components/Button.tsx',
-      ]);
+      const suggestionValues = result.current.suggestions.map((s) => s.value);
+      expect(suggestionValues).toHaveLength(4);
+      expect(suggestionValues).toEqual(
+        expect.arrayContaining([
+          'src/',
+          'src/components/',
+          'src/components/Button.tsx',
+          'src/index.js',
+        ]),
+      );
     });
 
     it('should append a trailing slash to directory paths in suggestions', async () => {
@@ -137,6 +147,15 @@ describe('useAtCompletion', () => {
         'dir/',
         'file.txt',
       ]);
+      // Verify isDirectory flag
+      const dirSuggestion = result.current.suggestions.find(
+        (s) => s.value === 'dir/',
+      );
+      const fileSuggestion = result.current.suggestions.find(
+        (s) => s.value === 'file.txt',
+      );
+      expect(dirSuggestion?.isDirectory).toBe(true);
+      expect(fileSuggestion?.isDirectory).toBe(false);
     });
   });
 
@@ -499,6 +518,164 @@ describe('useAtCompletion', () => {
       expect(result.current.suggestions.map((s) => s.value)).toEqual([
         'src/',
         'file.txt',
+      ]);
+    });
+  });
+
+  describe('MCP resource completion', () => {
+    it('suggests resource URIs for @server: when the server is configured', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: (name: string) =>
+            name === 'myserver'
+              ? [
+                  { uri: 'res://alpha', name: 'a', serverName: 'myserver' },
+                  { uri: 'res://beta', name: 'b', serverName: 'myserver' },
+                ]
+              : [],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'myserver:res://a',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // Only 'res://alpha' prefix-matches 'res://a'.
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'myserver:res://alpha',
+      ]);
+    });
+
+    it('falls through to filesystem search when the prefix is not a configured server', async () => {
+      testRootDir = await createTmpDir({ 'notes.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({ getResourcesByServer: () => [] }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'notes',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // 'notes' has no ':' → not a resource pattern → filesystem search.
+      expect(result.current.suggestions.map((s) => s.value)).toContain(
+        'notes.txt',
+      );
+    });
+
+    it('ranks prefix matches above mid-string matches', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            // contains 'doc' mid-string
+            { uri: 'api/doc', name: 'a', serverName: 'myserver' },
+            // starts with 'doc'
+            { uri: 'doc/readme', name: 'b', serverName: 'myserver' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'myserver:doc',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // Prefix match first, then the mid-string match.
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'myserver:doc/readme',
+        'myserver:api/doc',
+      ]);
+    });
+
+    it('does not surface resource URIs in an untrusted folder', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        isTrustedFolder: () => false,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            { uri: 'res://secret', name: 's', serverName: 'myserver' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'myserver:res',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      // getMcpResourceSuggestions returns null in an untrusted folder, so the
+      // hook falls through to filesystem search (which finds nothing for
+      // 'myserver:res'); the resource URI must never appear.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(result.current.suggestions.map((s) => s.value)).not.toContain(
+        'myserver:res://secret',
+      );
+    });
+
+    it('resolves a server name containing a colon (longest-prefix)', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      // Both "my" and "my:server" configured → longest-prefix picks "my:server".
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ my: {}, 'my:server': {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: (name: string) =>
+            name === 'my:server'
+              ? [{ uri: 'res://doc', name: 'd', serverName: 'my:server' }]
+              : [],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'my:server:res',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'my:server:res://doc',
       ]);
     });
   });

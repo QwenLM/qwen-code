@@ -94,8 +94,8 @@ public static void runStreamingExample() {
                 }
 
                 @Override
-                public void onThinking(Session session, ThingkingAssistantContent thingkingAssistantContent) {
-                    logger.info("Thinking content received: {}", thingkingAssistantContent.getThinking());
+                public void onThinking(Session session, ThinkingAssistantContent thinkingAssistantContent) {
+                    logger.info("Thinking content received: {}", thinkingAssistantContent.getThinking());
                 }
 
                 @Override
@@ -144,7 +144,7 @@ The SDK supports different permission modes for controlling tool execution:
 
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
-- **`auto-edit`**: Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+- **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Session Event Consumers and Assistant Content Consumers
@@ -170,7 +170,7 @@ The `SessionEventConsumers` interface provides callbacks for different types of 
 The `AssistantContentConsumers` interface handles different types of content within assistant messages:
 
 - `onText`: Handles text content (receives Session and TextAssistantContent)
-- `onThinking`: Handles thinking content (receives Session and ThingkingAssistantContent)
+- `onThinking`: Handles thinking content (receives Session and ThinkingAssistantContent)
 - `onToolUse`: Handles tool use content (receives Session and ToolUseAssistantContent)
 - `onToolResult`: Handles tool result content (receives Session and ToolResultAssistantContent)
 - `onOtherContent`: Handles other content types (receives Session and AssistantContent)

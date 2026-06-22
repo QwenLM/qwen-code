@@ -16,6 +16,8 @@ export type TransportOptions = {
   model?: string;
   permissionMode?: PermissionMode;
   env?: Record<string, string>;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   abortController?: AbortController;
   debug?: boolean;
   stderr?: (message: string) => void;
@@ -38,7 +40,21 @@ export type TransportOptions = {
    * When provided, takes precedence over `continue`.
    */
   resume?: string;
+  /**
+   * Session ID to use for this session.
+   * Passed to CLI via --session-id to ensure consistent session ID.
+   * When resume is provided, this should match the resume ID.
+   */
+  sessionId?: string;
 };
+
+export interface QuerySystemPromptPreset {
+  type: 'preset';
+  preset: 'qwen_code';
+  append?: string;
+}
+
+export type QuerySystemPrompt = string | QuerySystemPromptPreset;
 
 type ToolInput = Record<string, unknown>;
 
@@ -221,6 +237,16 @@ export interface QueryOptions {
   env?: Record<string, string>;
 
   /**
+   * System prompt configuration for the Qwen CLI session.
+   *
+   * - `string`: fully overrides the main session system prompt
+   * - `{ type: 'preset', preset: 'qwen_code', append?: string }`:
+   *   uses Qwen Code's built-in prompt as the base and optionally appends extra
+   *   instructions for the main session
+   */
+  systemPrompt?: QuerySystemPrompt;
+
+  /**
    * Permission mode controlling how the SDK handles tool execution approval.
    *
    * - 'default': Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`.
@@ -228,6 +254,10 @@ export interface QueryOptions {
    * - 'plan': Blocks all write tools, instructing AI to present a plan first.
    *   Read-only tools execute normally.
    * - 'auto-edit': Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+   * - 'auto': An LLM classifier evaluates each tool call and auto-approves
+   *   safe ones / blocks risky ones. Fail-closed: classifier outages route
+   *   the call to manual approval. Best for long autonomous sessions in
+   *   trusted projects. See `docs/users/features/auto-mode.md`.
    * - 'yolo': All tools execute automatically without confirmation.
    *
    * **Priority Chain (highest to lowest):**
@@ -235,15 +265,16 @@ export interface QueryOptions {
    * 2. `permissionMode: 'plan'` - Blocks non-read-only tools (except exit_plan_mode)
    * 3. `permissionMode: 'yolo'` - Auto-approves all tools
    * 4. `allowedTools` - Auto-approves matching tools
-   * 5. `canUseTool` callback - Custom approval logic
-   * 6. Default behavior - Auto-deny in SDK mode
+   * 5. `permissionMode: 'auto'` - Classifier-mediated approval for the rest
+   * 6. `canUseTool` callback - Custom approval logic
+   * 7. Default behavior - Auto-deny in SDK mode
    *
    * @default 'default'
    * @see canUseTool For custom permission handling
    * @see allowedTools For auto-approving specific tools
    * @see excludeTools For blocking specific tools
    */
-  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'yolo';
+  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
   /**
    * Custom permission handler for tool execution approval.
@@ -421,6 +452,14 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   resume?: string;
+
+  /**
+   * Specify a session ID for the new session.
+   * This ensures the SDK and CLI use the same session ID without resuming a previous session.
+   * Equivalent to CLI's `--session-id` flag.
+   * @example '123e4567-e89b-12d3-a456-426614174000'
+   */
+  sessionId?: string;
 
   /**
    * Timeout configuration for various SDK operations.

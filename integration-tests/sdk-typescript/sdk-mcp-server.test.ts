@@ -35,6 +35,14 @@ const SHARED_TEST_OPTIONS = {
   permissionMode: 'yolo' as const,
 };
 
+// MCP tool names are generated with the pattern: mcp__<serverName>__<toolName>
+const MCP_CALCULATE_SUM = 'mcp__sdk-calculator__calculate_sum';
+const MCP_REVERSE_STRING = 'mcp__sdk-string-utils__reverse_string';
+const MCP_SDK_ADD = 'mcp__sdk-math__sdk_add';
+const MCP_SDK_MULTIPLY = 'mcp__sdk-math__sdk_multiply';
+const MCP_MAYBE_FAIL = 'mcp__sdk-error-test__maybe_fail';
+const MCP_DELAYED_RESPONSE = 'mcp__sdk-async__delayed_response';
+
 describe('SDK MCP Server Integration (E2E)', () => {
   let helper: SDKTestHelper;
   let testDir: string;
@@ -91,7 +99,7 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'calculate_sum');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_CALCULATE_SUM);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -157,7 +165,10 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'reverse_string');
+            const toolUseBlocks = findToolUseBlocks(
+              message,
+              MCP_REVERSE_STRING,
+            );
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -244,8 +255,8 @@ describe('SDK MCP Server Integration (E2E)', () => {
         }
 
         // Validate both tools were called
-        expect(toolCalls).toContain('sdk_add');
-        expect(toolCalls).toContain('sdk_multiply');
+        expect(toolCalls).toContain(MCP_SDK_ADD);
+        expect(toolCalls).toContain(MCP_SDK_MULTIPLY);
 
         // Validate result: (10 + 5) * 3 = 45
         expect(assistantText).toMatch(/45/);
@@ -361,7 +372,7 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'maybe_fail');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_MAYBE_FAIL);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -430,7 +441,7 @@ describe('SDK MCP Server Integration (E2E)', () => {
           if (isSDKAssistantMessage(message)) {
             const toolUseBlocks = findToolUseBlocks(
               message,
-              'delayed_response',
+              MCP_DELAYED_RESPONSE,
             );
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;

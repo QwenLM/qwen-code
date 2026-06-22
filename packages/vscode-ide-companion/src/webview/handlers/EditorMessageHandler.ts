@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
+import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
  * Editor message handler
@@ -105,7 +106,9 @@ export class EditorMessageHandler extends BaseMessageHandler {
         '[EditorMessageHandler] Failed to focus active editor:',
         error,
       );
-      vscode.window.showErrorMessage(`Failed to focus editor: ${error}`);
+      vscode.window.showErrorMessage(
+        `Failed to focus editor: ${getErrorMessage(error)}`,
+      );
     }
   }
 }

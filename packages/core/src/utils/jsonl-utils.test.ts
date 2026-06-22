@@ -1,0 +1,362 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  _recoverObjectsFromLine,
+  _resetEnsuredDirsCacheForTest,
+  countLines,
+  parseLineTolerant,
+  read,
+  readLines,
+  write,
+  writeLine,
+  writeLineSync,
+} from './jsonl-utils.js';
+
+let tmpRoot: string;
+
+beforeAll(() => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jsonl-utils-test-'));
+});
+
+afterAll(() => {
+  fs.rmSync(tmpRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+});
+
+afterEach(() => {
+  _resetEnsuredDirsCacheForTest();
+});
+
+function tmpFile(content: string): string {
+  const p = path.join(
+    tmpRoot,
+    `t-${Math.random().toString(36).slice(2)}.jsonl`,
+  );
+  fs.writeFileSync(p, content, 'utf8');
+  return p;
+}
+
+async function waitForStreamClosed(
+  getStream: () => fs.ReadStream | undefined,
+): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (!getStream()?.closed && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(getStream()?.closed).toBe(true);
+}
+
+async function withCapturedReadStream<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  let capturedStream: fs.ReadStream | undefined;
+  const originalCreateReadStream = fs.createReadStream.bind(fs);
+  const spy = vi
+    .spyOn(fs, 'createReadStream')
+    .mockImplementation((...args: Parameters<typeof fs.createReadStream>) => {
+      const stream = originalCreateReadStream(...args);
+      capturedStream = stream;
+      return stream;
+    });
+
+  try {
+    const result = await operation();
+    expect(capturedStream).toBeDefined();
+    await waitForStreamClosed(() => capturedStream);
+    return result;
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+describe('_recoverObjectsFromLine', () => {
+  it('returns single object for a well-formed JSON line', () => {
+    expect(_recoverObjectsFromLine<{ a: number }>('{"a":1}')).toEqual([
+      { a: 1 },
+    ]);
+  });
+
+  it('splits two concatenated objects with no separator', () => {
+    expect(
+      _recoverObjectsFromLine<{ a: number } | { b: number }>('{"a":1}{"b":2}'),
+    ).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it('does not split on `}{` that appears inside a string value', () => {
+    const line = '{"text":"close-then-open: }{ here"}';
+    expect(_recoverObjectsFromLine<{ text: string }>(line)).toEqual([
+      { text: 'close-then-open: }{ here' },
+    ]);
+  });
+
+  it('handles escaped quotes inside strings', () => {
+    const line = '{"q":"he said \\"hi\\"","n":1}{"q":"x"}';
+    expect(_recoverObjectsFromLine<{ q: string; n?: number }>(line)).toEqual([
+      { q: 'he said "hi"', n: 1 },
+      { q: 'x' },
+    ]);
+  });
+
+  it('recovers objects around an unbalanced fragment', () => {
+    // Middle `{"oops":}` fails JSON.parse, surrounding objects still parse.
+    expect(
+      _recoverObjectsFromLine<{ a?: number; b?: number }>(
+        '{"a":1}{"oops":}{"b":2}',
+      ),
+    ).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it('returns empty array when nothing balanced can be parsed', () => {
+    expect(_recoverObjectsFromLine('not json at all')).toEqual([]);
+    expect(_recoverObjectsFromLine('{"unterminated":')).toEqual([]);
+  });
+});
+
+describe('parseLineTolerant', () => {
+  it('returns the parsed object for a well-formed line', () => {
+    expect(parseLineTolerant<{ a: number }>('{"a":1}', '/tmp/x.jsonl')).toEqual(
+      [{ a: 1 }],
+    );
+  });
+
+  it('recovers both records from a `}{`-glued line', () => {
+    expect(
+      parseLineTolerant<{ uuid: string }>(
+        '{"uuid":"a"}{"uuid":"b"}',
+        '/tmp/x.jsonl',
+      ),
+    ).toEqual([{ uuid: 'a' }, { uuid: 'b' }]);
+  });
+
+  it('returns [] when nothing balanced can be recovered', () => {
+    expect(parseLineTolerant('not-json', '/tmp/x.jsonl')).toEqual([]);
+  });
+
+  it('filters non-object JSON values (e.g. bare `null`) instead of forwarding them', () => {
+    // Without the filter, callers that do `record.type` would crash on the
+    // returned scalar; integration sites then propagate to outer catches and
+    // zero out whole counts.
+    expect(parseLineTolerant('null', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('42', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('"a string"', '/tmp/x.jsonl')).toEqual([]);
+  });
+
+  it('filters bare JSON arrays (typeof [] === "object" trap)', () => {
+    // Docstring promises only objects flow through. Arrays would otherwise
+    // slip past the `typeof === 'object'` check and force callers to add
+    // their own `Array.isArray` guards before `record.type`.
+    expect(parseLineTolerant('[1,2,3]', '/tmp/x.jsonl')).toEqual([]);
+    expect(parseLineTolerant('[]', '/tmp/x.jsonl')).toEqual([]);
+  });
+});
+
+describe('read() / readLines() with malformed lines', () => {
+  it('reads a clean file unchanged', async () => {
+    const file = tmpFile('{"a":1}\n{"a":2}\n{"a":3}\n');
+    expect(await read<{ a: number }>(file)).toEqual([
+      { a: 1 },
+      { a: 2 },
+      { a: 3 },
+    ]);
+  });
+
+  it('recovers concatenated records without losing later lines', async () => {
+    // The #3606 corruption shape: two records glued onto one physical line,
+    // with valid records before and after.
+    const file = tmpFile(
+      '{"uuid":"a","i":1}\n{"uuid":"b","i":2}{"uuid":"c","i":3}\n{"uuid":"d","i":4}\n',
+    );
+    const out = await read<{ uuid: string; i: number }>(file);
+    expect(out.map((r) => r.uuid)).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('skips a fully-garbage line and keeps reading', async () => {
+    const file = tmpFile('{"a":1}\nnot-json-at-all\n{"a":3}\n');
+    expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 3 }]);
+  });
+
+  it('returns [] for a missing file', async () => {
+    expect(await read(path.join(tmpRoot, 'does-not-exist.jsonl'))).toEqual([]);
+  });
+
+  it('can rethrow non-ENOENT read errors for user-visible callers', async () => {
+    const file = tmpFile('{"a":1}\n');
+    const error = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    const spy = vi.spyOn(fs, 'createReadStream').mockImplementationOnce(() => {
+      throw error;
+    });
+
+    try {
+      await expect(read(file, { throwOnNonEnoentError: true })).rejects.toThrow(
+        'permission denied',
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('still returns [] for missing files when rethrowing read errors', async () => {
+    await expect(
+      read(path.join(tmpRoot, 'does-not-exist.jsonl'), {
+        throwOnNonEnoentError: true,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it('readLines respects the limit when objects come from recovery', async () => {
+    // Two clean lines, then a glued pair. Asking for 3 should yield 3.
+    const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}{"i":4}\n{"i":5}\n');
+    expect((await readLines<{ i: number }>(file, 3)).map((r) => r.i)).toEqual([
+      1, 2, 3,
+    ]);
+  });
+
+  it('readLines recovers when the malformed line is within the first N', async () => {
+    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
+    expect((await readLines<{ i: number }>(file, 5)).map((r) => r.i)).toEqual([
+      1, 2, 3,
+    ]);
+  });
+
+  it('skips blank lines', async () => {
+    const file = tmpFile('{"a":1}\n\n{"a":2}\n');
+    expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
+  });
+
+  it('drops scalar / array lines so callers do not see non-object records', async () => {
+    // Locks in the broader semantic change beyond #3681 Item 1: read() and
+    // readLines() now silently skip well-formed JSON that is not an object.
+    // Pre-#3692 these would have round-tripped through `JSON.parse(line)`
+    // and surfaced as `null` / `42` / `"s"` / `[1,2]` array elements.
+    const file = tmpFile('{"a":1}\nnull\n42\n"a string"\n[1,2,3]\n{"a":2}\n');
+    expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
+    expect(await readLines<{ a: number }>(file, 10)).toEqual([
+      { a: 1 },
+      { a: 2 },
+    ]);
+  });
+});
+
+describe('reader resource cleanup', () => {
+  it('closes the file stream after readLines stops at the requested limit', async () => {
+    const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}\n');
+
+    const result = await withCapturedReadStream(() =>
+      readLines<{ i: number }>(file, 1),
+    );
+
+    expect(result).toEqual([{ i: 1 }]);
+  });
+
+  it('closes the file stream after read consumes all lines', async () => {
+    const file = tmpFile('{"i":1}\n{"i":2}\n');
+
+    const result = await withCapturedReadStream(() =>
+      read<{ i: number }>(file),
+    );
+
+    expect(result).toEqual([{ i: 1 }, { i: 2 }]);
+  });
+
+  it('closes the file stream after countLines consumes all lines', async () => {
+    const file = tmpFile('{"i":1}\n\n{"i":2}\n');
+
+    const result = await withCapturedReadStream(() => countLines(file));
+
+    expect(result).toBe(2);
+  });
+});
+
+// PR #4333 review fold-in: smoke tests for the three write paths. Downstream
+// callers (chatRecordingService, sessionService) mock these entirely, so a
+// regression in flush:true or atomicWriteFileSync wiring would otherwise go
+// undetected. Tests use real fs and assert roundtrip integrity.
+describe('writeLine / writeLineSync / write', () => {
+  it('writeLine round-trips through read() with flush:true appended records', async () => {
+    const file = path.join(
+      tmpRoot,
+      `wl-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    await writeLine(file, { kind: 'a', n: 1 });
+    await writeLine(file, { kind: 'b', n: 2 });
+    await writeLine(file, { kind: 'c', n: 3 });
+
+    const records = await read(file);
+    expect(records).toEqual([
+      { kind: 'a', n: 1 },
+      { kind: 'b', n: 2 },
+      { kind: 'c', n: 3 },
+    ]);
+    // No `}{` glue: each line is its own well-formed record.
+    const raw = fs.readFileSync(file, 'utf8');
+    expect(raw).toBe(
+      '{"kind":"a","n":1}\n{"kind":"b","n":2}\n{"kind":"c","n":3}\n',
+    );
+  });
+
+  it('writeLineSync appends well-formed records with trailing newlines', () => {
+    const file = path.join(
+      tmpRoot,
+      `wls-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    writeLineSync(file, { sync: true, i: 0 });
+    writeLineSync(file, { sync: true, i: 1 });
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(
+      '{"sync":true,"i":0}\n{"sync":true,"i":1}\n',
+    );
+  });
+
+  it('write() full-file replaces existing content via atomic write', async () => {
+    const file = path.join(
+      tmpRoot,
+      `wf-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    await writeLine(file, { v: 1 });
+    await writeLine(file, { v: 2 });
+    expect((await read(file)).length).toBe(2);
+
+    // Replace the entire file via the sync write() helper.
+    write(file, [{ v: 10 }, { v: 20 }, { v: 30 }]);
+
+    expect(await read(file)).toEqual([{ v: 10 }, { v: 20 }, { v: 30 }]);
+    // No tmp residue from atomicWriteFileSync.
+    const dirEntries = fs
+      .readdirSync(tmpRoot)
+      .filter((f) => f.startsWith(path.basename(file)));
+    expect(dirEntries).toEqual([path.basename(file)]);
+  });
+
+  // The other write() test targets a path inside the pre-created tmpRoot,
+  // so the `if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })`
+  // branch is never exercised. A regression that dropped that branch would
+  // make write() fail with ENOENT only when callers target a brand-new
+  // subdirectory.
+  it('write() creates parent dirs when missing', () => {
+    const nested = path.join(tmpRoot, 'a', 'b', 'c', 'file.jsonl');
+    write(nested, [{ x: 1 }]);
+    expect(fs.readFileSync(nested, 'utf-8')).toBe('{"x":1}\n');
+  });
+});

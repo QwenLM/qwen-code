@@ -6,7 +6,6 @@
 
 import path from 'node:path';
 import { promises as fs, unlinkSync } from 'node:fs';
-import * as os from 'os';
 import { randomUUID } from 'node:crypto';
 
 import type { IQwenOAuth2Client } from './qwenOAuth2.js';
@@ -18,17 +17,19 @@ import {
   CredentialsClearRequiredError,
 } from './qwenOAuth2.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { Storage } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('QWEN_OAUTH');
 
 // File System Configuration
-const QWEN_DIR = '.qwen';
 const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
 const QWEN_LOCK_FILENAME = 'oauth_creds.lock';
 
 // Token and Cache Configuration
 const TOKEN_REFRESH_BUFFER_MS = 30 * 1000; // 30 seconds
-const LOCK_TIMEOUT_MS = 10000; // 10 seconds lock timeout
+// Must exceed QWEN_OAUTH_REFRESH_TIMEOUT_MS so an in-flight refresh keeps its lock.
+const LOCK_TIMEOUT_MS = 35_000;
 const CACHE_CHECK_INTERVAL_MS = 5000; // 5 seconds cache check interval (increased from 1 second)
 
 // Lock acquisition configuration (can be overridden for testing)
@@ -468,12 +469,12 @@ export class SharedTokenManager {
   ): Promise<QwenCredentials> {
     const startTime = Date.now();
     const lockPath = this.getLockFilePath();
+    let lockAcquired = false;
 
     try {
       // Check if we have a refresh token before attempting refresh
       const currentCredentials = qwenClient.getCredentials();
       if (!currentCredentials.refresh_token) {
-        // console.debug('create a NO_REFRESH_TOKEN error');
         throw new TokenManagerError(
           TokenError.NO_REFRESH_TOKEN,
           'No refresh token available for token refresh',
@@ -482,6 +483,7 @@ export class SharedTokenManager {
 
       // Acquire distributed file lock
       await this.acquireLock(lockPath);
+      lockAcquired = true;
 
       // Check if the operation is taking too long
       const lockAcquisitionTime = Date.now() - startTime;
@@ -596,8 +598,10 @@ export class SharedTokenManager {
         error,
       );
     } finally {
-      // Always release the file lock
-      await this.releaseLock(lockPath);
+      // Only release the file lock if it was successfully acquired
+      if (lockAcquired) {
+        await this.releaseLock(lockPath);
+      }
     }
   }
 
@@ -611,7 +615,6 @@ export class SharedTokenManager {
   ): Promise<void> {
     const filePath = this.getCredentialFilePath();
     const dirPath = path.dirname(filePath);
-    const tempPath = `${filePath}.tmp.${randomUUID()}`;
 
     // Create directory with restricted permissions
     try {
@@ -631,19 +634,16 @@ export class SharedTokenManager {
     const credString = JSON.stringify(credentials, null, 2);
 
     try {
-      // Write to temporary file first with restricted permissions
-      await this.withTimeout(
-        fs.writeFile(tempPath, credString, { mode: 0o600 }),
-        5000,
-        'File operation',
-      );
-
-      // Atomic move to final location
-      await this.withTimeout(
-        fs.rename(tempPath, filePath),
-        5000,
-        'File operation',
-      );
+      // Don't wrap atomicWriteFile in withTimeout: a timeout would reject
+      // our caller while the rename can still complete after the lock is
+      // released, potentially overwriting another process's newer
+      // credentials. Atomic write is durable by design — accept whatever
+      // latency the I/O takes. (See PR #4095 Phase 2 Codex review round 3.)
+      await atomicWriteFile(filePath, credString, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
 
       // Update cached file modification time atomically after successful write
       const stats = await this.withTimeout(
@@ -653,13 +653,6 @@ export class SharedTokenManager {
       );
       this.memoryCache.fileModTime = stats.mtimeMs;
     } catch (error) {
-      // Clean up temp file if it exists
-      try {
-        await this.withTimeout(fs.unlink(tempPath), 1000, 'File operation');
-      } catch (_cleanupError) {
-        // Ignore cleanup errors - temp file might not exist
-      }
-
       throw new TokenManagerError(
         TokenError.FILE_ACCESS_ERROR,
         `Failed to write credentials file: ${error instanceof Error ? error.message : String(error)}`,
@@ -687,7 +680,7 @@ export class SharedTokenManager {
    * @returns The absolute path to the credentials file
    */
   private getCredentialFilePath(): string {
-    return path.join(os.homedir(), QWEN_DIR, QWEN_CREDENTIAL_FILENAME);
+    return path.join(Storage.getGlobalQwenDir(), QWEN_CREDENTIAL_FILENAME);
   }
 
   /**
@@ -696,7 +689,7 @@ export class SharedTokenManager {
    * @returns The absolute path to the lock file
    */
   private getLockFilePath(): string {
-    return path.join(os.homedir(), QWEN_DIR, QWEN_LOCK_FILENAME);
+    return path.join(Storage.getGlobalQwenDir(), QWEN_LOCK_FILENAME);
   }
 
   /**

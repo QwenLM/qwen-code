@@ -6,3 +6,4 @@ export const DEFAULT_DASHSCOPE_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
 export const DEFAULT_OPEN_ROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+export const DASHSCOPE_PROXY_BASE_URL = process.env['DASHSCOPE_PROXY_BASE_URL'];

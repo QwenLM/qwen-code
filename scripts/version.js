@@ -105,8 +105,11 @@ if (cliPackageJson.config?.sandboxImageUri) {
 }
 
 // 7. Run `npm install` to update package-lock.json.
+// --ignore-scripts prevents the root `prepare` lifecycle from triggering a
+// redundant full build that fails with TS5055 when dist/ already exists from
+// the initial `npm ci` install.
 run(
-  'npm install --workspace packages/cli --workspace packages/core --package-lock-only',
+  'npm install --workspace packages/cli --workspace packages/core --workspace packages/channels/base --workspace packages/channels/plugin-example --package-lock-only --ignore-scripts',
 );
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

@@ -30,7 +30,10 @@ We favor small, atomic PRs that address a single issue or add a single, self-con
 - **Do:** Create a PR that fixes one specific bug or adds one specific feature.
 - **Don't:** Bundle multiple unrelated changes (e.g., a bug fix, a new feature, and a refactor) into a single PR.
 
-Large changes should be broken down into a series of smaller, logical PRs that can be reviewed and merged independently.
+As a rule of thumb, start splitting a PR once it exceeds about 1,200 changed
+lines. PRs above about 2,000 changed lines should either be split into a series
+of smaller, logical PRs that can be reviewed and merged independently, or
+explain in the PR description why the change needs to land together.
 
 #### 3. Use Draft PRs for Work in Progress
 
@@ -44,7 +47,17 @@ Before submitting your PR, ensure that all automated checks are passing by runni
 
 If your PR introduces a user-facing change (e.g., a new command, a modified flag, or a change in behavior), you must also update the relevant documentation in the `/docs` directory.
 
-#### 6. Write Clear Commit Messages and a Good PR Description
+#### 6. Include a Screenshot or Video Demo
+
+To help reviewers understand your change quickly and prioritize reviews, please attach a screenshot or short video to your PR showing the change in action.
+
+- **For bug fixes:** Show the before and after behavior.
+- **For new features:** Show the feature working end-to-end.
+- **For refactors or internal-only changes:** Simply note "N/A — no user-facing change" in the demo section.
+
+PRs with visual demos tend to get reviewed much faster, so this is in your interest too!
+
+#### 7. Write Clear Commit Messages and a Good PR Description
 
 Your PR should have a clear, descriptive title and a detailed description of the changes. Follow the [Conventional Commits](https://www.conventionalcommits.org/) standard for your commit messages.
 
@@ -62,8 +75,8 @@ This section guides contributors on how to build, modify, and understand the dev
 **Prerequisites:**
 
 1.  **Node.js**:
-    - **Development:** Please use Node.js `~20.19.0`. This specific version is required due to an upstream development dependency issue. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
-    - **Production:** For running the CLI in a production environment, any version of Node.js `>=20` is acceptable.
+    - **Development:** Please use Node.js `>=22`. Ink 7 (used by the TUI) requires Node 22, and `react@^19.2.0` is the matching peer. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
+    - **Production:** For running the CLI in a production environment, any version of Node.js `>=22` is acceptable.
 2.  **Git**
 
 ### Build Process
@@ -200,7 +213,7 @@ This section describes how to develop and preview the documentation locally.
 
 ### Prerequisites
 
-1. Ensure you have Node.js (version 18+) installed
+1. Ensure you have Node.js (version 22+) installed
 2. Have npm or yarn available
 
 ### Setup Documentation Site Locally

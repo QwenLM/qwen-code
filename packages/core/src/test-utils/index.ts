@@ -5,3 +5,4 @@
  */
 
 export * from './mock-tool.js';
+export * from './file-system-test-helpers.js';

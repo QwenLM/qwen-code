@@ -18,6 +18,7 @@ import type {
   ToolListUnion,
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
+import { buildAnthropicUsageMetadata } from './usage.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import {
@@ -26,10 +27,80 @@ import {
 } from '../../utils/schemaConverter.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
+// `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
+// to extend prompt caching across sessions (rather than the default
+// per-session ephemeral scope). The Anthropic SDK types we depend on still
+// model `cache_control` as `{ type: 'ephemeral' }` only, so we widen the
+// shape here for the fields where we actually attach it (tool params and
+// the system text block).
+type AnthropicCacheControl = { type: 'ephemeral'; scope?: 'global' };
 type AnthropicToolParam = Anthropic.Tool & {
-  cache_control?: { type: 'ephemeral' };
+  cache_control?: AnthropicCacheControl;
+};
+type AnthropicTextBlockParam = Anthropic.TextBlockParam & {
+  cache_control?: AnthropicCacheControl;
 };
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
+
+export interface ConvertGeminiRequestToAnthropicOptions {
+  /**
+   * On every assistant turn, fill in `signature: ''` on any `thinking` block
+   * that lacks the required `signature` field. Preserves the original
+   * `thinking` text. Common case: cross-provider history where non-Anthropic
+   * generators (OpenAI / Gemini / agent-runtime) only set `thought: true`,
+   * or `redacted_thinking` blocks that lost their `data` field through the
+   * Gemini-Part round trip.
+   */
+  normalizeAssistantThinkingSignature?: boolean;
+  /**
+   * On assistant turns containing `tool_use` but lacking any thinking block,
+   * prepend a synthetic empty thinking block. Required by DeepSeek's
+   * anthropic-compatible API when thinking mode is enabled — without this,
+   * follow-up requests fail with HTTP 400 ("The content[].thinking in the
+   * thinking mode must be passed back to the API.").
+   *
+   * Pair with `normalizeAssistantThinkingSignature` so that any
+   * signature-less `thinking` block already present is normalized (filled
+   * with `signature: ''`) before this pass runs. After normalization the
+   * block has a valid `signature` and is treated as already-satisfying, so
+   * no synthetic block is prepended and the original thinking text is
+   * preserved on the wire.
+   *
+   * Must be gated on the same per-request condition that emits the
+   * top-level `thinking` config so disabled-thinking requests don't ship
+   * stray thinking blocks. https://github.com/QwenLM/qwen-code/issues/3786
+   */
+  injectThinkingOnToolUseTurns?: boolean;
+  /**
+   * Strip thinking and redacted_thinking blocks from assistant messages.
+   * Used to keep DeepSeek requests consistent when thinking mode is off but
+   * session history still carries `thought: true` parts (e.g. side-queries
+   * spawned with `thinkingConfig.includeThoughts: false`).
+   */
+  stripAssistantThinking?: boolean;
+  /**
+   * Per-call override for `enableCacheControl`. Falls back to the value
+   * captured at construction. The generator passes the live
+   * `contentGeneratorConfig.enableCacheControl` here so a hot
+   * `Config.setModel()` flip is reflected on the next request — otherwise
+   * the converter's body-side `cache_control` and the generator's
+   * per-request `prompt-caching-scope-2026-01-05` beta header (which reads
+   * the live config directly) can disagree.
+   */
+  enableCacheControl?: boolean;
+  /**
+   * When `true`, emit `cache_control: { type: 'ephemeral', scope: 'global' }`
+   * on the system text and last tool entry so prefixes cache across
+   * sessions; when `false` (or omitted), emit the SDK-standard per-session
+   * shape `{ type: 'ephemeral' }`. Must be a strict subset of
+   * `enableCacheControl` (no scope without a cache_control entry to
+   * attach it to) and should mirror the generator's
+   * `prompt-caching-scope-2026-01-05` beta-header gate — both ship
+   * together or neither, so anthropic-compatible backends without
+   * cross-session caching support don't see an unrecognized scope field.
+   */
+  useGlobalCacheScope?: boolean;
+}
 
 export class AnthropicContentConverter {
   private model: string;
@@ -46,8 +117,11 @@ export class AnthropicContentConverter {
     this.enableCacheControl = enableCacheControl;
   }
 
-  convertGeminiRequestToAnthropic(request: GenerateContentParameters): {
-    system?: Anthropic.TextBlockParam[] | string;
+  convertGeminiRequestToAnthropic(
+    request: GenerateContentParameters,
+    options: ConvertGeminiRequestToAnthropicOptions = {},
+  ): {
+    system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
     const messages: AnthropicMessageParam[] = [];
@@ -58,11 +132,34 @@ export class AnthropicContentConverter {
 
     this.processContents(request.contents, messages);
 
-    // Add cache_control to enable prompt caching (if enabled)
-    const system = this.enableCacheControl
-      ? this.buildSystemWithCacheControl(systemText)
+    if (options.stripAssistantThinking) {
+      this.stripThinkingFromAssistantMessages(messages);
+    }
+    // Normalization runs before injection so non-compliant blocks are seen
+    // as already-present (and not duplicated) by the injection pass.
+    if (options.normalizeAssistantThinkingSignature) {
+      this.fillMissingThinkingSignatures(messages);
+    }
+    if (options.injectThinkingOnToolUseTurns) {
+      this.injectEmptyThinkingOnToolUseTurns(messages);
+    }
+
+    // Add cache_control to enable prompt caching (if enabled). Prefer the
+    // per-call override when the caller (typically the generator) passes
+    // one — that path latches the live config value alongside the
+    // per-request beta-header decision so the two stay in sync after
+    // `Config.setModel()` mutates `enableCacheControl` mid-session.
+    // `useGlobalCacheScope` is independent of (and a strict subset of)
+    // `enableCacheControl`: it only controls whether the emitted
+    // cache_control carries `scope: 'global'`, not whether the
+    // cache_control itself is emitted.
+    const enableCacheControl =
+      options.enableCacheControl ?? this.enableCacheControl;
+    const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
+    const system = enableCacheControl
+      ? this.buildSystemWithCacheControl(systemText, useGlobalCacheScope)
       : systemText;
-    if (this.enableCacheControl) {
+    if (enableCacheControl) {
       this.addCacheControlToMessages(messages);
     }
 
@@ -74,6 +171,10 @@ export class AnthropicContentConverter {
 
   async convertGeminiToolsToAnthropic(
     geminiTools: ToolListUnion,
+    options: {
+      enableCacheControl?: boolean;
+      useGlobalCacheScope?: boolean;
+    } = {},
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
 
@@ -91,7 +192,8 @@ export class AnthropicContentConverter {
       }
 
       for (const func of actualTool.functionDeclarations) {
-        if (!func.name) continue;
+        // Skip functions without name or description (required by Anthropic API)
+        if (!func.name || !func.description) continue;
 
         let inputSchema: Record<string, unknown> | undefined;
         if (func.parametersJsonSchema) {
@@ -119,12 +221,31 @@ export class AnthropicContentConverter {
       }
     }
 
-    // Add cache_control to the last tool for prompt caching (if enabled)
-    if (this.enableCacheControl && tools.length > 0) {
+    // Add cache_control to the last tool for prompt caching (if enabled).
+    // When `useGlobalCacheScope` is set, attach `scope: 'global'` so
+    // identical tool prefixes are cached across sessions — tools tend to
+    // be the largest, slowest-changing prefix (often 5K+ tokens), so
+    // cross-session reuse is where most of the hit-rate improvement under
+    // `prompt-caching-scope-2026-01-05` shows up. Non-Anthropic baseURLs
+    // ship the standard per-session shape so they don't see a scope
+    // extension they may not recognize.
+    // Per-call overrides mirror the request-shape gates in
+    // `convertGeminiRequestToAnthropic` so a qwen-oauth-style hot flip of
+    // `enableCacheControl` (the only field `Config.handleModelChange()`
+    // mutates in place without recreating the generator) doesn't leave
+    // the tool body and the beta header out of sync. `baseUrl` isn't
+    // hot-mutated — non-qwen-oauth providers recreate the generator on
+    // refresh — but the same per-call plumbing covers it for free.
+    const enableCacheControl =
+      options.enableCacheControl ?? this.enableCacheControl;
+    const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
+    if (enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],
-        cache_control: { type: 'ephemeral' },
+        cache_control: useGlobalCacheScope
+          ? { type: 'ephemeral', scope: 'global' }
+          : { type: 'ephemeral' },
       };
     }
 
@@ -205,13 +326,12 @@ export class AnthropicContentConverter {
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
-      const promptTokens = response.usage.input_tokens || 0;
-      const completionTokens = response.usage.output_tokens || 0;
-      geminiResponse.usageMetadata = {
-        promptTokenCount: promptTokens,
-        candidatesTokenCount: completionTokens,
-        totalTokenCount: promptTokens + completionTokens,
-      };
+      geminiResponse.usageMetadata = buildAnthropicUsageMetadata({
+        inputTokens: response.usage.input_tokens || 0,
+        cacheReadTokens: response.usage.cache_read_input_tokens || 0,
+        cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
+        outputTokens: response.usage.output_tokens || 0,
+      });
     }
 
     return geminiResponse;
@@ -526,10 +646,16 @@ export class AnthropicContentConverter {
   /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
+   * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
+   * system prefix participates in cross-session caching under the
+   * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
+   * per-session shape so non-Anthropic baseURLs aren't sent a scope
+   * extension they may not recognize.
    */
   private buildSystemWithCacheControl(
     systemText: string,
-  ): Anthropic.TextBlockParam[] | string {
+    useGlobalCacheScope: boolean,
+  ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
     }
@@ -538,17 +664,157 @@ export class AnthropicContentConverter {
       {
         type: 'text',
         text: systemText,
-        cache_control: { type: 'ephemeral' },
+        cache_control: useGlobalCacheScope
+          ? { type: 'ephemeral', scope: 'global' }
+          : { type: 'ephemeral' },
       },
     ];
   }
 
   /**
+   * Remove thinking and redacted_thinking blocks from assistant messages.
+   * Used by DeepSeek when thinking mode is off but session history still
+   * has `thought: true` parts — keeps the request body in sync with the
+   * absent top-level `thinking` config.
+   *
+   * If stripping would leave an assistant message with no content blocks
+   * (a thinking-only turn, e.g. one cut off by max_tokens before any text
+   * or tool_use was emitted), we keep the original blocks. An empty
+   * `content: []` is rejected by the Anthropic API, and dropping the
+   * message would break the required user/assistant alternation. DeepSeek
+   * empirically tolerates the residual `thinking-block + no-thinking-config`
+   * shape (verified against api.deepseek.com/anthropic), so leaving it as
+   * an unaltered passthrough is the safer fallback.
+   */
+  private stripThinkingFromAssistantMessages(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if (!Array.isArray(message.content)) continue;
+
+      const filtered = message.content.filter((block) => {
+        const t = (block as { type?: string }).type;
+        return t !== 'thinking' && t !== 'redacted_thinking';
+      });
+      if (filtered.length === 0) continue;
+      if (filtered.length !== message.content.length) {
+        message.content = filtered;
+      }
+    }
+  }
+
+  /**
+   * Fill in `signature: ''` on every assistant `thinking` block that lacks
+   * a `signature` field. Preserves the original thinking text. Common cases:
+   *
+   * - Cross-provider history where the upstream generator (OpenAI / Gemini /
+   *   agent-runtime) only set `thought: true` without a signature.
+   * - `redacted_thinking` blocks whose `data` field didn't survive the
+   *   round-trip through Gemini Part format.
+   *
+   * DeepSeek empirically accepts empty signatures, so this keeps the wire
+   * shape spec-compliant without discarding any preserved thinking text.
+   */
+  private fillMissingThinkingSignatures(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if (!Array.isArray(message.content)) continue;
+
+      let modified = false;
+      const normalized = message.content.map((block) => {
+        const b = block as { type?: string; signature?: unknown };
+        if (b.type === 'thinking' && typeof b.signature !== 'string') {
+          modified = true;
+          return {
+            ...(block as object),
+            signature: '',
+          } as unknown as AnthropicContentBlockParam;
+        }
+        return block;
+      });
+      if (modified) {
+        message.content = normalized;
+      }
+    }
+  }
+
+  /**
+   * DeepSeek's anthropic-compatible API rejects follow-up requests when an
+   * assistant turn carrying `tool_use` omits a thinking block while thinking
+   * mode is on, returning HTTP 400 ("The content[].thinking in the thinking
+   * mode must be passed back to the API."). The model can legitimately
+   * return a tool round without thinking content, so prepend a synthetic
+   * empty thinking block when one is missing.
+   *
+   * Live verification against api.deepseek.com/anthropic confirmed the
+   * trigger is specific to tool_use turns — plain-text assistant turns
+   * without thinking are accepted unchanged. We mirror that boundary here
+   * to avoid bloating replay history with synthetic blocks for turns the
+   * API already accepts.
+   *
+   * Should be paired with `fillMissingThinkingSignatures` running first
+   * so that signature-less `thinking` blocks become compliant in place
+   * (preserving their original text), and this pass then sees them as
+   * already-satisfying. https://github.com/QwenLM/qwen-code/issues/3786
+   */
+  private injectEmptyThinkingOnToolUseTurns(
+    messages: AnthropicMessageParam[],
+  ): void {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if (!Array.isArray(message.content)) continue;
+
+      const blocks = message.content;
+
+      const hasToolUse = blocks.some(
+        (block) => (block as { type?: string }).type === 'tool_use',
+      );
+      if (!hasToolUse) continue;
+
+      const hasThinking = blocks.some((block) => {
+        const t = (block as { type?: string }).type;
+        return t === 'thinking' || t === 'redacted_thinking';
+      });
+      if (hasThinking) continue;
+
+      // DeepSeek currently accepts an empty `signature` for synthetic
+      // thinking blocks. The `signature` field is an opaque token in the
+      // Anthropic spec, so this is a workaround — if DeepSeek tightens
+      // validation in the future, we may need to switch to
+      // `redacted_thinking` or another approach.
+      const emptyThinking = {
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      } as unknown as AnthropicContentBlockParam;
+      message.content = [emptyThinking, ...blocks];
+    }
+  }
+
+  /**
    * Add cache_control to the last user message's content.
    * This enables prompt caching for the conversation context.
+   *
+   * Deliberately emits the per-session `{ type: 'ephemeral' }` shape only —
+   * no `scope: 'global'`. The last user message changes every turn (it's
+   * the live prompt and any tool_result blocks from the immediately prior
+   * round), so cross-session reuse here has effectively zero hit rate and
+   * paying the global-scope overhead would just churn cache. System text
+   * and tool prefixes (which DO repeat across sessions) carry
+   * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
-    // Find the last user message to add cache_control
+    // Find the last user message to add cache_control. The Anthropic docs
+    // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
+    // explicitly list both `text` and `tool_result` blocks as cacheable in
+    // `messages.content`. In agentic loops the last user message after
+    // turn 1 is typically a tool_result-only message, so accepting both
+    // types keeps the per-turn breakpoint moving forward as the
+    // conversation grows (otherwise the cacheable region collapses back
+    // to system+tools and turn-over-turn history never gets cached).
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.role === 'user') {
@@ -558,19 +824,18 @@ export class AnthropicContentConverter {
 
         if (content.length > 0) {
           const lastContent = content[content.length - 1];
-          // Only add cache_control if the last block is a non-empty text block
-          if (
-            typeof lastContent === 'object' &&
-            'type' in lastContent &&
-            lastContent.type === 'text' &&
-            'text' in lastContent &&
-            lastContent.text
-          ) {
-            lastContent.cache_control = {
-              type: 'ephemeral',
-            };
+          if (typeof lastContent === 'object' && 'type' in lastContent) {
+            const type = lastContent.type;
+            // Empty text blocks cannot be cached (per Anthropic docs).
+            const isEmptyText =
+              type === 'text' &&
+              (!('text' in lastContent) || !lastContent.text);
+            if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
+              lastContent.cache_control = {
+                type: 'ephemeral',
+              };
+            }
           }
-          // If last block is not text or is empty, don't add cache_control
           msg.content = content;
         }
         break;

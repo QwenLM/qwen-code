@@ -1,0 +1,38 @@
+{
+  "name": "@craft-agent/server-core",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "description": "Reusable headless server infrastructure for Qwen Code",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./transport": "./src/transport/index.ts",
+    "./runtime": "./src/runtime/index.ts",
+    "./handlers": "./src/handlers/index.ts",
+    "./bootstrap": "./src/bootstrap/index.ts",
+    "./model-fetchers": "./src/model-fetchers/index.ts",
+    "./domain": "./src/domain/index.ts",
+    "./services": "./src/services/index.ts",
+    "./handlers/rpc": "./src/handlers/rpc/index.ts",
+    "./handlers/rpc/*": "./src/handlers/rpc/*.ts",
+    "./sessions": "./src/sessions/index.ts",
+    "./webui": "./src/webui/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@craft-agent/core": "workspace:*",
+    "@craft-agent/session-tools-core": "workspace:*",
+    "@craft-agent/shared": "workspace:*",
+    "jose": "^6.0.0",
+    "ws": "^8.19.0",
+    "sharp": "0.34.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "@types/node": "^22.0.0"
+  }
+}

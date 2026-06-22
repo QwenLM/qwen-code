@@ -12,7 +12,7 @@ import type { SelectionListItem } from '../../hooks/useSelectionList.js';
 
 export interface DescriptiveRadioSelectItem<T> extends SelectionListItem<T> {
   title: React.ReactNode;
-  description: string;
+  description: React.ReactNode;
 }
 
 export interface DescriptiveRadioButtonSelectProps<T> {
@@ -32,6 +32,8 @@ export interface DescriptiveRadioButtonSelectProps<T> {
   showScrollArrows?: boolean;
   /** The maximum number of items to show at once. */
   maxItemsToShow?: number;
+  /** Gap (in rows) between each item. */
+  itemGap?: number;
 }
 
 /**
@@ -48,6 +50,7 @@ export function DescriptiveRadioButtonSelect<T>({
   showNumbers = false,
   showScrollArrows = false,
   maxItemsToShow = 10,
+  itemGap = 0,
 }: DescriptiveRadioButtonSelectProps<T>): React.JSX.Element {
   return (
     <BaseSelectionList<T, DescriptiveRadioSelectItem<T>>
@@ -59,10 +62,15 @@ export function DescriptiveRadioButtonSelect<T>({
       showNumbers={showNumbers}
       showScrollArrows={showScrollArrows}
       maxItemsToShow={maxItemsToShow}
+      itemGap={itemGap}
       renderItem={(item, { titleColor }) => (
         <Box flexDirection="column" key={item.key}>
           <Text color={titleColor}>{item.title}</Text>
-          <Text color={theme.text.secondary}>{item.description}</Text>
+          {typeof item.description === 'string' ? (
+            <Text color={theme.text.secondary}>{item.description}</Text>
+          ) : (
+            item.description
+          )}
         </Box>
       )}
     />

@@ -233,6 +233,27 @@ describe('Stream', () => {
     });
   });
 
+  describe('return() cleanup', () => {
+    it('settles a pending next() promise so awaiters do not hang', async () => {
+      // Consumer starts awaiting before any value is enqueued.
+      const pending = stream.next();
+      // External code cancels the iterator (e.g., timeout race, manual close).
+      await stream.return();
+      // The original pending promise must resolve cleanly with done:true.
+      const result = await pending;
+      expect(result).toEqual({ done: true, value: undefined });
+    });
+
+    it('return() invokes the optional returned callback', async () => {
+      let called = 0;
+      const s = new Stream<string>(() => {
+        called++;
+      });
+      await s.return();
+      expect(called).toBe(1);
+    });
+  });
+
   describe('Iteration Restrictions', () => {
     it('should only allow iteration once', async () => {
       const stream = new Stream<string>();

@@ -6,16 +6,17 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -27,16 +28,17 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -48,16 +50,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 true* │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -69,16 +72,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                false* │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                     false* │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -90,16 +94,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode (Modified in System)                                                            false │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -111,16 +116,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode (Modified in Workspace)                                                         false │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -132,16 +138,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -153,16 +160,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                false* │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -174,16 +182,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -195,16 +204,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
-│   Theme                                                                                Qwen Dark │
+│   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 true* │
-│   Interactive Shell (PTY)                                                                  false │
-│   Preferred Editor                                                                               │
+│   Interactive Shell (PTY)                                                                   true │
+│   Preferred Editor                                                                             ▸ │
 │   Auto-connect to IDE                                                                      true* │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"

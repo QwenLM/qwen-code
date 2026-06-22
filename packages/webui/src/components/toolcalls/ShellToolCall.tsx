@@ -13,12 +13,14 @@ import {
   CopyButton,
   safeTitle,
   groupContent,
+  mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import { usePlatform } from '../../context/PlatformContext.js';
 import type {
   BaseToolCallProps,
   ToolCallContainerProps,
 } from './shared/index.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 import './ShellToolCall.css';
 
@@ -129,7 +131,7 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
 
   const Container =
     variant === 'execute' ? ExecuteToolCallContainer : ToolCallContainer;
-  const label = variant === 'execute' ? 'Execute' : 'Bash';
+  const label = getToolDisplayLabel({ kind: toolCall.kind, title });
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);
@@ -156,9 +158,7 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
     | 'default' =
     errors.length > 0 || (variant === 'execute' && toolCall.status === 'failed')
       ? 'error'
-      : toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+      : mapToolStatusToContainerStatus(toolCall.status);
 
   // Error case
   if (errors.length > 0) {

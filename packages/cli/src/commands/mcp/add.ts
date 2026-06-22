@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// File for 'gemini mcp add' command
+// File for 'qwen mcp add' command
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import type {
+  MCPServerConfig,
+  MCPOAuthConfig,
+} from '@qwen-code/qwen-code-core';
 
 async function addMcpServer(
   name: string,
@@ -24,6 +27,12 @@ async function addMcpServer(
     description?: string;
     includeTools?: string[];
     excludeTools?: string[];
+    oauthClientId?: string;
+    oauthClientSecret?: string;
+    oauthRedirectUri?: string;
+    oauthAuthorizationUrl?: string;
+    oauthTokenUrl?: string;
+    oauthScopes?: string[];
   },
 ) {
   const {
@@ -36,6 +45,12 @@ async function addMcpServer(
     description,
     includeTools,
     excludeTools,
+    oauthClientId,
+    oauthClientSecret,
+    oauthRedirectUri,
+    oauthAuthorizationUrl,
+    oauthTokenUrl,
+    oauthScopes,
   } = options;
 
   const settings = loadSettings(process.cwd());
@@ -52,6 +67,43 @@ async function addMcpServer(
     scope === 'user' ? SettingScope.User : SettingScope.Workspace;
 
   let newServer: Partial<MCPServerConfig> = {};
+
+  const scopes = oauthScopes
+    ?.flatMap((s) => s.split(','))
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const hasOAuth = Boolean(
+    oauthClientId ||
+      oauthClientSecret ||
+      oauthRedirectUri ||
+      oauthAuthorizationUrl ||
+      oauthTokenUrl ||
+      (scopes && scopes.length > 0),
+  );
+
+  // OAuth only applies to remote HTTP/SSE transports. Reject mixing with stdio
+  // so users don't silently persist unused configuration.
+  if (hasOAuth && transport === 'stdio') {
+    writeStderrLine(
+      'Error: OAuth options (--oauth-*) are only supported with --transport sse or --transport http.',
+    );
+    process.exit(1);
+  }
+
+  const oauthConfig: MCPOAuthConfig | undefined = hasOAuth
+    ? {
+        enabled: true,
+        ...(oauthClientId && { clientId: oauthClientId }),
+        ...(oauthClientSecret && { clientSecret: oauthClientSecret }),
+        ...(oauthRedirectUri && { redirectUri: oauthRedirectUri }),
+        ...(oauthAuthorizationUrl && {
+          authorizationUrl: oauthAuthorizationUrl,
+        }),
+        ...(oauthTokenUrl && { tokenUrl: oauthTokenUrl }),
+        ...(scopes && scopes.length > 0 && { scopes }),
+      }
+    : undefined;
 
   const headers = header?.reduce(
     (acc, curr) => {
@@ -75,6 +127,7 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
+        oauth: oauthConfig,
       };
       break;
     case 'http':
@@ -86,6 +139,7 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
+        oauth: oauthConfig,
       };
       break;
     case 'stdio':
@@ -95,7 +149,12 @@ async function addMcpServer(
         args: args?.map(String),
         env: env?.reduce(
           (acc, curr) => {
-            const [key, value] = curr.split('=');
+            const separator = curr.indexOf('=');
+            if (separator === -1) {
+              return acc;
+            }
+            const key = curr.slice(0, separator);
+            const value = curr.slice(separator + 1);
             if (key && value) {
               acc[key] = value;
             }
@@ -159,14 +218,14 @@ export const addCommand: CommandModule = {
         alias: 's',
         describe: 'Configuration scope (user or project)',
         type: 'string',
-        default: 'project',
+        default: 'user',
         choices: ['user', 'project'],
       })
       .option('transport', {
         alias: 't',
-        describe: 'Transport type (stdio, sse, http)',
+        describe:
+          'Transport type (stdio, sse, http). Auto-detected from URL if not specified.',
         type: 'string',
-        default: 'stdio',
         choices: ['stdio', 'sse', 'http'],
       })
       .option('env', {
@@ -174,6 +233,7 @@ export const addCommand: CommandModule = {
         describe: 'Set environment variables (e.g. -e KEY=value)',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('header', {
         alias: 'H',
@@ -181,6 +241,7 @@ export const addCommand: CommandModule = {
           'Set HTTP headers for SSE and HTTP transports (e.g. -H "X-Api-Key: abc123" -H "Authorization: Bearer abc123")',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('timeout', {
         describe: 'Set connection timeout in milliseconds',
@@ -205,11 +266,47 @@ export const addCommand: CommandModule = {
         type: 'array',
         string: true,
       })
+      .option('oauth-client-id', {
+        describe: 'OAuth client ID for MCP server authentication',
+        type: 'string',
+      })
+      .option('oauth-client-secret', {
+        describe: 'OAuth client secret for MCP server authentication',
+        type: 'string',
+      })
+      .option('oauth-redirect-uri', {
+        describe:
+          'OAuth redirect URI (e.g., https://your-server.com/oauth/callback). Defaults to localhost for local setups.',
+        type: 'string',
+      })
+      .option('oauth-authorization-url', {
+        describe: 'OAuth authorization URL',
+        type: 'string',
+      })
+      .option('oauth-token-url', {
+        describe: 'OAuth token URL',
+        type: 'string',
+      })
+      .option('oauth-scopes', {
+        describe: 'OAuth scopes (comma-separated)',
+        type: 'array',
+        string: true,
+      })
       .middleware((argv) => {
         // Handle -- separator args as server args if present
         if (argv['--']) {
           const existingArgs = (argv['args'] as Array<string | number>) || [];
           argv['args'] = [...existingArgs, ...(argv['--'] as string[])];
+        }
+
+        // Auto-detect transport from URL if not explicitly specified
+        if (!argv['transport']) {
+          const commandOrUrl = argv['commandOrUrl'] as string;
+          if (commandOrUrl && /^https?:\/\//i.test(commandOrUrl)) {
+            argv['transport'] = 'http';
+          } else {
+            argv['transport'] = 'stdio';
+          }
         }
       }),
   handler: async (argv) => {
@@ -227,6 +324,14 @@ export const addCommand: CommandModule = {
         description: argv['description'] as string | undefined,
         includeTools: argv['includeTools'] as string[] | undefined,
         excludeTools: argv['excludeTools'] as string[] | undefined,
+        oauthClientId: argv['oauthClientId'] as string | undefined,
+        oauthClientSecret: argv['oauthClientSecret'] as string | undefined,
+        oauthRedirectUri: argv['oauthRedirectUri'] as string | undefined,
+        oauthAuthorizationUrl: argv['oauthAuthorizationUrl'] as
+          | string
+          | undefined,
+        oauthTokenUrl: argv['oauthTokenUrl'] as string | undefined,
+        oauthScopes: argv['oauthScopes'] as string[] | undefined,
       },
     );
   },

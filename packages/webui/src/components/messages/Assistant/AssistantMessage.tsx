@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FC } from 'react';
+import { type FC, memo } from 'react';
 import { MessageContent } from '../MessageContent.js';
+import { MessageMeta } from '../MessageMeta.js';
 import './AssistantMessage.css';
 
 export type AssistantMessageStatus =
@@ -32,16 +33,15 @@ export interface AssistantMessageProps {
  * AssistantMessage component - renders AI responses with styling
  * Supports different states: default, success, error, warning, loading
  */
-export const AssistantMessage: FC<AssistantMessageProps> = ({
+const AssistantMessageBase: FC<AssistantMessageProps> = ({
   content,
-  timestamp: _timestamp,
+  timestamp,
   onFileClick,
   status = 'default',
   hideStatusIcon = false,
   isFirst = false,
   isLast = false,
 }) => {
-  // Empty content not rendered directly
   if (!content || content.trim().length === 0) {
     return null;
   }
@@ -66,7 +66,7 @@ export const AssistantMessage: FC<AssistantMessageProps> = ({
 
   return (
     <div
-      className={`qwen-message message-item assistant-message-container ${getStatusClass()}`}
+      className={`qwen-message message-item assistant-message-container group ${getStatusClass()}`}
       data-first={isFirst}
       data-last={isLast}
       style={{
@@ -93,7 +93,12 @@ export const AssistantMessage: FC<AssistantMessageProps> = ({
             enableFileLinks={false}
           />
         </div>
+        <MessageMeta timestamp={timestamp} copyText={content} />
       </span>
     </div>
   );
 };
+
+AssistantMessageBase.displayName = 'AssistantMessage';
+
+export const AssistantMessage = memo(AssistantMessageBase);

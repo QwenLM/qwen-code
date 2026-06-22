@@ -100,27 +100,20 @@ export function isGenericQuotaExceededError(error: unknown): boolean {
 }
 
 export function isQwenQuotaExceededError(error: unknown): boolean {
-  // Check for Qwen insufficient quota errors (should not retry)
-  const checkMessage = (message: string): boolean => {
-    const lowerMessage = message.toLowerCase();
-    return (
-      lowerMessage.includes('insufficient_quota') ||
-      lowerMessage.includes('free allocated quota exceeded') ||
-      (lowerMessage.includes('quota') && lowerMessage.includes('exceeded'))
-    );
+  // Match the specific Qwen free-tier quota error to distinguish it from
+  // temporary throttling (429 due to concurrency) or paid account quota limits.
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const { status, code, message } = error as {
+    status?: number;
+    code?: string;
+    message?: string;
   };
-
-  if (typeof error === 'string') {
-    return checkMessage(error);
-  }
-
-  if (isStructuredError(error)) {
-    return checkMessage(error.message);
-  }
-
-  if (isApiError(error)) {
-    return checkMessage(error.error.message);
-  }
-
-  return false;
+  return (
+    status === 429 &&
+    code === 'insufficient_quota' &&
+    typeof message === 'string' &&
+    message.toLowerCase().includes('free allocated quota exceeded')
+  );
 }

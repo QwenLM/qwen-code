@@ -5,20 +5,44 @@
  */
 
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
+import * as useStatusLineModule from '../hooks/useStatusLine.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
+vi.mock('../hooks/useStatusLine.js');
+const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const registry = {
+    list: vi.fn(() => []),
+    subscribe: vi.fn(() => () => {}),
+  };
+  return {
+    ...actual,
+    getManagedAutoMemoryDreamTaskRegistry: vi.fn(() => registry),
+  };
+});
+
 const defaultProps = {
   model: 'gemini-pro',
 };
+
+const createMockMemoryManager = () => ({
+  subscribe: vi.fn(() => () => {}),
+  listTasksByType: vi.fn(() => []),
+});
 
 const createMockConfig = (overrides = {}) => ({
   getModel: vi.fn(() => defaultProps.model),
@@ -26,6 +50,9 @@ const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
+  getProjectRoot: vi.fn(() => '/test/project'),
+  getSessionId: vi.fn(() => 'test-session'),
+  getMemoryManager: vi.fn(createMockMemoryManager),
   ...overrides,
 });
 
@@ -33,11 +60,27 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
   ({
     sessionStats: {
       lastPromptTokenCount: 100,
+      sessionId: 'test-session',
+      metrics: {
+        models: {},
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
     },
+    currentModel: 'gemini-pro',
+    branchName: undefined,
     geminiMdFileCount: 0,
     contextFileNames: [],
     showToolDescriptions: false,
     ideContextState: undefined,
+    isConfigInitialized: true,
     ...overrides,
   }) as UIState;
 
@@ -52,21 +95,48 @@ const createMockSettings = (): LoadedSettings =>
 
 const renderWithWidth = (width: number, uiState: UIState) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
+  const mockSettings = createMockSettings();
   return render(
-    <ConfigContext.Provider value={createMockConfig() as never}>
-      <VimModeProvider settings={createMockSettings()}>
-        <UIStateContext.Provider value={uiState}>
-          <Footer />
-        </UIStateContext.Provider>
-      </VimModeProvider>
-    </ConfigContext.Provider>,
+    <SettingsContext.Provider value={mockSettings}>
+      <ConfigContext.Provider value={createMockConfig() as never}>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <VimModeProvider settings={mockSettings}>
+            <UIStateContext.Provider value={uiState}>
+              <Footer />
+            </UIStateContext.Provider>
+          </VimModeProvider>
+        </KeypressProvider>
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 
 describe('<Footer />', () => {
+  beforeEach(() => {
+    useStatusLineMock.mockReturnValue({
+      lines: [],
+      useThemeColors: false,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    });
+  });
+
   it('renders the component', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).toBeDefined();
+  });
+
+  it('shows the "workflow active" indicator when the keyword trigger is armed', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({ workflowKeywordActive: true }),
+    );
+    expect(lastFrame()).toContain('workflow active');
+  });
+
+  it('hides the "workflow active" indicator by default', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
+    expect(lastFrame()).not.toContain('workflow active');
   });
 
   it('does not display the working directory or branch name', () => {
@@ -82,6 +152,137 @@ describe('<Footer />', () => {
   it('displays the abbreviated context percentage on narrow terminal', () => {
     const { lastFrame } = renderWithWidth(99, createMockUIState());
     expect(lastFrame()).toMatch(/\d+%/);
+  });
+
+  describe('status line rendering', () => {
+    it('renders multi-line status line output', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name (main) ctx:34%', '████░░░░ 34% context'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('model-name (main) ctx:34%');
+      expect(frame).toContain('████░░░░ 34% context');
+    });
+
+    it('wraps long status line output without growing past two lines', () => {
+      const longLine = [
+        'visible-start',
+        ...Array.from({ length: 40 }, (_, index) => `chunk-${index}`),
+        'hidden-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('visible-start');
+      expect(frame).toContain('chunk-10');
+      expect(frame).not.toContain('hidden-tail');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('clips later status line entries after wrapped output reaches two lines', () => {
+      const longLine = [
+        'first-line-start',
+        ...Array.from({ length: 40 }, (_, index) => `part-${index}`),
+        'first-line-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine, 'second-status-line'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('first-line-start');
+      expect(frame).not.toContain('first-line-tail');
+      expect(frame).not.toContain('second-status-line');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('suppresses hint when status line is active', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['status info'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).not.toContain('? for shortcuts');
+    });
+
+    it('renders status line with respectUserColors enabled', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['\x1b[38;2;99;102;241m🤖 qwen\x1b[0m'],
+        useThemeColors: false,
+        respectUserColors: true,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('🤖 qwen');
+    });
+
+    it('hides context indicator when hideContextIndicator is true', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: [],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: true,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).not.toMatch(/\d+(\.\d+)?% context used/);
+    });
+  });
+
+  describe('config init message', () => {
+    it('shows init status in place of the hint while config is initializing', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('Initializing...');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('falls back to the hint once config is initialized', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: true }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).not.toContain('Initializing...');
+      expect(frame).toContain('? for shortcuts');
+    });
+
+    // Init progress is more useful than zero layout shift: we show it even
+    // when a custom status line is active, accepting that the row shrinks
+    // by one line once init completes. Still strictly better than the
+    // original bug (a 2-row residual above the input in the default case).
+    it('shows init status even when a custom status line is active', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name ctx:34%'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('model-name ctx:34%');
+      expect(frame).toContain('Initializing...');
+    });
   });
 
   describe('footer rendering (golden snapshots)', () => {

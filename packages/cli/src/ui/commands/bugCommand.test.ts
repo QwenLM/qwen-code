@@ -5,15 +5,23 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import open from 'open';
 import { bugCommand } from './bugCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { GIT_COMMIT_INFO } from '../../generated/git-commit.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import * as systemInfoUtils from '../../utils/systemInfo.js';
 
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
+
 // Mock dependencies
-vi.mock('open');
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    openBrowserSecurely: mockOpenBrowserSecurely,
+  };
+});
 vi.mock('../../utils/systemInfo.js');
 
 describe('bugCommand', () => {
@@ -36,6 +44,8 @@ describe('bugCommand', () => {
           ? GIT_COMMIT_INFO
           : undefined,
     });
+    mockOpenBrowserSecurely.mockClear();
+    mockOpenBrowserSecurely.mockResolvedValue(undefined);
     vi.stubEnv('SANDBOX', 'qwen-test');
   });
 
@@ -65,15 +75,26 @@ Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
 Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
 Memory Usage: 100 MB`;
     const expectedUrl =
-      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=' +
-      encodeURIComponent(`\n${expectedInfo}\n`);
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
 
-    expect(open).toHaveBeenCalledWith(expectedUrl);
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(expectedUrl);
   });
 
   it('should use a custom URL template from config if provided', async () => {
@@ -99,6 +120,7 @@ Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
 Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
@@ -107,7 +129,16 @@ Memory Usage: 100 MB`;
       .replace('{title}', encodeURIComponent('A custom bug'))
       .replace('{info}', encodeURIComponent(`\n${expectedInfo}\n`));
 
-    expect(open).toHaveBeenCalledWith(expectedUrl);
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(expectedUrl);
   });
 
   it('should include Base URL when auth type is OpenAI', async () => {
@@ -150,16 +181,50 @@ Memory Usage: 100 MB`;
 Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
-Auth: ${AuthType.USE_OPENAI} (https://api.openai.com/v1)
+Auth: API Key - ${AuthType.USE_OPENAI}
+Base URL: https://api.openai.com/v1
 Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
 Memory Usage: 100 MB`;
     const expectedUrl =
-      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=' +
-      encodeURIComponent(`\n${expectedInfo}\n`);
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
 
-    expect(open).toHaveBeenCalledWith(expectedUrl);
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(expectedUrl);
+  });
+
+  it('should report browser launch failures without failing the command', async () => {
+    mockOpenBrowserSecurely.mockRejectedValueOnce(new Error('browser failed'));
+    const mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getBugCommand: () => undefined,
+        },
+      },
+    });
+
+    if (!bugCommand.action) throw new Error('Action is not defined');
+    await bugCommand.action(mockContext, 'Browser failure');
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: 'Could not open URL in browser: browser failed',
+      }),
+      expect.any(Number),
+    );
   });
 });

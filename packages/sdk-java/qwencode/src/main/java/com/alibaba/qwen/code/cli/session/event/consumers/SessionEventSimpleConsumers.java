@@ -5,7 +5,7 @@ import java.util.Optional;
 
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.TextAssistantContent;
-import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThingkingAssistantContent;
+import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThinkingAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolResultAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolUseAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantUsage;
@@ -99,9 +99,9 @@ public class SessionEventSimpleConsumers implements SessionEventConsumers {
             MyConcurrentUtils.runAndWait(() -> assistantContentConsumers.onText(session, (TextAssistantContent) assistantContent),
                     Optional.ofNullable(assistantContentConsumers.onTextTimeout(session, (TextAssistantContent) assistantContent))
                             .orElse(defaultEventTimeout));
-        } else if (assistantContent instanceof ThingkingAssistantContent) {
-            MyConcurrentUtils.runAndWait(() -> assistantContentConsumers.onThinking(session, (ThingkingAssistantContent) assistantContent),
-                    Optional.ofNullable(assistantContentConsumers.onThinkingTimeout(session, (ThingkingAssistantContent) assistantContent))
+        } else if (assistantContent instanceof ThinkingAssistantContent) {
+            MyConcurrentUtils.runAndWait(() -> assistantContentConsumers.onThinking(session, (ThinkingAssistantContent) assistantContent),
+                    Optional.ofNullable(assistantContentConsumers.onThinkingTimeout(session, (ThinkingAssistantContent) assistantContent))
                             .orElse(defaultEventTimeout));
         } else if (assistantContent instanceof ToolUseAssistantContent) {
             MyConcurrentUtils.runAndWait(() -> assistantContentConsumers.onToolUse(session, (ToolUseAssistantContent) assistantContent),

@@ -1,0 +1,11 @@
+# Dependencies (npm ci installs fresh inside the container)
+node_modules
+**/node_modules
+
+# Build artifacts (rebuilt from scratch inside the container)
+dist
+**/dist
+**/tsconfig.tsbuildinfo
+
+# Version control
+.git

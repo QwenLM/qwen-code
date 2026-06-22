@@ -5,6 +5,9 @@
  */
 
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
 
 /**
  * Type definition for the result of parsing a JSON chunk in tool calls
@@ -69,6 +72,7 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     let actualIndex = index;
+    const isKnownId = Boolean(id && this.idToIndexMap.has(id));
 
     // Handle tool call ID mapping for collision detection
     if (id) {
@@ -140,14 +144,26 @@ export class StreamingToolCallParser {
       this.toolCallMeta.set(actualIndex, {});
     }
 
+    const currentBuffer = this.buffers.get(actualIndex)!;
+    const currentDepth = this.depths.get(actualIndex)!;
+    if (isKnownId && currentBuffer.trim() && currentDepth === 0) {
+      try {
+        JSON.parse(currentBuffer);
+        debugLogger.debug(
+          `Ignoring replay chunk for completed toolCall id=${id}`,
+        );
+        return { complete: false };
+      } catch {
+        // Not complete yet; append the incoming chunk below.
+      }
+    }
+
     // Update metadata
     const meta = this.toolCallMeta.get(actualIndex)!;
     if (id) meta.id = id;
     if (name) meta.name = name;
 
     // Get current state for the actual index
-    const currentBuffer = this.buffers.get(actualIndex)!;
-    const currentDepth = this.depths.get(actualIndex)!;
     const currentInString = this.inStrings.get(actualIndex)!;
     const currentEscape = this.escapes.get(actualIndex)!;
 
@@ -245,10 +261,18 @@ export class StreamingToolCallParser {
       args: Record<string, unknown>;
       index: number;
     }> = [];
+    const emittedIds = new Set<string>();
 
     for (const [index, buffer] of this.buffers.entries()) {
       const meta = this.toolCallMeta.get(index);
       if (meta?.name && buffer.trim()) {
+        if (meta.id) {
+          if (emittedIds.has(meta.id)) {
+            continue;
+          }
+          emittedIds.add(meta.id);
+        }
+
         let args: Record<string, unknown> = {};
 
         // Try to parse the final buffer
@@ -410,5 +434,33 @@ export class StreamingToolCallParser {
       inString: this.inStrings.get(index) || false,
       escape: this.escapes.get(index) || false,
     };
+  }
+
+  /**
+   * Checks whether any buffered tool call has incomplete JSON at stream end.
+   *
+   * A tool call is considered incomplete when its JSON parsing state indicates
+   * the buffer was truncated mid-stream:
+   * - depth > 0: unclosed braces/brackets remain
+   * - inString === true: still inside a string literal
+   *
+   * This is critical for detecting output truncation that the LLM provider
+   * may not report correctly via finish_reason (e.g. reporting "stop" or
+   * "tool_calls" instead of "length" when output was actually cut off).
+   *
+   * @returns true if at least one tool call buffer has incomplete JSON
+   */
+  hasIncompleteToolCalls(): boolean {
+    for (const [index] of this.buffers.entries()) {
+      const meta = this.toolCallMeta.get(index);
+      if (!meta?.name) continue;
+
+      const depth = this.depths.get(index) || 0;
+      const inString = this.inStrings.get(index) || false;
+      if (depth > 0 || inString) {
+        return true;
+      }
+    }
+    return false;
   }
 }

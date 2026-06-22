@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { unescapePath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type {
   LspCallHierarchyIncomingCall,
@@ -1145,8 +1146,11 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
           },
         },
       },
-      false,
-      false,
+      false, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — loaded on demand via ToolSearch
+      false, // alwaysLoad
+      'lsp language server definition references hover symbol diagnostics code actions',
     );
   }
 
@@ -1155,8 +1159,13 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
   ): string | null {
     const operation = params.operation;
 
+    // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
+    if (params.filePath) {
+      params.filePath = unescapePath(params.filePath.trim());
+    }
+
     if (LOCATION_REQUIRED_OPERATIONS.has(operation)) {
-      if (!params.filePath || params.filePath.trim() === '') {
+      if (!params.filePath) {
         return `filePath is required for ${operation}.`;
       }
       if (typeof params.line !== 'number') {
@@ -1165,7 +1174,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     }
 
     if (FILE_REQUIRED_OPERATIONS.has(operation)) {
-      if (!params.filePath || params.filePath.trim() === '') {
+      if (!params.filePath) {
         return `filePath is required for ${operation}.`;
       }
     }
@@ -1183,7 +1192,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     }
 
     if (RANGE_REQUIRED_OPERATIONS.has(operation)) {
-      if (!params.filePath || params.filePath.trim() === '') {
+      if (!params.filePath) {
         return `filePath is required for ${operation}.`;
       }
       if (typeof params.line !== 'number') {

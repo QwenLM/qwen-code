@@ -174,6 +174,53 @@ describe('CommandService', () => {
     expect(loader2.loadCommands).toHaveBeenCalledWith(signal);
   });
 
+  it('should exclude non-user-invocable commands from user command modes', async () => {
+    const userCommand = {
+      ...createMockCommand('user-command', CommandKind.FILE),
+      userInvocable: true,
+      modelInvocable: true,
+    };
+    const modelOnlyCommand = {
+      ...createMockCommand('model-only-command', CommandKind.FILE),
+      userInvocable: false,
+      modelInvocable: true,
+    };
+    const service = await CommandService.create(
+      [new MockCommandLoader([userCommand, modelOnlyCommand])],
+      new AbortController().signal,
+    );
+
+    expect(service.getCommands().map((cmd) => cmd.name)).toEqual([
+      'user-command',
+      'model-only-command',
+    ]);
+    expect(
+      service.getCommandsForMode('interactive').map((cmd) => cmd.name),
+    ).toEqual(['user-command']);
+    expect(service.getModelInvocableCommands().map((cmd) => cmd.name)).toEqual([
+      'user-command',
+      'model-only-command',
+    ]);
+  });
+
+  it('should exclude commands that are neither user nor model invocable', async () => {
+    const hiddenCommand = {
+      ...createMockCommand('hidden-command', CommandKind.FILE),
+      userInvocable: false,
+      modelInvocable: false,
+    };
+    const service = await CommandService.create(
+      [new MockCommandLoader([hiddenCommand])],
+      new AbortController().signal,
+    );
+
+    expect(service.getCommands().map((cmd) => cmd.name)).toEqual([
+      'hidden-command',
+    ]);
+    expect(service.getCommandsForMode('interactive')).toEqual([]);
+    expect(service.getModelInvocableCommands()).toEqual([]);
+  });
+
   it('should rename extension commands when they conflict', async () => {
     const builtinCommand = createMockCommand('deploy', CommandKind.BUILT_IN);
     const userCommand = createMockCommand('sync', CommandKind.FILE);
@@ -344,5 +391,60 @@ describe('CommandService', () => {
     );
     expect(deployExtension).toBeDefined();
     expect(deployExtension?.description).toBe('[gcp] Deploy to Google Cloud');
+  });
+
+  describe('disabled commands (disabledNames parameter)', () => {
+    it('should exclude commands whose names are in the disabledNames set', async () => {
+      const mockLoader = new MockCommandLoader([
+        mockCommandA,
+        mockCommandB,
+        mockCommandC,
+      ]);
+      const service = await CommandService.create(
+        [mockLoader],
+        new AbortController().signal,
+        new Set(['command-a']),
+      );
+
+      const commands = service.getCommands();
+      expect(commands).toHaveLength(2);
+      expect(commands.find((c) => c.name === 'command-a')).toBeUndefined();
+      expect(commands.find((c) => c.name === 'command-b')).toBeDefined();
+      expect(commands.find((c) => c.name === 'command-c')).toBeDefined();
+    });
+
+    it('should match disabled names case-insensitively', async () => {
+      const mockLoader = new MockCommandLoader([mockCommandA, mockCommandB]);
+      const service = await CommandService.create(
+        [mockLoader],
+        new AbortController().signal,
+        new Set(['COMMAND-A', 'Command-B']),
+      );
+
+      const commands = service.getCommands();
+      expect(commands).toHaveLength(0);
+    });
+
+    it('should not filter any commands when disabledNames is empty', async () => {
+      const mockLoader = new MockCommandLoader([mockCommandA, mockCommandB]);
+      const service = await CommandService.create(
+        [mockLoader],
+        new AbortController().signal,
+        new Set(),
+      );
+
+      expect(service.getCommands()).toHaveLength(2);
+    });
+
+    it('should not filter any commands when disabledNames is undefined', async () => {
+      const mockLoader = new MockCommandLoader([mockCommandA, mockCommandB]);
+      const service = await CommandService.create(
+        [mockLoader],
+        new AbortController().signal,
+        undefined,
+      );
+
+      expect(service.getCommands()).toHaveLength(2);
+    });
   });
 });

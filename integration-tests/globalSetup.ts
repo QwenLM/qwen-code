@@ -19,12 +19,9 @@ import {
 } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as os from 'node:os';
 
-import {
-  QWEN_CONFIG_DIR,
-  DEFAULT_CONTEXT_FILENAME,
-} from '../packages/core/src/tools/memoryTool.js';
+import { DEFAULT_CONTEXT_FILENAME } from '@qwen-code/qwen-code-core/src/memory/const.js';
+import { Storage } from '@qwen-code/qwen-code-core/src/config/storage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -33,8 +30,7 @@ let runDir = ''; // Make runDir accessible in teardown
 let sdkE2eRunDir = ''; // SDK E2E test run directory
 
 const memoryFilePath = join(
-  os.homedir(),
-  QWEN_CONFIG_DIR,
+  Storage.getGlobalQwenDir(),
   DEFAULT_CONTEXT_FILENAME,
 );
 let originalMemoryContent: string | null = null;
@@ -94,7 +90,7 @@ export async function setup() {
 
   // Environment variables for CLI integration tests
   process.env['INTEGRATION_TEST_FILE_DIR'] = runDir;
-  process.env['GEMINI_CLI_INTEGRATION_TEST'] = 'true';
+  process.env['QWEN_CODE_INTEGRATION_TEST'] = 'true';
   process.env['TELEMETRY_LOG_FILE'] = join(runDir, 'telemetry.log');
 
   // Environment variables for SDK E2E tests

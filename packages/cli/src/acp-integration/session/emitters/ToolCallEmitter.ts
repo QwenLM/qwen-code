@@ -13,13 +13,34 @@ import type {
   ResolvedToolMetadata,
   SubagentMeta,
 } from '../types.js';
-import type * as acp from '../../acp.js';
+import type {
+  ToolCallContent,
+  ToolCallLocation,
+  ToolKind,
+} from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
-import {
-  TodoWriteTool,
-  Kind,
-  ExitPlanModeTool,
-} from '@qwen-code/qwen-code-core';
+import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
+import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
+
+const KIND_MAP: Record<Kind, ToolKind> = {
+  [Kind.Read]: 'read',
+  [Kind.Edit]: 'edit',
+  [Kind.Delete]: 'delete',
+  [Kind.Move]: 'move',
+  [Kind.Search]: 'search',
+  [Kind.Execute]: 'execute',
+  [Kind.Think]: 'think',
+  [Kind.Fetch]: 'fetch',
+  // ACP defines no 'agent' ToolKind (verified through @agentclientprotocol/sdk
+  // 0.25.1). The daemon's ClientSideConnection Zod-validates every session/update
+  // and session/request_permission from the `qwen --acp` child before fanning out
+  // to SSE clients, so emitting 'agent' is rejected at that hop and the frame is
+  // dropped. Map the internal Kind.Agent to 'other' on the wire to stay
+  // protocol-valid; dedicated agent UI is delivered out-of-band (via _meta.toolName)
+  // in a follow-up rather than via a kind the protocol can't carry.
+  [Kind.Agent]: 'other',
+  [Kind.Other]: 'other',
+};
 
 /**
  * Unified tool call event emitter.
@@ -56,6 +77,10 @@ export class ToolCallEmitter extends BaseEmitter {
       params.toolName,
       params.args,
     );
+    const provenance = ToolCallEmitter.resolveToolProvenance(
+      params.toolName,
+      params.subagentMeta,
+    );
 
     await this.sendUpdate({
       sessionUpdate: 'tool_call',
@@ -69,6 +94,8 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName: params.toolName,
         ...params.subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
           timestamp: BaseEmitter.toEpochMs(params.timestamp),
         }),
@@ -103,7 +130,7 @@ export class ToolCallEmitter extends BaseEmitter {
     }
 
     // Determine content for the update
-    let contentArray: acp.ToolCallContent[] = [];
+    let contentArray: ToolCallContent[] = [];
 
     // Special case: diff result from edit tools (format from resultDisplay)
     const diffContent = this.extractDiffContent(params.resultDisplay);
@@ -123,6 +150,10 @@ export class ToolCallEmitter extends BaseEmitter {
     }
 
     // Build the update
+    const provenance = ToolCallEmitter.resolveToolProvenance(
+      params.toolName,
+      params.subagentMeta,
+    );
     const update: Parameters<typeof this.sendUpdate>[0] = {
       sessionUpdate: 'tool_call_update',
       toolCallId: params.callId,
@@ -131,6 +162,8 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName: params.toolName,
         ...params.subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
           timestamp: BaseEmitter.toEpochMs(params.timestamp),
         }),
@@ -138,7 +171,10 @@ export class ToolCallEmitter extends BaseEmitter {
     };
 
     // Add rawOutput from resultDisplay
-    if (params.resultDisplay !== undefined) {
+    if (
+      params.resultDisplay !== undefined &&
+      !this.isTruncatedSessionDiffDisplay(params.resultDisplay)
+    ) {
       (update as Record<string, unknown>)['rawOutput'] = params.resultDisplay;
     }
 
@@ -160,6 +196,10 @@ export class ToolCallEmitter extends BaseEmitter {
     error: Error,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
+    const provenance = ToolCallEmitter.resolveToolProvenance(
+      toolName,
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
       toolCallId: callId,
@@ -170,8 +210,53 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName,
         ...subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
       },
     });
+  }
+
+  /**
+   * Resolve a tool's provenance for UI dispatch on tool_call events.
+   * The SDK reads `_meta.
+   * provenance` + `_meta.serverId` to render builtin / MCP-server-badge /
+   * subagent-block differently. Without this stamping, the SDK falls
+   * back to string-matching the toolName which can't reliably
+   * distinguish builtin from subagent.
+   *
+   * Resolution rules:
+   *   - `subagentMeta` present → `'subagent'` (a Task tool / Codex
+   *     subagent / etc. wrapping its own tool calls)
+   *   - toolName matches `mcp__<server>__<tool>` → `'mcp'` with
+   *     `serverId: <server>`. Naming convention from
+   *     `packages/core/src/tools/mcp-tool.ts` in the
+   *     `@qwen-code/qwen-code-core` package — mirrors the SDK's same
+   *     heuristic fallback so SDK consumers stay consistent with
+   *     daemon classification.
+   *   - everything else → `'builtin'`
+   *
+   * Static + pure so it can be unit-tested without an emitter
+   * instance. Exported via `ToolCallEmitter.resolveToolProvenance`.
+   */
+  static resolveToolProvenance(
+    toolName: string,
+    subagentMeta?: SubagentMeta,
+  ): { provenance: 'builtin' | 'mcp' | 'subagent'; serverId?: string } {
+    if (subagentMeta !== undefined) {
+      return { provenance: 'subagent' };
+    }
+    if (toolName.startsWith('mcp__')) {
+      // mcp__<serverName>__<toolName> — split is "__", not single "_",
+      // so server / tool segments can contain underscores. Require
+      // both a non-empty server segment and at least one segment past
+      // it; malformed names fall through to 'builtin' rather than
+      // stamping an empty/garbage serverId.
+      const parts = toolName.split('__');
+      if (parts.length >= 3 && parts[1] && parts[1].length > 0) {
+        return { provenance: 'mcp', serverId: parts[1] };
+      }
+    }
+    return { provenance: 'builtin' };
   }
 
   // ==================== Public Utilities ====================
@@ -181,14 +266,21 @@ export class ToolCallEmitter extends BaseEmitter {
    * Exposed for external use in components that need to check this.
    */
   isTodoWriteTool(toolName: string): boolean {
-    return toolName === TodoWriteTool.Name;
+    return toolName === ToolNames.TODO_WRITE;
   }
 
   /**
    * Checks if a tool name is the ExitPlanModeTool.
    */
   isExitPlanModeTool(toolName: string): boolean {
-    return toolName === ExitPlanModeTool.Name;
+    return toolName === ToolNames.EXIT_PLAN_MODE;
+  }
+
+  /**
+   * Checks if a tool name is the EnterPlanModeTool.
+   */
+  isEnterPlanModeTool(toolName: string): boolean {
+    return toolName === ToolNames.ENTER_PLAN_MODE;
   }
 
   /**
@@ -206,8 +298,8 @@ export class ToolCallEmitter extends BaseEmitter {
     const tool = toolRegistry.getTool(toolName);
 
     let title = tool?.displayName ?? toolName;
-    let locations: acp.ToolCallLocation[] = [];
-    let kind: acp.ToolKind = 'other';
+    let locations: ToolCallLocation[] = [];
+    let kind: ToolKind = 'other';
 
     if (tool && args) {
       try {
@@ -221,7 +313,13 @@ export class ToolCallEmitter extends BaseEmitter {
         // Pass tool name to handle special cases like exit_plan_mode -> switch_mode
         kind = this.mapToolKind(tool.kind, toolName);
       } catch {
-        // Use defaults on build failure
+        // Fallback: use the description arg directly if available
+        if (typeof args['description'] === 'string') {
+          title = `${title}: ${args['description']}`;
+        }
+        if (tool.kind) {
+          kind = this.mapToolKind(tool.kind, toolName);
+        }
       }
     }
 
@@ -234,24 +332,15 @@ export class ToolCallEmitter extends BaseEmitter {
    * @param kind - The core Kind enum value
    * @param toolName - Optional tool name to handle special cases like exit_plan_mode
    */
-  mapToolKind(kind: Kind, toolName?: string): acp.ToolKind {
-    // Special case: exit_plan_mode uses 'switch_mode' kind per ACP spec
-    if (toolName && this.isExitPlanModeTool(toolName)) {
+  mapToolKind(kind: Kind, toolName?: string): ToolKind {
+    // Special case: enter/exit_plan_mode use 'switch_mode' kind per ACP spec
+    if (
+      toolName &&
+      (this.isExitPlanModeTool(toolName) || this.isEnterPlanModeTool(toolName))
+    ) {
       return 'switch_mode';
     }
-
-    const kindMap: Record<Kind, acp.ToolKind> = {
-      [Kind.Read]: 'read',
-      [Kind.Edit]: 'edit',
-      [Kind.Delete]: 'delete',
-      [Kind.Move]: 'move',
-      [Kind.Search]: 'search',
-      [Kind.Execute]: 'execute',
-      [Kind.Think]: 'think',
-      [Kind.Fetch]: 'fetch',
-      [Kind.Other]: 'other',
-    };
-    return kindMap[kind] ?? 'other';
+    return KIND_MAP[kind] ?? 'other';
   }
 
   // ==================== Private Helpers ====================
@@ -260,15 +349,23 @@ export class ToolCallEmitter extends BaseEmitter {
    * Extracts diff content from resultDisplay if it's a diff type (edit tool result).
    * Returns null if not a diff.
    */
-  private extractDiffContent(
-    resultDisplay: unknown,
-  ): acp.ToolCallContent | null {
+  private extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
     if (!resultDisplay || typeof resultDisplay !== 'object') return null;
 
     const obj = resultDisplay as Record<string, unknown>;
 
     // Check if this is a diff display (edit tool result)
     if ('fileName' in obj && 'newContent' in obj) {
+      if (this.isTruncatedSessionDiffDisplay(resultDisplay)) {
+        return {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: buildTruncatedDiffPreviewText(obj),
+          },
+        };
+      }
+
       return {
         type: 'diff',
         path: obj['fileName'] as string,
@@ -280,14 +377,23 @@ export class ToolCallEmitter extends BaseEmitter {
     return null;
   }
 
+  private isTruncatedSessionDiffDisplay(resultDisplay: unknown): boolean {
+    if (!resultDisplay || typeof resultDisplay !== 'object') return false;
+
+    const obj = resultDisplay as Record<string, unknown>;
+    return (
+      obj['truncatedForSession'] === true &&
+      'fileName' in obj &&
+      'newContent' in obj
+    );
+  }
+
   /**
    * Transforms Part[] to ToolCallContent[].
    * Extracts text from functionResponse parts and text parts.
    */
-  private transformPartsToToolCallContent(
-    parts: Part[],
-  ): acp.ToolCallContent[] {
-    const result: acp.ToolCallContent[] = [];
+  private transformPartsToToolCallContent(parts: Part[]): ToolCallContent[] {
+    const result: ToolCallContent[] = [];
 
     for (const part of parts) {
       // Handle text parts

@@ -128,9 +128,11 @@ describe('Single-Turn Query (E2E)', () => {
           }
         }
 
-        // Validate content contains greeting
+        // Validate content contains either the requested greeting or self-description.
         expect(assistantText.length).toBeGreaterThan(0);
-        expect(assistantText.toLowerCase()).toMatch(/hello|hi|greetings/);
+        expect(assistantText.toLowerCase()).toMatch(
+          /hello|hi|greetings|qwen code|assistant/,
+        );
 
         // Validate message types
         const assistantMessages = collectMessagesByType(

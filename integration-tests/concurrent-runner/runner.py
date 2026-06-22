@@ -51,10 +51,17 @@ class Task:
 
 
 @dataclass
+class ModelSpec:
+    """One model to run: name and optional auth_type (e.g. anthropic)."""
+    name: str
+    auth_type: Optional[str] = None
+
+
+@dataclass
 class RunConfig:
     """Configuration for the concurrent execution."""
     tasks: List[Task]
-    models: List[str]
+    models: List[ModelSpec]  # name + optional auth_type per model
     concurrency: int = 4
     yolo: bool = True
     source_repo: Path = field(default_factory=lambda: Path.cwd())
@@ -84,6 +91,7 @@ class RunRecord:
     task_name: str
     model: str
     status: RunStatus
+    auth_type: Optional[str] = None  # e.g. "anthropic" for qwen --auth-type
     worktree_path: Optional[str] = None
     output_dir: Optional[str] = None
     logs_dir: Optional[str] = None
@@ -104,6 +112,7 @@ class RunRecord:
             "task_name": self.task_name,
             "model": self.model,
             "status": self.status.value,
+            "auth_type": self.auth_type,
             "worktree_path": self.worktree_path,
             "output_dir": self.output_dir,
             "logs_dir": self.logs_dir,
@@ -136,6 +145,7 @@ class RunRecord:
             task_name=data["task_name"],
             model=data["model"],
             status=RunStatus(data["status"]),
+            auth_type=data.get("auth_type"),
             worktree_path=data.get("worktree_path"),
             output_dir=data.get("output_dir"),
             logs_dir=data.get("logs_dir"),
@@ -806,6 +816,10 @@ class QwenRunner:
         # Add model
         cmd.extend(["--model", run.model])
 
+        # Add auth-type when model uses non-OpenAI protocol (e.g. anthropic for glm-4.7)
+        if run.auth_type:
+            cmd.extend(["--auth-type", run.auth_type])
+
         # Add yolo if enabled
         if self.config.yolo:
             cmd.append("--yolo")
@@ -829,27 +843,41 @@ def generate_run_matrix(config: RunConfig) -> List[RunRecord]:
     runs = []
     for task in config.tasks:
         for model in config.models:
-            run_id = str(uuid.uuid4())[:8]
             runs.append(RunRecord(
-                run_id=run_id,
+                run_id=str(uuid.uuid4())[:8],
                 task_id=task.id,
                 task_name=task.name,
-                model=model,
+                model=model.name,
                 status=RunStatus.QUEUED,
+                auth_type=model.auth_type,
             ))
     return runs
+
+
+def _parse_models(data_models: List[Any]) -> List[ModelSpec]:
+    """Parse models: string or {name, auth_type/authType}; returns list of ModelSpec."""
+    specs: List[ModelSpec] = []
+    for item in data_models or []:
+        if isinstance(item, str):
+            name, auth = item, None
+        elif isinstance(item, dict) and item.get("name"):
+            name = item["name"]
+            auth = item.get("auth_type") or item.get("authType")
+        else:
+            continue
+        specs.append(ModelSpec(name=name, auth_type=auth))
+    return specs
 
 
 def load_config(config_path: Path) -> RunConfig:
     """Load configuration from JSON file."""
     with open(config_path, 'r') as f:
         data = json.load(f)
-    
     tasks = [Task(**t) for t in data.get("tasks", [])]
-    
+    models = _parse_models(data.get("models", []))
     return RunConfig(
         tasks=tasks,
-        models=data.get("models", []),
+        models=models,
         concurrency=data.get("concurrency", 4),
         yolo=data.get("yolo", True),
         source_repo=Path(data.get("source_repo", ".")).resolve(),

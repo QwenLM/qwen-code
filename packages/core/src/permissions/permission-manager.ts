@@ -1,0 +1,1152 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  parseRules,
+  parseRule,
+  matchesRule,
+  resolveToolName,
+  splitCompoundCommand,
+  SHELL_TOOL_NAMES,
+  toolMatchesRuleToolName,
+} from './rule-parser.js';
+import type { PathMatchContext } from './rule-parser.js';
+import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
+import type { ShellOperation } from './shell-semantics.js';
+import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  findDangerousAllowRules,
+  isDangerousAllowRule,
+} from './dangerousRules.js';
+import type {
+  PermissionCheckContext,
+  PermissionDecision,
+  PermissionRule,
+  PermissionRuleSet,
+  RuleType,
+  RuleWithSource,
+  RuleScope,
+} from './types.js';
+
+const debugLogger = createDebugLogger('PERMISSIONS');
+
+/**
+ * Numeric priority for each PermissionDecision.
+ * Higher number = more restrictive. Used to combine decisions by taking
+ * the most restrictive result across base rules + virtual shell operations.
+ */
+const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
+  deny: 3,
+  ask: 2,
+  default: 1,
+  allow: 0,
+};
+
+/**
+ * Minimal interface for the parts of Config used by PermissionManager.
+ * Keeps the dependency explicit and avoids a circular import on the
+ * full Config class.
+ *
+ * Each getter already returns a fully-merged list: persistent settings rules
+ * plus any SDK / CLI params that have been folded in by the Config layer.
+ * PermissionManager therefore only needs these three getters.
+ */
+export interface PermissionManagerConfig {
+  /** Merged allow-rules (settings + coreTools + allowedTools). */
+  getPermissionsAllow(): string[] | undefined;
+  /** Merged ask-rules (settings only). */
+  getPermissionsAsk(): string[] | undefined;
+  /** Merged deny-rules (settings + excludeTools). */
+  getPermissionsDeny(): string[] | undefined;
+  /** Project root directory (for resolving path patterns). */
+  getProjectRoot?(): string;
+  /** Current working directory (for resolving path patterns). */
+  getCwd?(): string;
+  /**
+   * Returns the current approval mode (plan/default/auto-edit/yolo).
+   * Used by `getDefaultMode()` to determine the fallback when no rule matches.
+   */
+  getApprovalMode?(): string;
+  /**
+   * Returns the legacy coreTools allowlist.
+   *
+   * When non-empty, only the tools in this list will be considered enabled at
+   * the registry level — all other tools will be excluded from registration.
+   * This preserves the original `tools.core` whitelist semantic inside
+   * PermissionManager, so `createToolRegistry` can use a single
+   * `pm.isToolEnabled()` check without any legacy fallback.
+   *
+   * @deprecated Configure tool availability via `permissions.deny` rules
+   *             (e.g. `"Bash"` to block all shell commands) instead.
+   */
+  getCoreTools?(): string[] | undefined;
+}
+
+/**
+ * Manages tool and command permissions by evaluating a set of
+ * prioritised rules against allow / ask / deny lists.
+ *
+ * Rule evaluation order (highest priority first):
+ *   1. deny rules  → PermissionDecision.deny
+ *   2. ask  rules  → PermissionDecision.ask
+ *   3. allow rules → PermissionDecision.allow
+ *   4. (no match)  → PermissionDecision.default
+ *
+ * Rules can come from three sources, checked in order within each type:
+ *   - Session rules  (in-memory only, added during the current session)
+ *   - Persistent rules (from settings files, passed via ConfigParameters)
+ *
+ * Legacy params (coreTools / allowedTools / excludeTools) are converted
+ * to in-memory rules for backward compatibility with the SDK API.
+ */
+export class PermissionManager {
+  /** Persistent rules loaded from settings (all scopes merged). */
+  private persistentRules: PermissionRuleSet = {
+    allow: [],
+    ask: [],
+    deny: [],
+  };
+
+  /** In-memory rules added for the current session only. */
+  private sessionRules: PermissionRuleSet = {
+    allow: [],
+    ask: [],
+    deny: [],
+  };
+
+  /**
+   * Allow rules temporarily removed while the user is in AUTO mode.
+   * Populated by `stripDangerousRulesForAutoMode` (called from
+   * `Config.setApprovalMode` on AUTO entry) and drained by
+   * `restoreDangerousRules` (called on AUTO exit). `undefined` means
+   * "not currently in AUTO mode" — distinct from "no rules stripped".
+   */
+  private strippedAllowRules?: {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  };
+
+  /**
+   * Canonical tool names from the legacy `coreTools` allowlist.
+   * When non-null, `isToolEnabled()` rejects any tool not in this set.
+   * Populated during `initialize()` from `config.getCoreTools()`.
+   */
+  private coreToolsAllowList: Set<string> | null = null;
+
+  constructor(private readonly config: PermissionManagerConfig) {}
+
+  /**
+   * Initialise from the config's permission parameters.
+   * Must be called once before any rule lookups.
+   *
+   * The config getters already return fully-merged lists (settings + SDK params),
+   * so we simply parse them into typed rules.
+   */
+  initialize(): void {
+    this.persistentRules = {
+      allow: parseRules(this.config.getPermissionsAllow() ?? []),
+      ask: parseRules(this.config.getPermissionsAsk() ?? []),
+      deny: parseRules(this.config.getPermissionsDeny() ?? []),
+    };
+
+    // Build the coreTools allowlist (legacy whitelist semantic).
+    // Each entry may be a bare name ("Bash", "read_file") or include a specifier
+    // ("Bash(ls -l)") – we normalise to canonical tool names and ignore specifiers
+    // because the registry check is at the tool level, not the invocation level.
+    const rawCoreTools = this.config.getCoreTools?.();
+    if (rawCoreTools && rawCoreTools.length > 0) {
+      this.coreToolsAllowList = new Set(
+        rawCoreTools.map((t) => parseRule(t).toolName),
+      );
+    }
+
+    // When the session starts in AUTO (via `tools.approvalMode: 'auto'` in
+    // settings.json or `--approval-mode auto` on the CLI), the constructor
+    // sets approvalMode before PermissionManager is wired up. Catch that
+    // case here so AUTO-on-startup sessions get dangerous allow rules
+    // stripped, same as sessions that switch to AUTO via Shift+Tab.
+    if (this.config.getApprovalMode?.() === 'auto') {
+      this.stripDangerousRulesForAutoMode();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Core evaluation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Evaluate the permission decision for a given tool invocation context.
+   *
+   * @param ctx - The context containing the tool name and optional command.
+   * @returns A PermissionDecision indicating how to handle this tool call.
+   */
+  async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
+    ctx = this.normalizePermissionContext(ctx);
+    const { command, toolName } = ctx;
+
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // Run the compound-aware extractor on the FULL original command before
+    // splitting. This is the single source of truth for cd tracking and
+    // recursive shell-wrapper unwrapping — without it, splitting first
+    // would discard the cd context, so a rule like
+    // `deny: ["Write(.qwen/settings.json)"]` would miss
+    // `cd .qwen && bash -lc 'echo > settings.json'`.
+    //
+    // Virtual-op verdicts can only ESCALATE the overall decision; a
+    // 'default' here means "shell semantics have no opinion" and we still
+    // need to consult Bash rules below.
+    let virtualDecision: PermissionDecision = 'default';
+    if (command !== undefined && SHELL_TOOL_NAMES.has(toolName)) {
+      const pathCtx: PathMatchContext | undefined =
+        this.config.getProjectRoot && this.config.getCwd
+          ? {
+              projectRoot: this.config.getProjectRoot(),
+              cwd: ctx.cwd ?? this.config.getCwd(),
+            }
+          : undefined;
+      const cwd = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwd);
+      virtualDecision = this.evaluateShellVirtualOps(ops, pathCtx);
+      // deny short-circuits — most restrictive verdict possible.
+      if (virtualDecision === 'deny') return 'deny';
+    }
+
+    // ── Bash-rule pass: split compound commands and evaluate each
+    // sub-command independently against Bash(...) patterns, returning the
+    // most restrictive result. Priority: deny > ask > allow.
+    let bashDecision: PermissionDecision;
+    if (command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
+      } else {
+        bashDecision = this.evaluateSingle(ctx);
+        // For shell commands, resolve 'default' to actual permission via AST
+        // analysis so the caller always sees a concrete verdict.
+        if (
+          bashDecision === 'default' &&
+          SHELL_TOOL_NAMES.has(toolName) &&
+          command !== undefined
+        ) {
+          bashDecision = await this.resolveDefaultPermission(command);
+        }
+      }
+    } else {
+      bashDecision = this.evaluateSingle(ctx);
+    }
+
+    // ── Merge: virtual-op verdict can ESCALATE the bash verdict (to ask /
+    // deny) but a 'default' virtual result means "shell semantics have no
+    // opinion" and must never override an explicit allow from a Bash
+    // rule. (DECISION_PRIORITY.default > DECISION_PRIORITY.allow so the
+    // guard is load-bearing.)
+    if (
+      virtualDecision !== 'default' &&
+      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[bashDecision]
+    ) {
+      return virtualDecision;
+    }
+    return bashDecision;
+  }
+
+  /**
+   * Evaluate a single (non-compound) context against all rules.
+   *
+   * For shell commands (run_shell_command), the result is the most restrictive
+   * of:
+   *   1. The base decision from Bash / command-pattern rules.
+   *   2. The decision derived from virtual file / network operations extracted
+   *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
+   *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
+   */
+  private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+
+    // Build path context for resolving relative path patterns
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    // Compute the base decision from explicit Bash/file/domain rules.
+    // Using an IIFE to keep the priority-cascade logic clean.
+    const baseDecision: PermissionDecision = (() => {
+      // Priority 1: deny rules (session first, then persistent)
+      for (const rule of [
+        ...this.sessionRules.deny,
+        ...this.persistentRules.deny,
+      ]) {
+        if (matchesRule(rule, ...matchArgs)) return 'deny';
+      }
+      // Priority 2: ask rules
+      for (const rule of [
+        ...this.sessionRules.ask,
+        ...this.persistentRules.ask,
+      ]) {
+        if (matchesRule(rule, ...matchArgs)) return 'ask';
+      }
+      // Priority 3: allow rules
+      for (const rule of [
+        ...this.sessionRules.allow,
+        ...this.persistentRules.allow,
+      ]) {
+        if (matchesRule(rule, ...matchArgs)) return 'allow';
+      }
+      return 'default';
+    })();
+
+    // `deny` is the most restrictive result — no further checks needed.
+    if (baseDecision === 'deny') return 'deny';
+
+    // For shell commands: evaluate virtual file/network operations extracted
+    // from the command string against Read/Edit/Write/WebFetch/ListFiles rules.
+    //
+    // Virtual ops can only ESCALATE a decision (to 'ask' or 'deny').
+    // A 'default' virtual result means "shell semantics have no opinion" — it
+    // must never downgrade an explicit 'allow' decision from a Bash rule.
+    // Example: `git status` has no file ops; an allow rule for `Bash(git *)`
+    // should return 'allow', not be downgraded to 'default'.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwd = pathCtx?.cwd ?? process.cwd();
+      // Use the compound-aware extractor here too so a single
+      // `evaluateSingle` call on a segment like
+      // `bash -lc 'echo > .qwen/settings.json'` still surfaces the inner
+      // write to virtual-op rules. The cross-command cd-tracking pass at
+      // the top of `evaluate()` handles `cd && wrapper` patterns —
+      // per-segment unwrapping handles wrappers in isolation.
+      const virtualDecision = this.evaluateShellVirtualOps(
+        extractShellOperationsAcrossCommand(command, cwd),
+        pathCtx,
+      );
+      if (
+        virtualDecision !== 'default' &&
+        DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[baseDecision]
+      ) {
+        return virtualDecision;
+      }
+    }
+
+    return baseDecision;
+  }
+
+  /**
+   * Evaluate a list of virtual operations (derived from shell command analysis)
+   * against all current rules.  Returns the most restrictive matching decision,
+   * or `'default'` if no rule matches any operation.
+   *
+   * Each operation is evaluated as if it were a direct invocation of its
+   * `virtualTool` (e.g. `read_file`, `web_fetch`, `edit`), so Read/Edit/etc.
+   * rules are applied naturally.
+   */
+  private evaluateShellVirtualOps(
+    ops: ShellOperation[],
+    pathCtx: PathMatchContext | undefined,
+  ): PermissionDecision {
+    if (ops.length === 0) return 'default';
+
+    let worst: PermissionDecision = 'default';
+
+    for (const op of ops) {
+      // Evaluate the virtual operation using the standard rule-matching path.
+      // Since op.virtualTool ≠ 'run_shell_command', this will not recurse back
+      // into the shell-semantics branch.
+      let opDecision = this.evaluateSingle({
+        toolName: op.virtualTool,
+        cwd: pathCtx?.cwd,
+        filePath: op.filePath,
+        domain: op.domain,
+      });
+
+      if (
+        op.cwdUnknown &&
+        op.pathMayDependOnCwd &&
+        DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask &&
+        this.hasDenyOrAskRuleForTool(op.virtualTool)
+      ) {
+        debugLogger.info(
+          `PermissionManager: cwdUnknown escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath}`,
+        );
+        opDecision = 'ask';
+      }
+
+      if (DECISION_PRIORITY[opDecision] > DECISION_PRIORITY[worst]) {
+        worst = opDecision;
+        if (worst === 'deny') return 'deny'; // short-circuit
+      }
+    }
+
+    return worst;
+  }
+
+  private hasDenyOrAskRuleForTool(toolName: string): boolean {
+    return [
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
+  }
+
+  /**
+   * Evaluate a compound command by splitting it into sub-commands,
+   * evaluating each independently, and returning the most restrictive result.
+   *
+   * Restriction order: deny > ask > allow
+   *
+   * When a sub-command returns 'default' (no rule matches), it is resolved to
+   * the actual default permission using AST analysis:
+   *   - Read-only command (cd, ls, git status, etc.) → 'allow'
+   *   - Otherwise (including command substitution) → 'ask'
+   *
+   * Example: with rules `allow: [git checkout *]`
+   *   - "cd /path && git checkout -b feature" → allow (cd) + allow (rule) → allow
+   *   - "rm /path && git checkout -b feature" → ask (rm) + allow (rule) → ask
+   *   - "evil-cmd && git checkout" (deny: [evil-cmd]) → deny + allow → deny
+   */
+  private async evaluateCompoundCommand(
+    ctx: PermissionCheckContext,
+    subCommands: string[],
+  ): Promise<PermissionDecision> {
+    // Type for resolved decisions (excludes 'default' since it's resolved)
+    type ResolvedDecision = 'allow' | 'ask' | 'deny';
+    const PRIORITY: Record<ResolvedDecision, number> = {
+      deny: 3,
+      ask: 2,
+      allow: 0,
+    };
+
+    let mostRestrictive: ResolvedDecision = 'allow';
+
+    for (const subCmd of subCommands) {
+      const subCtx: PermissionCheckContext = {
+        ...ctx,
+        command: subCmd,
+      };
+      const rawDecision = this.evaluateSingle(subCtx);
+
+      // Resolve 'default' to actual permission using AST analysis
+      // (same logic as ShellToolInvocation.getDefaultPermission)
+      const decision: ResolvedDecision =
+        rawDecision === 'default'
+          ? await this.resolveDefaultPermission(subCmd)
+          : (rawDecision as ResolvedDecision);
+
+      if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
+        mostRestrictive = decision;
+      }
+
+      // Short-circuit: deny is the most restrictive possible
+      if (mostRestrictive === 'deny') {
+        return 'deny';
+      }
+    }
+
+    return mostRestrictive;
+  }
+
+  /**
+   * Resolve 'default' permission to actual permission using AST analysis.
+   * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
+   *
+   * Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
+   * falls through to 'ask' along with every other non-read-only command, so
+   * the user (or YOLO mode) can decide. The user-facing warning is surfaced
+   * by ShellToolInvocation.getConfirmationDetails so the confirmation prompt
+   * still flags the substitution clearly. See issue #4093 for why a hard
+   * deny here is wrong: it (a) cannot be overridden by YOLO mode and (b)
+   * fires inconsistently based on whether the PermissionManager has
+   * "relevant" rules for the surrounding compound command.
+   *
+   * @param command - The shell command to analyze.
+   * @returns 'allow' for read-only, 'ask' otherwise.
+   */
+  private async resolveDefaultPermission(
+    command: string,
+  ): Promise<'allow' | 'ask'> {
+    // AST-based read-only detection. Commands containing command
+    // substitution are never read-only — `evaluateStatementReadOnly`
+    // (shellAstParser.ts) guards on `containsCommandSubstitutionAST` at
+    // the top so every node type inherits the check, including
+    // `variable_assignment` (`FOO=$(curl ...)`) and `redirected_statement`
+    // (`cat < $(curl ...)`) where earlier versions had blind spots. See
+    // PR #4386 round 4. So substitution-bearing commands fall through
+    // to 'ask' on the line below.
+    try {
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      if (isReadOnly) {
+        return 'allow';
+      }
+    } catch (e) {
+      // Mirror the equivalent logging in `ShellToolInvocation.getDefaultPermission`
+      // (shell.ts) and `MonitorToolInvocation.getDefaultPermission` (monitor.ts).
+      // Pre-#4386 we had a regex `detectCommandSubstitution` safety net here;
+      // with that gone, the AST check is the sole gatekeeper, so a silent
+      // catch makes parser regressions invisible.
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
+    }
+
+    return 'ask';
+  }
+
+  private normalizePermissionContext(
+    ctx: PermissionCheckContext,
+  ): PermissionCheckContext {
+    if (ctx.toolName !== 'monitor' || ctx.command === undefined) {
+      return ctx;
+    }
+
+    // Note on cwd: callers wired through `buildPermissionCheckContext`
+    // already populate `ctx.cwd` from the monitor's `directory` parameter
+    // (see permission-helpers.ts), and the spread below preserves it. That
+    // is what makes relative-path rules — including those derived from
+    // virtual shell ops in evaluateSingle() — resolve against the monitor's
+    // working directory rather than the global config cwd. Direct callers
+    // of `evaluate()` that bypass that helper must pass `cwd` themselves.
+    return {
+      ...ctx,
+      command: normalizeMonitorCommand(ctx.command).safetyCommand,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Registry-level helper
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Core tools that are subject to the coreTools allowlist check.
+   *
+   * Tools NOT in this set bypass the check. Two categories live outside:
+   * - Dynamically discovered tools (MCP, Skill).
+   * - Synthetic system tools that the framework injects when a feature is
+   *   opted into and that have no meaning when missing — `agent`,
+   *   `exit_plan_mode`, `ask_user_question`, `task_stop`, `send_message`,
+   *   `structured_output` (registered only when `--json-schema` is set).
+   *   Excluding `structured_output` from `--core-tools` would leave a
+   *   `--json-schema` run with no terminal contract, so the synthetic
+   *   tool stays available regardless of the allowlist (deny rules still
+   *   apply).
+   */
+  private static readonly CORE_TOOLS = new Set([
+    'read_file',
+    'write_file',
+    'edit',
+    'notebook_edit',
+    'glob',
+    'grep_search',
+    'run_shell_command',
+    'list_directory',
+    'web_fetch',
+    'todo_write',
+    'save_memory',
+    'lsp',
+    'cron_create',
+    'cron_list',
+    'cron_delete',
+    'loop_wakeup',
+    'monitor',
+  ]);
+
+  /**
+   * Check if a tool is a core tool subject to the coreTools allowlist check.
+   */
+  private isCoreTool(toolName: string): boolean {
+    return PermissionManager.CORE_TOOLS.has(toolName);
+  }
+
+  /**
+   * Determine whether a tool should be present in the tool registry.
+   *
+   * A tool is disabled (returns false) when a `deny` rule without a specifier
+   * (i.e. a whole-tool deny) matches.  Specifier-based deny rules such as
+   * `"Bash(rm -rf *)"` do NOT remove the tool from the registry – they only
+   * deny specific invocations at runtime.
+   *
+   * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
+   * check because they are dynamically discovered or essential for system
+   * operation.
+   */
+  async isToolEnabled(toolName: string): Promise<boolean> {
+    const canonicalName = resolveToolName(toolName);
+
+    // Non-core tools bypass coreTools allowlist check
+    if (!this.isCoreTool(canonicalName)) {
+      const decision = await this.evaluate({ toolName: canonicalName });
+      return decision !== 'deny';
+    }
+
+    // Core tools: if a coreTools allowlist is active, only explicitly listed
+    // tools are registered. This mirrors the legacy `tools.core` whitelist
+    // semantic: any tool NOT in the allowlist is excluded from the registry.
+    if (this.coreToolsAllowList !== null && this.coreToolsAllowList.size > 0) {
+      if (!this.coreToolsAllowList.has(canonicalName)) {
+        return false;
+      }
+    }
+
+    // evaluate({ toolName }) without a command will only match rules that have
+    // no specifier, which is the correct registry-level check.
+    const decision = await this.evaluate({ toolName: canonicalName });
+    return decision !== 'deny';
+  }
+
+  /**
+   * Find the first deny rule that matches the given context.
+   * Returns the raw rule string if found, or undefined if no deny rule matches.
+   *
+   * Useful for providing user-visible feedback about which rule caused a denial.
+   */
+  findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
+    ctx = this.normalizePermissionContext(ctx);
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    for (const rule of [
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ]) {
+      if (matchesRule(rule, ...matchArgs)) {
+        return rule.raw;
+      }
+    }
+    return undefined;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shell command helper
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Determine the permission decision for a specific shell command string.
+   *
+   * @param command - The shell command to evaluate.
+   * @returns The PermissionDecision for this command.
+   */
+  async isCommandAllowed(
+    command: string,
+    cwd?: string,
+  ): Promise<PermissionDecision> {
+    return this.evaluate({
+      toolName: 'run_shell_command',
+      command,
+      cwd,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Relevance check
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Check whether any rule (allow, ask, or deny) in the current rule set
+   * matches the given invocation context.
+   *
+   * This allows the scheduler to skip the full `evaluate()` call when no
+   * rules are relevant, preserving the tool's `getDefaultPermission()` result
+   * as-is.
+   *
+   * "Relevant" means at least one rule's toolName matches AND, if the rule
+   * has a specifier, it also matches the context's command/filePath/domain.
+   *
+   * Examples for Shell executing `git clone xxx`:
+   *   - "Bash"               → matches (tool-level rule, no specifier)
+   *   - "Bash(git *)"        → matches (git sub-command wildcard)
+   *   - "Bash(git clone *)"  → matches (exact sub-command wildcard)
+   *   - "Bash(git add *)"    → no match (different sub-command)
+   *   - "Edit"               → no match (different tool)
+   *
+   * @param ctx - Permission check context.
+   * @returns true if at least one rule matches.
+   */
+  hasRelevantRules(ctx: PermissionCheckContext): boolean {
+    ctx = this.normalizePermissionContext(ctx);
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+
+    const allRules = [
+      ...this.sessionRules.allow,
+      ...this.persistentRules.allow,
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ];
+
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // Run before the splitCompound recursion so cd tracking and recursive
+    // wrapper unwrapping see the FULL original command. Required so
+    // rules like `Write(.qwen/settings.json)` are recognised as relevant
+    // for `cd .qwen && bash -lc 'echo > settings.json'`.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwdForOps = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
+      if (
+        ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasDenyOrAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
+          const opMatchArgs = [
+            op.virtualTool,
+            undefined,
+            op.filePath,
+            op.domain,
+            pathCtx,
+            undefined,
+          ] as const;
+          return allRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+        })
+      ) {
+        return true;
+      }
+    }
+
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        return subCommands.some((subCmd) =>
+          this.hasRelevantRules({ ...ctx, command: subCmd }),
+        );
+      }
+    }
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    return allRules.some((rule) => matchesRule(rule, ...matchArgs));
+  }
+
+  /**
+   * Returns true when the invocation is matched by an explicit `ask` rule.
+   *
+   * This is intentionally narrower than `evaluate(ctx) === 'ask'`. Shell
+   * commands can resolve to `ask` simply because they are non-read-only and no
+   * explicit allow/deny rule matched. That fallback should still allow users to
+   * create new allow rules, so callers must only hide "Always allow" when a
+   * real ask rule matched.
+   */
+  hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
+    ctx = this.normalizePermissionContext(ctx);
+    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+
+    const askRules = [...this.sessionRules.ask, ...this.persistentRules.ask];
+
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // See `hasRelevantRules` for the rationale; same cd-tracking and
+    // wrapper-unwrapping requirement applies to ask rules.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwdForOps = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
+      if (
+        ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
+          const opMatchArgs = [
+            op.virtualTool,
+            undefined,
+            op.filePath,
+            op.domain,
+            pathCtx,
+            undefined,
+          ] as const;
+          return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+        })
+      ) {
+        return true;
+      }
+    }
+
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        return subCommands.some((subCmd) =>
+          this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+        );
+      }
+    }
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    return askRules.some((rule) => matchesRule(rule, ...matchArgs));
+  }
+
+  private hasAskRuleForTool(toolName: string): boolean {
+    return [...this.sessionRules.ask, ...this.persistentRules.ask].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session rule management
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a session-level allow rule (in-memory, cleared when the session ends).
+   * Used when the user clicks "Always allow for this session".
+   *
+   * @param raw - The raw rule string, e.g. "Bash(git status)".
+   */
+  addSessionAllowRule(raw: string): void {
+    if (raw && raw.trim()) {
+      const rule = parseRule(raw);
+      if (rule.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        return;
+      }
+      // AUTO mode invariant: while dangerous allow rules are stripped,
+      // any newly added allow rule that is itself dangerous must be
+      // stashed alongside the strip rather than made active. Without
+      // this, a user clicking "Always allow" on a fallback prompt for
+      // a Bash invocation could persist `Bash` or `Bash(python *)` and
+      // every subsequent AUTO call would bypass the classifier. See
+      // dangerousRules.ts for the classifier-bypass criteria.
+      if (this.strippedAllowRules && isDangerousAllowRule(rule)) {
+        // Deduplicate on raw string — matches the persistent-stash branch
+        // in addPersistentRule. A repeated "Always allow" choice for the
+        // same rule must not pile copies into the session stash.
+        const exists = this.strippedAllowRules.session.some(
+          (r) => r.raw === rule.raw,
+        );
+        if (!exists) {
+          this.strippedAllowRules.session.push(rule);
+        }
+        debugLogger.info(
+          `Stashed newly added dangerous allow rule while in AUTO mode: ${rule.raw}`,
+        );
+        return;
+      }
+      this.sessionRules.allow.push(rule);
+    }
+  }
+
+  /**
+   * Add a session-level deny rule (in-memory, cleared when the session ends).
+   */
+  addSessionDenyRule(raw: string): void {
+    if (raw && raw.trim()) {
+      const rule = parseRule(raw);
+      if (rule.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        return;
+      }
+      this.sessionRules.deny.push(rule);
+    }
+  }
+
+  /**
+   * Add a session-level ask rule (in-memory, cleared when the session ends).
+   */
+  addSessionAskRule(raw: string): void {
+    if (raw && raw.trim()) {
+      const rule = parseRule(raw);
+      if (rule.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        return;
+      }
+      this.sessionRules.ask.push(rule);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Persistent rule management
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a single persistent rule to the specified type.
+   * This modifies the in-memory rule set; the caller is responsible for
+   * persisting the change to disk (e.g. by writing to settings.json).
+   *
+   * @param raw - The raw rule string, e.g. "Bash(git *)"
+   * @param type - 'allow' | 'ask' | 'deny'
+   * @returns The parsed rule that was added.
+   */
+  addPersistentRule(raw: string, type: RuleType): PermissionRule {
+    const rule = parseRule(raw);
+    if (rule.invalid) {
+      debugLogger.warn(
+        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
+      );
+      return rule;
+    }
+    // AUTO mode invariant: see addSessionAllowRule above. A dangerous
+    // allow rule persisted while in AUTO must not become active until
+    // the user exits AUTO — otherwise an "Always allow" choice on a
+    // fallback prompt would bypass the classifier from that point on.
+    // The settings.json write is still performed by the caller (this
+    // method only manages the in-memory ruleset), so the rule reaches
+    // disk and will activate normally on the next non-AUTO start.
+    if (
+      type === 'allow' &&
+      this.strippedAllowRules &&
+      isDangerousAllowRule(rule)
+    ) {
+      const exists = this.strippedAllowRules.persistent.some(
+        (r) => r.raw === rule.raw,
+      );
+      if (!exists) {
+        this.strippedAllowRules.persistent.push(rule);
+      }
+      debugLogger.info(
+        `Stashed newly added dangerous persistent allow rule while in AUTO mode: ${rule.raw}`,
+      );
+      return rule;
+    }
+    // Deduplicate: skip if a rule with the same raw string already exists
+    const exists = this.persistentRules[type].some((r) => r.raw === rule.raw);
+    if (!exists) {
+      this.persistentRules[type].push(rule);
+    }
+    return rule;
+  }
+
+  /**
+   * Remove a persistent rule matching the given raw string from the
+   * specified type.  Removes the first match only.
+   *
+   * @returns true if a rule was removed, false if no matching rule was found.
+   */
+  removePersistentRule(raw: string, type: RuleType): boolean {
+    const rules = this.persistentRules[type];
+    const idx = rules.findIndex((r) => r.raw === raw);
+    if (idx !== -1) {
+      rules.splice(idx, 1);
+      return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Default mode
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Return the current default approval mode from config.
+   * This is used by the UI layer when `evaluate()` returns 'default' to
+   * determine the actual behavior (ask vs allow).
+   */
+  getDefaultMode(): string {
+    return this.config.getApprovalMode?.() ?? 'default';
+  }
+
+  /**
+   * Update the persistent deny rules (called after migrating settings).
+   * Replaces the persistent deny rule set entirely.
+   */
+  updatePersistentRules(ruleSet: Partial<PermissionRuleSet>): void {
+    if (ruleSet.allow !== undefined) {
+      this.persistentRules.allow = ruleSet.allow;
+    }
+    if (ruleSet.ask !== undefined) {
+      this.persistentRules.ask = ruleSet.ask;
+    }
+    if (ruleSet.deny !== undefined) {
+      this.persistentRules.deny = ruleSet.deny;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Listing rules (for /permissions UI)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Return all active rules with their types and scopes, suitable for
+   * display in the /permissions dialog.
+   */
+  listRules(): RuleWithSource[] {
+    const result: RuleWithSource[] = [];
+
+    const addRules = (
+      rules: PermissionRule[],
+      type: RuleType,
+      scope: RuleScope,
+    ) => {
+      for (const rule of rules) {
+        if (!rule.invalid) {
+          result.push({ rule, type, scope });
+        }
+      }
+    };
+
+    addRules(this.sessionRules.deny, 'deny', 'session');
+    addRules(this.persistentRules.deny, 'deny', 'user');
+    addRules(this.sessionRules.ask, 'ask', 'session');
+    addRules(this.persistentRules.ask, 'ask', 'user');
+    addRules(this.sessionRules.allow, 'allow', 'session');
+    addRules(this.persistentRules.allow, 'allow', 'user');
+
+    return result;
+  }
+
+  /**
+   * Return a summary of active allow rules (raw strings), including
+   * both session and persistent rules.  Used for telemetry.
+   */
+  getAllowRawStrings(): string[] {
+    return [
+      ...this.sessionRules.allow.map((r) => r.raw),
+      ...this.persistentRules.allow.map((r) => r.raw),
+    ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // AUTO mode dangerous-rule stash
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Remove any allow rules whose breadth would defeat the AUTO classifier
+   * (see {@link findDangerousAllowRules}) and stash them for restore.
+   * Idempotent — calling twice while in AUTO is a no-op. Deny rules are
+   * never stripped; users intend deny rules as hard blocks regardless of
+   * mode.
+   */
+  stripDangerousRulesForAutoMode(): {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  } {
+    if (this.strippedAllowRules) {
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerous = findDangerousAllowRules(
+      this.persistentRules.allow,
+    );
+    const sessionDangerous = findDangerousAllowRules(this.sessionRules.allow);
+
+    if (persistentDangerous.length === 0 && sessionDangerous.length === 0) {
+      this.strippedAllowRules = { persistent: [], session: [] };
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerousSet = new Set(persistentDangerous);
+    const sessionDangerousSet = new Set(sessionDangerous);
+
+    this.persistentRules.allow = this.persistentRules.allow.filter(
+      (r) => !persistentDangerousSet.has(r),
+    );
+    this.sessionRules.allow = this.sessionRules.allow.filter(
+      (r) => !sessionDangerousSet.has(r),
+    );
+
+    this.strippedAllowRules = {
+      persistent: persistentDangerous,
+      session: sessionDangerous,
+    };
+    return this.strippedAllowRules;
+  }
+
+  /**
+   * Reverse of {@link stripDangerousRulesForAutoMode}: re-attach previously
+   * stripped allow rules to their original scope. Idempotent when not
+   * currently in AUTO.
+   */
+  restoreDangerousRules(): void {
+    if (!this.strippedAllowRules) return;
+    if (this.strippedAllowRules.persistent.length > 0) {
+      this.persistentRules.allow = [
+        ...this.persistentRules.allow,
+        ...this.strippedAllowRules.persistent,
+      ];
+    }
+    if (this.strippedAllowRules.session.length > 0) {
+      this.sessionRules.allow = [
+        ...this.sessionRules.allow,
+        ...this.strippedAllowRules.session,
+      ];
+    }
+    this.strippedAllowRules = undefined;
+  }
+
+  /**
+   * Return a snapshot of currently-stashed dangerous allow rules.
+   * Used by the UI to surface a "the following rules are disabled in AUTO
+   * mode" notice. Returns `undefined` when not currently in AUTO.
+   */
+  getStrippedDangerousRules():
+    | {
+        persistent: readonly PermissionRule[];
+        session: readonly PermissionRule[];
+      }
+    | undefined {
+    return this.strippedAllowRules;
+  }
+}

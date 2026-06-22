@@ -21,12 +21,13 @@ export const PlanSummaryDisplay: React.FC<PlanSummaryDisplayProps> = ({
   availableHeight,
   childWidth,
 }) => {
-  const { message, plan } = data;
+  const { message, plan, rejected } = data;
+  const messageColor = rejected ? Colors.AccentYellow : Colors.AccentGreen;
 
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
-        <Text color={Colors.AccentGreen} wrap="wrap">
+        <Text color={messageColor} wrap="wrap">
           {message}
         </Text>
       </Box>

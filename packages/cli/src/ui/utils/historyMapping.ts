@@ -1,0 +1,128 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Code
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { HistoryItem, HistoryItemUser } from '../types.js';
+import type { Content } from '@google/genai';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '@qwen-code/qwen-code-core';
+import { isSlashCommand } from './commandUtils.js';
+
+/**
+ * Returns true when the history item represents a real user prompt that was
+ * sent to the model, as opposed to a slash-command invocation (`/help`,
+ * `/stats`, …) which is stored with `type: 'user'` in the UI but never
+ * reaches the API history or `turnParentUuids`.
+ *
+ * Typed as a type predicate so callers can drop their `as HistoryItemUser`
+ * casts — a regression that loosened either side of the narrowing would now
+ * be caught by tsc instead of silently bypassing it.
+ */
+export function isRealUserTurn(
+  item: HistoryItem,
+): item is HistoryItem & HistoryItemUser {
+  if (item.type !== 'user' || !item.text) return false;
+  if (typeof item.sentToModel === 'boolean') return item.sentToModel;
+  // Legacy resumed sessions do not have sentToModel, so this fallback is
+  // intentionally coupled to isSlashCommand's current lexical classifier.
+  // Changes to slash-command classification must account for old sessions that
+  // still rely on this inference.
+  return !isSlashCommand(item.text) && !item.text.startsWith('?');
+}
+
+/**
+ * Checks if a Content entry is a user-initiated text prompt
+ * as opposed to a tool result (functionResponse).
+ */
+function isUserTextContent(content: Content): boolean {
+  if (content.role !== 'user') return false;
+  if (!content.parts || content.parts.length === 0) return false;
+
+  const hasFunctionResponse = content.parts.some(
+    (part) => 'functionResponse' in part,
+  );
+  if (hasFunctionResponse) return false;
+
+  // Exclude pure <system-reminder> entries (the startup prelude and the
+  // mid-history MCP added-tool reminders). They are structural, not real user
+  // prompts; counting them here would shift the rewind truncation index and
+  // silently drop a real turn's context. A genuine user turn that merely has
+  // a per-turn reminder prepended still has a non-reminder prompt part, so it
+  // is NOT excluded.
+  if (isSystemReminderContent(content)) return false;
+
+  return content.parts.some((part) => 'text' in part && part.text);
+}
+
+/**
+ * Computes the number of API Content[] entries to keep when rewinding
+ * to a specific user turn in the UI history.
+ *
+ * The API history may include:
+ * - A startup context entry at the beginning
+ * - User text prompts (corresponding to UI user turns)
+ * - Model responses (with optional functionCall parts)
+ * - Tool result entries: user(functionResponse) + model(response)
+ *
+ * This function counts user text Content entries (skipping tool results
+ * and the startup context entry) to find the API boundary corresponding
+ * to the target UI user turn.
+ *
+ * Note: In IDE mode, additional user Content entries may be injected for
+ * IDE context. This function does not account for those and will produce
+ * incorrect results. Rewind is therefore disabled in IDE mode (guarded
+ * in openRewindSelector).
+ *
+ * @param uiHistory The full UI history array
+ * @param targetUserItemId The ID of the user HistoryItem to rewind to
+ * @param apiHistory The current API Content[] array
+ * @returns The number of Content entries to keep, or -1 if the target turn
+ *   could not be located (e.g., it was absorbed by chat compression).
+ */
+export function computeApiTruncationIndex(
+  uiHistory: HistoryItem[],
+  targetUserItemId: number,
+  apiHistory: Content[],
+): number {
+  // Count how many UI user turns exist before the target
+  let uiUserTurnCount = 0;
+  for (const item of uiHistory) {
+    if (item.id === targetUserItemId) {
+      break;
+    }
+    if (isRealUserTurn(item)) {
+      uiUserTurnCount++;
+    }
+  }
+
+  // Determine the starting index in the API history (skip startup context)
+  const startIndex = getStartupContextLength(apiHistory);
+
+  if (uiUserTurnCount === 0) {
+    // Rewinding to the first user turn: keep only startup context (if any)
+    return startIndex;
+  }
+
+  // Walk the API history from after the startup context, counting
+  // user text prompts to find the one corresponding to the target turn.
+  let realUserPromptCount = 0;
+
+  for (let i = startIndex; i < apiHistory.length; i++) {
+    if (isUserTextContent(apiHistory[i]!)) {
+      realUserPromptCount++;
+      // The target turn is the (uiUserTurnCount + 1)th real user prompt.
+      // We want to truncate right before it.
+      if (realUserPromptCount > uiUserTurnCount) {
+        return i;
+      }
+    }
+  }
+
+  // If we didn't find enough user prompts (e.g., after compression),
+  // signal that the target turn is unreachable.
+  return -1;
+}

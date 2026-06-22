@@ -38,6 +38,7 @@ ls -la $(dirname $(which qwen))/../lib/node_modules/@qwen-code/qwen-code
 # 7.Test the version of qwen
 qwen -v
 # npm link will overwrite the global qwen. To avoid being unable to distinguish the same version number, you can uninstall the global CLI first
+
 ```
 
 #### 3、Create your sandbox Dockerfile under the root directory of your own project
@@ -59,7 +60,7 @@ RUN apt-get update && apt-get install -y \
 #### 4、Create the first sandbox image under the root directory of your project
 
 ```bash
-GEMINI_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
+QWEN_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
 # Observe whether the sandbox version of the tool you launched is consistent with the version of your custom image. If they are consistent, the startup will be successful
 ```
 

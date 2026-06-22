@@ -22,8 +22,11 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   CoreToolScheduler,
+  compactToolResultDisplayForHistory,
   createDebugLogger,
+  isAnyAutoMemPath,
 } from '@qwen-code/qwen-code-core';
+import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
 import type {
   HistoryItemToolGroup,
@@ -48,9 +51,39 @@ export type TrackedValidatingToolCall = ValidatingToolCall & {
 export type TrackedWaitingToolCall = WaitingToolCall & {
   responseSubmittedToGemini?: boolean;
 };
+/**
+ * NOTE on inherited fields: `pid?` and `promoteAbortController?` come
+ * from the core `ExecutingToolCall` type via the `&` intersection —
+ * we do NOT redeclare them here. `promoteAbortController` is set by
+ * `coreToolScheduler` when the shell tool's
+ * `setPromoteAbortControllerCallback` fires, and is read by the
+ * Ctrl+B keybind handler in `AppContainer.handleGlobalKeypress`.
+ * Aborting with reason `{ kind: 'background' }` triggers the
+ * `ShellExecutionService` promote handoff; `shell.ts` then registers
+ * a `BackgroundShellEntry` and the child keeps running. The optional
+ * `shellId` field on the abort reason is generated downstream by
+ * `handlePromotedForeground` — callers leave it unset.
+ *
+ * The compile-time assertions below pin the inheritance: if a future
+ * core change renames or removes `pid` / `promoteAbortController` from
+ * `ExecutingToolCall`, these assertions break the React-side build
+ * (loud + local) instead of silently breaking the Ctrl+B handler at
+ * runtime. Cheaper than re-declaring the fields here (which the
+ * earlier review flagged as redundant noise on top of the
+ * intersection).
+ */
+type _AssertExecutingHasPid = 'pid' extends keyof ExecutingToolCall
+  ? true
+  : never;
+type _AssertExecutingHasPromoteAc =
+  'promoteAbortController' extends keyof ExecutingToolCall ? true : never;
+// Construct so the type-only assertion above isn't dead code.
+const _ASSERT_INHERITED_FIELDS_PRESENT: _AssertExecutingHasPid &
+  _AssertExecutingHasPromoteAc = true;
+void _ASSERT_INHERITED_FIELDS_PRESENT;
+
 export type TrackedExecutingToolCall = ExecutingToolCall & {
   responseSubmittedToGemini?: boolean;
-  pid?: number;
 };
 export type TrackedCompletedToolCall = CompletedToolCall & {
   responseSubmittedToGemini?: boolean;
@@ -79,11 +112,12 @@ export function useReactToolScheduler(
 
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
+      const compactOutput = compactToolResultDisplayForHistory(outputChunk);
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) => {
           if (tc.request.callId === toolCallId && tc.status === 'executing') {
             const executingTc = tc as TrackedExecutingToolCall;
-            return { ...executingTc, liveOutput: outputChunk };
+            return { ...executingTc, liveOutput: compactOutput };
           }
           return tc;
         }),
@@ -112,22 +146,36 @@ export function useReactToolScheduler(
             existingTrackedCall?.responseSubmittedToGemini ?? false;
 
           if (coreTc.status === 'executing') {
+            // `...coreTc` already spreads `pid` and
+            // `promoteAbortController` from the core `ExecutingToolCall`
+            // — no need to re-project. `liveOutput` is the only React-
+            // side state we need to carry over from the previous tracked
+            // version of this call.
             return {
               ...coreTc,
               responseSubmittedToGemini,
               liveOutput: (existingTrackedCall as TrackedExecutingToolCall)
                 ?.liveOutput,
-              pid: (coreTc as ExecutingToolCall).pid,
             };
           }
 
-          // For other statuses, explicitly set liveOutput and pid to undefined
-          // to ensure they are not carried over from a previous executing state.
+          // For non-executing statuses, explicitly clear liveOutput so
+          // it doesn't leak across an executing → completed transition.
+          // `pid` / `promoteAbortController` are also explicitly set to
+          // `undefined` here as defense-in-depth: today they're not on
+          // `coreTc` for non-executing statuses so `...coreTc` doesn't
+          // carry them, but if a future core change adds either field
+          // to a non-executing status type the explicit clearing
+          // prevents stale executing-state leakage into the React tree
+          // (which would surface as a stuck PID display or a Ctrl+B
+          // handler that incorrectly matches a no-longer-executing
+          // tool call).
           return {
             ...coreTc,
             responseSubmittedToGemini,
             liveOutput: undefined,
             pid: undefined,
+            promoteAbortController: undefined,
           };
         }),
       );
@@ -210,10 +258,31 @@ function mapCoreStatusToDisplayStatus(coreStatus: CoreStatus): ToolCallStatus {
 }
 
 /**
+ * Returns 'read' or 'write' if the tool call operates on a managed-auto-memory
+ * file; returns undefined otherwise.
+ */
+function detectMemoryOp(
+  toolName: string,
+  args: Record<string, unknown>,
+  projectRoot: string,
+): 'read' | 'write' | undefined {
+  const WRITE_TOOLS = new Set(['write_file', 'edit']);
+  const READ_TOOLS = new Set(['read_file']);
+  const filePath = args?.['file_path'] as string | undefined;
+  if (!filePath) return undefined;
+  const resolved = path.resolve(filePath);
+  if (!isAnyAutoMemPath(resolved, projectRoot)) return undefined;
+  if (WRITE_TOOLS.has(toolName)) return 'write';
+  if (READ_TOOLS.has(toolName)) return 'read';
+  return undefined;
+}
+
+/**
  * Transforms `TrackedToolCall` objects into `HistoryItemToolGroup` objects for UI display.
  */
 export function mapToDisplay(
   toolOrTools: TrackedToolCall[] | TrackedToolCall,
+  projectRoot?: string,
 ): HistoryItemToolGroup {
   const toolCalls = Array.isArray(toolOrTools) ? toolOrTools : [toolOrTools];
 
@@ -243,6 +312,14 @@ export function mapToDisplay(
         name: displayName,
         description,
         renderOutputAsMarkdown,
+        isMemoryOp:
+          projectRoot && trackedCall.status !== 'error'
+            ? detectMemoryOp(
+                trackedCall.request.name,
+                trackedCall.request.args as Record<string, unknown>,
+                projectRoot,
+              )
+            : undefined,
       };
 
       switch (trackedCall.status) {
@@ -250,22 +327,27 @@ export function mapToDisplay(
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
-            outputFile: trackedCall.response.outputFile,
           };
         case 'error':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'cancelled':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'awaiting_approval':
@@ -276,6 +358,7 @@ export function mapToDisplay(
             confirmationDetails: trackedCall.confirmationDetails,
           };
         case 'executing':
+          // React stores compacted live output when handling raw update chunks.
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -283,6 +366,8 @@ export function mapToDisplay(
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
+            executionStartTime: (trackedCall as TrackedExecutingToolCall)
+              .executionStartTime,
           };
         case 'validating': // Fallthrough
         case 'scheduled':
@@ -311,5 +396,9 @@ export function mapToDisplay(
   return {
     type: 'tool_group',
     tools: toolDisplays,
+    memoryWriteCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'write').length || undefined,
+    memoryReadCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'read').length || undefined,
   };
 }

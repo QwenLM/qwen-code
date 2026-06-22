@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { VSCodeAPI } from '../../hooks/useVSCode.js';
 
 /**
@@ -20,12 +20,42 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     useState<string>('Past Conversations');
   const [showSessionSelector, setShowSessionSelector] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
-  const [savedSessionTags, setSavedSessionTags] = useState<string[]>([]);
   const [nextCursor, setNextCursor] = useState<number | undefined>(undefined);
   const [hasMore, setHasMore] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isSwitchingSession, setIsSwitchingSessionRaw] =
+    useState<boolean>(false);
+  const switchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const SWITCH_TIMEOUT_MS = 15000;
   const PAGE_SIZE = 20;
+
+  const setIsSwitchingSession = useCallback((value: boolean) => {
+    setIsSwitchingSessionRaw(value);
+    if (switchTimeoutRef.current) {
+      clearTimeout(switchTimeoutRef.current);
+      switchTimeoutRef.current = null;
+    }
+    if (value) {
+      switchTimeoutRef.current = setTimeout(() => {
+        console.warn(
+          '[useSessionManagement] Switch session timed out, clearing loading state',
+        );
+        setIsSwitchingSessionRaw(false);
+        switchTimeoutRef.current = null;
+      }, SWITCH_TIMEOUT_MS);
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (switchTimeoutRef.current) {
+        clearTimeout(switchTimeoutRef.current);
+        switchTimeoutRef.current = null;
+      }
+    },
+    [],
+  );
 
   /**
    * Filter session list
@@ -72,10 +102,20 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
   /**
    * Create new session
    */
-  const handleNewQwenSession = useCallback(() => {
-    vscode.postMessage({ type: 'openNewChatTab', data: {} });
-    setShowSessionSelector(false);
-  }, [vscode]);
+  const handleNewQwenSession = useCallback(
+    (modelId?: string | null) => {
+      const trimmedModelId =
+        typeof modelId === 'string' && modelId.trim().length > 0
+          ? modelId.trim()
+          : undefined;
+      vscode.postMessage({
+        type: 'openNewChatTab',
+        data: trimmedModelId ? { modelId: trimmedModelId } : {},
+      });
+      setShowSessionSelector(false);
+    },
+    [vscode],
+  );
 
   /**
    * Switch session
@@ -89,44 +129,39 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
       }
 
       console.log('[useSessionManagement] Switching to session:', sessionId);
+      setIsSwitchingSession(true);
       vscode.postMessage({
         type: 'switchQwenSession',
         data: { sessionId },
       });
     },
-    [currentSessionId, vscode],
+    [currentSessionId, vscode, setIsSwitchingSession],
   );
 
   /**
-   * Save session
+   * Delete session
    */
-  const handleSaveSession = useCallback(
-    (tag: string) => {
+  const handleDeleteSession = useCallback(
+    (sessionId: string) => {
       vscode.postMessage({
-        type: 'saveSession',
-        data: { tag },
+        type: 'deleteQwenSession',
+        data: { sessionId },
       });
     },
     [vscode],
   );
 
   /**
-   * Handle Save session response
+   * Rename session
    */
-  const handleSaveSessionResponse = useCallback(
-    (response: { success: boolean; message?: string }) => {
-      if (response.success) {
-        if (response.message) {
-          const tagMatch = response.message.match(/tag: (.+)$/);
-          if (tagMatch) {
-            setSavedSessionTags((prev) => [...prev, tagMatch[1]]);
-          }
-        }
-      } else {
-        console.error('Failed to save session:', response.message);
-      }
+  const handleRenameSession = useCallback(
+    (sessionId: string, title: string) => {
+      vscode.postMessage({
+        type: 'renameQwenSession',
+        data: { sessionId, title },
+      });
     },
-    [],
+    [vscode],
   );
 
   return {
@@ -137,10 +172,10 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     showSessionSelector,
     sessionSearchQuery,
     filteredSessions,
-    savedSessionTags,
     nextCursor,
     hasMore,
     isLoading,
+    isSwitchingSession,
 
     // State setters
     setQwenSessions,
@@ -148,17 +183,17 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     setCurrentSessionTitle,
     setShowSessionSelector,
     setSessionSearchQuery,
-    setSavedSessionTags,
     setNextCursor,
     setHasMore,
     setIsLoading,
+    setIsSwitchingSession,
 
     // Operations
     handleLoadQwenSessions,
     handleNewQwenSession,
     handleSwitchSession,
-    handleSaveSession,
-    handleSaveSessionResponse,
     handleLoadMoreSessions,
+    handleDeleteSession,
+    handleRenameSession,
   };
 };

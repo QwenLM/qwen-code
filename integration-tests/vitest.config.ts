@@ -18,7 +18,12 @@ export default defineConfig({
     globalSetup: './globalSetup.ts',
     reporters: ['default'],
     include: ['**/*.test.ts'],
-    exclude: ['**/terminal-bench/*.test.ts', '**/node_modules/**'],
+    exclude: [
+      '**/terminal-bench/*.test.ts',
+      '**/hook-integration/**',
+      '**/qwen-daemon-loadtest*',
+      '**/node_modules/**',
+    ],
     retry: 2,
     fileParallelism: true,
     poolOptions: {

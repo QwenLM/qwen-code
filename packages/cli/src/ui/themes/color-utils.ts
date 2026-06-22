@@ -233,3 +233,125 @@ export function resolveColor(colorValue: string): string | undefined {
   );
   return undefined;
 }
+
+// Basic Ink color names that resolveColor passes through as names rather than
+// hex. Needed so interpolateColor can blend them numerically.
+const INK_NAME_TO_HEX: Readonly<Record<string, string>> = {
+  black: '#000000',
+  red: '#ff0000',
+  green: '#00ff00',
+  yellow: '#ffff00',
+  blue: '#0000ff',
+  cyan: '#00ffff',
+  magenta: '#ff00ff',
+  white: '#ffffff',
+  gray: '#808080',
+  grey: '#808080',
+  blackbright: '#808080',
+  redbright: '#ff8080',
+  greenbright: '#80ff80',
+  yellowbright: '#ffff80',
+  bluebright: '#8080ff',
+  cyanbright: '#80ffff',
+  magentabright: '#ff80ff',
+  whitebright: '#ffffff',
+};
+
+/**
+ * Resolves any accepted color string to a 6-digit hex (#rrggbb), or undefined
+ * if it cannot be parsed into RGB.
+ */
+function toHex(color: string): string | undefined {
+  const resolved = (resolveColor(color) ?? color).toLowerCase();
+  if (resolved.startsWith('#')) {
+    if (/^#[0-9a-f]{3}$/.test(resolved)) {
+      return `#${resolved
+        .slice(1)
+        .split('')
+        .map((c) => c + c)
+        .join('')}`;
+    }
+    if (/^#[0-9a-f]{6}$/.test(resolved)) {
+      return resolved;
+    }
+    return undefined;
+  }
+  return INK_NAME_TO_HEX[resolved];
+}
+
+/**
+ * Linearly blends two colors in RGB space.
+ * @param color1 Returned (unchanged) when factor <= 0.
+ * @param color2 Returned (unchanged) when factor >= 1.
+ * @param factor Blend amount in [0, 1] from color1 toward color2.
+ * @returns A #rrggbb hex string, or '' if either color cannot be parsed.
+ */
+export function interpolateColor(
+  color1: string,
+  color2: string,
+  factor: number,
+): string {
+  if (factor <= 0) {
+    return color1;
+  }
+  if (factor >= 1) {
+    return color2;
+  }
+  const h1 = toHex(color1);
+  const h2 = toHex(color2);
+  if (!h1 || !h2) {
+    return '';
+  }
+  const r1 = parseInt(h1.slice(1, 3), 16);
+  const g1 = parseInt(h1.slice(3, 5), 16);
+  const b1 = parseInt(h1.slice(5, 7), 16);
+  const r2 = parseInt(h2.slice(1, 3), 16);
+  const g2 = parseInt(h2.slice(3, 5), 16);
+  const b2 = parseInt(h2.slice(5, 7), 16);
+  const lerp = (a: number, b: number) => Math.round(a + (b - a) * factor);
+  const toByte = (n: number) =>
+    Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
+  return `#${toByte(lerp(r1, r2))}${toByte(lerp(g1, g2))}${toByte(lerp(b1, b2))}`;
+}
+
+/**
+ * Computes a subtle band color by shifting the background brightness toward
+ * white (dark themes) or black (light themes) by `factor` (default 0.06).
+ * No hue change — just a brightness nudge, so the band is nearly invisible.
+ * Automatically detects dark/light from the background color luminance.
+ * Returns '' if the background color cannot be resolved.
+ */
+export function subtleBandColor(bgColor: string, factor = 0.06): string {
+  const hex = toHex(bgColor);
+  if (!hex) {
+    return '';
+  }
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const isDark = (r * 299 + g * 587 + b * 114) / 1000 < 128;
+  const target = isDark ? '#ffffff' : '#000000';
+  return interpolateColor(hex, target, factor);
+}
+
+/**
+ * Detects whether the terminal supports 24-bit (true) color, required for the
+ * blended half-line background band. Result is cached at module scope since
+ * terminal color capability does not change during the process lifetime.
+ */
+let _supportsTrueColor: boolean | undefined;
+export function supportsTrueColor(): boolean {
+  if (_supportsTrueColor !== undefined) return _supportsTrueColor;
+  const colorterm = process.env['COLORTERM'];
+  if (
+    colorterm === 'truecolor' ||
+    colorterm === '24bit' ||
+    colorterm === 'kmscon'
+  ) {
+    return (_supportsTrueColor = true);
+  }
+  if (process.stdout.getColorDepth && process.stdout.getColorDepth() >= 24) {
+    return (_supportsTrueColor = true);
+  }
+  return (_supportsTrueColor = false);
+}

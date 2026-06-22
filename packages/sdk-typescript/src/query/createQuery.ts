@@ -7,9 +7,15 @@ import { serializeJsonLine } from '../utils/jsonLines.js';
 import { ProcessTransport } from '../transport/ProcessTransport.js';
 import { prepareSpawnInfo, type SpawnInfo } from '../utils/cliPath.js';
 import { Query } from './Query.js';
-import type { QueryOptions } from '../types/types.js';
+import type {
+  QueryOptions,
+  QuerySystemPrompt,
+  TransportOptions,
+} from '../types/types.js';
 import { QueryOptionsSchema } from '../types/queryOptionsSchema.js';
 import { SdkLogger } from '../utils/logger.js';
+import { randomUUID } from 'node:crypto';
+import { validateSessionId } from '../utils/validation.js';
 
 export type { QueryOptions };
 
@@ -40,6 +46,10 @@ export function query({
 
   const abortController = options.abortController ?? new AbortController();
 
+  // Generate or use provided session ID for SDK-CLI alignment
+  const sessionId = options.resume ?? options.sessionId ?? randomUUID();
+  const resolvedSystemPrompt = resolveSystemPromptOption(options.systemPrompt);
+
   const transport = new ProcessTransport({
     pathToQwenExecutable,
     spawnInfo,
@@ -47,6 +57,7 @@ export function query({
     model: options.model,
     permissionMode: options.permissionMode,
     env: options.env,
+    ...resolvedSystemPrompt,
     abortController,
     debug: options.debug,
     stderr: options.stderr,
@@ -58,11 +69,13 @@ export function query({
     authType: options.authType,
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
+    sessionId,
   });
 
   const queryOptions: QueryOptions = {
     ...options,
     abortController,
+    sessionId,
   };
 
   const queryInstance = new Query(transport, queryOptions, isSingleTurn);
@@ -82,9 +95,16 @@ export function query({
     (async () => {
       try {
         await queryInstance.initialized;
+        // Skip writing if transport has already exited with an error
+        if (transport.exitError) {
+          return;
+        }
         transport.write(serializeJsonLine(message));
       } catch (err) {
-        logger.error('Error sending single-turn prompt:', err);
+        // Only log error if it's not due to transport already being closed
+        if (!transport.exitError) {
+          logger.error('Error sending single-turn prompt:', err);
+        }
       }
     })();
   } else {
@@ -98,6 +118,20 @@ export function query({
   return queryInstance;
 }
 
+function resolveSystemPromptOption(
+  systemPrompt: QuerySystemPrompt | undefined,
+): Pick<TransportOptions, 'systemPrompt' | 'appendSystemPrompt'> {
+  if (!systemPrompt) {
+    return {};
+  }
+
+  if (typeof systemPrompt === 'string') {
+    return { systemPrompt };
+  }
+
+  return systemPrompt.append ? { appendSystemPrompt: systemPrompt.append } : {};
+}
+
 function validateOptions(options: QueryOptions): SpawnInfo | undefined {
   const validationResult = QueryOptionsSchema.safeParse(options);
   if (!validationResult.success) {
@@ -105,6 +139,16 @@ function validateOptions(options: QueryOptions): SpawnInfo | undefined {
       .map((err) => `${err.path.join('.')}: ${err.message}`)
       .join('; ');
     throw new Error(`Invalid QueryOptions: ${errors}`);
+  }
+
+  // Validate sessionId format if provided
+  if (options.sessionId) {
+    validateSessionId(options.sessionId, 'sessionId');
+  }
+
+  // Validate resume format if provided
+  if (options.resume) {
+    validateSessionId(options.resume, 'resume');
   }
 
   try {

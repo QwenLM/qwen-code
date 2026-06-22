@@ -524,13 +524,12 @@ const TOOL_DISPLAY_NAME_BY_NAME = {
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   save_memory: 'SaveMemory',
   task: 'Task',
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
   web_fetch: 'WebFetch',
-  web_search: 'WebSearch',
   list_directory: 'ListFiles',
 };
 
@@ -546,7 +545,6 @@ const TOOL_KIND_BY_NAME = {
   rename: 'move',
   grep_search: 'search',
   glob: 'search',
-  web_search: 'search',
   list_directory: 'search',
   run_shell_command: 'execute',
   bash: 'execute',
@@ -594,12 +592,8 @@ function extractLocations(rawInput, toolCallResult) {
 
   // Extract from rawInput - common path field names used by various tools
   if (rawInput && typeof rawInput === 'object') {
-    // read_file, write_file use absolute_path
-    if (typeof rawInput.absolute_path === 'string' && rawInput.absolute_path) {
-      locations.push({ path: rawInput.absolute_path });
-    }
-    // edit tool uses file_path
-    else if (typeof rawInput.file_path === 'string' && rawInput.file_path) {
+    // read_file, write_file, edit tool use file_path
+    if (typeof rawInput.file_path === 'string' && rawInput.file_path) {
       locations.push({ path: rawInput.file_path });
     }
     // some tools use just 'path'

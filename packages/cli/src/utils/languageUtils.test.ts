@@ -22,6 +22,7 @@ vi.mock('../i18n/index.js', () => ({
   getLanguageNameFromLocale: vi.fn((locale: string) => {
     const map: Record<string, string> = {
       en: 'English',
+      'zh-tw': 'Traditional Chinese',
       zh: 'Chinese',
       ru: 'Russian',
       de: 'German',
@@ -30,7 +31,7 @@ vi.mock('../i18n/index.js', () => ({
       fr: 'French',
       es: 'Spanish',
     };
-    return map[locale] || 'English';
+    return map[locale.toLowerCase()] || 'English';
   }),
 }));
 
@@ -49,6 +50,7 @@ import {
   resolveOutputLanguage,
   writeOutputLanguageFile,
   updateOutputLanguageFile,
+  writeOutputLanguageAndRegisterPath,
   initializeLlmOutputLanguage,
 } from './languageUtils.js';
 
@@ -102,6 +104,12 @@ describe('languageUtils', () => {
       expect(normalizeOutputLanguage('en')).toBe('English');
     });
 
+    it('should normalize "english" to "English"', () => {
+      expect(normalizeOutputLanguage('english')).toBe('English');
+      expect(normalizeOutputLanguage('English')).toBe('English');
+      expect(normalizeOutputLanguage('en-US')).toBe('English');
+    });
+
     it('should convert "zh" to "Chinese"', () => {
       expect(normalizeOutputLanguage('zh')).toBe('Chinese');
     });
@@ -123,9 +131,16 @@ describe('languageUtils', () => {
       expect(normalizeOutputLanguage('Ru')).toBe('Russian');
     });
 
+    it('should convert "zh-TW" (mixed case) to "Traditional Chinese"', () => {
+      expect(normalizeOutputLanguage('zh-TW')).toBe('Traditional Chinese');
+      expect(normalizeOutputLanguage('zh-tw')).toBe('Traditional Chinese');
+      expect(normalizeOutputLanguage('ZH-TW')).toBe('Traditional Chinese');
+    });
+
     it('should preserve explicit language names as-is', () => {
       expect(normalizeOutputLanguage('Japanese')).toBe('Japanese');
       expect(normalizeOutputLanguage('French')).toBe('French');
+      expect(normalizeOutputLanguage('french')).toBe('French');
     });
 
     it('should preserve unknown language names as-is', () => {
@@ -156,6 +171,12 @@ describe('languageUtils', () => {
 
     it('should normalize explicit locale codes', () => {
       expect(resolveOutputLanguage('zh')).toBe('Chinese');
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
+    it('should normalize "english"', () => {
+      expect(resolveOutputLanguage('english')).toBe('English');
+      expect(resolveOutputLanguage('en-US')).toBe('English');
       expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
@@ -218,6 +239,56 @@ describe('languageUtils', () => {
         '<!-- qwen-code:llm-output-language: TestLanguage -->',
       );
     });
+
+    it('should use mandatory language rule instead of preference', () => {
+      writeOutputLanguageFile('Chinese');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain(
+        'You MUST always respond in **Chinese**',
+      );
+      expect(writtenContent).toContain(
+        'This is a mandatory requirement, not a preference.',
+      );
+      expect(writtenContent).not.toContain('Prefer responding');
+    });
+
+    it('should write to custom targetPath when provided', () => {
+      writeOutputLanguageFile('Korean', '/proj/.qwen/output-language.md');
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith('/proj/.qwen', {
+        recursive: true,
+      });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/proj/.qwen/output-language.md',
+        expect.stringContaining('Korean'),
+        'utf-8',
+      );
+    });
+
+    it('should include exception clause for explicit user language requests', () => {
+      writeOutputLanguageFile('English');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain('## Exception');
+      expect(writtenContent).toContain(
+        "switch to the user's requested language for the remainder of the conversation",
+      );
+    });
+
+    it('should use the correct language name throughout the template', () => {
+      writeOutputLanguageFile('Japanese');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain(
+        'You MUST always respond in **Japanese**',
+      );
+      expect(writtenContent).toContain('## Rule');
+      expect(writtenContent).toContain('## Exception');
+    });
   });
 
   describe('updateOutputLanguageFile', () => {
@@ -272,12 +343,12 @@ describe('languageUtils', () => {
       );
     });
 
-    it('should NOT overwrite file when content matches resolved language', () => {
+    it('should NOT overwrite file when it already exists with valid content', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(i18n.detectSystemLanguage).mockReturnValue('en');
       vi.mocked(fs.readFileSync).mockReturnValue(
-        `# Output language preference: English
-<!-- qwen-code:llm-output-language: English -->
+        `# Output language preference: French
+<!-- qwen-code:llm-output-language: French -->
 `,
       );
 
@@ -286,21 +357,18 @@ describe('languageUtils', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it('should overwrite file when language setting differs', () => {
+    it('should NOT overwrite file even when setting differs from existing content', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(
-        `# Output language preference: English
-<!-- qwen-code:llm-output-language: English -->
+        `# Output language preference: French
+<!-- qwen-code:llm-output-language: French -->
 `,
       );
 
       initializeLlmOutputLanguage('Japanese');
 
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('output-language.md'),
-        expect.stringContaining('Japanese'),
-        'utf-8',
-      );
+      // Should NOT overwrite - user's existing file takes precedence
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
     it('should resolve "auto" to detected system language', () => {
@@ -378,6 +446,127 @@ describe('languageUtils', () => {
 
       // Should not overwrite since file already has Chinese
       expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('output-language.md path resolution priority', () => {
+    it('should prefer project-level path over global path', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (p.toString() === projectPath) return true;
+        if (p.toString() === globalPath) return true;
+        return false;
+      });
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBe(projectPath);
+    });
+
+    it('should fall back to global path when project-level does not exist', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (p.toString() === projectPath) return false;
+        if (p.toString() === globalPath) return true;
+        return false;
+      });
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBe(globalPath);
+    });
+
+    it('should return undefined when neither path exists', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBeUndefined();
+    });
+  });
+
+  describe('writeOutputLanguageAndRegisterPath', () => {
+    beforeEach(() => {
+      vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
+      vi.mocked(fs.writeFileSync).mockImplementation(() => undefined);
+    });
+
+    it('writes to config-bound path when available', () => {
+      const config = {
+        getOutputLanguageFilePath: vi
+          .fn()
+          .mockReturnValue('/proj/.qwen/output-language.md'),
+        setOutputLanguageFilePath: vi.fn(),
+      };
+
+      writeOutputLanguageAndRegisterPath('Chinese', config);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/proj/.qwen/output-language.md',
+        expect.stringContaining('Chinese'),
+        'utf-8',
+      );
+      expect(config.setOutputLanguageFilePath).not.toHaveBeenCalled();
+    });
+
+    it('writes to global default and registers path when config path is undefined', () => {
+      const config = {
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
+      };
+
+      writeOutputLanguageAndRegisterPath('Japanese', config);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Japanese'),
+        'utf-8',
+      );
+      expect(config.setOutputLanguageFilePath).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+      );
+    });
+
+    it('handles null config gracefully', () => {
+      writeOutputLanguageAndRegisterPath('Korean', null);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Korean'),
+        'utf-8',
+      );
+    });
+
+    it('handles undefined config gracefully', () => {
+      writeOutputLanguageAndRegisterPath('Russian', undefined);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Russian'),
+        'utf-8',
+      );
     });
   });
 });

@@ -1,148 +1,300 @@
 # Installation Guide for Qwen Code with Source Tracking
 
-This guide describes how to install Node.js and Qwen Code with source information tracking.
+This guide describes the source-tracking installation scripts for Qwen Code.
+The scripts prefer standalone release archives and can fall back to npm when a
+standalone archive is not available.
 
 ## Overview
 
-The installation scripts automate the process of installing Node.js (if not present or below version 20) and Qwen Code, while capturing and storing the installation source information for analytics and tracking purposes.
+The installers are intentionally lightweight:
+
+- They try a standalone archive first by default.
+- They do not install Node.js, NVM, or any other Node version manager.
+- They do not edit npm config. Standalone installs may update the shell profile
+  or user/machine PATH so the generated `qwen` shim is discoverable.
+- They do not start `qwen` automatically after installation.
+- They store source information in `~/.qwen/source.json` or
+  `%USERPROFILE%\.qwen\source.json` when `--source` is provided.
+
+Standalone archives include a private Node.js runtime, so users do not need a
+local Node.js installation on the standalone path. Node.js 22 or newer and npm
+are only required when the installer falls back to npm or when
+`--method npm` is used.
 
 ## Installation Scripts
 
-We provide platform-specific installation scripts:
+- Linux/macOS: `install-qwen-standalone.sh`
+- Windows: `install-qwen-standalone.ps1`
+- Linux/macOS uninstall: `uninstall-qwen-standalone.sh`
+- Windows uninstall: `uninstall-qwen-standalone.ps1`
 
-- **Linux/macOS**: `install-qwen-with-source.sh`
-- **Windows**: `install-qwen-with-source.bat`
+## Release Artifacts
 
-## Linux/macOS Installation
+GitHub releases publish these standalone archives:
 
-### Script: install-qwen-with-source.sh
+- `qwen-code-darwin-arm64.tar.gz`
+- `qwen-code-darwin-x64.tar.gz`
+- `qwen-code-linux-arm64.tar.gz`
+- `qwen-code-linux-x64.tar.gz`
+- `qwen-code-win-x64.zip`
+- `SHA256SUMS`
 
-#### Features:
+The new standalone-first installer scripts (`install-qwen-standalone.sh`,
+`install-qwen-standalone.ps1`) are not republished per release. They are served
+from a hosted installation endpoint and accept `--version` to pin a specific
+standalone release. The `standalone` suffix intentionally avoids overwriting the
+existing production `install-qwen.sh` / `install-qwen.bat` OSS objects during
+the staged rollout.
 
-- Checks for existing Node.js installation and version
-- Installs Node.js 20+ if needed using NVM
-- Installs Qwen Code globally with source information
-- Stores the source information in `~/.qwen/source.json`
+Hosted installer assets are staged separately from GitHub Release archives:
 
-#### Usage:
+- `install-qwen-standalone.sh` is the Linux/macOS hosted entrypoint.
+- `install-qwen-standalone.ps1` is the Windows hosted entrypoint for `irm | iex`.
+- `install-qwen-standalone.bat` is the Windows installer implementation used by
+  `install-qwen-standalone.ps1` and can also be downloaded and run directly.
+- `uninstall-qwen-standalone.sh` removes Linux/macOS standalone installs.
+- `uninstall-qwen-standalone.ps1` removes Windows standalone installs.
 
-```bash
-# Install with a specific source
-sh install-qwen-with-source.sh --source github
+The global standalone-suffixed OSS entrypoints are maintained under
+`installation/install-qwen-standalone.sh`,
+`installation/install-qwen-standalone.ps1`,
+`installation/install-qwen-standalone.bat`,
+`installation/uninstall-qwen-standalone.sh`, and
+`installation/uninstall-qwen-standalone.ps1`.
 
-# Install with internal source
-sh install-qwen-with-source.sh -s internal
-
-# Show help
-sh install-qwen-with-source.sh --help
-```
-
-#### Supported Source Values:
-
-- `github` - Installed from GitHub repository
-- `npm` - Installed from npm registry
-- `internal` - Internal installation
-- `local-build` - Local build installation
-
-#### How it Works:
-
-1. The script accepts a `--source` parameter to specify where Qwen Code is being installed from
-2. It installs Node.js if needed
-3. It installs Qwen Code globally
-4. It creates `~/.qwen/source.json` with the specified source information
-
-#### Important Notes:
-
-⚠️ **After installation, you need to restart your terminal or run:**
+Build them with:
 
 ```bash
-source ~/.bashrc  # For bash users
-# or
-source ~/.zshrc   # For zsh users
+npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-This is required to load the newly installed Node.js and Qwen Code into your PATH.
+The staged `install-qwen-standalone.sh`, `install-qwen-standalone.ps1`,
+`install-qwen-standalone.bat`, `uninstall-qwen-standalone.sh`, and
+`uninstall-qwen-standalone.ps1` files map to the standalone-suffixed hosted URLs
+shown above. The staging command also writes `SHA256SUMS` for upload
+verification. During a non-dry-run stable release, the publish workflow uploads
+a byte-for-byte snapshot to `installation/vX.Y.Z/` for audit and rollback, and
+also refreshes the global `installation/` entrypoint objects so `curl | bash`
+links keep resolving without a version segment. The versioned snapshot lets you
+roll back by repointing the global objects to a previous tag if a regression is
+caught after publish. The hosted
+installers intentionally default to `latest`; on Aliyun OSS this means reading
+`releases/qwen-code/latest/VERSION` first, then downloading the matching
+versioned release directory. Use `--version` or `QWEN_INSTALL_VERSION` to pin a
+standalone release directly.
 
-#### Prerequisites:
+Configure the `production-release` GitHub environment with these required
+secrets before enabling OSS sync:
 
-- curl (for NVM installation and script download)
-- bash-compatible shell
+- `ALIYUN_OSS_ACCESS_KEY_ID`
+- `ALIYUN_OSS_ACCESS_KEY_SECRET`
 
-## Windows Installation
+The workflow defaults to the production OSS bucket and Hangzhou endpoint. Set
+these GitHub Actions variables only when the bucket, endpoint, or public base
+URL changes:
 
-### Script: install-qwen-with-source.bat
+- `ALIYUN_OSS_BUCKET` (default: `qwen-code-assets`)
+- `ALIYUN_OSS_ENDPOINT` (default: `https://oss-cn-hangzhou.aliyuncs.com`)
+- `ALIYUN_OSS_PUBLIC_BASE_URL` (default:
+  `https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com`)
 
-#### Features:
+Archive layout:
 
-- Checks for existing Node.js installation and version (requires version 18+)
-- Automatically downloads and installs Node.js 24 LTS if not present or version is too low
-- Installs Qwen Code globally with source information
-- Stores the source information in `%USERPROFILE%\.qwen\source.json`
+```text
+qwen-code/
+  bin/qwen
+  bin/qwen.cmd
+  lib/cli.js
+  node/
+  package.json
+  README.md
+  LICENSE
+  manifest.json
+```
 
-#### Prerequisites:
+## Install Methods
 
-- **PowerShell (Administrator)**: The script must be run in PowerShell with Administrator privileges
-- Internet connection for downloading Node.js and Qwen Code
+The default method is `detect`:
 
-#### Usage:
+1. Detect the current platform.
+2. Try to download and install the matching standalone archive.
+3. Verify the archive with `SHA256SUMS`.
+4. Fall back to npm if the standalone archive is not available.
 
-> ⚠️ **Important**: You must run PowerShell as Administrator to install Node.js and global npm packages.
+You can force a method:
 
-**Step 1**: Open PowerShell as Administrator
+```bash
+bash install-qwen-standalone.sh --method standalone
+bash install-qwen-standalone.sh --method npm
+```
 
-- Right-click on PowerShell and select "Run as Administrator"
-- Or press `Win + X` and select "Windows PowerShell (Admin)"
+```bat
+install-qwen-standalone.bat --method standalone
+install-qwen-standalone.bat --method npm
+```
 
-**Step 2**: Navigate to the script directory and run:
+Repair PATH for an existing standalone Windows install without downloading or
+reinstalling Qwen Code:
+
+```bat
+install-qwen-standalone.bat --repair-path
+install-qwen-standalone.bat --repair-path --path-scope machine
+```
+
+## Optional Native Modules
+
+The standalone archives bundle Qwen Code and a private Node.js runtime. They do
+not currently install npm optional native modules such as `node-pty` and
+`@teddyzhu/clipboard`. Qwen Code is designed to degrade when these optional
+modules are absent, but terminal pty behavior and clipboard image support may
+not be identical to an npm installation.
+
+Use `--method npm` if you specifically need npm to resolve optional native
+modules for the current machine.
+
+## Linux/macOS Usage
+
+```bash
+# Default: standalone archive with npm fallback
+bash install-qwen-standalone.sh
+
+# Record a source value
+bash install-qwen-standalone.sh --source github
+
+# Use npm explicitly
+bash install-qwen-standalone.sh --method npm --registry https://registry.npmjs.org
+
+# Use the Aliyun standalone mirror
+bash install-qwen-standalone.sh --mirror aliyun
+
+# Install an offline archive
+# SHA256SUMS must be in the same directory.
+bash install-qwen-standalone.sh --archive ./qwen-code-linux-x64.tar.gz
+```
+
+Standalone installs to:
+
+- Runtime: `~/.local/lib/qwen-code`
+- Shim: `~/.local/bin/qwen`
+
+Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_PARENT`,
+`QWEN_INSTALL_LIB_DIR`, or `QWEN_INSTALL_BIN_DIR` when needed.
+
+Uninstall a standalone Linux/macOS install:
+
+```bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.sh | bash
+```
+
+The uninstaller removes only the standalone runtime, generated `qwen` wrapper,
+and installer-managed shell PATH block. It preserves `~/.qwen` by default. Set
+`QWEN_UNINSTALL_PURGE=1` to remove `~/.qwen/source.json`; other config and auth
+files are still preserved.
+
+## Windows Usage
+
+```bat
+REM Default: standalone archive with npm fallback
+install-qwen-standalone.bat
+
+REM Record a source value
+install-qwen-standalone.bat --source github
+
+REM Use npm explicitly
+install-qwen-standalone.bat --method npm --registry https://registry.npmjs.org
+
+REM Use the Aliyun standalone mirror
+install-qwen-standalone.bat --mirror aliyun
+
+REM Install an offline archive
+REM SHA256SUMS must be in the same directory.
+install-qwen-standalone.bat --archive qwen-code-win-x64.zip
+```
+
+Standalone installs to:
+
+- Runtime: `%LOCALAPPDATA%\qwen-code\qwen-code`
+- Shim: `%LOCALAPPDATA%\qwen-code\bin\qwen.cmd`
+
+Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_DIR`, or
+`QWEN_INSTALL_BIN_DIR` when needed.
+
+For self-hosted Windows runners, install under the runner account once, then
+repair machine-level PATH without reinstalling:
 
 ```powershell
-# Install with a specific source using --source parameter
-./install-qwen-with-source.bat --source github
-
-# Install with short parameter
-./install-qwen-with-source.bat -s internal
-
-# Use default source (unknown)
-./install-qwen-with-source.bat
+$env:QWEN_INSTALL_REPAIR_PATH = '1'
+$env:QWEN_INSTALL_PATH_SCOPE = 'machine'
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
 ```
 
-#### Supported Source Values:
+Restart the runner service or machine after updating machine-level PATH so jobs
+inherit the refreshed environment.
 
-- `github` - Installed from GitHub repository
-- `npm` - Installed from npm registry
-- `internal` - Internal installation
-- `local-build` - Local build installation
+Restart the terminal if `qwen` is not immediately available on PATH.
 
-#### How it Works:
+Uninstall a standalone Windows install:
 
-1. The script accepts a `--source` or `-s` parameter to specify where Qwen Code is being installed from
-2. It checks if Node.js is already installed and if the version is 18 or higher
-3. If Node.js is not installed or version is too low, it automatically downloads and installs Node.js 24 LTS
-4. It installs Qwen Code globally using npm
-5. It creates `%USERPROFILE%\.qwen\source.json` with the specified source information
+```bat
+powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.ps1 | iex"
+```
 
-#### Why Administrator Privileges are Required:
+The uninstaller removes only the standalone runtime, generated `qwen.cmd`
+wrapper, user or machine PATH entry, and the current-session `cmd.exe` shim
+created by the hosted PowerShell installer. It preserves `%USERPROFILE%\.qwen`
+by default. Set `QWEN_UNINSTALL_PURGE=1` to remove
+`%USERPROFILE%\.qwen\source.json`; other config and auth files are still
+preserved.
 
-- Installing Node.js requires writing to `C:\Program Files\nodejs`
-- Installing global npm packages requires elevated permissions
-- Modifying system PATH environment variables requires Administrator access
+## Mirrors and Overrides
 
-## Installation Source Feature
+Options:
 
-### Overview
+- `--method detect|standalone|npm`
+- `--mirror github|aliyun`
+- `--base-url URL`
+- `--archive PATH`
+- `--version VERSION`
+- `--registry REGISTRY`
+- `--source SOURCE`
+- `--repair-path`
+- `--path-scope user|machine`
 
-This feature implements the ability to capture and store the installation source of the Qwen Code package. The source information is used for analytics and tracking purposes.
+Environment variables:
 
-### Storage Location
+- `QWEN_INSTALL_METHOD`
+- `QWEN_INSTALL_MIRROR`
+- `QWEN_INSTALL_BASE_URL`
+- `QWEN_INSTALL_ARCHIVE`
+- `QWEN_INSTALL_VERSION`
+- `QWEN_NPM_REGISTRY`
+- `QWEN_INSTALL_REPAIR_PATH`
+- `QWEN_INSTALL_PATH_SCOPE`
 
-The installation source is stored in a separate file at:
+Use `--base-url` for private mirrors. The URL must contain
+`qwen-code-<target>` archives and `SHA256SUMS` in the same directory. Custom
+base URLs must use `https://`.
 
-- **Unix/Linux/macOS**: `~/.qwen/source.json`
-- **Windows**: `%USERPROFILE%\.qwen\source.json` (equivalent to `C:\Users\{username}\.qwen\source.json`)
+For Aliyun OSS/CDN, release publishing uploads byte-identical artifacts to the
+versioned directory, for example `releases/qwen-code/vX.Y.Z/`. Stable releases
+also update the small `releases/qwen-code/latest/VERSION` pointer used by the
+default installer path. The installer reads that pointer and then downloads the
+versioned archive plus the versioned `SHA256SUMS`; nightly and preview releases
+do not update the pointer.
 
-### File Format
+## Supported Source Values
 
-The `source.json` file contains:
+The source value may only contain letters, numbers, dot, underscore, and dash.
+Common values are:
+
+- `github`
+- `npm`
+- `internal`
+- `local-build`
+
+## Source Tracking
+
+When `--source` or `-s` is provided, the installer writes:
 
 ```json
 {
@@ -150,53 +302,23 @@ The `source.json` file contains:
 }
 ```
 
-### How the Source Information is Used
+Locations:
 
-1. **Telemetry Tracking**: The source information is included in RUM (Real User Monitoring) telemetry logs
-2. **Analytics**: Helps understand how users are discovering and installing Qwen Code
-3. **Distribution Analysis**: Tracks which distribution channels are most popular
+- Linux/macOS: `~/.qwen/source.json`
+- Windows: `%USERPROFILE%\.qwen\source.json`
 
-### Technical Implementation
+The telemetry logger reads this file when available. Missing, invalid, or
+unreadable source files are ignored.
 
-- The source information is stored as a separate JSON file
-- The `QwenLogger` class reads this file during telemetry initialization
-- The source is included in the `app.channel` field of the RUM payload
-- The implementation gracefully handles missing files, unknown values, and parsing errors
+## Manual Installation
 
-### Verification
-
-After installation and restarting your terminal (or sourcing your shell configuration), you can verify the source information:
-
-**Linux/macOS:**
-
-```bash
-cat ~/.qwen/source.json
-```
-
-**Windows:**
-
-```cmd
-type %USERPROFILE%\.qwen\source.json
-```
-
-## Manual Installation (Without Source Tracking)
-
-If you prefer not to use the installation scripts or don't want source tracking:
-
-### Prerequisites
-
-```bash
-# Node.js 20+
-curl -qL https://www.npmjs.com/install.sh | sh
-```
-
-### NPM Installation
+If source tracking is not needed and Node.js 22 or newer is already available:
 
 ```bash
 npm install -g @qwen-code/qwen-code@latest
 ```
 
-### Homebrew (macOS, Linux)
+Homebrew users can also install Qwen Code with:
 
 ```bash
 brew install qwen-code
@@ -204,47 +326,47 @@ brew install qwen-code
 
 ## Troubleshooting
 
-### Script Execution Issues
+### Standalone Archive Missing
 
-**Linux/macOS:**
+In `detect` mode, the installer falls back to npm. In `standalone` mode, install
+fails so that automation can detect the missing artifact.
+
+### Node.js Missing or Too Old
+
+This only blocks npm installation. Install or activate Node.js 22 or newer, then
+rerun the installer with `--method npm` or let `detect` fall back again.
+
+### npm Missing
+
+Install a Node.js distribution that includes npm, then rerun the installer.
+
+### Permission Errors During npm Install
+
+The installers do not rewrite npm prefix settings. If global npm installation
+fails with a permission error, fix the npm global install location or use a
+user-owned Node.js installation, then rerun:
 
 ```bash
-# Run with sh
-sh install-qwen-with-source.sh --source github
+npm install -g @qwen-code/qwen-code@latest --registry https://registry.npmmirror.com
 ```
 
-**Windows (PowerShell as Administrator):**
+### qwen Is Not on PATH After Installation
 
-```powershell
-# Run the script with --source parameter
-./install-qwen-with-source.bat --source github
+Restart the terminal first. For standalone installs, add the shim directory:
 
-# Or with short parameter
-./install-qwen-with-source.bat -s github
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### Node.js Installation Issues
+For npm installs, add npm's global binary directory. On Linux/macOS this is
+usually:
 
-**Linux/macOS:**
+```bash
+export PATH="$(npm prefix -g)/bin:$PATH"
+```
 
-- Ensure NVM is installed: `curl -o- https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install_nvm.sh | bash`
-- Restart your terminal or run: `source ~/.bashrc`
+On Windows standalone installs, add this directory to PATH:
 
-**Windows:**
-
-- Install NVM for Windows from: https://github.com/coreybutler/nvm-windows/releases
-- After installation, run the script again
-
-### Permission Issues
-
-You may need administrative privileges for global npm installation:
-
-- **Linux/macOS**: Use `sudo` with npm
-- **Windows**: Run PowerShell as Administrator (required for Node.js installation and global npm packages)
-
-## Notes
-
-- The scripts require internet access to download Node.js and Qwen Code
-- Administrative privileges may be required for global npm installation
-- The installation source is stored locally and used for tracking purposes only
-- If the source file is missing or invalid, the application continues to work normally
+```bat
+%LOCALAPPDATA%\qwen-code\bin
+```

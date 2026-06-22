@@ -13,8 +13,8 @@ import {
 import type { Config } from '../config/config.js';
 
 // Mock the memoryTool module
-vi.mock('../tools/memoryTool.js', () => ({
-  getCurrentGeminiMdFilename: vi.fn(() => 'GEMINI.md'),
+vi.mock('../memory/const.js', () => ({
+  getAllGeminiMdFilenames: vi.fn(() => ['GEMINI.md', 'AGENTS.md']),
 }));
 
 describe('FileExclusions', () => {
@@ -56,6 +56,7 @@ describe('FileExclusions', () => {
 
       // Should include dynamic patterns
       expect(patterns).toContain('**/GEMINI.md');
+      expect(patterns).toContain('**/AGENTS.md');
     });
 
     it('should respect includeDefaults option', () => {
@@ -68,6 +69,7 @@ describe('FileExclusions', () => {
       expect(patterns).not.toContain('**/node_modules/**');
       expect(patterns).not.toContain('**/.git/**');
       expect(patterns).not.toContain('**/GEMINI.md');
+      expect(patterns).not.toContain('**/AGENTS.md');
       expect(patterns).toHaveLength(0);
     });
 
@@ -101,7 +103,9 @@ describe('FileExclusions', () => {
       });
 
       expect(patternsWithDynamic).toContain('**/GEMINI.md');
+      expect(patternsWithDynamic).toContain('**/AGENTS.md');
       expect(patternsWithoutDynamic).not.toContain('**/GEMINI.md');
+      expect(patternsWithoutDynamic).not.toContain('**/AGENTS.md');
     });
   });
 
@@ -114,6 +118,7 @@ describe('FileExclusions', () => {
       expect(patterns).toContain('**/node_modules/**');
       expect(patterns).toContain('**/.git/**');
       expect(patterns).toContain('**/GEMINI.md');
+      expect(patterns).toContain('**/AGENTS.md');
 
       // Should include additional excludes
       expect(patterns).toContain('**/*.log');
@@ -209,9 +214,12 @@ describe('BINARY_EXTENSIONS', () => {
   });
 
   it('should include additional binary extensions', () => {
-    expect(BINARY_EXTENSIONS).toContain('.dat');
     expect(BINARY_EXTENSIONS).toContain('.obj');
     expect(BINARY_EXTENSIONS).toContain('.wasm');
+  });
+
+  it('should not force generic data extensions to binary', () => {
+    expect(BINARY_EXTENSIONS).not.toContain('.dat');
   });
 
   it('should include media file extensions', () => {

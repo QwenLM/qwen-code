@@ -8,13 +8,13 @@
  * OAuth client name used for MCP dynamic client registration.
  * This name must match the allowlist on MCP servers like Figma.
  */
-export const MCP_OAUTH_CLIENT_NAME = 'Gemini CLI MCP Client';
+export const MCP_OAUTH_CLIENT_NAME = 'Qwen Code MCP Client';
 
 /**
  * OAuth client name for service account impersonation provider.
  */
 export const MCP_SA_IMPERSONATION_CLIENT_NAME =
-  'Gemini CLI (Service Account Impersonation)';
+  'Qwen Code (Service Account Impersonation)';
 
 /**
  * Port for OAuth redirect callback server.

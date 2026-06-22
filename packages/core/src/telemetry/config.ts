@@ -7,6 +7,12 @@
 import type { TelemetrySettings } from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
 import { TelemetryTarget } from './index.js';
+import type { ResourceAttributeWarnings } from './resource-attributes.js';
+import {
+  coerceStringResourceAttributes,
+  parseOtelResourceAttributes,
+  stripReservedResourceAttributes,
+} from './resource-attributes.js';
 
 /**
  * Parse a boolean environment flag. Accepts 'true'/'1' as true.
@@ -57,12 +63,12 @@ export async function resolveTelemetrySettings(options: {
 
   const enabled =
     argv.telemetry ??
-    parseBooleanEnvFlag(env['GEMINI_TELEMETRY_ENABLED']) ??
+    parseBooleanEnvFlag(env['QWEN_TELEMETRY_ENABLED']) ??
     settings.enabled;
 
   const rawTarget =
     (argv.telemetryTarget as string | TelemetryTarget | undefined) ??
-    env['GEMINI_TELEMETRY_TARGET'] ??
+    env['QWEN_TELEMETRY_TARGET'] ??
     (settings.target as string | TelemetryTarget | undefined);
   const target = parseTelemetryTargetValue(rawTarget);
   if (rawTarget !== undefined && target === undefined) {
@@ -75,13 +81,13 @@ export async function resolveTelemetrySettings(options: {
 
   const otlpEndpoint =
     argv.telemetryOtlpEndpoint ??
-    env['GEMINI_TELEMETRY_OTLP_ENDPOINT'] ??
+    env['QWEN_TELEMETRY_OTLP_ENDPOINT'] ??
     env['OTEL_EXPORTER_OTLP_ENDPOINT'] ??
     settings.otlpEndpoint;
 
   const rawProtocol =
     (argv.telemetryOtlpProtocol as string | undefined) ??
-    env['GEMINI_TELEMETRY_OTLP_PROTOCOL'] ??
+    env['QWEN_TELEMETRY_OTLP_PROTOCOL'] ??
     settings.otlpProtocol;
   const otlpProtocol = (['grpc', 'http'] as const).find(
     (p) => p === rawProtocol,
@@ -96,25 +102,94 @@ export async function resolveTelemetrySettings(options: {
 
   const logPrompts =
     argv.telemetryLogPrompts ??
-    parseBooleanEnvFlag(env['GEMINI_TELEMETRY_LOG_PROMPTS']) ??
+    parseBooleanEnvFlag(env['QWEN_TELEMETRY_LOG_PROMPTS']) ??
     settings.logPrompts;
 
-  const outfile =
-    argv.telemetryOutfile ??
-    env['GEMINI_TELEMETRY_OUTFILE'] ??
-    settings.outfile;
+  const includeSensitiveSpanAttributes =
+    parseBooleanEnvFlag(
+      env['QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES'],
+    ) ??
+    settings.includeSensitiveSpanAttributes ??
+    false;
 
-  const useCollector =
-    parseBooleanEnvFlag(env['GEMINI_TELEMETRY_USE_COLLECTOR']) ??
-    settings.useCollector;
+  const outfile =
+    argv.telemetryOutfile ?? env['QWEN_TELEMETRY_OUTFILE'] ?? settings.outfile;
+
+  // Per-signal endpoint overrides (HTTP only).
+  // Priority: QWEN_ env var > standard OTEL_ env var > settings.json
+  const otlpTracesEndpoint =
+    env['QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT'] ??
+    env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] ??
+    settings.otlpTracesEndpoint;
+
+  const otlpLogsEndpoint =
+    env['QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT'] ??
+    env['OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'] ??
+    settings.otlpLogsEndpoint;
+
+  const otlpMetricsEndpoint =
+    env['QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT'] ??
+    env['OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'] ??
+    settings.otlpMetricsEndpoint;
+
+  // Resource attributes: merge OTEL_RESOURCE_ATTRIBUTES (lowest), then
+  // settings.resourceAttributes (settings wins on key conflict). RESERVED
+  // keys (`service.version`, `session.id`) are stripped from both sources
+  // with a `diag.warn`. OTEL_SERVICE_NAME is a standard escape hatch that
+  // overrides service.name from any other source. All drops/coercions are
+  // accumulated into `resourceAttributeWarnings` so the SDK can emit a
+  // one-time user-visible summary at telemetry init.
+  const resourceAttributeWarnings: ResourceAttributeWarnings = [];
+  const envResourceAttrs = stripReservedResourceAttributes(
+    parseOtelResourceAttributes(
+      env['OTEL_RESOURCE_ATTRIBUTES'],
+      resourceAttributeWarnings,
+    ),
+    'OTEL_RESOURCE_ATTRIBUTES',
+    resourceAttributeWarnings,
+  );
+  const settingsResourceAttrs = stripReservedResourceAttributes(
+    coerceStringResourceAttributes(
+      settings.resourceAttributes,
+      resourceAttributeWarnings,
+    ),
+    'settings.telemetry.resourceAttributes',
+    resourceAttributeWarnings,
+  );
+  const mergedResourceAttrs: Record<string, string> = {
+    ...envResourceAttrs,
+    ...settingsResourceAttrs,
+  };
+  // Trim OTEL_SERVICE_NAME so a whitespace-only value (`' '`, `'\t'`) is
+  // treated as unset rather than producing a blank service name on Resource.
+  const otelServiceName = env['OTEL_SERVICE_NAME']?.trim();
+  if (otelServiceName) {
+    mergedResourceAttrs['service.name'] = otelServiceName;
+  }
+  const resourceAttributes = Object.keys(mergedResourceAttrs).length
+    ? mergedResourceAttrs
+    : undefined;
+
+  const metricsIncludeSessionId =
+    parseBooleanEnvFlag(env['QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID']) ??
+    settings.metrics?.includeSessionId ??
+    false;
 
   return {
     enabled,
     target,
     otlpEndpoint,
     otlpProtocol,
+    otlpTracesEndpoint,
+    otlpLogsEndpoint,
+    otlpMetricsEndpoint,
     logPrompts,
+    includeSensitiveSpanAttributes,
     outfile,
-    useCollector,
+    resourceAttributes,
+    metrics: { includeSessionId: metricsIncludeSessionId },
+    resourceAttributeWarnings: resourceAttributeWarnings.length
+      ? resourceAttributeWarnings
+      : undefined,
   };
 }

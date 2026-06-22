@@ -129,6 +129,8 @@ interface ParsedLog {
     function_args?: string;
     success?: boolean;
     duration_ms?: number;
+    status?: string;
+    'error.message'?: string;
   };
   scopeMetrics?: {
     metrics: {
@@ -154,7 +156,7 @@ export class TestRig {
   // Get timeout based on environment
   getDefaultTimeout() {
     if (env['CI']) return 60000; // 1 minute in CI
-    if (env['GEMINI_SANDBOX']) return 30000; // 30s in containers
+    if (env['QWEN_SANDBOX']) return 30000; // 30s in containers
     return 15000; // 15s locally
   }
 
@@ -181,7 +183,7 @@ export class TestRig {
         otlpEndpoint: '',
         outfile: telemetryPath,
       },
-      sandbox: env.GEMINI_SANDBOX !== 'false' ? env.GEMINI_SANDBOX : false,
+      sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
     };
     writeFileSync(
@@ -270,13 +272,13 @@ export class TestRig {
       child.stdin!.write(execOptions.input);
     }
 
-    if (
+    const keepStdinOpen =
       typeof promptOrOptions === 'object' &&
-      !promptOrOptions.stdinDoesNotEnd
-    ) {
+      promptOrOptions !== null &&
+      promptOrOptions.stdinDoesNotEnd === true;
+    if (!keepStdinOpen) {
       child.stdin!.end();
     }
-    child.stdin!.end();
 
     child.stdout!.on('data', (data: Buffer) => {
       stdout += data;
@@ -301,7 +303,7 @@ export class TestRig {
           // Filter out telemetry output when running with Podman
           // Podman seems to output telemetry to stdout even when writing to file
           let result = stdout;
-          if (env['GEMINI_SANDBOX'] === 'podman') {
+          if (env['QWEN_SANDBOX'] === 'podman') {
             // Remove telemetry JSON objects from output
             // They are multi-line JSON objects that start with { and contain telemetry fields
             const lines = result.split(EOL);
@@ -569,6 +571,8 @@ export class TestRig {
         args: string;
         success: boolean;
         duration_ms: number;
+        status?: string;
+        error?: string;
       };
     }[] = [];
 
@@ -727,7 +731,7 @@ export class TestRig {
   readToolLogs() {
     // For Podman, first check if telemetry file exists and has content
     // If not, fall back to parsing from stdout
-    if (env['GEMINI_SANDBOX'] === 'podman') {
+    if (env['QWEN_SANDBOX'] === 'podman') {
       // Try reading from file first
       const logFilePath = join(this.testDir!, 'telemetry.log');
 
@@ -760,6 +764,8 @@ export class TestRig {
         args: string;
         success: boolean;
         duration_ms: number;
+        status?: string;
+        error?: string;
       };
     }[] = [];
 
@@ -776,6 +782,8 @@ export class TestRig {
             args: logData.attributes.function_args,
             success: logData.attributes.success,
             duration_ms: logData.attributes.duration_ms,
+            status: logData.attributes.status,
+            error: logData.attributes['error.message'],
           },
         });
       }

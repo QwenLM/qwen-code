@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { buildResumedHistoryItems } from './resumeHistoryUtils.js';
+import {
+  buildResumedHistoryItems,
+  stripSuppressOnRestore,
+  expandCollapsedHistory,
+} from './resumeHistoryUtils.js';
 import { ToolCallStatus } from '../types.js';
 import type {
   AnyDeclarativeTool,
@@ -14,16 +18,12 @@ import type {
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import type { HistoryItem } from '../types.js';
 
 const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
   ({
     getToolRegistry: () => ({
       getTool: (name: string) => tools[name],
-    }),
-    getContentGenerator: () => ({
-      // Default to showing full thinking content during resume unless explicitly
-      // summarized; tests don't care about summarized thinking behavior.
-      useSummarizedThinking: () => false,
     }),
   }) as unknown as Config;
 
@@ -107,7 +107,50 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
-  it('marks tool results as error, captures thought text, and falls back when tool is missing', () => {
+  it('restores mid-turn user messages from display text', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'call-1',
+            resultDisplay: 'All set',
+            status: 'success',
+          },
+        },
+        {
+          type: 'user',
+          subtype: 'mid_turn_user_message',
+          message: {
+            parts: [
+              {
+                text: '\n[User message received during tool execution]: save logs',
+              } as Part,
+            ],
+          },
+          systemPayload: { displayText: 'save logs' },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(
+      session,
+      makeConfig({ replace: mockTool }),
+      20,
+    );
+
+    expect(items).toContainEqual({
+      id: 21,
+      type: 'notification',
+      text: 'save logs',
+    });
+  });
+
+  it('marks tool results as error, omits thought text, and falls back when tool is missing', () => {
     const conversation = {
       messages: [
         {
@@ -147,11 +190,6 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}));
 
     expect(items).toEqual([
-      {
-        id: expect.any(Number),
-        type: 'gemini_thought',
-        text: 'should be skipped',
-      },
       { id: expect.any(Number), type: 'gemini', text: 'visible text' },
       {
         id: expect.any(Number),
@@ -167,6 +205,40 @@ describe('resumeHistoryUtils', () => {
           },
         ],
       },
+    ]);
+  });
+
+  it('keeps thought text in standalone previews without config', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          message: {
+            parts: [
+              {
+                text: 'preview thought',
+                thought: true,
+              } as unknown as Part,
+              { text: 'visible text' } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, null);
+
+    expect(items).toEqual([
+      {
+        id: expect.any(Number),
+        type: 'gemini_thought',
+        text: 'preview thought',
+      },
+      { id: expect.any(Number), type: 'gemini', text: 'visible text' },
     ]);
   });
 
@@ -285,5 +357,230 @@ describe('resumeHistoryUtils', () => {
       },
       { id: 8, type: 'gemini', text: 'Follow-up' },
     ]);
+  });
+
+  it('preserves model-sent slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: true,
+          },
+        },
+        {
+          type: 'assistant',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 20);
+
+    expect(items).toEqual([
+      { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
+      { id: 22, type: 'gemini', text: 'Follow-up' },
+    ]);
+  });
+
+  it('preserves local-only slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/about',
+            sentToModel: false,
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 30);
+
+    expect(items).toEqual([
+      { id: 31, type: 'user', text: '/about', sentToModel: false },
+    ]);
+  });
+
+  it('omits sentToModel for legacy slash command records', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/legacy',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 40);
+
+    expect(items).toEqual([{ id: 41, type: 'user', text: '/legacy' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+
+  it('omits corrupted non-boolean sentToModel metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: 'true',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 50);
+
+    expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+});
+
+describe('stripSuppressOnRestore', () => {
+  it('returns item unchanged when display is undefined', () => {
+    const item = { id: 1, type: 'user', text: 'hello' } as HistoryItem;
+    expect(stripSuppressOnRestore(item)).toBe(item);
+  });
+
+  it('returns item unchanged when suppressOnRestore is absent', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: {},
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: {},
+    });
+  });
+
+  it('strips suppressOnRestore while preserving other display properties', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true, kind: 'collapse-summary' },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { kind: 'collapse-summary' },
+    });
+  });
+
+  it('sets display to undefined when suppressOnRestore was the only property', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: undefined,
+    });
+  });
+});
+
+describe('expandCollapsedHistory', () => {
+  it('returns empty array for empty input', () => {
+    expect(expandCollapsedHistory([])).toEqual([]);
+  });
+
+  it('filters out collapse-summary items and strips suppressOnRestore', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 3,
+        type: 'info',
+        text: 'Summary',
+        display: { kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello', display: undefined },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('preserves items without suppressOnRestore', () => {
+    const items = [
+      { id: 1, type: 'user', text: 'hello' },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello' },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('handles items with both suppressOnRestore and kind', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true, kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([]);
   });
 });

@@ -19,6 +19,7 @@ import type {
   CLIControlInitializeRequest,
   CLIControlSetModelRequest,
   CLIMcpServerConfig,
+  CLIControlGetContextUsageRequest,
 } from '../../types.js';
 import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
 import {
@@ -29,6 +30,14 @@ import {
 } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SYSTEM_CONTROLLER');
+
+/**
+ * Maximum allowed timeout for canUseTool requests (10 minutes).
+ * Node.js setTimeout coerces delays > 2^31-1 to 32-bit signed integers,
+ * which can cause timeouts to fire immediately or never. This cap prevents
+ * such edge cases while still allowing reasonable timeout values.
+ */
+const MAX_CAN_USE_TOOL_TIMEOUT_MS = 600_000;
 
 export class SystemController extends BaseController {
   /**
@@ -61,8 +70,55 @@ export class SystemController extends BaseController {
       case 'supported_commands':
         return this.handleSupportedCommands(signal);
 
+      case 'get_context_usage':
+        return this.handleGetContextUsage(
+          payload as CLIControlGetContextUsageRequest,
+          signal,
+        );
+
       default:
         throw new Error(`Unsupported request subtype in SystemController`);
+    }
+  }
+
+  private async handleGetContextUsage(
+    payload: CLIControlGetContextUsageRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    try {
+      const mod = await import('../../../ui/commands/contextCommand.js');
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
+      if (typeof mod.collectContextData !== 'function') {
+        throw new Error('collectContextData is not available');
+      }
+      const showDetails = payload.show_details ?? false;
+      const contextUsageItem = await mod.collectContextData(
+        this.context.config,
+        showDetails,
+      );
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
+
+      const { type: _type, ...contextData } = contextUsageItem;
+      return {
+        subtype: 'get_context_usage',
+        ...contextData,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get context usage';
+      debugLogger.error(
+        '[SystemController] Failed to get context usage:',
+        error,
+      );
+      throw new Error(errorMessage);
     }
   }
 
@@ -83,6 +139,16 @@ export class SystemController extends BaseController {
     }
 
     this.context.config.setSdkMode(true);
+
+    const canUseToolTimeout = payload.timeout?.canUseTool;
+    if (
+      typeof canUseToolTimeout === 'number' &&
+      Number.isFinite(canUseToolTimeout) &&
+      canUseToolTimeout > 0 &&
+      canUseToolTimeout <= MAX_CAN_USE_TOOL_TIMEOUT_MS
+    ) {
+      this.context.sdkCanUseToolTimeoutMs = canUseToolTimeout;
+    }
 
     // Process SDK MCP servers
     if (
@@ -193,6 +259,7 @@ export class SystemController extends BaseController {
 
     return {
       subtype: 'initialize',
+      session_id: this.context.config.getSessionId(),
       capabilities,
     };
   }
@@ -211,6 +278,7 @@ export class SystemController extends BaseController {
       can_set_permission_mode:
         typeof this.context.config.setApprovalMode === 'function',
       can_set_model: typeof this.context.config.setModel === 'function',
+      can_get_context_usage: true,
       // SDK MCP servers are supported - messages routed through control plane
       can_handle_mcp_message: true,
     };
@@ -394,7 +462,11 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const commands = await getAvailableCommands(this.context.config, signal);
+      const commands = await getAvailableCommands(
+        this.context.config,
+        signal,
+        'non_interactive',
+      );
 
       if (signal.aborted) {
         return [];

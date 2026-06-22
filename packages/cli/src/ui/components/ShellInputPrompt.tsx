@@ -9,6 +9,7 @@ import type React from 'react';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 import { keyToAnsi, type Key } from '../hooks/keyToAnsi.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 
 export interface ShellInputPromptProps {
   activeShellPtyId: number | null;
@@ -31,6 +32,11 @@ export const ShellInputPrompt: React.FC<ShellInputPromptProps> = ({
   const handleInput = useCallback(
     (key: Key) => {
       if (!focus || !activeShellPtyId) {
+        return;
+      }
+      // Don't forward Ctrl+F to the PTY — it's used to toggle shell focus.
+      // Without this, the raw ^F control character gets written to the shell.
+      if (keyMatchers[Command.TOGGLE_SHELL_INPUT_FOCUS](key)) {
         return;
       }
       if (key.ctrl && key.shift && key.name === 'up') {

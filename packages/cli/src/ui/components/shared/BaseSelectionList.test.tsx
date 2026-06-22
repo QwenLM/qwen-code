@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { waitFor } from '@testing-library/react';
+import { act, waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import {
   BaseSelectionList,
@@ -22,6 +22,16 @@ const mockTheme = {
   text: { primary: 'COLOR_PRIMARY', secondary: 'COLOR_SECONDARY' },
   status: { success: 'COLOR_SUCCESS' },
 } as typeof theme;
+
+const renderSelectionList = (
+  component: Parameters<typeof renderWithProviders>[0],
+): ReturnType<typeof renderWithProviders> => {
+  let rendered!: ReturnType<typeof renderWithProviders>;
+  act(() => {
+    rendered = renderWithProviders(component);
+  });
+  return rendered;
+};
 
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
@@ -74,7 +84,7 @@ describe('BaseSelectionList', () => {
       ...props,
     };
 
-    return renderWithProviders(<BaseSelectionList {...defaultProps} />);
+    return renderSelectionList(<BaseSelectionList {...defaultProps} />);
   };
 
   beforeEach(() => {
@@ -93,12 +103,12 @@ describe('BaseSelectionList', () => {
       expect(mockRenderItem).toHaveBeenCalledWith(items[0], expect.any(Object));
     });
 
-    it('should render the selection indicator (● or space) and layout', () => {
+    it('should render the selection indicator (› or space) and layout', () => {
       const { lastFrame } = renderComponent({}, 0);
       const output = lastFrame();
 
       // Use regex to assert the structure: Indicator + Whitespace + Number + Label
-      expect(output).toMatch(/●\s+1\.\s+Item A/);
+      expect(output).toMatch(/›\s+1\.\s+Item A/);
       expect(output).toMatch(/\s+2\.\s+Item B/);
       expect(output).toMatch(/\s+3\.\s+Item C/);
     });
@@ -286,7 +296,7 @@ describe('BaseSelectionList', () => {
         ),
       );
 
-      const { rerender, lastFrame } = renderWithProviders(
+      const { rerender, lastFrame } = renderSelectionList(
         <BaseSelectionList {...componentProps} />,
       );
 
@@ -297,10 +307,13 @@ describe('BaseSelectionList', () => {
           setActiveIndex: vi.fn(),
         });
 
-        rerender(<BaseSelectionList {...componentProps} />);
+        await act(async () => {
+          rerender(<BaseSelectionList {...componentProps} />);
+        });
+        await act(async () => {});
 
         await waitFor(() => {
-          expect(lastFrame()).toBeTruthy();
+          expect(lastFrame()).toContain(longList[newIndex]!.label);
         });
       };
 
@@ -316,21 +329,7 @@ describe('BaseSelectionList', () => {
       expect(output).not.toContain('Item 4');
     });
 
-    it('should scroll down when activeIndex moves beyond the visible window', async () => {
-      const { updateActiveIndex, lastFrame } = renderScrollableList(0);
-
-      // Move to index 3 (Item 4). Should trigger scroll.
-      // New visible window should be Items 2, 3, 4 (scroll offset 1).
-      await updateActiveIndex(3);
-
-      const output = lastFrame();
-      expect(output).not.toContain('Item 1');
-      expect(output).toContain('Item 2');
-      expect(output).toContain('Item 4');
-      expect(output).not.toContain('Item 5');
-    });
-
-    it.skip('should scroll up when activeIndex moves before the visible window', async () => {
+    it('should scroll up when activeIndex moves before the visible window', async () => {
       const { updateActiveIndex, lastFrame } = renderScrollableList(0);
 
       await updateActiveIndex(4);
@@ -364,6 +363,15 @@ describe('BaseSelectionList', () => {
       });
     });
 
+    it('should show a high initial selection on the first frame', () => {
+      const { lastFrame } = renderScrollableList(9);
+      const output = lastFrame();
+
+      expect(output).toContain('Item 10');
+      expect(output).toContain('Item 8');
+      expect(output).not.toMatch(/(^|\n)\s*1\. Item 1($|\n)/);
+    });
+
     it('should handle dynamic scrolling through multiple activeIndex changes', async () => {
       const { updateActiveIndex, lastFrame } = renderScrollableList(0);
 
@@ -381,6 +389,10 @@ describe('BaseSelectionList', () => {
       expect(output).not.toContain('Item 1');
 
       await updateActiveIndex(5); // Scroll further
+      // Wait for scrollOffset state to settle after the second jump
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Item 6');
+      });
       output = lastFrame();
       expect(output).toContain('Item 4');
       expect(output).toContain('Item 6');

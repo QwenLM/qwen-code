@@ -1,0 +1,2779 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "Qwen Code settings configuration",
+  "properties": {
+    "mcpServers": {
+      "description": "Configuration for MCP servers.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "channels": {
+      "description": "Configuration for messaging channels.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "modelProviders": {
+      "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "plansDirectory": {
+      "description": "Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.",
+      "type": "string"
+    },
+    "env": {
+      "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "proxy": {
+      "description": "Proxy URL for CLI HTTP requests. Takes precedence over proxy environment variables when --proxy is not provided.",
+      "type": "string"
+    },
+    "general": {
+      "description": "General application settings.",
+      "type": "object",
+      "properties": {
+        "preferredEditor": {
+          "description": "The preferred editor to open files in.",
+          "type": "string"
+        },
+        "vimMode": {
+          "description": "Enable Vim keybindings",
+          "type": "boolean",
+          "default": false
+        },
+        "voice": {
+          "description": "Voice dictation settings.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable voice dictation in the prompt input.",
+              "type": "boolean",
+              "default": false
+            },
+            "mode": {
+              "description": "How push-to-talk behaves: \"hold\" to talk while held, or \"tap\" to start and tap (or pause) to stop and submit. Options: hold, tap",
+              "enum": [
+                "hold",
+                "tap"
+              ],
+              "default": "hold"
+            },
+            "language": {
+              "description": "Preferred spoken language for voice transcription (e.g. \"english\", \"chinese\"). Leave empty to auto-detect.",
+              "type": "string",
+              "default": ""
+            }
+          }
+        },
+        "enableAutoUpdate": {
+          "description": "Enable automatic update checks and installations on startup.",
+          "type": "boolean",
+          "default": true
+        },
+        "showSessionRecap": {
+          "description": "Auto-show a one-line \"where you left off\" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.",
+          "type": "boolean",
+          "default": false
+        },
+        "sessionRecapAwayThresholdMinutes": {
+          "description": "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
+          "type": "number",
+          "default": 5
+        },
+        "cleanupPeriodDays": {
+          "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
+          "type": "number",
+          "default": 30
+        },
+        "gitCoAuthor": {
+          "description": "Attribution added to git commits and pull requests created through Qwen Code.",
+          "default": {
+            "commit": true,
+            "pr": true
+          },
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "commit": {
+                  "description": "Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.",
+                  "type": "boolean",
+                  "default": true
+                },
+                "pr": {
+                  "description": "Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.",
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            }
+          ]
+        },
+        "debugKeystrokeLogging": {
+          "description": "Enable debug logging of keystrokes to the console.",
+          "type": "boolean",
+          "default": false
+        },
+        "language": {
+          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh-TW, zh, ru, de, ja, pt, fr, ca",
+          "enum": [
+            "auto",
+            "en",
+            "zh-TW",
+            "zh",
+            "ru",
+            "de",
+            "ja",
+            "pt",
+            "fr",
+            "ca"
+          ],
+          "default": "auto"
+        },
+        "outputLanguage": {
+          "description": "The language for LLM output. Use \"auto\" to detect from system settings, or set a specific language.",
+          "type": "string",
+          "default": "auto"
+        },
+        "dynamicCommandTranslation": {
+          "description": "Enable AI translation for dynamic slash command descriptions. When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.",
+          "type": "boolean",
+          "default": false
+        },
+        "terminalBell": {
+          "description": "Play terminal bell sound when response completes or needs approval.",
+          "type": "boolean",
+          "default": true
+        },
+        "preventSystemSleep": {
+          "description": "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
+          "type": "boolean",
+          "default": true
+        },
+        "chatRecording": {
+          "description": "Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.",
+          "type": "boolean",
+          "default": true
+        },
+        "defaultFileEncoding": {
+          "description": "Default encoding for new files. Use \"utf-8\" (default) for UTF-8 without BOM, or \"utf-8-bom\" for UTF-8 with BOM. Only change this if your project specifically requires BOM. Options: utf-8, utf-8-bom",
+          "enum": [
+            "utf-8",
+            "utf-8-bom"
+          ],
+          "default": "utf-8"
+        }
+      }
+    },
+    "output": {
+      "description": "Settings for the CLI output.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "description": "The format of the CLI output. Options: text, json",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "default": "text"
+        },
+        "showTimestamps": {
+          "description": "Show [HH:MM:SS] timestamp before each assistant response.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "dualOutput": {
+      "description": "Dual-output sidecar mode: emit structured JSON events to a second channel while the TUI renders normally on stdout. See docs/users/features/dual-output.md. CLI flags take precedence over these settings.",
+      "type": "object",
+      "properties": {
+        "jsonFile": {
+          "description": "File path for structured JSON event output. Equivalent to --json-file. Ignored if --json-fd or --json-file is also set.",
+          "type": "string"
+        },
+        "inputFile": {
+          "description": "File path for remote input commands (JSONL). Equivalent to --input-file. Ignored if --input-file is also set.",
+          "type": "string"
+        }
+      }
+    },
+    "ui": {
+      "description": "User interface settings.",
+      "type": "object",
+      "properties": {
+        "theme": {
+          "description": "The color theme for the UI.",
+          "type": "string",
+          "default": "Qwen Dark"
+        },
+        "autoModeAcknowledged": {
+          "description": "True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.",
+          "type": "boolean",
+          "default": false
+        },
+        "statusLine": {
+          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "customThemes": {
+          "description": "Custom theme definitions.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "hideBuiltinWorktreeIndicator": {
+          "description": "When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.",
+          "type": "boolean",
+          "default": false
+        },
+        "hideWindowTitle": {
+          "description": "Hide the window title bar",
+          "type": "boolean",
+          "default": false
+        },
+        "disableWorkflowKeywordTrigger": {
+          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
+          "type": "boolean",
+          "default": false
+        },
+        "showStatusInTitle": {
+          "description": "Show Qwen Code session name and status in the terminal window title",
+          "type": "boolean",
+          "default": true
+        },
+        "hideTips": {
+          "description": "Hide helpful tips in the UI",
+          "type": "boolean",
+          "default": false
+        },
+        "history": {
+          "description": "History display settings.",
+          "type": "object",
+          "properties": {
+            "collapseOnResume": {
+              "description": "Whether to collapse history by default when resuming a session.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "showLineNumbers": {
+          "description": "Show line numbers in the code output.",
+          "type": "boolean",
+          "default": true
+        },
+        "renderMode": {
+          "description": "Default Markdown display mode. Use \"render\" for rich visual previews, or \"raw\" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M; on macOS the terminal must send Option as Meta. Options: render, raw",
+          "enum": [
+            "render",
+            "raw"
+          ],
+          "default": "render"
+        },
+        "showCitations": {
+          "description": "Show citations for generated text in the chat.",
+          "type": "boolean",
+          "default": false
+        },
+        "customWittyPhrases": {
+          "description": "Custom witty phrases to display during loading.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "showResponseTokensPerSecond": {
+          "description": "Show a live tokens/sec estimate next to the response token counter while the model is streaming. Takes effect in the next session.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableWelcomeBack": {
+          "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableUserFeedback": {
+          "description": "Show optional feedback dialog after conversations to help improve Qwen performance.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableFollowupSuggestions": {
+          "description": "Show context-aware follow-up suggestions after task completion. Press Tab, Right Arrow, or Enter to accept into the input buffer.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableCacheSharing": {
+          "description": "Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).",
+          "type": "boolean",
+          "default": true
+        },
+        "enableSpeculation": {
+          "description": "Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).",
+          "type": "boolean",
+          "default": false
+        },
+        "accessibility": {
+          "description": "Accessibility settings.",
+          "type": "object",
+          "properties": {
+            "enableLoadingPhrases": {
+              "description": "Enable loading phrases (disable for accessibility)",
+              "type": "boolean",
+              "default": true
+            },
+            "screenReader": {
+              "description": "Render output in plain-text to be more screen reader accessible",
+              "type": "boolean"
+            }
+          }
+        },
+        "feedbackLastShownTimestamp": {
+          "description": "The last time the feedback dialog was shown.",
+          "type": "number",
+          "default": 0
+        },
+        "compactMode": {
+          "description": "Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).",
+          "type": "boolean",
+          "default": false
+        },
+        "compactInline": {
+          "description": "Compact tool display within each group instead of merging across groups. Requires compactMode to be enabled.",
+          "type": "boolean",
+          "default": false
+        },
+        "useTerminalBuffer": {
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
+          "type": "boolean",
+          "default": false
+        },
+        "shellOutputMaxLines": {
+          "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
+          "type": "number",
+          "default": 5
+        },
+        "hideBanner": {
+          "description": "Hide the startup ASCII banner and info panel.",
+          "type": "boolean",
+          "default": false
+        },
+        "customBannerTitle": {
+          "description": "Replace the default \">_ Qwen Code\" title shown in the banner info panel. The version suffix is always appended.",
+          "type": "string",
+          "default": ""
+        },
+        "customBannerSubtitle": {
+          "description": "Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.",
+          "type": "string",
+          "default": ""
+        },
+        "customAsciiArt": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "small": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "large": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Replace the default QWEN ASCII art. Accepts an inline string, {\"path\": \"...\"}, or {\"small\": ..., \"large\": ...} for width-aware selection."
+        }
+      }
+    },
+    "ide": {
+      "description": "IDE integration settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable IDE integration mode",
+          "type": "boolean",
+          "default": false
+        },
+        "hasSeenNudge": {
+          "description": "Whether the user has seen the IDE integration nudge.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "privacy": {
+      "description": "Privacy-related settings.",
+      "type": "object",
+      "properties": {
+        "usageStatisticsEnabled": {
+          "description": "Enable collection of usage statistics",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "properties": {
+        "includeSensitiveSpanAttributes": {
+          "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
+          "type": "boolean",
+          "default": false
+        },
+        "resourceAttributes": {
+          "description": "Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "metrics": {
+          "description": "Per-signal cardinality controls for exported metrics.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "includeSessionId": {
+              "description": "Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      },
+      "additionalProperties": true,
+      "description": "Telemetry configuration."
+    },
+    "outboundCorrelation": {
+      "type": "object",
+      "properties": {
+        "propagateTraceContext": {
+          "description": "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false — trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "description": "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) — separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope)."
+    },
+    "fastModel": {
+      "description": "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
+      "type": "string",
+      "default": ""
+    },
+    "voiceModel": {
+      "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
+      "type": "string",
+      "default": ""
+    },
+    "model": {
+      "description": "Settings related to the generative model.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The model to use for conversations.",
+          "type": "string"
+        },
+        "baseUrl": {
+          "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
+          "type": "string"
+        },
+        "maxSessionTurns": {
+          "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
+          "type": "number",
+          "default": -1
+        },
+        "maxWallTimeSeconds": {
+          "description": "Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).",
+          "type": "number",
+          "default": -1
+        },
+        "maxToolCalls": {
+          "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means \"no tool calls allowed\" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.",
+          "type": "number",
+          "default": -1
+        },
+        "chatCompression": {
+          "description": "Chat compression settings.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "sessionTokenLimit": {
+          "description": "The maximum number of tokens allowed in a session.",
+          "type": "number"
+        },
+        "skipNextSpeakerCheck": {
+          "description": "Skip the next speaker check.",
+          "type": "boolean",
+          "default": true
+        },
+        "skipWorkflowUsageWarning": {
+          "description": "Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.",
+          "type": "boolean",
+          "default": false
+        },
+        "skipLoopDetection": {
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.",
+          "type": "boolean",
+          "default": true
+        },
+        "skipStartupContext": {
+          "description": "Avoid sending the workspace startup context at the beginning of each session.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableOpenAILogging": {
+          "description": "Enable OpenAI logging.",
+          "type": "boolean",
+          "default": false
+        },
+        "openAILoggingDir": {
+          "description": "Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.",
+          "type": "string"
+        },
+        "generationConfig": {
+          "description": "Generation configuration settings.",
+          "type": "object",
+          "properties": {
+            "timeout": {
+              "description": "Request timeout in milliseconds.",
+              "type": "number"
+            },
+            "maxRetries": {
+              "description": "Maximum number of retries for failed requests.",
+              "type": "number"
+            },
+            "enableCacheControl": {
+              "description": "Enable cache control for DashScope providers.",
+              "type": "boolean",
+              "default": true
+            },
+            "splitToolMedia": {
+              "description": "When true, media (images / audio / video / files) returned by tool calls — including the built-in read_file and MCP tools — is split into a follow-up user message instead of being embedded in the `role: \"tool\"` message. The OpenAI Chat Completions spec only permits text on tool messages, so strict OpenAI-compatible servers (e.g., doubao / new-api / LM Studio) silently drop or reject embedded media and the model never sees an image read via read_file (QwenLM/qwen-code#4876, #3616). Default true is spec-compliant and safe for permissive providers; set false only to restore the legacy embed-in-tool-message behavior.",
+              "type": "boolean",
+              "default": true
+            },
+            "toolResultContentFormat": {
+              "description": "Controls how text-only tool results are serialized in OpenAI-compatible requests. Use \"parts\" for the default content-part array shape. Use \"string\" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia. Options: parts, string",
+              "enum": [
+                "parts",
+                "string"
+              ],
+              "default": "parts"
+            },
+            "schemaCompliance": {
+              "description": "The compliance mode for tool schemas sent to the model. Use \"openapi_30\" for strict OpenAPI 3.0 compatibility (e.g., for Gemini). Options: auto, openapi_30",
+              "enum": [
+                "auto",
+                "openapi_30"
+              ],
+              "default": "auto"
+            },
+            "contextWindowSize": {
+              "description": "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    "modelPricing": {
+      "description": "Optional per-model pricing for cost estimation in /stats model. Example: {\"qwen3-coder\": {\"inputPerMillionTokens\": 0.30, \"outputPerMillionTokens\": 1.20}}",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "context": {
+      "description": "Settings for managing context provided to the model.",
+      "type": "object",
+      "properties": {
+        "fileName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "The name of the context file or files."
+        },
+        "importFormat": {
+          "description": "The format to use when importing memory. Options: tree, flat",
+          "enum": [
+            "tree",
+            "flat"
+          ]
+        },
+        "includeDirectories": {
+          "description": "Additional directories to include in the workspace context. Missing directories will be skipped with a warning.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "loadFromIncludeDirectories": {
+          "description": "Whether to load memory files from include directories.",
+          "type": "boolean",
+          "default": false
+        },
+        "clearContextOnIdle": {
+          "description": "Settings for clearing stale or oversized tool result context. Use -1 to disable a threshold.",
+          "type": "object",
+          "properties": {
+            "toolResultsThresholdMinutes": {
+              "description": "Minutes of inactivity before clearing old tool result content. Use -1 to disable.",
+              "type": "number",
+              "default": 60
+            },
+            "toolResultsNumToKeep": {
+              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
+              "type": "number",
+              "default": 5
+            },
+            "toolResultsTotalCharsThreshold": {
+              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
+              "type": "number",
+              "default": 500000
+            }
+          }
+        },
+        "fileFiltering": {
+          "description": "Settings for git-aware file filtering.",
+          "type": "object",
+          "properties": {
+            "respectGitIgnore": {
+              "description": "Respect .gitignore files when searching",
+              "type": "boolean",
+              "default": true
+            },
+            "respectQwenIgnore": {
+              "description": "Respect .qwenignore files when searching",
+              "type": "boolean",
+              "default": true
+            },
+            "enableRecursiveFileSearch": {
+              "description": "Enable recursive file search functionality",
+              "type": "boolean",
+              "default": true
+            },
+            "enableFuzzySearch": {
+              "description": "Enable fuzzy search when searching for files.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "memory": {
+      "description": "Settings for managed auto-memory.",
+      "type": "object",
+      "properties": {
+        "enableManagedAutoMemory": {
+          "description": "Enable background extraction of memories from conversations.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableManagedAutoDream": {
+          "description": "Enable automatic consolidation (dream) of collected memories.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableAutoSkill": {
+          "description": "Enable background review for reusable project skills after tool-heavy sessions.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "slashCommands": {
+      "description": "Configuration for slash commands exposed by the CLI. Useful for locking down the command surface in multi-tenant or enterprise deployments.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"). Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "skills": {
+      "description": "Configuration for skills (SKILL.md-based capabilities) exposed to the model.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "permissions": {
+      "description": "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Tools or commands that are auto-approved without confirmation. Examples: \"ShellTool\", \"Bash(git *)\", \"ReadFileTool\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask": {
+          "description": "Tools or commands that always require user confirmation. Takes precedence over allow rules.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Tools or commands that are always blocked. Highest priority rule. Examples: \"ShellTool\", \"Bash(rm -rf *)\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "autoMode": {
+          "description": "Settings consumed by the AUTO approval mode classifier.",
+          "type": "object",
+          "properties": {
+            "classifier": {
+              "description": "Runtime controls for the AUTO approval mode classifier.",
+              "type": "object",
+              "properties": {
+                "timeouts": {
+                  "description": "Timeouts for the two AUTO classifier stages, in milliseconds.",
+                  "type": "object",
+                  "properties": {
+                    "stage1Ms": {
+                      "description": "Timeout in milliseconds for the fast stage-1 AUTO classifier.",
+                      "type": "number"
+                    },
+                    "stage2Ms": {
+                      "description": "Timeout in milliseconds for the stage-2 AUTO classifier review.",
+                      "type": "number"
+                    }
+                  }
+                },
+                "thinking": {
+                  "description": "Provider/API-level thinking controls for the AUTO classifier.",
+                  "type": "object",
+                  "properties": {
+                    "stage2Enabled": {
+                      "description": "Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.",
+                      "type": "boolean",
+                      "default": false
+                    }
+                  }
+                }
+              }
+            },
+            "hints": {
+              "description": "Natural-language hints injected into the classifier system prompt.",
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "description": "Natural-language descriptions of actions AUTO mode should allow.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "softDeny": {
+                  "description": "Natural-language descriptions of destructive / irreversible actions AUTO mode should block unless the user explicitly authorised that exact action and scope.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hardDeny": {
+                  "description": "Natural-language descriptions of security-boundary actions the AUTO classifier must block even when an autoMode allow hint or recent user request would normally authorise them. Does not override permissions.allow; use permissions.deny for deterministic hard permission rules.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deny": {
+                  "description": "Deprecated alias for `softDeny`. Entries here are merged into the SOFT BLOCK user section so existing settings keep working; new configurations should use `softDeny` or `hardDeny` instead.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "environment": {
+              "description": "Environment / context lines injected into the classifier system prompt.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "description": "Settings for built-in and custom tools.",
+      "type": "object",
+      "properties": {
+        "sandbox": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Sandbox execution environment (can be a boolean or a path string)."
+        },
+        "sandboxImage": {
+          "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
+          "type": "string"
+        },
+        "toolSearch": {
+          "description": "Settings for the ToolSearch discovery mechanism.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "shell": {
+          "description": "Settings for shell execution.",
+          "type": "object",
+          "properties": {
+            "enableInteractiveShell": {
+              "description": "Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.",
+              "type": "boolean",
+              "default": true
+            },
+            "pager": {
+              "description": "The pager command to use for shell output. Defaults to `cat`.",
+              "type": "string",
+              "default": "cat"
+            },
+            "showColor": {
+              "description": "Show color in shell output.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "core": {
+          "description": "Deprecated. Use permissions.allow instead.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed": {
+          "description": "Deprecated. Use permissions.allow instead.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "description": "Deprecated. Use permissions.deny instead.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disabled": {
+          "description": "Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "approvalMode": {
+          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
+          "enum": [
+            "plan",
+            "default",
+            "auto-edit",
+            "auto",
+            "yolo"
+          ],
+          "default": "default"
+        },
+        "autoAccept": {
+          "description": "Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.",
+          "type": "boolean",
+          "default": false
+        },
+        "discoveryCommand": {
+          "description": "Command to run for tool discovery.",
+          "type": "string"
+        },
+        "callCommand": {
+          "description": "Command to run for tool calls.",
+          "type": "string"
+        },
+        "useRipgrep": {
+          "description": "Use ripgrep for file content search instead of the fallback implementation. Provides faster search performance.",
+          "type": "boolean",
+          "default": true
+        },
+        "useBuiltinRipgrep": {
+          "description": "Use the bundled ripgrep binary. When set to false, the system-level \"rg\" command will be used instead. This setting is only effective when useRipgrep is true.",
+          "type": "boolean",
+          "default": true
+        },
+        "truncateToolOutputThreshold": {
+          "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
+          "type": "number",
+          "default": 25000
+        },
+        "truncateToolOutputLines": {
+          "description": "The number of lines to keep when truncating tool output.",
+          "type": "number",
+          "default": 1000
+        },
+        "toolOutputBatchBudget": {
+          "description": "Per-message budget (characters) for the combined output of one batch of tool calls; the largest results are offloaded to disk when exceeded. Set to -1 to disable.",
+          "type": "number",
+          "default": 200000
+        },
+        "computerUse": {
+          "description": "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
+              "type": "boolean",
+              "default": true
+            },
+            "maxImageDimension": {
+              "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
+              "type": "number",
+              "default": -1
+            }
+          }
+        }
+      }
+    },
+    "policy": {
+      "description": "Daemon multi-client coordination policies. Tool-level allow/deny rules live under `permissions`; this section is for runtime mediation behavior between concurrent HTTP clients sharing one `qwen serve` daemon.",
+      "type": "object",
+      "properties": {
+        "permissionStrategy": {
+          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token identity is not implemented yet), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). For M=2 specifically, split votes resolve only via permissionTimeoutMs. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:\"cancelled\"}) — cancel stays cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart — read once at boot. Options: first-responder, designated, consensus, local-only",
+          "enum": [
+            "first-responder",
+            "designated",
+            "consensus",
+            "local-only"
+          ],
+          "default": "first-responder"
+        },
+        "consensusQuorum": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — read once at boot."
+        }
+      }
+    },
+    "mcp": {
+      "description": "Settings for Model Context Protocol (MCP) servers.",
+      "type": "object",
+      "properties": {
+        "serverCommand": {
+          "description": "Command to start an MCP server.",
+          "type": "string"
+        },
+        "allowed": {
+          "description": "A list of MCP servers to allow.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded": {
+          "description": "A list of MCP servers to exclude.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "security": {
+      "description": "Security-related settings.",
+      "type": "object",
+      "properties": {
+        "folderTrust": {
+          "description": "Settings for folder trust.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Setting to track whether Folder trust is enabled.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "auth": {
+          "description": "Authentication settings.",
+          "type": "object",
+          "properties": {
+            "selectedType": {
+              "description": "The currently selected authentication type.",
+              "type": "string"
+            },
+            "enforcedType": {
+              "description": "The required auth type. If this does not match the selected auth type, the user will be prompted to re-authenticate.",
+              "type": "string"
+            },
+            "useExternal": {
+              "description": "Whether to use an external authentication flow.",
+              "type": "boolean"
+            },
+            "apiKey": {
+              "description": "API key for OpenAI compatible authentication.",
+              "type": "string"
+            },
+            "baseUrl": {
+              "description": "Base URL for OpenAI compatible API.",
+              "type": "string"
+            }
+          }
+        },
+        "allowedHttpHookUrls": {
+          "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).",
+          "type": "array",
+          "items": {
+            "description": "URL pattern (supports * wildcard)",
+            "type": "string"
+          }
+        }
+      }
+    },
+    "advanced": {
+      "description": "Advanced settings for power users.",
+      "type": "object",
+      "properties": {
+        "autoConfigureMemory": {
+          "description": "Automatically configure Node.js memory limits",
+          "type": "boolean",
+          "default": false
+        },
+        "dnsResolutionOrder": {
+          "description": "The DNS resolution order. Options: ipv4first, verbatim",
+          "enum": [
+            "ipv4first",
+            "verbatim"
+          ]
+        },
+        "excludedEnvVars": {
+          "description": "Environment variables to exclude from project context.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "DEBUG",
+            "DEBUG_MODE"
+          ]
+        },
+        "bugCommand": {
+          "description": "Configuration for the bug report command.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "runtimeOutputDir": {
+          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.",
+          "type": "string"
+        }
+      }
+    },
+    "agents": {
+      "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
+      "type": "object",
+      "properties": {
+        "displayMode": {
+          "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
+          "enum": [
+            "in-process"
+          ]
+        },
+        "arena": {
+          "description": "Settings for Arena (multi-model competitive execution).",
+          "type": "object",
+          "properties": {
+            "worktreeBaseDir": {
+              "description": "Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.",
+              "type": "string"
+            },
+            "preserveArtifacts": {
+              "description": "When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.",
+              "type": "boolean",
+              "default": false
+            },
+            "maxRoundsPerAgent": {
+              "description": "Maximum number of rounds (turns) each agent can execute. No limit if unset.",
+              "type": "number"
+            },
+            "timeoutSeconds": {
+              "description": "Total timeout in seconds for the Arena session. No limit if unset.",
+              "type": "number"
+            }
+          }
+        },
+        "team": {
+          "description": "Settings for Agent Team (role-based collaborative execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "swarm": {
+          "description": "Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "disableAllHooks": {
+      "description": "Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).",
+      "type": "boolean",
+      "default": false
+    },
+    "stopHookBlockingCap": {
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
+      "type": "number",
+      "default": 8
+    },
+    "hooks": {
+      "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",
+      "type": "object",
+      "properties": {
+        "UserPromptSubmit": {
+          "description": "Hooks that execute before agent processing. Can modify prompts or inject context.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "UserPromptExpansion": {
+          "description": "Hooks that execute when a slash command expands into a prompt.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "Stop": {
+          "description": "Hooks that execute after agent processing. Can post-process responses or log interactions.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "Notification": {
+          "description": "Hooks that execute when notifications are sent.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PreToolUse": {
+          "description": "Hooks that execute before tool execution.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PostToolUse": {
+          "description": "Hooks that execute after successful tool execution.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PostToolUseFailure": {
+          "description": "Hooks that execute when tool execution fails. ",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PostToolBatch": {
+          "description": "Hooks that execute once after all tool calls in a batch resolve.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "SessionStart": {
+          "description": "Hooks that execute when a new session starts or resumes.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "SessionEnd": {
+          "description": "Hooks that execute when a session ends.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PreCompact": {
+          "description": "Hooks that execute before conversation compaction.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "SubagentStart": {
+          "description": "Hooks that execute when a subagent (Task tool call) is started.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "SubagentStop": {
+          "description": "Hooks that execute right before a subagent (Task tool call) concludes its response.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PermissionRequest": {
+          "description": "Hooks that execute when a permission dialog is displayed.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        }
+      }
+    },
+    "experimental": {
+      "description": "Settings to enable experimental features.",
+      "type": "object",
+      "properties": {
+        "cron": {
+          "description": "Enable in-session cron/loop tools. When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can be disabled via QWEN_CODE_DISABLE_CRON=1 environment variable.",
+          "type": "boolean",
+          "default": true
+        },
+        "agentTeam": {
+          "description": "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        },
+        "artifact": {
+          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. Can also be enabled via QWEN_CODE_ENABLE_ARTIFACT=1, or hard-disabled via QWEN_CODE_DISABLE_ARTIFACT=1.",
+          "type": "boolean",
+          "default": false
+        },
+        "emitToolUseSummaries": {
+          "description": "Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "artifact": {
+      "description": "Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
+      "type": "object",
+      "properties": {
+        "autoOpen": {
+          "description": "Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.",
+          "type": "boolean",
+          "default": true
+        },
+        "publisher": {
+          "description": "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload). Options: local, host, oss",
+          "enum": [
+            "local",
+            "host",
+            "oss"
+          ],
+          "default": "local"
+        },
+        "host": {
+          "description": "Host-backend config, used when artifact.publisher is \"host\".",
+          "type": "object",
+          "properties": {
+            "uploadCommand": {
+              "description": "Command that uploads the artifact, run with execFile (no shell). {file} = local HTML path, {key} = remote object key. e.g. \"aws s3 cp {file} s3://bucket/{key} --content-type text/html\".",
+              "type": "string",
+              "default": ""
+            },
+            "urlTemplate": {
+              "description": "Shareable URL template; {key} is substituted. e.g. \"https://bucket.example.com/{key}\".",
+              "type": "string",
+              "default": ""
+            },
+            "keyPrefix": {
+              "description": "Remote key prefix; the object key is \"{prefix}/{id}/index.html\".",
+              "type": "string",
+              "default": "artifacts"
+            }
+          }
+        },
+        "oss": {
+          "description": "Native Aliyun OSS backend, used when artifact.publisher is \"oss\". Credentials are read from OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET (or ALIBABA_CLOUD_*), never from settings.",
+          "type": "object",
+          "properties": {
+            "bucket": {
+              "description": "OSS bucket name.",
+              "type": "string",
+              "default": ""
+            },
+            "endpoint": {
+              "description": "OSS endpoint host, e.g. \"oss-cn-hangzhou.aliyuncs.com\".",
+              "type": "string",
+              "default": ""
+            },
+            "keyPrefix": {
+              "description": "Remote key prefix; the object key is \"{prefix}/{id}/index.html\".",
+              "type": "string",
+              "default": "artifacts"
+            },
+            "acl": {
+              "description": "Object ACL applied on upload. \"public-read\" (default) makes the link shareable.",
+              "type": "string",
+              "default": "public-read"
+            },
+            "publicBaseUrl": {
+              "description": "Optional CDN / custom-domain base for the returned URL. Upload still goes through endpoint. e.g. \"https://cdn.example.com\".",
+              "type": "string",
+              "default": ""
+            }
+          }
+        }
+      }
+    },
+    "worktree": {
+      "description": "Configuration for general-purpose git worktrees created by the CLI (the `enter_worktree` tool, the `agent isolation: \"worktree\"` parameter, and the startup `--worktree` flag). Does NOT affect Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.",
+      "type": "object",
+      "properties": {
+        "symlinkDirectories": {
+          "description": "Directories under the main repository to symlink into every general-purpose worktree on creation. Useful for sharing large opt-in dirs like `node_modules` so the model can run tests / builds inside the worktree without a fresh install. Paths must be relative to the repo root; absolute paths, anything containing `..`, and any path inside `.git` or `.qwen` (the CLI-managed metadata tree, which contains the worktrees directory itself) are rejected. Missing source dirs and existing destination paths are silently skipped (no overwrite, no failure).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "$version": {
+      "type": "number",
+      "description": "Settings schema version for migration tracking.",
+      "default": 4
+    }
+  },
+  "additionalProperties": true
+}

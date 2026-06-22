@@ -14,19 +14,24 @@ import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
+  MiniMaxOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentGenerator } from './openaiContentGenerator.js';
-export { ContentGenerationPipeline, type PipelineConfig } from './pipeline.js';
+export { ContentGenerationPipeline } from './pipeline.js';
+export type { ErrorHandler, PipelineConfig, RequestContext } from './types.js';
 
 export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
+  MiniMaxOpenAICompatibleProvider,
+  MistralOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -71,12 +76,8 @@ export function determineProvider(
     );
   }
 
-  // Check for OpenRouter provider
-  if (OpenRouterOpenAICompatibleProvider.isOpenRouterProvider(config)) {
-    return new OpenRouterOpenAICompatibleProvider(
-      contentGeneratorConfig,
-      cliConfig,
-    );
+  if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {
+    return new MiMoOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
   }
 
   // Check for ModelScope provider
@@ -87,8 +88,24 @@ export function determineProvider(
     );
   }
 
+  // Check for MiniMax provider
+  if (MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)) {
+    return new MiniMaxOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Mistral provider
+  if (MistralOpenAICompatibleProvider.isMistralProvider(config)) {
+    return new MistralOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
   // Default provider for standard OpenAI-compatible APIs
   return new DefaultOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
 }
 
-export { type ErrorHandler, EnhancedErrorHandler } from './errorHandler.js';
+export { EnhancedErrorHandler } from './errorHandler.js';

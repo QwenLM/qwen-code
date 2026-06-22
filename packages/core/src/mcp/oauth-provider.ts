@@ -21,8 +21,29 @@ import {
 } from './constants.js';
 
 export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
+export const OAUTH_AUTH_URL_EVENT = 'oauth-auth-url' as const;
+
+/**
+ * Structured display message for i18n support.
+ * The `key` is the i18n translation key (English text as key).
+ * The `params` are optional interpolation parameters.
+ */
+export interface OAuthDisplayMessage {
+  key: string;
+  params?: Record<string, string>;
+}
+
+/** Payload type for OAuth display message events: structured i18n message or plain string. */
+export type OAuthDisplayPayload = string | OAuthDisplayMessage;
 
 const debugLogger = createDebugLogger('MCP_OAUTH');
+
+// Module-level reference to the active OAuth callback server.
+// This ensures that if a new authentication is started before the previous one
+// finishes (e.g. user navigated back and re-entered), the old server is closed
+// first to avoid EADDRINUSE errors.
+let activeCallbackServer: http.Server | null = null;
+let activeCallbackTimeout: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * OAuth configuration for an MCP server.
@@ -57,6 +78,34 @@ export interface OAuthTokenResponse {
   expires_in?: number;
   refresh_token?: string;
   scope?: string;
+}
+
+function parseExpiresIn(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  const seconds =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value.trim())
+        ? Number(value.trim())
+        : NaN;
+
+  if (!Number.isSafeInteger(seconds) || seconds < 0) {
+    throw new Error(`Invalid expires_in value: ${String(value)}`);
+  }
+
+  return seconds;
+}
+
+function normalizeTokenResponse(
+  response: OAuthTokenResponse,
+): OAuthTokenResponse {
+  return {
+    ...response,
+    expires_in: parseExpiresIn(response.expires_in),
+  };
 }
 
 /**
@@ -195,6 +244,20 @@ export class MCPOAuthProvider {
   private async startCallbackServer(
     expectedState: string,
   ): Promise<OAuthAuthorizationResponse> {
+    // Close any previously active callback server to avoid EADDRINUSE
+    if (activeCallbackServer) {
+      try {
+        activeCallbackServer.close();
+      } catch {
+        // Ignore errors when closing stale server
+      }
+      activeCallbackServer = null;
+    }
+    if (activeCallbackTimeout) {
+      clearTimeout(activeCallbackTimeout);
+      activeCallbackTimeout = null;
+    }
+
     return new Promise((resolve, reject) => {
       const server = http.createServer(
         async (req: http.IncomingMessage, res: http.ServerResponse) => {
@@ -226,6 +289,11 @@ export class MCPOAuthProvider {
                 </body>
               </html>
             `);
+              activeCallbackServer = null;
+              if (activeCallbackTimeout) {
+                clearTimeout(activeCallbackTimeout);
+                activeCallbackTimeout = null;
+              }
               server.close();
               reject(new Error(`OAuth error: ${error}`));
               return;
@@ -240,6 +308,11 @@ export class MCPOAuthProvider {
             if (state !== expectedState) {
               res.writeHead(400);
               res.end('Invalid state parameter');
+              activeCallbackServer = null;
+              if (activeCallbackTimeout) {
+                clearTimeout(activeCallbackTimeout);
+                activeCallbackTimeout = null;
+              }
               server.close();
               reject(new Error('State mismatch - possible CSRF attack'));
               return;
@@ -251,15 +324,25 @@ export class MCPOAuthProvider {
             <html>
               <body>
                 <h1>Authentication Successful!</h1>
-                <p>You can close this window and return to Gemini CLI.</p>
+                <p>You can close this window and return to Qwen Code.</p>
                 <script>window.close();</script>
               </body>
             </html>
           `);
 
+            activeCallbackServer = null;
+            if (activeCallbackTimeout) {
+              clearTimeout(activeCallbackTimeout);
+              activeCallbackTimeout = null;
+            }
             server.close();
             resolve({ code, state });
           } catch (error) {
+            activeCallbackServer = null;
+            if (activeCallbackTimeout) {
+              clearTimeout(activeCallbackTimeout);
+              activeCallbackTimeout = null;
+            }
             server.close();
             reject(error);
           }
@@ -273,9 +356,14 @@ export class MCPOAuthProvider {
         );
       });
 
+      // Track the active server so it can be cleaned up if a new auth starts
+      activeCallbackServer = server;
+
       // Timeout after 5 minutes
-      setTimeout(
+      activeCallbackTimeout = setTimeout(
         () => {
+          activeCallbackServer = null;
+          activeCallbackTimeout = null;
           server.close();
           reject(new Error('OAuth callback timeout'));
         },
@@ -436,8 +524,16 @@ export class MCPOAuthProvider {
 
     // Try to parse as JSON first, fall back to form-urlencoded
     try {
-      return JSON.parse(responseText) as OAuthTokenResponse;
-    } catch {
+      return normalizeTokenResponse(
+        JSON.parse(responseText) as OAuthTokenResponse,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('Invalid expires_in value')
+      ) {
+        throw error;
+      }
       // Parse form-urlencoded response
       const tokenParams = new URLSearchParams(responseText);
       const accessToken = tokenParams.get('access_token');
@@ -458,7 +554,7 @@ export class MCPOAuthProvider {
       return {
         access_token: accessToken,
         token_type: tokenType,
-        expires_in: expiresIn ? parseInt(expiresIn, 10) : undefined,
+        expires_in: parseExpiresIn(expiresIn),
         refresh_token: refreshToken || undefined,
         scope: scope || undefined,
       } as OAuthTokenResponse;
@@ -558,8 +654,16 @@ export class MCPOAuthProvider {
 
     // Try to parse as JSON first, fall back to form-urlencoded
     try {
-      return JSON.parse(responseText) as OAuthTokenResponse;
-    } catch {
+      return normalizeTokenResponse(
+        JSON.parse(responseText) as OAuthTokenResponse,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('Invalid expires_in value')
+      ) {
+        throw error;
+      }
       // Parse form-urlencoded response
       const tokenParams = new URLSearchParams(responseText);
       const accessToken = tokenParams.get('access_token');
@@ -580,7 +684,7 @@ export class MCPOAuthProvider {
       return {
         access_token: accessToken,
         token_type: tokenType,
-        expires_in: expiresIn ? parseInt(expiresIn, 10) : undefined,
+        expires_in: parseExpiresIn(expiresIn),
         refresh_token: refreshToken || undefined,
         scope: scope || undefined,
       } as OAuthTokenResponse;
@@ -603,11 +707,17 @@ export class MCPOAuthProvider {
     events?: EventEmitter,
   ): Promise<OAuthToken> {
     // Helper function to display messages through handler or fallback to debugLogger
-    const displayMessage = (message: string) => {
+    const displayMessage = (message: OAuthDisplayPayload) => {
       if (events) {
         events.emit(OAUTH_DISPLAY_MESSAGE_EVENT, message);
       } else {
-        debugLogger.info(message);
+        if (typeof message === 'string') {
+          debugLogger.info(message);
+        } else {
+          debugLogger.info(
+            `[${message.key}]${message.params ? ` ${JSON.stringify(message.params)}` : ''}`,
+          );
+        }
       }
     };
 
@@ -746,13 +856,20 @@ export class MCPOAuthProvider {
       mcpServerUrl,
     );
 
-    displayMessage(`→ Opening your browser for OAuth sign-in...
-
-If the browser does not open, copy and paste this URL into your browser:
-${authUrl}
-
-💡 TIP: Triple-click to select the entire URL, then copy and paste it into your browser.
-⚠️  Make sure to copy the COMPLETE URL - it may wrap across multiple lines.`);
+    displayMessage({
+      key: 'If the browser does not open, copy and paste this URL into your browser:',
+    });
+    displayMessage({
+      key: 'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',
+    });
+    if (events) {
+      // UI consumers render the URL from this event (as a clickable OSC 8
+      // hyperlink). Avoid also pushing the raw URL through displayMessage —
+      // hard-wrapping it inside the message list breaks link detection.
+      events.emit(OAUTH_AUTH_URL_EVENT, authUrl.toString());
+    } else {
+      displayMessage(`\n${authUrl.toString()}\n`);
+    }
 
     // Start callback server
     const callbackPromise = this.startCallbackServer(pkceParams.state);
@@ -793,8 +910,9 @@ ${authUrl}
       scope: tokenResponse.scope,
     };
 
-    if (tokenResponse.expires_in) {
-      token.expiresAt = Date.now() + tokenResponse.expires_in * 1000;
+    const expiresIn = parseExpiresIn(tokenResponse.expires_in);
+    if (expiresIn !== undefined) {
+      token.expiresAt = Date.now() + expiresIn * 1000;
     }
 
     // Save token
@@ -885,8 +1003,9 @@ ${authUrl}
           scope: newTokenResponse.scope || token.scope,
         };
 
-        if (newTokenResponse.expires_in) {
-          newToken.expiresAt = Date.now() + newTokenResponse.expires_in * 1000;
+        const expiresIn = parseExpiresIn(newTokenResponse.expires_in);
+        if (expiresIn !== undefined) {
+          newToken.expiresAt = Date.now() + expiresIn * 1000;
         }
 
         await this.tokenStorage.saveToken(

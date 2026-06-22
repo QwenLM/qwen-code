@@ -161,6 +161,7 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
       contentWidth,
       theme,
       settings,
+      tabWidth,
     );
   } else {
     renderedOutput = renderDiffContent(

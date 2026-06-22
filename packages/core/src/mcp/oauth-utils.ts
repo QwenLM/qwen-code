@@ -10,6 +10,82 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MCP_OAUTH');
 
+function splitAuthParams(value: string): string[] {
+  const params: string[] = [];
+  let start = 0;
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (quote) {
+      if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      const beforeQuote = value.slice(start, i).trimEnd();
+      if (beforeQuote.endsWith('=')) {
+        quote = char;
+      }
+      continue;
+    }
+
+    if (char === ',') {
+      params.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+
+  params.push(value.slice(start).trim());
+  return params;
+}
+
+function parseResourceMetadataParam(rawParam: string): string | null {
+  const param = rawParam.replace(/^Bearer\s+/i, '').trim();
+  const prefix = /^resource_metadata\s*=\s*/.exec(param);
+  if (!prefix) {
+    return null;
+  }
+
+  const rest = param.slice(prefix[0].length).trim();
+  const quote = rest[0];
+  if (quote !== '"' && quote !== "'") {
+    return null;
+  }
+
+  let value = '';
+  let escaped = false;
+  for (let i = 1; i < rest.length; i++) {
+    const char = rest[i];
+    if (escaped) {
+      value += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === quote) {
+      return rest.slice(i + 1).trim() === '' && value.length > 0 ? value : null;
+    }
+    value += char;
+  }
+
+  return null;
+}
+
 /**
  * OAuth authorization server metadata as per RFC 8414.
  */
@@ -38,6 +114,7 @@ export interface OAuthProtectedResourceMetadata {
   resource_signing_alg_values_supported?: string[];
   resource_encryption_alg_values_supported?: string[];
   resource_encryption_enc_values_supported?: string[];
+  scopes_supported?: string[];
 }
 
 /**
@@ -251,6 +328,11 @@ export class OAuthUtils {
 
         if (authServerMetadata) {
           const config = this.metadataToOAuthConfig(authServerMetadata);
+          // Merge scopes from protected resource metadata (RFC 9728)
+          // Protected resource scopes take precedence as they define the specific access requirements
+          if (resourceMetadata.scopes_supported?.length) {
+            config.scopes = resourceMetadata.scopes_supported;
+          }
           if (authServerMetadata.registration_endpoint) {
             debugLogger.debug(
               `Dynamic client registration is supported at: ${authServerMetadata.registration_endpoint}`,
@@ -291,10 +373,11 @@ export class OAuthUtils {
    * @returns The resource metadata URI if found
    */
   static parseWWWAuthenticateHeader(header: string): string | null {
-    // Parse Bearer realm and resource_metadata
-    const match = header.match(/resource_metadata="([^"]+)"/);
-    if (match) {
-      return match[1];
+    for (const rawParam of splitAuthParams(header)) {
+      const resourceMetadata = parseResourceMetadataParam(rawParam);
+      if (resourceMetadata !== null) {
+        return resourceMetadata;
+      }
     }
     return null;
   }
@@ -325,7 +408,13 @@ export class OAuthUtils {
       await this.discoverAuthorizationServerMetadata(authServerUrl);
 
     if (authServerMetadata) {
-      return this.metadataToOAuthConfig(authServerMetadata);
+      const config = this.metadataToOAuthConfig(authServerMetadata);
+      // Merge scopes from protected resource metadata (RFC 9728)
+      // Protected resource scopes take precedence as they define the specific access requirements
+      if (resourceMetadata.scopes_supported?.length) {
+        config.scopes = resourceMetadata.scopes_supported;
+      }
+      return config;
     }
 
     return null;
@@ -355,11 +444,25 @@ export class OAuthUtils {
   /**
    * Build a resource parameter for OAuth requests.
    *
-   * @param endpointUrl The endpoint URL
-   * @returns The resource parameter value
+   * Per MCP spec and RFC 8707, the resource parameter MUST be the
+   * canonical URI of the MCP server. Clients SHOULD provide the most
+   * specific URI they can. The URI MUST NOT include a fragment and
+   * SHOULD NOT include a query component.
+   *
+   * @param endpointUrl The MCP server endpoint URL
+   * @returns The canonical resource URI
    */
   static buildResourceParameter(endpointUrl: string): string {
     const url = new URL(endpointUrl);
-    return `${url.protocol}//${url.host}`;
+    // Build canonical URI: scheme + host + path (no query, no fragment)
+    // per RFC 8707 Section 2 and MCP spec Resource Parameter Implementation
+    const path = url.pathname === '/' ? '' : url.pathname;
+    let canonical = `${url.protocol}//${url.host}${path}`;
+    // Remove trailing slash from non-root paths for consistency
+    // (MCP spec recommends form without trailing slash)
+    if (canonical.endsWith('/') && path !== '') {
+      canonical = canonical.slice(0, -1);
+    }
+    return canonical;
   }
 }

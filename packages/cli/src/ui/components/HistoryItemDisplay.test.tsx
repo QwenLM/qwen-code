@@ -15,7 +15,9 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -56,6 +58,37 @@ describe('<HistoryItemDisplay />', () => {
       <HistoryItemDisplay {...baseItem} item={item} />,
     );
     expect(lastFrame()).toContain('/theme');
+  });
+
+  it('renders assistant replies with a leading spacer row', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini',
+      text: 'Hello',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output.startsWith('\n')).toBe(true);
+    expect(output).toContain('✦ Hello');
+  });
+
+  it('renders tool summaries without a leading spacer row', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'tool_use_summary',
+      summary: 'Read txt files',
+      precedingToolUseIds: ['c1'],
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output.startsWith('\n')).toBe(false);
+    expect(output).toContain('Read txt files');
   });
 
   it('renders StatsDisplay for "stats" type', () => {
@@ -283,5 +316,170 @@ describe('<HistoryItemDisplay />', () => {
     );
 
     expect(lastFrame()).toMatchSnapshot();
+  });
+
+  it('renders tool_use_summary as a dim badge line in full mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'tool_use_summary',
+      summary: 'Read txt files',
+      precedingToolUseIds: ['c1', 'c2', 'c3', 'c4'],
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay
+        {...baseItem}
+        item={item}
+        isPending={false}
+        terminalWidth={80}
+      />,
+    );
+    expect(lastFrame()).toContain('Read txt files');
+    expect(lastFrame()).toContain('●');
+  });
+
+  it('renders committed thinking text in full transcript mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain('Inspecting the repository');
+  });
+
+  it('renders committed thinking continuations in full transcript mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    expect(lastFrame()).toContain('Continuing the reasoning');
+  });
+
+  it('keeps committed thinking collapsed in compact mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain('ctrl+o to expand');
+    expect(output).not.toContain('Inspecting the repository');
+  });
+
+  it('keeps committed thinking continuations hidden in compact mode', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </CompactModeProvider>,
+    );
+
+    expect(lastFrame()).not.toContain('Continuing the reasoning');
+  });
+
+  describe('showTimestamps', () => {
+    const timestampItem: HistoryItem = {
+      ...baseItem,
+      type: 'gemini',
+      text: 'Hello from assistant',
+      timestamp: new Date('2026-01-15T14:30:45').getTime(),
+    };
+
+    const makeTimestampSettings = () =>
+      new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { output: { showTimestamps: true } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+
+    it('does not render timestamp when showTimestamps is disabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame()).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('renders [HH:MM:SS] timestamp when showTimestamps is enabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={false}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('renders timestamp even when isPending is true (streaming)', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={true}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('does not render timestamp when timestamp field is missing', () => {
+      const noTimestampItem: HistoryItem = {
+        id: 1,
+        type: 'gemini',
+        text: 'Hello',
+      };
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={noTimestampItem}
+          isPending={false}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
   });
 });

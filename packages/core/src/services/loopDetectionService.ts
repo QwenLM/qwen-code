@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
 import { createHash } from 'node:crypto';
 import type { ServerGeminiStreamEvent } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
+import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
   logLoopDetected,
   logLoopDetectionDisabled,
@@ -18,58 +18,51 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
-import {
-  isFunctionCall,
-  isFunctionResponse,
-} from '../utils/messageInspectors.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 
-const debugLogger = createDebugLogger('LOOP_DETECTION');
-
+// Consecutive identical tool calls (same name + identical args) tolerated
+// before the always-on guard halts the turn. Repeating an identical call
+// yields an identical result, so this is never a productive pattern. Kept
+// below the DashScope server-side "Repetitive tool calls detected" threshold
+// so the client breaks the loop before the server rejects the whole
+// conversation with a 400 (issue #5019).
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 const MAX_HISTORY_LENGTH = 1000;
 
-/**
- * The number of recent conversation turns to include in the history when asking the LLM to check for a loop.
- */
-const LLM_LOOP_CHECK_HISTORY_COUNT = 20;
+// Thought tracking
+const THOUGHT_REPEAT_THRESHOLD = 3;
+const MAX_THOUGHT_HISTORY = 50;
 
-/**
- * The number of turns that must pass in a single prompt before the LLM-based loop check is activated.
- */
-const LLM_CHECK_AFTER_TURNS = 30;
+// File read tracking.
+//
+// Thresholds were raised from 5/10 because a prompt like "summarize this
+// project" legitimately opens with `list_directory` + several parallel
+// `read_file` calls in a single turn, which previously tripped the detector
+// on its first productive move. 8/15 leaves enough headroom for that shape
+// while still catching pathological read-only churn. Combined with the
+// cold-start exemption below (see `hasSeenNonReadTool`), a turn that has
+// only ever performed read-like actions is treated as exploration, not a
+// loop — once any non-read tool lands, the detector activates.
+const FILE_READ_THRESHOLD = 8;
+const FILE_READ_WINDOW = 15;
 
-/**
- * The default interval, in number of turns, at which the LLM-based loop check is performed.
- * This value is adjusted dynamically based on the LLM's confidence.
- */
-const DEFAULT_LLM_CHECK_INTERVAL = 3;
+// Action stagnation tracking
+const STAGNATION_THRESHOLD = 8;
 
-/**
- * The minimum interval for LLM-based loop checks.
- * This is used when the confidence of a loop is high, to check more frequently.
- */
-const MIN_LLM_CHECK_INTERVAL = 5;
+// Global tool call duplicate tracking: how many times the same (tool, args)
+// pair must appear across the entire turn (not necessarily consecutively)
+// before it is treated as a loop.
+const GLOBAL_DUPLICATE_THRESHOLD = 6;
 
-/**
- * The maximum interval for LLM-based loop checks.
- * This is used when the confidence of a loop is low, to check less frequently.
- */
-const MAX_LLM_CHECK_INTERVAL = 15;
+// Alternating pattern detection: number of complete AB cycles needed to
+// trip the detector (3 cycles = 6 calls: A B A B A B).
+const ALTERNATING_PATTERN_CYCLES = 3;
 
-const LOOP_DETECTION_SYSTEM_PROMPT = `You are a sophisticated AI diagnostic agent specializing in identifying when a conversational AI is stuck in an unproductive state. Your task is to analyze the provided conversation history and determine if the assistant has ceased to make meaningful progress.
-
-An unproductive state is characterized by one or more of the following patterns over the last 5 or more assistant turns:
-
-Repetitive Actions: The assistant repeats the same tool calls or conversational responses a decent number of times. This includes simple loops (e.g., tool_A, tool_A, tool_A) and alternating patterns (e.g., tool_A, tool_B, tool_A, tool_B, ...).
-
-Cognitive Loop: The assistant seems unable to determine the next logical step. It might express confusion, repeatedly ask the same questions, or generate responses that don't logically follow from the previous turns, indicating it's stuck and not advancing the task.
-
-Crucially, differentiate between a true unproductive state and legitimate, incremental progress.
-For example, a series of 'tool_A' or 'tool_B' tool calls that make small, distinct changes to the same file (like adding docstrings to functions one by one) is considered forward progress and is NOT a loop. A loop would be repeatedly replacing the same text with the same content, or cycling between a small set of files with no net change.`;
+// Hard per-turn tool call cap. Always-on circuit breaker — not gated by
+// skipLoopDetection. If a single turn exceeds this many tool calls the
+// turn is halted regardless of loop-detection configuration.
+const TURN_TOOL_CALL_CAP = 100;
 
 /**
  * Service for detecting and preventing infinite loops in AI responses.
@@ -90,16 +83,68 @@ export class LoopDetectionService {
   private loopDetected = false;
   private inCodeBlock = false;
 
-  // LLM loop track tracking
-  private turnsInCurrentPrompt = 0;
-  private llmCheckInterval = DEFAULT_LLM_CHECK_INTERVAL;
-  private lastCheckTurn = 0;
-
   // Session-level disable flag
   private disabledForSession = false;
 
+  // Thought tracking
+  private thoughtHistory: string[] = [];
+
+  // Tool call tracking (for read-file loop + stagnation detection)
+  private recentToolCalls: Array<{ name: string; args: object }> = [];
+
+  // Action stagnation tracking: consecutive calls to the same tool *name*
+  // (regardless of args). Distinct from checkToolCallLoop, which requires
+  // identical name AND args. This catches parameter-thrashing loops where
+  // the model keeps calling one tool with varying arguments.
+  private sameNameStreak = 0;
+  private lastSeenToolName: string | null = null;
+
+  // Cold-start gate for READ_FILE_LOOP: the opening exploration of a prompt
+  // is almost always read-heavy (list + parallel reads). Until at least one
+  // non-read-like tool fires, a window full of reads is treated as legitimate
+  // exploration rather than loop evidence. Resets per-prompt in reset().
+  private hasSeenNonReadTool = false;
+
+  // Non-consecutive global duplicate tracking: counts every (tool, args)
+  // pair seen across the entire turn. When any pair reaches
+  // GLOBAL_DUPLICATE_THRESHOLD, the turn is halted.
+  private globalToolCallCounts = new Map<string, number>();
+
+  // Sliding window of recent tool-call keys for alternating-pattern
+  // detection (ABABAB…). Kept at 2 * ALTERNATING_PATTERN_CYCLES entries.
+  private recentToolCallKeys: string[] = [];
+
+  // Total tool calls emitted in the current turn. Always-on circuit breaker;
+  // exceeds TURN_TOOL_CALL_CAP → hard-stop. Accumulates across ToolResult
+  // continuations within a turn (reset() only runs for top-level interactions).
+  private turnToolCallTotal = 0;
+
+  // Rollback floor for turnToolCallTotal: the committed total as of the last
+  // completed round-trip (Finished event). A retry re-streams the failed
+  // attempt's tool calls (Turn clears pendingToolCalls on retry), so on Retry
+  // we roll back to this floor — discarding only the failed attempt, not the
+  // counts from prior completed round-trips.
+  private turnToolCallTotalCommitted = 0;
+
+  // Loop type of the most recent firing. Bubbled up through the
+  // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
+  // the user which detector actually fired.
+  private lastLoopType: LoopType | null = null;
+
   constructor(config: Config) {
     this.config = config;
+  }
+
+  /**
+   * Returns the LoopType of the most recent detection, or null if no loop
+   * has been detected in the current prompt.
+   */
+  getLastLoopType(): LoopType | null {
+    return this.lastLoopType;
+  }
+
+  getConsecutiveToolCallCount(): number {
+    return this.toolCallRepetitionCount;
   }
 
   /**
@@ -120,25 +165,71 @@ export class LoopDetectionService {
   }
 
   /**
-   * Processes a stream event and checks for loop conditions.
+   * Convenience aggregate that runs every tier in order: the always-on
+   * safeties (consecutive-identical guard + per-turn cap) followed by the
+   * opt-in heuristics. Intended as a single "check everything" entry point for
+   * unit tests. Production code (client.ts) intentionally calls the tiers
+   * separately so the `skipLoopDetection` gate can sit between them — a new
+   * guard added here will NOT take effect in production unless it is also
+   * wired into checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
    * @param event - The stream event to process
-   * @returns true if a loop is detected, false otherwise
+   * @returns true if any tier detects a loop, false otherwise
    */
   addAndCheck(event: ServerGeminiStreamEvent): boolean {
+    if (this.checkAlwaysOnSafeties(event)) {
+      return true;
+    }
+
+    return this.addAndCheckHeuristicLoops(event);
+  }
+
+  addAndCheckHeuristicLoops(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected || this.disabledForSession) {
       return this.loopDetected;
     }
 
     switch (event.type) {
-      case GeminiEventType.ToolCallRequest:
+      case GeminiEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
         // is a tool call in between
         this.resetContentTracking();
-        this.loopDetected = this.checkToolCallLoop(event.value);
+        // Thought repetition is only meaningful within a single contiguous
+        // reasoning stream. Once a tool call lands, the model has made
+        // observable progress — any prior thoughts should not carry over.
+        this.thoughtHistory = [];
+
+        this.trackToolCall(event.value);
+        const toolCallKey = this.getToolCallKey(event.value);
+        const globalDup = this.checkGlobalDuplicate(toolCallKey);
+        const alternating = this.checkAlternatingPattern(toolCallKey);
+        const readFileLoop = this.checkReadFileLoop();
+        const actionStagnation = this.checkActionStagnation();
+
+        this.loopDetected =
+          globalDup || alternating || readFileLoop || actionStagnation;
         break;
-      case GeminiEventType.Content:
+      }
+      case GeminiEventType.Retry: {
+        // A retry replays the failed attempt's tool calls (Turn clears
+        // pendingToolCalls on retry), so drop the heuristic duplicate counters
+        // to avoid firing on a duplicated replay — e.g. 3 identical calls +
+        // Retry + 3 more would otherwise hit the global-duplicate threshold of
+        // 6. The always-on guards reset their own counters in
+        // checkAlwaysOnSafeties' Retry branch (cap rollback + consecutive
+        // streak reset).
+        this.globalToolCallCounts.clear();
+        this.recentToolCallKeys = [];
+        break;
+      }
+      case GeminiEventType.Content: {
         this.loopDetected = this.checkContentLoop(event.value);
         break;
+      }
+      case GeminiEventType.Thought: {
+        this.trackThought(event.value);
+        this.loopDetected = this.checkRepetitiveThoughts();
+        break;
+      }
       default:
         break;
     }
@@ -146,29 +237,58 @@ export class LoopDetectionService {
   }
 
   /**
-   * Signals the start of a new turn in the conversation.
-   *
-   * This method increments the turn counter and, if specific conditions are met,
-   * triggers an LLM-based check to detect potential conversation loops. The check
-   * is performed periodically based on the `llmCheckInterval`.
-   *
-   * @param signal - An AbortSignal to allow for cancellation of the asynchronous LLM check.
-   * @returns A promise that resolves to `true` if a loop is detected, and `false` otherwise.
+   * Always-on safety checks that fire regardless of the `skipLoopDetection`
+   * config default. Enforces two guards: the consecutive-identical tool-call
+   * loop and the per-turn tool-call cap. Call this before the gated heuristic
+   * checks so neither guard can be bypassed by configuration.
    */
-  async turnStarted(signal: AbortSignal) {
-    if (this.disabledForSession) {
+  checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
+    if (this.loopDetected) {
+      return true;
+    }
+
+    // A model response (round-trip) finished cleanly: commit its tool-call
+    // count as the rollback floor. The per-turn total accumulates across
+    // ToolResult continuations, so the floor must track the last committed
+    // round-trip rather than resetting to zero.
+    if (event.type === GeminiEventType.Finished) {
+      this.turnToolCallTotalCommitted = this.turnToolCallTotal;
       return false;
     }
-    this.turnsInCurrentPrompt++;
 
-    if (
-      this.turnsInCurrentPrompt >= LLM_CHECK_AFTER_TURNS &&
-      this.turnsInCurrentPrompt - this.lastCheckTurn >= this.llmCheckInterval
-    ) {
-      this.lastCheckTurn = this.turnsInCurrentPrompt;
-      return await this.checkForLoopWithLLM(signal);
+    // A retry re-streams the failed attempt's tool calls, which would
+    // double-count against both always-on guards. Roll the per-turn cap back
+    // to the last committed round-trip (never below it — prior round-trips
+    // stay) and drop the consecutive-identical streak so the replayed attempt
+    // cannot push it over the threshold.
+    if (event.type === GeminiEventType.Retry) {
+      this.turnToolCallTotal = this.turnToolCallTotalCommitted;
+      this.resetToolCallCount();
+      return false;
     }
 
+    if (event.type !== GeminiEventType.ToolCallRequest) {
+      return false;
+    }
+
+    // Consecutive identical tool calls (same name AND identical args) are the
+    // one repetition signal precise enough to halt unconditionally — an
+    // identical call returns an identical result, so it is never productive.
+    // Promoted here from the opt-in tier so it protects every user regardless
+    // of the `skipLoopDetection` config default: the DashScope server rejects
+    // this pattern with a 400 (issue #5019) far below the per-turn cap (100),
+    // so the gated default left users unprotected. It still honors an explicit
+    // in-session disable — the user's active "stop detecting" choice — whereas
+    // the per-turn cap below honors nothing.
+    if (!this.disabledForSession && this.checkToolCallLoop(event.value)) {
+      this.loopDetected = true;
+      return true;
+    }
+
+    if (this.checkTurnToolCallCap()) {
+      this.loopDetected = true;
+      return true;
+    }
     return false;
   }
 
@@ -181,6 +301,7 @@ export class LoopDetectionService {
       this.toolCallRepetitionCount = 1;
     }
     if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
+      this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
       logLoopDetected(
         this.config,
         new LoopDetectedEvent(
@@ -294,6 +415,7 @@ export class LoopDetectionService {
       const chunkHash = createHash('sha256').update(currentChunk).digest('hex');
 
       if (this.isLoopDetectedForChunk(currentChunk, chunkHash)) {
+        this.lastLoopType = LoopType.CHANTING_IDENTICAL_SENTENCES;
         logLoopDetected(
           this.config,
           new LoopDetectedEvent(
@@ -371,92 +493,238 @@ export class LoopDetectionService {
     return originalChunk === currentChunk;
   }
 
-  private trimRecentHistory(recentHistory: Content[]): Content[] {
-    // A function response must be preceded by a function call.
-    // Continuously removes dangling function calls from the end of the history
-    // until the last turn is not a function call.
-    while (
-      recentHistory.length > 0 &&
-      isFunctionCall(recentHistory[recentHistory.length - 1])
-    ) {
-      recentHistory.pop();
+  /**
+   * Records a structured thought summary for repetition detection. Uses both
+   * subject and description so two thoughts with the same subject but
+   * diverging descriptions are correctly treated as distinct progress.
+   */
+  private trackThought(summary: ThoughtSummary): void {
+    const subject = summary.subject.trim().toLowerCase();
+    const description = summary.description
+      .trim()
+      .toLowerCase()
+      .substring(0, 200);
+    const signature = `${subject}|${description}`;
+    this.thoughtHistory.push(signature);
+    if (this.thoughtHistory.length > MAX_THOUGHT_HISTORY) {
+      this.thoughtHistory.shift();
     }
-
-    // A function response should follow a function call.
-    // Continuously removes leading function responses from the beginning of history
-    // until the first turn is not a function response.
-    while (recentHistory.length > 0 && isFunctionResponse(recentHistory[0])) {
-      recentHistory.shift();
-    }
-
-    return recentHistory;
   }
 
-  private async checkForLoopWithLLM(signal: AbortSignal) {
-    const recentHistory = this.config
-      .getGeminiClient()
-      .getHistory()
-      .slice(-LLM_LOOP_CHECK_HISTORY_COUNT);
-
-    const trimmedHistory = this.trimRecentHistory(recentHistory);
-
-    const taskPrompt = `Please analyze the conversation history to determine the possibility that the conversation is stuck in a repetitive, non-productive state. Provide your response in the requested JSON format.`;
-
-    const contents = [
-      ...trimmedHistory,
-      { role: 'user', parts: [{ text: taskPrompt }] },
-    ];
-    const schema: Record<string, unknown> = {
-      type: 'object',
-      properties: {
-        reasoning: {
-          type: 'string',
-          description:
-            'Your reasoning on if the conversation is looping without forward progress.',
-        },
-        confidence: {
-          type: 'number',
-          description:
-            'A number between 0.0 and 1.0 representing your confidence that the conversation is in an unproductive state.',
-        },
-      },
-      required: ['reasoning', 'confidence'],
-    };
-    let result;
-    try {
-      result = await this.config.getBaseLlmClient().generateJson({
-        contents,
-        schema,
-        model: this.config.getModel() || DEFAULT_QWEN_MODEL,
-        systemInstruction: LOOP_DETECTION_SYSTEM_PROMPT,
-        abortSignal: signal,
-        promptId: this.promptId,
-      });
-    } catch (e) {
-      // Do nothing, treat it as a non-loop.
-      this.config.getDebugLogger().error(e);
+  /**
+   * Checks for repetitive thoughts pattern.
+   *
+   * Only fires when the last `THOUGHT_REPEAT_THRESHOLD` thoughts are the same
+   * string. Earlier implementations counted repeats across the full retained
+   * history, which caused false positives whenever the model revisited an
+   * earlier phrase after making progress on an unrelated step.
+   */
+  private checkRepetitiveThoughts(): boolean {
+    if (this.thoughtHistory.length < THOUGHT_REPEAT_THRESHOLD) {
       return false;
     }
 
-    if (typeof result['confidence'] === 'number') {
-      if (result['confidence'] > 0.9) {
-        if (typeof result['reasoning'] === 'string' && result['reasoning']) {
-          debugLogger.warn(result['reasoning']);
-        }
-        logLoopDetected(
-          this.config,
-          new LoopDetectedEvent(LoopType.LLM_DETECTED_LOOP, this.promptId),
-        );
-        return true;
-      } else {
-        this.llmCheckInterval = Math.round(
-          MIN_LLM_CHECK_INTERVAL +
-            (MAX_LLM_CHECK_INTERVAL - MIN_LLM_CHECK_INTERVAL) *
-              (1 - result['confidence']),
-        );
-      }
+    const recentThoughts = this.thoughtHistory.slice(-THOUGHT_REPEAT_THRESHOLD);
+    const firstThought = recentThoughts[0];
+    if (recentThoughts.every((thought) => thought === firstThought)) {
+      this.lastLoopType = LoopType.REPETITIVE_THOUGHTS;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.REPETITIVE_THOUGHTS, this.promptId),
+      );
+      return true;
     }
     return false;
+  }
+
+  // Exact tool names that read content from the filesystem. A plain substring
+  // match on tokens like "view" or "list" is unsafe because unrelated tools
+  // (e.g. "review", "checklist_update") can incidentally contain those
+  // tokens and get miscounted as file reads.
+  private static readonly READ_LIKE_TOOL_NAMES: ReadonlySet<string> = new Set([
+    'read_file',
+    'read_many_files',
+    'list_directory',
+  ]);
+
+  // Prefix fallback for MCP-provided tools that follow the same naming
+  // convention (e.g. `read_resource`, `list_projects`). The trailing
+  // underscore anchors the match to a name segment so "review" and
+  // "listener" are not treated as read-like.
+  private static readonly READ_LIKE_NAME_PREFIXES: readonly string[] = [
+    'read_',
+    'list_',
+  ];
+
+  private isReadLikeTool(toolName: string): boolean {
+    if (LoopDetectionService.READ_LIKE_TOOL_NAMES.has(toolName)) {
+      return true;
+    }
+    return LoopDetectionService.READ_LIKE_NAME_PREFIXES.some((prefix) =>
+      toolName.startsWith(prefix),
+    );
+  }
+
+  /**
+   * Tracks tool calls for subsequent loop detection.
+   */
+  private trackToolCall(toolCall: { name: string; args: object }): void {
+    // Add to recent tool calls history
+    this.recentToolCalls.push(toolCall);
+
+    // Keep bounded history
+    if (this.recentToolCalls.length > FILE_READ_WINDOW) {
+      this.recentToolCalls.shift();
+    }
+
+    // Flip the cold-start gate once any non-read-like tool has been observed.
+    // Opening exploration (list_directory + several read_file calls) should
+    // not count as loop evidence on its own.
+    if (!this.hasSeenNonReadTool && !this.isReadLikeTool(toolCall.name)) {
+      this.hasSeenNonReadTool = true;
+    }
+
+    // Track same-name streak for action stagnation. Distinct from
+    // checkToolCallLoop which requires identical args; this detector catches
+    // "thrashing" where the same tool is called with varying arguments.
+    if (this.lastSeenToolName === toolCall.name) {
+      this.sameNameStreak++;
+    } else {
+      this.lastSeenToolName = toolCall.name;
+      this.sameNameStreak = 1;
+    }
+  }
+
+  /**
+   * Checks for excessive file read operations without meaningful progress.
+   */
+  private checkReadFileLoop(): boolean {
+    // Cold-start exemption: if no non-read-like tool has ever fired in this
+    // prompt, the model is still in its opening exploration phase. Treat a
+    // run of reads as legitimate discovery rather than a loop. Once any
+    // write/execute/other tool lands, normal detection resumes.
+    if (!this.hasSeenNonReadTool) {
+      return false;
+    }
+
+    if (this.recentToolCalls.length < FILE_READ_THRESHOLD) {
+      return false;
+    }
+
+    // Count how many of the recent tool calls were file reads
+    const fileReadCount = this.recentToolCalls.filter((call) =>
+      this.isReadLikeTool(call.name),
+    ).length;
+
+    if (fileReadCount >= FILE_READ_THRESHOLD) {
+      this.lastLoopType = LoopType.READ_FILE_LOOP;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.READ_FILE_LOOP, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Checks for action stagnation where the model performs different but equally unproductive actions.
+   */
+  private checkActionStagnation(): boolean {
+    if (this.sameNameStreak >= STAGNATION_THRESHOLD) {
+      this.lastLoopType = LoopType.ACTION_STAGNATION;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.ACTION_STAGNATION, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Always-on hard cap: if the turn exceeds TURN_TOOL_CALL_CAP tool calls
+   * the turn is halted. This is a safety net independent of
+   * skipLoopDetection and fires on the very next tool call that pushes the
+   * total past the cap, not retroactively.
+   */
+  private checkTurnToolCallCap(): boolean {
+    this.turnToolCallTotal++;
+    if (this.turnToolCallTotal > TURN_TOOL_CALL_CAP) {
+      this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Non-consecutive global duplicate detection: the SAME (tool, args) pair
+   * need not appear consecutively — if it appears GLOBAL_DUPLICATE_THRESHOLD
+   * times anywhere in the turn, it is treated as a loop. This catches models
+   * that intersperse the stuck call among other actions.
+   */
+  private checkGlobalDuplicate(toolCallKey: string): boolean {
+    const count = (this.globalToolCallCounts.get(toolCallKey) ?? 0) + 1;
+    this.globalToolCallCounts.set(toolCallKey, count);
+
+    if (count >= GLOBAL_DUPLICATE_THRESHOLD) {
+      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          this.promptId,
+        ),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Alternating-pattern detection: catches ABABAB… patterns where the model
+   * flips between two distinct tool calls. Tracked via a sliding window of
+   * tool-call keys; when the window fills with alternating A/B values the
+   * turn is halted.
+   */
+  private checkAlternatingPattern(toolCallKey: string): boolean {
+    const maxLen = 2 * ALTERNATING_PATTERN_CYCLES;
+    this.recentToolCallKeys.push(toolCallKey);
+    if (this.recentToolCallKeys.length > maxLen) {
+      this.recentToolCallKeys.shift();
+    }
+
+    if (this.recentToolCallKeys.length < maxLen) {
+      return false;
+    }
+
+    // Extract the two alternating keys. If there are more than two distinct
+    // keys in the window, there is no clean ABAB pattern.
+    const [a, b] = this.recentToolCallKeys;
+    if (a === b) return false; // not alternating, same tool
+
+    for (let i = 0; i < maxLen; i++) {
+      const expected = i % 2 === 0 ? a : b;
+      if (this.recentToolCallKeys[i] !== expected) {
+        return false;
+      }
+    }
+
+    this.lastLoopType = LoopType.ALTERNATING_TOOL_CALL_PATTERN;
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+        this.promptId,
+      ),
+    );
+    return true;
   }
 
   /**
@@ -466,8 +734,19 @@ export class LoopDetectionService {
     this.promptId = promptId;
     this.resetToolCallCount();
     this.resetContentTracking();
-    this.resetLlmCheckTracking();
     this.loopDetected = false;
+
+    // Reset new tracking variables
+    this.thoughtHistory = [];
+    this.recentToolCalls = [];
+    this.sameNameStreak = 0;
+    this.lastSeenToolName = null;
+    this.hasSeenNonReadTool = false;
+    this.lastLoopType = null;
+    this.globalToolCallCounts.clear();
+    this.recentToolCallKeys = [];
+    this.turnToolCallTotal = 0;
+    this.turnToolCallTotalCommitted = 0;
   }
 
   private resetToolCallCount(): void {
@@ -481,11 +760,5 @@ export class LoopDetectionService {
     }
     this.contentStats.clear();
     this.lastContentIndex = 0;
-  }
-
-  private resetLlmCheckTracking(): void {
-    this.turnsInCurrentPrompt = 0;
-    this.llmCheckInterval = DEFAULT_LLM_CHECK_INTERVAL;
-    this.lastCheckTurn = 0;
   }
 }

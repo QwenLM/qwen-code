@@ -20,6 +20,7 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
+const MAX_TCP_PORT = 65_535;
 
 export class LspConfigLoader {
   constructor(private readonly workspaceRoot: string) {}
@@ -106,18 +107,17 @@ export class LspConfigLoader {
   }
 
   /**
-   * Merge configs: built-in presets + extension configs + user configs
+   * Merge configs: extension configs + user configs
+   * Note: Built-in presets are disabled. LSP servers must be explicitly configured
+   * by the user via .lsp.json or through extensions.
    */
   mergeConfigs(
-    detectedLanguages: string[],
+    _detectedLanguages: string[],
     extensionConfigs: LspServerConfig[],
     userConfigs: LspServerConfig[],
   ): LspServerConfig[] {
-    // Built-in preset configurations
-    const presets = this.getBuiltInPresets(detectedLanguages);
-
     // Merge configs, user configs take priority
-    const mergedConfigs = [...presets];
+    const mergedConfigs: LspServerConfig[] = [];
 
     const applyConfigs = (configs: LspServerConfig[]) => {
       for (const config of configs) {
@@ -159,71 +159,6 @@ export class LspConfigLoader {
       }
     }
     return overrides;
-  }
-
-  /**
-   * Get built-in preset configurations
-   */
-  private getBuiltInPresets(detectedLanguages: string[]): LspServerConfig[] {
-    const presets: LspServerConfig[] = [];
-
-    // Convert directory path to file URI format
-    const rootUri = pathToFileURL(this.workspaceRoot).toString();
-
-    // Generate corresponding LSP server config based on detected languages
-    if (
-      detectedLanguages.includes('typescript') ||
-      detectedLanguages.includes('javascript')
-    ) {
-      presets.push({
-        name: 'typescript-language-server',
-        languages: [
-          'typescript',
-          'javascript',
-          'typescriptreact',
-          'javascriptreact',
-        ],
-        command: 'typescript-language-server',
-        args: ['--stdio'],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('python')) {
-      presets.push({
-        name: 'pylsp',
-        languages: ['python'],
-        command: 'pylsp',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('go')) {
-      presets.push({
-        name: 'gopls',
-        languages: ['go'],
-        command: 'gopls',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    // Additional language presets can be added as needed
-
-    return presets;
   }
 
   /**
@@ -434,6 +369,26 @@ export class LspConfigLoader {
     return value;
   }
 
+  private normalizePort(value: unknown): number | undefined {
+    let port: number;
+    if (typeof value === 'number') {
+      port = value;
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!/^\d+$/.test(trimmed)) {
+        return undefined;
+      }
+      port = Number(trimmed);
+    } else {
+      return undefined;
+    }
+
+    if (!Number.isSafeInteger(port) || port < 1 || port > MAX_TCP_PORT) {
+      return undefined;
+    }
+    return port;
+  }
+
   private normalizeSocketOptions(
     value: Record<string, unknown>,
   ): LspSocketOptions | undefined {
@@ -453,20 +408,14 @@ export class LspConfigLoader {
         : typeof source['socketPath'] === 'string'
           ? (source['socketPath'] as string)
           : undefined;
-    const portValue = source['port'];
-    const port =
-      typeof portValue === 'number'
-        ? portValue
-        : typeof portValue === 'string'
-          ? Number(portValue)
-          : undefined;
+    const port = this.normalizePort(source['port']);
 
     const socket: LspSocketOptions = {};
     if (host) {
       socket.host = host;
     }
-    if (Number.isFinite(port) && (port as number) > 0) {
-      socket.port = port as number;
+    if (port !== undefined) {
+      socket.port = port;
     }
     if (pathValue) {
       socket.path = pathValue;

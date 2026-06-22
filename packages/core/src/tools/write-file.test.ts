@@ -14,7 +14,7 @@ import {
   type Mocked,
 } from 'vitest';
 import type { WriteFileToolParams } from './write-file.js';
-import { getCorrectedFileContent, WriteFileTool } from './write-file.js';
+import { WriteFileTool } from './write-file.js';
 import { ToolErrorType } from './tool-error.js';
 import type { FileDiff, ToolEditConfirmationDetails } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -26,40 +26,29 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { GeminiClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
-import type { DiffUpdateResult } from '../ide/ide-client.js';
-import { IdeClient } from '../ide/ide-client.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
 
 // --- MOCKS ---
 vi.mock('../core/client.js');
-vi.mock('../ide/ide-client.js', () => ({
-  IdeClient: {
-    getInstance: vi.fn(),
-  },
-}));
 
 let mockGeminiClientInstance: Mocked<GeminiClient>;
-const mockIdeClient = {
-  openDiff: vi.fn(),
-  isDiffingEnabled: vi.fn(),
-};
-
-vi.mocked(IdeClient.getInstance).mockResolvedValue(
-  mockIdeClient as unknown as IdeClient,
-);
 
 // Mock Config
 const fsService = new StandardFileSystemService();
+const fileReadCache = new FileReadCache();
+const mockFileHistoryService = { trackEdit: vi.fn() };
 const mockConfigInternal = {
   getTargetDir: () => rootDir,
+  getProjectRoot: () => rootDir,
   getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
   setApprovalMode: vi.fn(),
   getGeminiClient: vi.fn(), // Initialize as a plain mock function
   getBaseLlmClient: vi.fn(), // Initialize as a plain mock function
   getFileSystemService: () => fsService,
-  getIdeMode: vi.fn(() => false),
   getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
   getApiKey: () => 'test-key',
   getModel: () => 'test-model',
@@ -82,6 +71,9 @@ const mockConfigInternal = {
       discoverTools: vi.fn(),
     }) as unknown as ToolRegistry,
   getDefaultFileEncoding: () => 'utf-8',
+  getFileReadCache: () => fileReadCache,
+  getFileReadCacheDisabled: () => false,
+  getFileHistoryService: () => mockFileHistoryService,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -97,6 +89,12 @@ describe('WriteFileTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // The fileReadCache is module-scope (declared at L41) and shared
+    // across every test in this file, so state from one test leaks
+    // into the next. Clear it before each test so every test starts
+    // from a known-empty cache. CI surfaced this on Linux only because
+    // file-creation order across tests differs by platform.
+    fileReadCache.clear();
     // Create a unique temporary directory for files created outside the root
     tempDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'write-file-test-external-'),
@@ -135,6 +133,19 @@ describe('WriteFileTool', () => {
     vi.clearAllMocks();
   });
 
+  /**
+   * Simulate the model having read `filePath` earlier in the session,
+   * so the WriteFileTool's prior-read enforcement does not reject the
+   * subsequent overwrite. New-file creation paths do not need this.
+   */
+  function seedPriorRead(filePath: string) {
+    const stats = fs.statSync(filePath);
+    fileReadCache.recordRead(filePath, stats, {
+      full: true,
+      cacheable: true,
+    });
+  }
+
   describe('build', () => {
     it('should return an invocation for a valid absolute path within root', () => {
       const params = {
@@ -151,15 +162,14 @@ describe('WriteFileTool', () => {
       expect(() => tool.build(params)).toThrow(/File path must be absolute/);
     });
 
-    it('should throw an error for a path outside root', () => {
+    it('should allow a path outside root (external path support)', () => {
       const outsidePath = path.resolve(tempDir, 'outside-root.txt');
       const params = {
         file_path: outsidePath,
         content: 'hello',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
 
     it('should throw an error if path is a directory', () => {
@@ -191,79 +201,42 @@ describe('WriteFileTool', () => {
       };
       expect(() => tool.build(params)).toThrow(`Missing or empty "file_path"`);
     });
-  });
 
-  describe('getCorrectedFileContent', () => {
-    it('should return proposed content unchanged for a new file', async () => {
-      const filePath = path.join(rootDir, 'new_corrected_file.txt');
-      const proposedContent = 'Proposed new content.';
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe('');
-      expect(result.fileExists).toBe(false);
-      expect(result.error).toBeUndefined();
-    });
-
-    it('should return proposed content unchanged for an existing file', async () => {
-      const filePath = path.join(rootDir, 'existing_corrected_file.txt');
-      const originalContent = 'Original existing content.';
-      const proposedContent = 'Proposed replacement content.';
-      fs.writeFileSync(filePath, originalContent, 'utf8');
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe(originalContent);
-      expect(result.fileExists).toBe(true);
-      expect(result.error).toBeUndefined();
-    });
-
-    it('should return error if reading an existing file fails (e.g. permissions)', async () => {
-      const filePath = path.join(rootDir, 'unreadable_file.txt');
-      const proposedContent = 'some content';
-      fs.writeFileSync(filePath, 'content', { mode: 0o000 });
-
-      const readError = new Error('Permission denied');
-      vi.spyOn(fsService, 'readTextFile').mockImplementationOnce(() =>
-        Promise.reject(readError),
-      );
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(fsService.readTextFile).toHaveBeenCalledWith(filePath);
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe('');
-      expect(result.fileExists).toBe(true);
-      expect(result.error).toEqual({
-        message: 'Permission denied',
-        code: undefined,
-      });
-
-      fs.chmodSync(filePath, 0o600);
-    });
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped spaces in file_path',
+      () => {
+        // On Windows, unescapePath is a no-op and backslashes are path
+        // separators, so the expected unescape behavior doesn't apply.
+        const escapedPath = path.join(rootDir, 'my\\ file.txt');
+        const params = {
+          file_path: escapedPath,
+          content: 'hello',
+        };
+        const invocation = tool.build(params);
+        expect(invocation).toBeDefined();
+        expect(invocation.params.file_path).toBe(
+          path.join(rootDir, 'my file.txt'),
+        );
+      },
+    );
   });
 
   describe('shouldConfirmExecute', () => {
     const abortSignal = new AbortController().signal;
 
-    it('should return false if _getCorrectedFileContent returns an error', async () => {
+    it('should always return ask from getDefaultPermission', async () => {
+      const filePath = path.join(rootDir, 'confirm_permission_file.txt');
+      const params = { file_path: filePath, content: 'test content' };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('should throw if _getCorrectedFileContent returns an error', async () => {
       const filePath = path.join(rootDir, 'confirm_error_file.txt');
       const params = { file_path: filePath, content: 'test content' };
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
+      seedPriorRead(filePath);
 
       const readError = new Error('Simulated read error for confirmation');
       vi.spyOn(fsService, 'readTextFile').mockImplementationOnce(() =>
@@ -271,8 +244,9 @@ describe('WriteFileTool', () => {
       );
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(abortSignal);
-      expect(confirmation).toBe(false);
+      await expect(
+        invocation.getConfirmationDetails(abortSignal),
+      ).rejects.toThrow('Error reading existing file for confirmation');
 
       fs.chmodSync(filePath, 0o600);
     });
@@ -283,7 +257,7 @@ describe('WriteFileTool', () => {
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
-      const confirmation = (await invocation.shouldConfirmExecute(
+      const confirmation = (await invocation.getConfirmationDetails(
         abortSignal,
       )) as ToolEditConfirmationDetails;
 
@@ -307,10 +281,11 @@ describe('WriteFileTool', () => {
       const originalContent = 'Original content for confirmation.';
       const proposedContent = 'Proposed replacement for confirmation.';
       fs.writeFileSync(filePath, originalContent, 'utf8');
+      seedPriorRead(filePath);
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
-      const confirmation = (await invocation.shouldConfirmExecute(
+      const confirmation = (await invocation.getConfirmationDetails(
         abortSignal,
       )) as ToolEditConfirmationDetails;
 
@@ -325,122 +300,16 @@ describe('WriteFileTool', () => {
         originalContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
     });
-
-    describe('with IDE integration', () => {
-      beforeEach(() => {
-        // Enable IDE mode and set connection status for these tests
-        mockConfigInternal.getIdeMode.mockReturnValue(true);
-        mockIdeClient.isDiffingEnabled.mockReturnValue(true);
-        mockIdeClient.openDiff.mockResolvedValue({
-          status: 'accepted',
-          content: 'ide-modified-content',
-        });
-      });
-
-      it('should call openDiff and await it when in IDE mode and connected', async () => {
-        const filePath = path.join(rootDir, 'ide_confirm_file.txt');
-        const params = { file_path: filePath, content: 'test' };
-        const invocation = tool.build(params);
-
-        const confirmation = (await invocation.shouldConfirmExecute(
-          abortSignal,
-        )) as ToolEditConfirmationDetails;
-
-        expect(mockIdeClient.openDiff).toHaveBeenCalledWith(
-          filePath,
-          'test', // The corrected content
-        );
-        // Ensure the promise is awaited by checking the result
-        expect(confirmation.ideConfirmation).toBeDefined();
-        await confirmation.ideConfirmation; // Should resolve
-      });
-
-      it('should not call openDiff if not in IDE mode', async () => {
-        mockConfigInternal.getIdeMode.mockReturnValue(false);
-        const filePath = path.join(rootDir, 'ide_disabled_file.txt');
-        const params = { file_path: filePath, content: 'test' };
-        const invocation = tool.build(params);
-
-        await invocation.shouldConfirmExecute(abortSignal);
-
-        expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
-      });
-
-      it('should not call openDiff if IDE is not connected', async () => {
-        mockIdeClient.isDiffingEnabled.mockReturnValue(false);
-        const filePath = path.join(rootDir, 'ide_disconnected_file.txt');
-        const params = { file_path: filePath, content: 'test' };
-        const invocation = tool.build(params);
-
-        await invocation.shouldConfirmExecute(abortSignal);
-
-        expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
-      });
-
-      it('should update params.content with IDE content when onConfirm is called', async () => {
-        const filePath = path.join(rootDir, 'ide_onconfirm_file.txt');
-        const params = { file_path: filePath, content: 'original-content' };
-        const invocation = tool.build(params);
-
-        // This is the key part: get the confirmation details
-        const confirmation = (await invocation.shouldConfirmExecute(
-          abortSignal,
-        )) as ToolEditConfirmationDetails;
-
-        // The `onConfirm` function should exist on the details object
-        expect(confirmation.onConfirm).toBeDefined();
-
-        // Call `onConfirm` to trigger the logic that updates the content
-        await confirmation.onConfirm!(ToolConfirmationOutcome.ProceedOnce);
-
-        // Now, check if the original `params` object (captured by the invocation) was modified
-        expect(invocation.params.content).toBe('ide-modified-content');
-      });
-
-      it('should not await ideConfirmation promise', async () => {
-        const filePath = path.join(rootDir, 'ide_no_await_file.txt');
-        const params = { file_path: filePath, content: 'test' };
-        const invocation = tool.build(params);
-
-        let diffPromiseResolved = false;
-        const diffPromise = new Promise<DiffUpdateResult>((resolve) => {
-          setTimeout(() => {
-            diffPromiseResolved = true;
-            resolve({ status: 'accepted', content: 'ide-modified-content' });
-          }, 50); // A small delay to ensure the check happens before resolution
-        });
-        mockIdeClient.openDiff.mockReturnValue(diffPromise);
-
-        const confirmation = (await invocation.shouldConfirmExecute(
-          abortSignal,
-        )) as ToolEditConfirmationDetails;
-
-        // This is the key check: the confirmation details should be returned
-        // *before* the diffPromise is resolved.
-        expect(diffPromiseResolved).toBe(false);
-        expect(confirmation).toBeDefined();
-        expect(confirmation.ideConfirmation).toBe(diffPromise);
-
-        // Now, we can await the promise to let the test finish cleanly.
-        await diffPromise;
-        expect(diffPromiseResolved).toBe(true);
-      });
-    });
   });
 
   describe('execute', () => {
     const abortSignal = new AbortController().signal;
 
-    beforeEach(() => {
-      // Ensure IDE mode is disabled for these tests
-      mockConfigInternal.getIdeMode.mockReturnValue(false);
-      mockIdeClient.isDiffingEnabled.mockReturnValue(false);
-    });
-
     it('should return error if _getCorrectedFileContent returns an error during execute', async () => {
       const filePath = path.join(rootDir, 'execute_error_file.txt');
       const params = { file_path: filePath, content: 'test content' };
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
+      seedPriorRead(filePath);
 
       vi.spyOn(fsService, 'readTextFile').mockImplementationOnce(() => {
         const readError = new Error('Simulated read error for execute');
@@ -469,7 +338,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
 
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -483,8 +353,11 @@ describe('WriteFileTool', () => {
       expect(result.llmContent).toMatch(
         /Successfully created and wrote to new file/,
       );
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       expect(fs.existsSync(filePath)).toBe(true);
-      const writtenContent = await fsService.readTextFile(filePath);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_new_file.txt');
@@ -495,16 +368,119 @@ describe('WriteFileTool', () => {
       );
     });
 
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the write_file tool.
+    it('completes the write even when trackEdit throws', async () => {
+      const filePath = path.join(rootDir, 'write_when_trackedit_fails.txt');
+      const proposedContent = 'Content that survives trackEdit failure.';
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params = { file_path: filePath, content: proposedContent };
+      const invocation = tool.build(params);
+
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+
+      const result = await invocation.execute(abortSignal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(result.llmContent).toMatch(
+        /Successfully created and wrote to new file/,
+      );
+      expect(fs.existsSync(filePath)).toBe(true);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
+      expect(writtenContent).toBe(proposedContent);
+    });
+
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk before returning. That mutation must be detected by the
+    // pre-write `checkPriorRead`. That only happens if `trackEdit`
+    // runs BEFORE the pre-write check — the broken ordering would run
+    // the pre-write check first (passing on pre-mutation stats), then
+    // trackEdit (which mutates), then write (which clobbers the
+    // external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const filePath = path.join(rootDir, 'toctou_ordering.txt');
+      const initialContent = 'pre-existing content';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: true,
+        cacheable: true,
+      });
+
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        // Simulate an external write that lands while trackEdit is
+        // copying the file. Bumping mtime by 5 s makes the change
+        // reliably "newer" under the cache's ~1 s comparison
+        // granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
+      });
+
+      const params = { file_path: filePath, content: 'new content' };
+      const invocation = tool.build(params);
+
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+      const result = await invocation.execute(abortSignal);
+
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
+    });
+
     it('should overwrite an existing file and return diff', async () => {
       const filePath = path.join(rootDir, 'execute_existing_file.txt');
       const initialContent = 'Initial content for execute.';
       const proposedContent = 'Proposed overwrite for execute.';
       fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
 
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -516,7 +492,9 @@ describe('WriteFileTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.llmContent).toMatch(/Successfully overwrote file/);
-      const writtenContent = await fsService.readTextFile(filePath);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_existing_file.txt');
@@ -528,6 +506,36 @@ describe('WriteFileTool', () => {
       );
     });
 
+    it('should treat metadata ENOENT as new file when readTextFile returned empty content', async () => {
+      const filePath = path.join(rootDir, 'execute_acp_like_missing_file.txt');
+      const proposedContent = 'content from acp-like flow';
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+
+      // Simulate ENOENT: file does not exist, readTextFile throws ENOENT.
+      const enoentError = new Error('File not found') as NodeJS.ErrnoException;
+      enoentError.code = 'ENOENT';
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce(enoentError);
+
+      const params = { file_path: filePath, content: proposedContent };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(
+        /Successfully created and wrote to new file/,
+      );
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: proposedContent,
+        _meta: {
+          bom: false,
+          encoding: undefined,
+        },
+      });
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(proposedContent);
+    });
+
     it('should create directory if it does not exist', async () => {
       const dirPath = path.join(rootDir, 'new_dir_for_write');
       const filePath = path.join(dirPath, 'file_in_new_dir.txt');
@@ -536,7 +544,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content };
       const invocation = tool.build(params);
       // Simulate confirmation if your logic requires it before execute, or remove if not needed for this path
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -596,6 +605,37 @@ describe('WriteFileTool', () => {
 
       expect(result.llmContent).not.toMatch(/User modified the `content`/);
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should write to a file with spaces in its name when given an escaped path',
+      async () => {
+        // On Windows, unescapePath is a no-op and backslashes are path
+        // separators, so shell-escaping behavior doesn't apply.
+        const realPath = path.join(rootDir, 'my spaced write.txt');
+        const escapedPath = path.join(rootDir, 'my\\ spaced\\ write.txt');
+        const content = 'Written via escaped path.';
+
+        const params = { file_path: escapedPath, content };
+        const invocation = tool.build(params);
+
+        const confirmDetails =
+          await invocation.getConfirmationDetails(abortSignal);
+        if (
+          typeof confirmDetails === 'object' &&
+          'onConfirm' in confirmDetails &&
+          confirmDetails.onConfirm
+        ) {
+          await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+        }
+
+        const result = await invocation.execute(abortSignal);
+
+        // Should succeed — file created at the unescaped (real) path
+        expect(result.llmContent).toMatch(/Successfully created and wrote/);
+        expect(fs.existsSync(realPath)).toBe(true);
+        expect(fs.readFileSync(realPath, 'utf8')).toBe(content);
+      },
+    );
   });
 
   describe('workspace boundary validation', () => {
@@ -607,14 +647,13 @@ describe('WriteFileTool', () => {
       expect(() => tool.build(params)).not.toThrow();
     });
 
-    it('should reject paths outside workspace root', () => {
+    it('should allow paths outside workspace root (external path support)', () => {
       const params = {
         file_path: '/etc/passwd',
-        content: 'malicious',
+        content: 'test',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
   });
 
@@ -748,6 +787,7 @@ describe('WriteFileTool', () => {
           Buffer.from(originalContent, 'utf-8'),
         ]),
       );
+      seedPriorRead(filePath);
 
       // Spy on writeTextFile to verify BOM option
       const writeSpy = vi.spyOn(fsService, 'writeTextFile');
@@ -757,8 +797,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: true
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: true,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: true, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
       // Cleanup
@@ -774,6 +816,7 @@ describe('WriteFileTool', () => {
 
       // Create file without BOM
       fs.writeFileSync(filePath, originalContent, 'utf-8');
+      seedPriorRead(filePath);
 
       // Spy on writeTextFile to verify BOM option
       const writeSpy = vi.spyOn(fsService, 'writeTextFile');
@@ -783,8 +826,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: false
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: false,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
       // Cleanup
@@ -810,8 +855,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: false (default is utf-8)
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: false,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: false, encoding: undefined },
       });
 
       // Cleanup
@@ -842,8 +889,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: true
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: true,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: true, encoding: undefined },
       });
 
       // Restore mock
@@ -852,6 +901,377 @@ describe('WriteFileTool', () => {
 
       // Cleanup
       if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+
+    it('records a write into the FileReadCache', async () => {
+      // Symmetric with EditTool's "records a write" test: ensures
+      // ReadFile's post-write guard observes lastWriteAt and skips
+      // the file_unchanged placeholder for files this PR's tools just
+      // mutated.
+      fileReadCache.clear();
+      const filePath = path.join(rootDir, 'cache-marker.txt');
+      const params = { file_path: filePath, content: 'fresh bytes' };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+      expect(result.error).toBeUndefined();
+
+      const stats = fs.statSync(filePath);
+      const status = fileReadCache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastWriteAt).toBeDefined();
+      }
+
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+  });
+
+  // Same as edit.test's wiring guard: the WriteFileTool feeds the
+  // commit-attribution singleton on success. The recordEdit call
+  // distinguishes a true file creation (`null` old content) from
+  // overwriting an existing empty file (`''` old content); these
+  // tests pin both shapes so the distinction can't drift silently.
+  describe('commit-attribution wiring', () => {
+    const abortSignal = new AbortController().signal;
+
+    beforeEach(() => {
+      CommitAttributionService.resetInstance();
+    });
+
+    it('records AI-originated writes in the attribution service', async () => {
+      const filePath = path.join(rootDir, 'attr_write.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'fresh content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiContribution).toBeGreaterThan(0);
+      // A truly new file should be flagged so deletions later in the
+      // session can be reconciled.
+      expect(attribution!.aiCreated).toBe(true);
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('skips attribution when modified_by_user', async () => {
+      const filePath = path.join(rootDir, 'attr_skip.txt');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'human-edited',
+        modified_by_user: true,
+      });
+      await invocation.execute(abortSignal);
+
+      expect(
+        CommitAttributionService.getInstance().getFileAttribution(filePath),
+      ).toBeUndefined();
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('marks aiCreated=false when overwriting an existing empty file', async () => {
+      const filePath = path.join(rootDir, 'attr_existing_empty.txt');
+      // Create an empty file first — the distinction we're guarding
+      // is that overwriting an empty existing file should NOT be
+      // counted as a creation, even though both old contents are
+      // length-0.
+      fs.writeFileSync(filePath, '', 'utf8');
+      // Prior-read enforcement (origin/main #3774) requires the file
+      // to have been Read before WriteFile can overwrite it.
+      seedPriorRead(filePath);
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'overwrite content',
+      });
+      await invocation.execute(abortSignal);
+
+      const attribution =
+        CommitAttributionService.getInstance().getFileAttribution(filePath);
+      expect(attribution).toBeDefined();
+      expect(attribution!.aiCreated).toBe(false);
+
+      fs.unlinkSync(filePath);
+    });
+  });
+
+  describe('prior-read enforcement', () => {
+    const abortSignal = new AbortController().signal;
+
+    it('rejects a write that would overwrite an unread existing file', async () => {
+      const filePath = path.join(rootDir, 'enforce-overwrite.txt');
+      fs.writeFileSync(filePath, 'untouched bytes', 'utf-8');
+      // No seedPriorRead — model has not Read this file in the session.
+
+      // Spy on readTextFile to assert enforcement runs *before* any
+      // I/O against the file's contents — see the L4 review comment.
+      const readSpy = vi.spyOn(fsService, 'readTextFile');
+
+      const params = { file_path: filePath, content: 'clobber attempt' };
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.message).toMatch(
+        /has not been read in this session/,
+      );
+      // File must remain at its pre-call content, and the tool must
+      // not have slurped the existing bytes into memory before
+      // rejecting.
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched bytes');
+      expect(readSpy).not.toHaveBeenCalled();
+
+      readSpy.mockRestore();
+      fs.unlinkSync(filePath);
+    });
+
+    it('allows a write after a ranged (offset/limit) read', async () => {
+      // Aligns WriteFile with EditTool and Claude Code's
+      // `readFileState`: any prior read clears enforcement. The
+      // earlier asymmetric stance (full read required for
+      // overwrite, partial OK for Edit) created a deadlock on
+      // files larger than the truncate-tool-output limit, where
+      // `read_file` without offset/limit still produced a
+      // truncated read and there was no way to satisfy the
+      // "fully read" precondition (issue #3945). The mtime/size
+      // drift check is the gate that distinguishes "model has
+      // seen current bytes" from "model has seen older bytes",
+      // and it fires identically for Edit and WriteFile.
+      const filePath = path.join(rootDir, 'enforce-ranged.txt');
+      fs.writeFileSync(filePath, 'unchanged', 'utf-8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: false,
+        cacheable: true,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'clobber' })
+        .execute(abortSignal);
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('clobber');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('allows a write after a truncated full read (issue #3945 deadlock fix)', async () => {
+      // Pre-fix, a `read_file` without offset/limit on a file larger
+      // than the truncate-tool-output limit recorded
+      // `lastReadWasFull: false` (the model only saw the head), and
+      // WriteFile's `requireFullRead: true` rejected the follow-up
+      // overwrite with "only been partially read … re-read without
+      // offset / limit / pages" — but a re-read produces the same
+      // truncated state, deadlocking the user. After dropping
+      // `requireFullRead` (aligning with Claude Code), the truncated
+      // read is enough to clear enforcement; the mtime/size drift
+      // check remains the gate that distinguishes "model saw current
+      // bytes" from "model saw older bytes".
+      //
+      // Coverage split: this test seeds the cache directly (mockConfig
+      // here lacks the `getFileService` / `getTruncateToolOutputLines`
+      // / `getTruncateToolOutputThreshold` / `getContentGeneratorConfig`
+      // wiring ReadFileTool needs). The matching ReadFile-side coverage
+      // that *produces* `{ full: false, cacheable: true }` for a
+      // truncated full read lives in read-file.test.ts under "records
+      // truncated full reads with lastReadCacheable=true (issue #3964)".
+      // A future cache-entry schema change must update both halves to
+      // keep the deadlock-free guarantee end-to-end.
+      const filePath = path.join(rootDir, 'enforce-truncated-full.txt');
+      fs.writeFileSync(filePath, 'unchanged', 'utf-8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        // `full: false` is what a truncated full read records
+        // (read-file.ts: `full: isFullRead && !result.isTruncated`).
+        full: false,
+        cacheable: true,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'rewritten' })
+        .execute(abortSignal);
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('rewritten');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects a write when the previous read was non-cacheable', async () => {
+      const filePath = path.join(rootDir, 'enforce-noncacheable.txt');
+      fs.writeFileSync(filePath, 'pretend binary', 'utf-8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: true,
+        cacheable: false,
+      });
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'clobber' })
+        .execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+      expect(result.error?.message).toContain('notebook_edit');
+      // Verb in the dead-end guidance must read correctly for
+      // overwrite (the WriteFile path), not "edit".
+      expect(result.error?.message).toMatch(/if you need to overwrite it\./);
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('confirmation falls back to a new-file diff when the file disappears mid-flight', async () => {
+      // isFilefileExists() saw the file. Between that and the
+      // readTextFile inside getConfirmationDetails, an external
+      // process deletes it. Pre-fix, readTextFile threw ENOENT and
+      // the confirmation collapsed into UNHANDLED_EXCEPTION; the new
+      // catch falls back to fileExists=false so the user sees the
+      // brand-new-file diff instead.
+      const filePath = path.join(rootDir, 'enforce-disappear.txt');
+      fs.writeFileSync(filePath, 'will disappear', 'utf-8');
+      seedPriorRead(filePath);
+      const readSpy = vi
+        .spyOn(fsService, 'readTextFile')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+        );
+
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'new content',
+      });
+      const confirmation = await invocation.getConfirmationDetails(abortSignal);
+      // Should produce a confirmation diff (not throw), with the
+      // new content as the proposed value.
+      expect(confirmation).toEqual(
+        expect.objectContaining({
+          type: 'edit',
+          newContent: 'new content',
+        }),
+      );
+
+      readSpy.mockRestore();
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+
+    it('rejects confirmation requests on an unread existing file before showing a diff', async () => {
+      const filePath = path.join(rootDir, 'enforce-confirm.txt');
+      fs.writeFileSync(filePath, 'unread current bytes', 'utf-8');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'replacement content',
+      });
+      await expect(
+        invocation.getConfirmationDetails(abortSignal),
+      ).rejects.toThrow(/has not been read in this session/);
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('attaches a structured ToolErrorType when getConfirmationDetails rejects', async () => {
+      // The thrown error must carry `errorType` so the scheduler
+      // surfaces EDIT_REQUIRES_PRIOR_READ instead of
+      // UNHANDLED_EXCEPTION on approval-required flows.
+      const filePath = path.join(rootDir, 'enforce-confirm-type.txt');
+      fs.writeFileSync(filePath, 'unread current bytes', 'utf-8');
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'replacement content',
+      });
+      let caught: unknown;
+      try {
+        await invocation.getConfirmationDetails(abortSignal);
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as { errorType?: string })?.errorType).toBe(
+        ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
+      );
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects a write with a stat failure other than ENOENT (fail-closed)', async () => {
+      // checkPriorRead must NOT default to ok:true when stat fails
+      // for reasons other than disappearance race (EACCES, EBUSY,
+      // NFS hiccup, ...). Doing so reopens the blind-write path on
+      // transient metadata errors.
+      const filePath = path.join(rootDir, 'enforce-stat-fail.txt');
+      fs.writeFileSync(filePath, 'untouched', 'utf-8');
+      const statSpy = vi
+        .spyOn(fs.promises, 'stat')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+        );
+
+      const result = await tool
+        .build({ file_path: filePath, content: 'clobber' })
+        .execute(abortSignal);
+      // Distinct error code: the model may have legitimately read the
+      // file — we just cannot verify because stat itself failed.
+      // EDIT_REQUIRES_PRIOR_READ would imply "definitely not read".
+      expect(result.error?.type).toBe(
+        ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      );
+      expect(result.error?.message).toMatch(/Could not stat .*\(EACCES\)/);
+      // File untouched.
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched');
+
+      statSpy.mockRestore();
+      fs.unlinkSync(filePath);
+    });
+
+    it('rejects a write when the file has been modified since the last read', async () => {
+      const filePath = path.join(rootDir, 'enforce-stale.txt');
+      fs.writeFileSync(filePath, 'one', 'utf-8');
+      seedPriorRead(filePath);
+      fs.writeFileSync(filePath, 'two with more bytes', 'utf-8');
+      const future = new Date(Date.now() + 60_000);
+      fs.utimesSync(filePath, future, future);
+
+      const params = {
+        file_path: filePath,
+        content: 'clobber the stale file',
+      };
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      expect(result.error?.message).toMatch(/has been modified since/);
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('two with more bytes');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('exempts new-file creation from prior-read enforcement', async () => {
+      const filePath = path.join(rootDir, 'enforce-new.txt');
+      // File does not exist; model has nothing to read first.
+      const params = { file_path: filePath, content: 'fresh content' };
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('fresh content');
+
+      fs.unlinkSync(filePath);
+    });
+
+    it('bypasses enforcement entirely when fileReadCacheDisabled is true', async () => {
+      const filePath = path.join(rootDir, 'enforce-bypass.txt');
+      fs.writeFileSync(filePath, 'untouched', 'utf-8');
+      const original = mockConfigInternal.getFileReadCacheDisabled;
+      mockConfigInternal.getFileReadCacheDisabled = () => true;
+
+      try {
+        const params = { file_path: filePath, content: 'clobbered' };
+        const result = await tool.build(params).execute(abortSignal);
+        expect(result.error).toBeUndefined();
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('clobbered');
+      } finally {
+        mockConfigInternal.getFileReadCacheDisabled = original;
         fs.unlinkSync(filePath);
       }
     });

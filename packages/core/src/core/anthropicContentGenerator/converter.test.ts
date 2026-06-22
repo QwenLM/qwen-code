@@ -63,6 +63,30 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('emits scope:"global" on the system text when useGlobalCacheScope is set', () => {
+      // Anthropic-native + caching enabled → generator passes
+      // `useGlobalCacheScope: true` and the system prefix participates in
+      // cross-session caching under the `prompt-caching-scope-2026-01-05`
+      // beta. Non-Anthropic backends pass false (or omit) so they see the
+      // standard per-session shape verified by the test above.
+      const { system } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: 'hi',
+          config: { systemInstruction: 'sys' },
+        },
+        { useGlobalCacheScope: true },
+      );
+
+      expect(system).toEqual([
+        {
+          type: 'text',
+          text: 'sys',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+      ]);
+    });
+
     it('converts a plain string content into a user message', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -102,6 +126,35 @@ describe('AnthropicContentConverter', () => {
             {
               type: 'text',
               text: 'World',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('preserves ordered multi-part startup reminder user content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\ndeferred tools' },
+              { text: '<system-reminder>\nstartup context' },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\ndeferred tools' },
+            {
+              type: 'text',
+              text: '<system-reminder>\nstartup context',
               cache_control: { type: 'ephemeral' },
             },
           ],
@@ -197,6 +250,7 @@ describe('AnthropicContentConverter', () => {
               type: 'tool_result',
               tool_use_id: 'call-1',
               content: 'ok',
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -229,6 +283,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: 'boom',
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -262,6 +317,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: '',
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -312,6 +368,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -410,6 +467,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -461,6 +519,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -512,6 +571,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -641,7 +701,444 @@ describe('AnthropicContentConverter', () => {
                 },
               },
             ],
+            cache_control: { type: 'ephemeral' },
           },
+        ],
+      });
+    });
+  });
+
+  // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
+  // anthropic-compatible API rejects requests in thinking mode when a prior
+  // assistant turn carrying `tool_use` omits a thinking block. Plain-text
+  // assistant turns without thinking are accepted unchanged, so the converter
+  // injects an empty thinking block only on tool-use turns when the caller
+  // opts in.
+  describe('DeepSeek thinking-mode normalization, injection, and stripping', () => {
+    // The two options paired together replicate the DeepSeek "thinking on"
+    // behavior wired in AnthropicContentGenerator.buildRequest.
+    const enableThinking = {
+      normalizeAssistantThinkingSignature: true,
+      injectThinkingOnToolUseTurns: true,
+    };
+
+    it('does not inject on plain-text assistant turns (DeepSeek tolerates them)', () => {
+      // Verified against api.deepseek.com/anthropic: plain-text assistant
+      // turns without thinking are accepted. Avoid bloating replay history
+      // with synthetic blocks the API does not require.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Hello!' }] },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+    });
+
+    it('injects an empty thinking block on tool-calling assistant turns missing one', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'List files' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'glob',
+                    args: { pattern: '**/*.md' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          {
+            type: 'tool_use',
+            id: 'call-1',
+            name: 'glob',
+            input: { pattern: '**/*.md' },
+          },
+        ],
+      });
+    });
+
+    it('preserves existing thinking blocks on tool-use assistant turns', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Run tool' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'Let me think',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Let me think', signature: 'sig' },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+        ],
+      });
+    });
+
+    it('does not modify user messages', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+        },
+        enableThinking,
+      );
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Hi', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+      ]);
+    });
+
+    it('does nothing when option is disabled (default)', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello!' }] },
+        ],
+      });
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+    });
+
+    it('injects thinking blocks on every tool-using assistant turn in a multi-turn history', () => {
+      const toolUse = (id: string) => ({
+        functionCall: { id, name: 'tool', args: {} },
+      });
+      const toolResult = (id: string) => ({
+        functionResponse: { id, name: 'tool', response: { output: 'ok' } },
+      });
+
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Q1' }] },
+            { role: 'model', parts: [toolUse('t1')] },
+            { role: 'user', parts: [toolResult('t1')] },
+            { role: 'model', parts: [toolUse('t2')] },
+            { role: 'user', parts: [toolResult('t2')] },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toMatchObject({ role: 'assistant' });
+      expect(messages[3]).toMatchObject({ role: 'assistant' });
+      expect((messages[1] as { content: unknown[] }).content[0]).toEqual({
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      });
+      expect((messages[3] as { content: unknown[] }).content[0]).toEqual({
+        type: 'thinking',
+        thinking: '',
+        signature: '',
+      });
+    });
+
+    it('preserves thinking-only assistant turns rather than emit empty content (Anthropic rejects content: [])', () => {
+      // A turn whose only blocks are thinking/redacted_thinking can occur
+      // when a previous round was cut off by max_tokens before any text or
+      // tool_use was emitted. Stripping unconditionally would leave
+      // `content: []`, which Anthropic API rejects, and dropping the message
+      // would break user/assistant alternation. Keep the original blocks
+      // instead — DeepSeek empirically tolerates the residual mismatch.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'pondering',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'Continue' }] },
+          ],
+        },
+        { stripAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'pondering', signature: 'sig' },
+        ],
+      });
+    });
+
+    it('strips thinking blocks from assistant turns when stripAssistantThinking is set', () => {
+      // suggestionGenerator / forkedAgent path: history has real thought
+      // parts but the side-query disables thinking. The converter must drop
+      // those blocks so the outgoing request matches the absent top-level
+      // `thinking` config.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'reasoning',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+                { text: 'Hello!' },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                { text: 'more reasoning', thought: true },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { stripAssistantThinking: true },
+      );
+
+      // Both assistant turns have their thinking blocks removed.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello!' }],
+      });
+      expect(messages[2]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+      });
+    });
+
+    it('strips redacted_thinking blocks too when stripAssistantThinking is set', () => {
+      // The strip path must cover both `thinking` and `redacted_thinking`.
+      // processContent doesn't synthesize redacted_thinking from Gemini parts,
+      // so reach into the private helper directly with a constructed message.
+      const messages = [
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'redacted_thinking', data: 'opaque' },
+            { type: 'text', text: 'Hello!' },
+            { type: 'thinking', thinking: 'reasoning', signature: 'sig' },
+          ],
+        },
+      ];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (converter as any).stripThinkingFromAssistantMessages(messages);
+
+      expect(messages[0].content).toEqual([{ type: 'text', text: 'Hello!' }]);
+    });
+
+    it('treats a redacted_thinking block as already-satisfying (no synthetic injection)', () => {
+      // redacted_thinking has no `signature` field by spec — its `data` is
+      // the opaque token. Distinct from a non-compliant `thinking` block
+      // missing its required signature. The injector must leave redacted
+      // turns alone. processContent doesn't synthesize redacted_thinking
+      // from Gemini parts, so reach into the private helper directly.
+      const messages = [
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'redacted_thinking', data: 'opaque' },
+            { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+          ],
+        },
+      ];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (converter as any).injectEmptyThinkingOnToolUseTurns(messages);
+
+      expect(messages[0].content).toEqual([
+        { type: 'redacted_thinking', data: 'opaque' },
+        { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+      ]);
+    });
+
+    it('normalizes a non-compliant thinking block (no signature field) on a tool-use turn', () => {
+      // A part `{ text: '', thought: true }` (e.g. round-tripped from a
+      // `redacted_thinking` response that lost its `data` field via the
+      // Gemini Part representation) converts to a thinking block without a
+      // `signature` field. The cleanup adds an empty signature in place;
+      // because the normalized block now satisfies the requirement, Step 2
+      // does not prepend a synthetic.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Run tool' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: '', thought: true },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+        ],
+      });
+    });
+
+    it('preserves an existing compliant thinking block on a tool-use turn', () => {
+      // A thinking block with a real `signature` field is fully compliant —
+      // the injector must not duplicate it.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Run tool' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'real thinking',
+                  thought: true,
+                  thoughtSignature: 'real-sig',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'real thinking',
+            signature: 'real-sig',
+          },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+        ],
+      });
+    });
+
+    it('normalizes non-compliant thinking blocks (adds empty signature) on plain-text turns', () => {
+      // A part `{ thought: true, text: '...' }` (the normal shape from
+      // OpenAI/Gemini/agent-runtime where users may switch providers
+      // mid-session, or a `redacted_thinking` round-tripped through Gemini-
+      // Part) converts to `{ type: 'thinking', thinking: '...' }` without
+      // signature. The cleanup adds an empty signature in place to make the
+      // block spec-compliant while preserving the original thinking text.
+      // No synthetic is prepended on a plain-text turn (no tool_use).
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'cross-provider thoughts', thought: true },
+                { text: 'Hello!' },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'cross-provider thoughts',
+            signature: '',
+          },
+          { type: 'text', text: 'Hello!' },
+        ],
+      });
+    });
+
+    it('injects on mixed text+tool_use assistant turns missing thinking', () => {
+      // Common shape: model says something, then calls a tool. With no
+      // thinking, this is still a tool-use turn that needs the synthetic.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Look this up' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'Let me check that' },
+                { functionCall: { id: 't1', name: 'lookup', args: {} } },
+              ],
+            },
+          ],
+        },
+        enableThinking,
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '', signature: '' },
+          { type: 'text', text: 'Let me check that' },
+          { type: 'tool_use', id: 't1', name: 'lookup', input: {} },
         ],
       });
     });
@@ -680,6 +1177,29 @@ describe('AnthropicContentConverter', () => {
       });
 
       expect(vi.mocked(convertSchema)).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits scope:"global" on the last tool when useGlobalCacheScope is set', async () => {
+      // Mirror of the system-block scope test: cross-session caching for
+      // tools (the largest, slowest-changing prefix) only fires for
+      // Anthropic-native baseURLs. The generator latches the predicate
+      // once per request and forwards the same value here.
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'get_weather', description: 'Get weather' },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToAnthropic(tools, {
+        useGlobalCacheScope: true,
+      });
+
+      expect(result[0].cache_control).toEqual({
+        type: 'ephemeral',
+        scope: 'global',
+      });
     });
 
     it('resolves CallableTool.tool() and converts its functionDeclarations', async () => {
@@ -743,6 +1263,62 @@ describe('AnthropicContentConverter', () => {
       const result = await converter.convertGeminiToolsToAnthropic(tools);
       expect(result[0]?.input_schema?.type).toBe('object');
     });
+
+    it('skips functions without name or description', async () => {
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'valid_tool',
+              description: 'A valid tool',
+            },
+            {
+              name: 'missing_description',
+              // no description
+            },
+            {
+              // no name
+              description: 'Missing name',
+            },
+            {
+              // neither name nor description
+              parametersJsonSchema: { type: 'object' },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToAnthropic(tools);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('valid_tool');
+    });
+
+    it('skips functions with empty name or description', async () => {
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'valid_tool',
+              description: 'A valid tool',
+            },
+            {
+              name: '',
+              description: 'Empty name',
+            },
+            {
+              name: 'empty_description',
+              description: '',
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToAnthropic(tools);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('valid_tool');
+    });
   });
 
   describe('convertAnthropicResponseToGemini', () => {
@@ -767,6 +1343,7 @@ describe('AnthropicContentConverter', () => {
         promptTokenCount: 3,
         candidatesTokenCount: 5,
         totalTokenCount: 8,
+        cachedContentTokenCount: 0,
       });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
@@ -792,6 +1369,35 @@ describe('AnthropicContentConverter', () => {
       expect(parts).toEqual([
         { functionCall: { id: 't1', name: 'tool', args: { x: 1 } } },
       ]);
+    });
+
+    it('forwards cache_read_input_tokens and cache_creation_input_tokens through to usageMetadata', () => {
+      // A real Anthropic mid-conversation response carries all three prompt
+      // buckets simultaneously: `input_tokens` (the non-cached tail),
+      // `cache_read_input_tokens` (the warm prefix served from cache), and
+      // `cache_creation_input_tokens` (the new region being written). The
+      // converter must forward both cache fields so the normalizer can sum
+      // them — dropping either silently undercounts the Footer reading by
+      // the size of the dropped bucket.
+      const response = converter.convertAnthropicResponseToGemini({
+        id: 'msg-1',
+        model: 'claude-test',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: {
+          input_tokens: 2_500,
+          cache_read_input_tokens: 32_088,
+          cache_creation_input_tokens: 8_700,
+          output_tokens: 400,
+        },
+      } as unknown as Anthropic.Message);
+
+      expect(response.usageMetadata).toEqual({
+        promptTokenCount: 43_288,
+        candidatesTokenCount: 400,
+        totalTokenCount: 43_688,
+        cachedContentTokenCount: 32_088,
+      });
     });
   });
 
@@ -849,6 +1455,47 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('marks the last user message with cache_control when its last block is tool_result', () => {
+      // Regression: in agentic loops the last user message is typically a
+      // tool_result, not a text block. An earlier guard required the last
+      // block to be text, which silently dropped the per-turn cache
+      // breakpoint from turn 2 onward and collapsed the cacheable region
+      // back to system+tools. Anthropic docs explicitly list tool_result
+      // as a cacheable block type in messages.content.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'do the thing' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c1', name: 't', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 't',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastUser = messages[messages.length - 1];
+      expect(lastUser.role).toBe('user');
+      const content = Array.isArray(lastUser.content) ? lastUser.content : [];
+      const lastBlock = content[content.length - 1] as {
+        type: string;
+        cache_control?: { type: string };
+      };
+      expect(lastBlock.type).toBe('tool_result');
+      expect(lastBlock.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
     it('does not add cache_control to tools when disabled', async () => {
       const noCacheConverter = new AnthropicContentConverter(
         'test-model',
@@ -885,6 +1532,135 @@ describe('AnthropicContentConverter', () => {
         },
       });
       expect(result[0]).not.toHaveProperty('cache_control');
+    });
+
+    describe('per-call options override constructor default', () => {
+      // The generator latches `contentGeneratorConfig.enableCacheControl`
+      // per request and forwards the live value to the converter, so a
+      // `Config.setModel()` flip is reflected without rebuilding the
+      // converter. These tests exercise the override directly so the
+      // contract is pinned at the converter level too.
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'get_weather', description: 'Get weather' },
+          ],
+        },
+      ] as Tool[];
+
+      it('overrides constructor false → true for system + messages + tools', async () => {
+        const constructedWithCacheOff = new AnthropicContentConverter(
+          'test-model',
+          'auto',
+          false,
+        );
+
+        const { system, messages } =
+          constructedWithCacheOff.convertGeminiRequestToAnthropic(
+            {
+              model: 'models/test',
+              contents: 'Hello',
+              config: { systemInstruction: 'sys' },
+            },
+            { enableCacheControl: true, useGlobalCacheScope: true },
+          );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+        // Last user-text block gets per-session cache_control (no scope).
+        expect(messages).toEqual([
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: 'Hello',
+                cache_control: { type: 'ephemeral' },
+              },
+            ],
+          },
+        ]);
+
+        const result =
+          await constructedWithCacheOff.convertGeminiToolsToAnthropic(tools, {
+            enableCacheControl: true,
+            useGlobalCacheScope: true,
+          });
+        expect(result[0].cache_control).toEqual({
+          type: 'ephemeral',
+          scope: 'global',
+        });
+      });
+
+      it('overrides constructor true → false (cache fully off)', async () => {
+        // Default ctor: enableCacheControl true. Per-call override flips to
+        // false, mirroring a runtime `setModel()` that switches into a
+        // cache-disabled provider config.
+        const constructedWithCacheOn = new AnthropicContentConverter(
+          'test-model',
+          'auto',
+          true,
+        );
+
+        const { system, messages } =
+          constructedWithCacheOn.convertGeminiRequestToAnthropic(
+            {
+              model: 'models/test',
+              contents: 'Hello',
+              config: { systemInstruction: 'sys' },
+            },
+            { enableCacheControl: false },
+          );
+
+        expect(system).toBe('sys');
+        expect(messages).toEqual([
+          { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+        ]);
+
+        const result =
+          await constructedWithCacheOn.convertGeminiToolsToAnthropic(tools, {
+            enableCacheControl: false,
+          });
+        expect(result[0]).not.toHaveProperty('cache_control');
+      });
+
+      it('honors useGlobalCacheScope independently of enableCacheControl source', async () => {
+        // Cache on (per-call), scope off (per-call default). Verify the
+        // emitted shape is per-session even though cache_control IS
+        // attached — non-Anthropic baseURL behavior in one call.
+        const converterDefault = new AnthropicContentConverter(
+          'test-model',
+          'auto',
+        );
+        const { system } = converterDefault.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'Hello',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            enableCacheControl: true /* useGlobalCacheScope omitted → false */,
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+
+        const result = await converterDefault.convertGeminiToolsToAnthropic(
+          tools,
+          { enableCacheControl: true },
+        );
+        expect(result[0].cache_control).toEqual({ type: 'ephemeral' });
+      });
     });
   });
 });

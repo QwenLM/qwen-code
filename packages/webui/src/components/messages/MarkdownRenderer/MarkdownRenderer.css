@@ -182,14 +182,9 @@
     monospace
   );
   font-size: 0.95em;
-  color: var(--app-link-foreground, #007acc);
-  text-decoration: underline;
+  color: inherit;
+  text-decoration: none;
   cursor: pointer;
-  transition: color 0.1s ease;
-}
-
-.markdown-content .file-path-link:hover {
-  color: var(--app-link-active-foreground, #005a9e);
 }
 
 .markdown-content hr {

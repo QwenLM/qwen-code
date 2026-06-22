@@ -16,9 +16,19 @@ import {
 import { ConfigContext } from '../contexts/ConfigContext.js';
 // Mock VimModeContext hook
 vi.mock('../contexts/VimModeContext.js', () => ({
+  useVimModeState: vi.fn(() => ({
+    vimEnabled: false,
+    vimMode: 'NORMAL',
+  })),
+  useVimModeActions: vi.fn(() => ({
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
+  })),
   useVimMode: vi.fn(() => ({
     vimEnabled: false,
     vimMode: 'NORMAL',
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
   })),
 }));
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -26,8 +36,29 @@ import { StreamingState } from '../types.js';
 
 // Mock child components
 vi.mock('./LoadingIndicator.js', () => ({
-  LoadingIndicator: ({ thought }: { thought?: string }) => (
-    <Text>LoadingIndicator{thought ? `: ${thought}` : ''}</Text>
+  LoadingIndicator: ({
+    currentLoadingPhrase,
+    candidatesTokens,
+    taskStartTokens,
+    taskStartStreamingChars,
+    showResponseTokensPerSecond,
+  }: {
+    currentLoadingPhrase?: string;
+    candidatesTokens?: number;
+    taskStartTokens?: number;
+    taskStartStreamingChars?: number;
+    showResponseTokensPerSecond?: boolean;
+  }) => (
+    <Text>
+      LoadingIndicator
+      {currentLoadingPhrase ? `: ${currentLoadingPhrase}` : ''}
+      {typeof candidatesTokens === 'number' ? `: ${candidatesTokens}` : ''}
+      {typeof taskStartTokens === 'number' ? `: start ${taskStartTokens}` : ''}
+      {typeof taskStartStreamingChars === 'number'
+        ? `: chars ${taskStartStreamingChars}`
+        : ''}
+      {showResponseTokensPerSecond ? ': show t/s' : ''}
+    </Text>
   ),
 }));
 
@@ -93,7 +124,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     commandContext: null,
     shellModeActive: false,
     isFocused: true,
-    thought: '',
+    thought: null,
     currentLoadingPhrase: '',
     elapsedTime: 0,
     ctrlCPressedOnce: false,
@@ -111,12 +142,20 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     debugMessage: '',
     nightly: false,
     isTrustedFolder: true,
+    taskStartTokens: 0,
+    taskStartStreamingChars: 0,
+    responseCandidateTokens: 0,
+    streamingResponseLengthRef: { current: 0 },
+    isReceivingContent: false,
+    pendingGeminiHistoryItems: [],
+    terminalWidth: 80,
     ...overrides,
   }) as UIState;
 
 const createMockUIActions = (): UIActions =>
   ({
     handleFinalSubmit: vi.fn(),
+    handleRetryLastPrompt: vi.fn(),
     handleClearScreen: vi.fn(),
     setShellModeActive: vi.fn(),
     onEscapePromptChange: vi.fn(),
@@ -129,6 +168,7 @@ const createMockConfig = (overrides = {}) => ({
   getTargetDir: vi.fn(() => '/test/dir'),
   getDebugMode: vi.fn(() => false),
   getAccessibility: vi.fn(() => ({})),
+  getShowResponseTokensPerSecond: vi.fn(() => false),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
   ...overrides,
@@ -164,13 +204,9 @@ describe('Composer', () => {
   });
 
   describe('Loading Indicator', () => {
-    it('renders LoadingIndicator with thought when streaming', () => {
+    it('renders LoadingIndicator with phrase when streaming', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,
-        thought: {
-          subject: 'Processing',
-          description: 'Processing your request...',
-        },
         currentLoadingPhrase: 'Analyzing',
         elapsedTime: 1500,
       });
@@ -179,38 +215,116 @@ describe('Composer', () => {
 
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
+      expect(output).toContain('LoadingIndicator: Analyzing');
     });
 
-    it('renders LoadingIndicator without thought when accessibility disables loading phrases', () => {
+    it('passes the response token rate setting to LoadingIndicator', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,
-        thought: { subject: 'Hidden', description: 'Should not show' },
+        currentLoadingPhrase: 'Analyzing',
+        responseCandidateTokens: 550,
+        taskStartTokens: 500,
+        taskStartStreamingChars: 200,
       });
       const config = createMockConfig({
-        getAccessibility: vi.fn(() => ({ disableLoadingPhrases: true })),
+        getShowResponseTokensPerSecond: vi.fn(() => true),
       });
 
       const { lastFrame } = renderComposer(uiState, config);
 
-      const output = lastFrame();
-      expect(output).toContain('LoadingIndicator');
-      expect(output).not.toContain('Should not show');
+      expect(lastFrame()).toContain('LoadingIndicator: Analyzing');
+      expect(lastFrame()).toContain(': 550: start 500: chars 200');
+      expect(lastFrame()).toContain(': show t/s');
     });
 
-    it('suppresses thought when waiting for confirmation', () => {
+    // ─── Narrow-terminal suppression (suppressBottomLoadingIndicator) ───
+    // The indicator is hidden only when actively Responding on a terminal
+    // ≤ 30 cols wide. WaitingForConfirmation must NEVER be suppressed.
+
+    it('hides LoadingIndicator when Responding on a 30-col terminal', () => {
       const uiState = createMockUIState({
-        streamingState: StreamingState.WaitingForConfirmation,
-        thought: {
-          subject: 'Confirmation',
-          description: 'Should not show during confirmation',
-        },
+        streamingState: StreamingState.Responding,
+        terminalWidth: 30,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('LoadingIndicator');
+    });
+
+    it('hides LoadingIndicator when Responding on a 25-col terminal', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('LoadingIndicator');
+    });
+
+    it('preserves "esc to cancel" fallback when LoadingIndicator is suppressed', () => {
+      // Even when the full LoadingIndicator is hidden on ultra-narrow
+      // terminals, the cancel affordance must remain so users can abort.
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame();
+      expect(output).not.toContain('LoadingIndicator');
+      expect(output).toContain('Esc to cancel');
+    });
+
+    it('does not render the esc fallback once the full indicator is visible', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 31,
       });
 
       const { lastFrame } = renderComposer(uiState);
 
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
-      expect(output).not.toContain('Should not show during confirmation');
+      // The minimal fallback string only appears when the full indicator is
+      // suppressed — when LoadingIndicator renders, it owns the cancel hint.
+      expect(output).not.toContain('Esc to cancel');
+    });
+
+    it('shows LoadingIndicator when Responding on a 31-col terminal', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 31,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('LoadingIndicator');
+    });
+
+    it('shows LoadingIndicator when WaitingForConfirmation even on a 25-col terminal', () => {
+      // Confirmation prompts must remain visible regardless of width — the
+      // user needs to see something is awaiting their input.
+      const uiState = createMockUIState({
+        streamingState: StreamingState.WaitingForConfirmation,
+        terminalWidth: 25,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('LoadingIndicator');
+    });
+
+    it('renders LoadingIndicator during WaitingForConfirmation', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.WaitingForConfirmation,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('LoadingIndicator');
     });
   });
 

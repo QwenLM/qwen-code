@@ -28,7 +28,8 @@ describe('SettingsSchema', () => {
         'mcp',
         'security',
         'advanced',
-        'experimental',
+        'plansDirectory',
+        'voiceModel',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -84,17 +85,6 @@ describe('SettingsSchema', () => {
       ).toBe('boolean');
     });
 
-    it('should have checkpointing nested properties', () => {
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled,
-      ).toBeDefined();
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled.type,
-      ).toBe('boolean');
-    });
-
     it('should have fileFiltering nested properties', () => {
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties
@@ -108,6 +98,81 @@ describe('SettingsSchema', () => {
         getSettingsSchema().context.properties.fileFiltering.properties
           ?.enableRecursiveFileSearch,
       ).toBeDefined();
+    });
+
+    it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
+      const threshold =
+        getSettingsSchema().context.properties.clearContextOnIdle.properties
+          ?.toolResultsTotalCharsThreshold;
+
+      expect(threshold).toBeDefined();
+      expect(threshold?.type).toBe('number');
+      expect(threshold?.default).toBe(500_000);
+      expect(threshold?.requiresRestart).toBe(false);
+    });
+
+    it('should have sandboxImage setting under tools', () => {
+      expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
+      expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(
+        'string',
+      );
+      expect(getSettingsSchema().tools.properties.sandboxImage.default).toBe(
+        undefined,
+      );
+    });
+
+    it('should define tools.sandbox schema override as boolean or string', () => {
+      expect(
+        getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
+    it('should have top-level proxy setting in schema', () => {
+      expect(getSettingsSchema().proxy).toBeDefined();
+      expect(getSettingsSchema().proxy.type).toBe('string');
+      expect(getSettingsSchema().proxy.category).toBe('Advanced');
+      expect(getSettingsSchema().proxy.requiresRestart).toBe(true);
+      expect(getSettingsSchema().proxy.default).toBe(undefined);
+      expect(getSettingsSchema().proxy.showInDialog).toBe(false);
+    });
+
+    it('should have plansDirectory setting in schema', () => {
+      expect(getSettingsSchema().plansDirectory).toBeDefined();
+      expect(getSettingsSchema().plansDirectory.type).toBe('string');
+      expect(getSettingsSchema().plansDirectory.category).toBe('Advanced');
+      expect(getSettingsSchema().plansDirectory.default).toBe(undefined);
+      expect(getSettingsSchema().plansDirectory.requiresRestart).toBe(true);
+      expect(getSettingsSchema().plansDirectory.showInDialog).toBe(false);
+    });
+
+    it('should have voice model setting in schema', () => {
+      const voiceModel = getSettingsSchema().voiceModel;
+
+      expect(voiceModel).toBeDefined();
+      expect(voiceModel.type).toBe('string');
+      expect(voiceModel.category).toBe('Model');
+      expect(voiceModel.default).toBe('');
+      expect(voiceModel.requiresRestart).toBe(false);
+      expect(voiceModel.showInDialog).toBe(false);
+    });
+
+    it('should have voice dictation settings under general', () => {
+      const voice =
+        getSettingsSchema().general.properties.voice.properties ?? {};
+
+      expect(voice.enabled.type).toBe('boolean');
+      expect(voice.enabled.default).toBe(false);
+
+      expect(voice.mode.type).toBe('enum');
+      expect(voice.mode.default).toBe('hold');
+      expect(
+        voice.mode.options?.map((o: { value: string }) => o.value),
+      ).toEqual(['hold', 'tap']);
+
+      expect(voice.language.type).toBe('string');
+      expect(voice.language.default).toBe('');
     });
 
     it('should have unique categories', () => {
@@ -173,6 +238,10 @@ describe('SettingsSchema', () => {
         true,
       );
       expect(
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond
+          .showInDialog,
+      ).toBe(true);
+      expect(
         getSettingsSchema().privacy.properties.usageStatisticsEnabled
           .showInDialog,
       ).toBe(true);
@@ -181,9 +250,7 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().security.properties.auth.showInDialog).toBe(
         false,
       );
-      expect(getSettingsSchema().tools.properties.core.showInDialog).toBe(
-        false,
-      );
+      expect(getSettingsSchema().permissions.showInDialog).toBe(false);
       expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
       expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
 
@@ -192,9 +259,6 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().ui.properties.customThemes.showInDialog).toBe(
         false,
       ); // Managed via theme editor
-      expect(
-        getSettingsSchema().general.properties.checkpointing.showInDialog,
-      ).toBe(false); // Experimental feature
       expect(getSettingsSchema().ui.properties.accessibility.showInDialog).toBe(
         false,
       );
@@ -210,11 +274,45 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should define Markdown render mode as a user-facing UI enum', () => {
+      const renderMode = getSettingsSchema().ui.properties.renderMode;
+
+      expect(renderMode.type).toBe('enum');
+      expect(renderMode.default).toBe('render');
+      expect(renderMode.requiresRestart).toBe(false);
+      expect(renderMode.showInDialog).toBe(true);
+      expect(renderMode.options).toEqual([
+        { value: 'render', label: 'Render visual previews' },
+        { value: 'raw', label: 'Show raw source' },
+      ]);
+    });
+
+    it('should have useTerminalBuffer in ui settings', () => {
+      const useTerminalBuffer =
+        getSettingsSchema().ui.properties.useTerminalBuffer;
+      expect(useTerminalBuffer).toBeDefined();
+      expect(useTerminalBuffer.type).toBe('boolean');
+      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.showInDialog).toBe(true);
+      expect(useTerminalBuffer.requiresRestart).toBe(false);
+    });
+
+    it('should expose response tokens/sec as an opt-in UI setting', () => {
+      const responseTokensPerSecond =
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond;
+      expect(responseTokensPerSecond).toBeDefined();
+      expect(responseTokensPerSecond.type).toBe('boolean');
+      expect(responseTokensPerSecond.default).toBe(false);
+      expect(responseTokensPerSecond.showInDialog).toBe(true);
+      expect(responseTokensPerSecond.requiresRestart).toBe(true);
+    });
+
     it('should infer Settings type correctly', () => {
       // This test ensures that the Settings type is properly inferred from the schema
       const settings: Settings = {
         ui: {
           theme: 'dark',
+          renderMode: 'raw',
         },
         context: {
           includeDirectories: ['/path/to/dir'],
@@ -224,6 +322,7 @@ describe('SettingsSchema', () => {
 
       // TypeScript should not complain about these properties
       expect(settings.ui?.theme).toBe('dark');
+      expect(settings.ui?.renderMode).toBe('raw');
       expect(settings.context?.includeDirectories).toEqual(['/path/to/dir']);
       expect(settings.context?.loadFromIncludeDirectories).toBe(true);
     });
@@ -241,6 +340,27 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().context?.properties.includeDirectories.default,
       ).toEqual([]);
+    });
+
+    it('should define context.fileName schema override as string or string array', () => {
+      expect(
+        getSettingsSchema().context?.properties.fileName.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+      });
+    });
+
+    it('should define context.importFormat as tree or flat', () => {
+      const importFormat = getSettingsSchema().context?.properties.importFormat;
+
+      expect(importFormat.type).toBe('enum');
+      expect(importFormat.options).toEqual([
+        { value: 'tree', label: 'Tree' },
+        { value: 'flat', label: 'Flat' },
+      ]);
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {
@@ -307,6 +427,17 @@ describe('SettingsSchema', () => {
         getSettingsSchema().general.properties.debugKeystrokeLogging
           .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
+    });
+
+    it('should define advanced.dnsResolutionOrder as ipv4first or verbatim', () => {
+      const dnsResolutionOrder =
+        getSettingsSchema().advanced.properties.dnsResolutionOrder;
+
+      expect(dnsResolutionOrder.type).toBe('enum');
+      expect(dnsResolutionOrder.options).toEqual([
+        { value: 'ipv4first', label: 'IPv4 First' },
+        { value: 'verbatim', label: 'Verbatim' },
+      ]);
     });
   });
 });

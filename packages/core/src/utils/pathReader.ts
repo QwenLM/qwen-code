@@ -72,9 +72,10 @@ export async function readPathFromWorkspace(
     const relativeFiles = files.map((p) =>
       path.relative(config.getTargetDir(), p),
     );
+    const filteringOptions = config.getFileFilteringOptions();
     const filteredFiles = fileService.filterFiles(relativeFiles, {
-      respectGitIgnore: true,
-      respectQwenIgnore: true,
+      respectGitIgnore: filteringOptions.respectGitIgnore,
+      respectQwenIgnore: filteringOptions.respectQwenIgnore,
     });
     const finalFiles = filteredFiles.map((p) =>
       path.resolve(config.getTargetDir(), p),
@@ -93,9 +94,10 @@ export async function readPathFromWorkspace(
   } else {
     // It's a single file, check if it's ignored.
     const relativePath = path.relative(config.getTargetDir(), absolutePath);
+    const singleFileFilteringOptions = config.getFileFilteringOptions();
     const filtered = fileService.filterFiles([relativePath], {
-      respectGitIgnore: true,
-      respectQwenIgnore: true,
+      respectGitIgnore: singleFileFilteringOptions.respectGitIgnore,
+      respectQwenIgnore: singleFileFilteringOptions.respectQwenIgnore,
     });
 
     if (filtered.length === 0) {

@@ -5,23 +5,22 @@
  */
 
 import { getErrorMessage } from '../../utils/errors.js';
-import { ExtensionUpdateState } from '../state/extensions.js';
 import { MessageType } from '../types.js';
 import {
   type CommandContext,
   type SlashCommand,
   CommandKind,
 } from './types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import {
   ExtensionManager,
+  openBrowserSecurely,
   parseInstallSource,
-  type ExtensionUpdateInfo,
+  createDebugLogger,
+  redactUrlCredentials,
+  getExtensionDisplayName,
+  getExtensionDescription,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { SettingScope } from '../../config/settings.js';
-import open from 'open';
-import { extensionToOutputString } from '../../commands/extensions/utils.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS_COMMAND');
 const EXTENSION_EXPLORE_URL = {
@@ -31,24 +30,15 @@ const EXTENSION_EXPLORE_URL = {
 
 type ExtensionExploreSource = keyof typeof EXTENSION_EXPLORE_URL;
 
-function showMessageIfNoExtensions(
-  context: CommandContext,
-  extensions: unknown[],
-): boolean {
-  if (extensions.length === 0) {
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: t('No extensions installed.'),
-      },
-      Date.now(),
-    );
-    return true;
-  }
-  return false;
-}
-
 async function exploreAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('/extensions explore is only available in interactive mode.'),
+    };
+  }
   const source = args.trim();
   const extensionsUrl = source
     ? EXTENSION_EXPLORE_URL[source as ExtensionExploreSource]
@@ -97,7 +87,7 @@ async function exploreAction(context: CommandContext, args: string) {
       Date.now(),
     );
     try {
-      await open(extensionsUrl);
+      await openBrowserSecurely(extensionsUrl);
     } catch (_error) {
       context.ui.addItem(
         {
@@ -111,135 +101,104 @@ async function exploreAction(context: CommandContext, args: string) {
       );
     }
   }
+  return undefined;
 }
 
-async function listAction(context: CommandContext) {
-  const extensions = context.services.config
-    ? context.services.config.getExtensions()
-    : [];
-
-  if (showMessageIfNoExtensions(context, extensions)) {
-    return;
+async function listAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return listTextAction(context, args);
   }
-
-  context.ui.addItem(
-    {
-      type: MessageType.EXTENSIONS_LIST,
-    },
-    Date.now(),
-  );
+  return {
+    type: 'dialog' as const,
+    dialog: 'extensions_manage' as const,
+  };
 }
 
-async function updateAction(context: CommandContext, args: string) {
-  const updateArgs = args.split(' ').filter((value) => value.length > 0);
-  const all = updateArgs.length === 1 && updateArgs[0] === '--all';
-  const names = all ? undefined : updateArgs;
-
-  if (!all && names?.length === 0) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: t('Usage: /extensions update <extension-names>|--all'),
-      },
-      Date.now(),
-    );
-    return;
+async function listTextAction(context: CommandContext, _args: string) {
+  const config = context.services.config;
+  if (!config) {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('Config not loaded.'),
+    };
   }
 
-  let updateInfos: ExtensionUpdateInfo[] = [];
-
-  const extensionManager = context.services.config!.getExtensionManager();
-  const extensions = context.services.config
-    ? context.services.config.getExtensions()
-    : [];
-
-  if (showMessageIfNoExtensions(context, extensions)) {
-    return Promise.resolve();
-  }
-
+  let extensions;
   try {
-    context.ui.dispatchExtensionStateUpdate({ type: 'BATCH_CHECK_START' });
-    await extensionManager.checkForAllExtensionUpdates((extensionName, state) =>
-      context.ui.dispatchExtensionStateUpdate({
-        type: 'SET_STATE',
-        payload: { name: extensionName, state },
-      }),
-    );
-    context.ui.dispatchExtensionStateUpdate({ type: 'BATCH_CHECK_END' });
-
-    context.ui.setPendingItem({
-      type: MessageType.EXTENSIONS_LIST,
-    });
-    if (all) {
-      updateInfos = await extensionManager.updateAllUpdatableExtensions(
-        context.ui.extensionsUpdateState,
-        (extensionName, state) =>
-          context.ui.dispatchExtensionStateUpdate({
-            type: 'SET_STATE',
-            payload: { name: extensionName, state },
-          }),
-      );
-    } else if (names?.length) {
-      const extensions = context.services.config!.getExtensions();
-      for (const name of names) {
-        const extension = extensions.find(
-          (extension) => extension.name === name,
-        );
-        if (!extension) {
-          context.ui.addItem(
-            {
-              type: MessageType.ERROR,
-              text: t('Extension "{{name}}" not found.', { name }),
-            },
-            Date.now(),
-          );
-          continue;
-        }
-        const updateInfo = await extensionManager.updateExtension(
-          extension,
-          context.ui.extensionsUpdateState.get(extension.name)?.status ??
-            ExtensionUpdateState.UNKNOWN,
-          (extensionName, state) =>
-            context.ui.dispatchExtensionStateUpdate({
-              type: 'SET_STATE',
-              payload: { name: extensionName, state },
-            }),
-        );
-        if (updateInfo) updateInfos.push(updateInfo);
-      }
-    }
-
-    if (updateInfos.length === 0) {
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text: t('No extensions to update.'),
-        },
-        Date.now(),
-      );
-      return;
-    }
+    extensions = config.getExtensions();
   } catch (error) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: getErrorMessage(error),
-      },
-      Date.now(),
-    );
-  } finally {
-    context.ui.addItem(
-      {
-        type: MessageType.EXTENSIONS_LIST,
-      },
-      Date.now(),
-    );
-    context.ui.reloadCommands();
-    context.ui.setPendingItem(null);
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('Failed to read extensions: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    };
   }
+  if (extensions.length === 0) {
+    return {
+      type: 'message' as const,
+      messageType: 'info' as const,
+      content: t('No extensions installed.'),
+    };
+  }
+
+  const active = extensions.filter((e) => e.isActive);
+  let output =
+    t('**Installed Extensions ({{total}} total, {{active}} active)**', {
+      total: String(extensions.length),
+      active: String(active.length),
+    }) + '\n\n';
+
+  const locale = getCurrentLanguage();
+  for (const ext of extensions) {
+    const status = ext.isActive ? '✓' : '✗';
+    const displayLabel = getExtensionDisplayName(ext, locale);
+    const description = getExtensionDescription(ext, locale);
+
+    const caps: string[] = [];
+    const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
+    if (mcpCount > 0) {
+      caps.push(t('{{count}} MCP servers', { count: String(mcpCount) }));
+    }
+    if (ext.skills && ext.skills.length > 0) {
+      caps.push(t('{{count}} skills', { count: String(ext.skills.length) }));
+    }
+    if (ext.commands && ext.commands.length > 0) {
+      caps.push(
+        t('{{count}} commands', { count: String(ext.commands.length) }),
+      );
+    }
+    const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';
+    output += `- [${status}] **${displayLabel}**${capsStr}\n`;
+    if (description) {
+      const maxLen = 80;
+      const truncated =
+        description.length > maxLen
+          ? description.slice(0, maxLen - 1) + '…'
+          : description;
+      output += `  ${truncated}\n`;
+    }
+  }
+
+  return {
+    type: 'message' as const,
+    messageType: 'info' as const,
+    content: output,
+  };
 }
 
 async function installAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('/extensions install is only available in interactive mode.'),
+    };
+  }
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
     debugLogger.error(
@@ -262,10 +221,13 @@ async function installAction(context: CommandContext, args: string) {
 
   try {
     const installMetadata = await parseInstallSource(source);
+    const redactedSource = redactUrlCredentials(source);
     context.ui.addItem(
       {
         type: MessageType.INFO,
-        text: t('Installing extension from "{{source}}"...', { source }),
+        text: t('Installing extension from "{{source}}"...', {
+          source: redactedSource,
+        }),
       },
       Date.now(),
     );
@@ -286,243 +248,15 @@ async function installAction(context: CommandContext, args: string) {
       {
         type: MessageType.ERROR,
         text: t('Failed to install extension from "{{source}}": {{error}}', {
-          source,
-          error: getErrorMessage(error),
+          source: redactUrlCredentials(source),
+          error: redactUrlCredentials(getErrorMessage(error)),
         }),
       },
       Date.now(),
     );
     return;
   }
-}
-
-async function uninstallAction(context: CommandContext, args: string) {
-  const extensionManager = context.services.config?.getExtensionManager();
-  if (!(extensionManager instanceof ExtensionManager)) {
-    debugLogger.error(
-      `Cannot ${context.invocation?.name} extensions in this environment`,
-    );
-    return;
-  }
-
-  const name = args.trim();
-  if (!name) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: t('Usage: /extensions uninstall <extension-name>'),
-      },
-      Date.now(),
-    );
-    return;
-  }
-
-  context.ui.addItem(
-    {
-      type: MessageType.INFO,
-      text: t('Uninstalling extension "{{name}}"...', { name }),
-    },
-    Date.now(),
-  );
-
-  try {
-    await extensionManager.uninstallExtension(name, false);
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: t('Extension "{{name}}" uninstalled successfully.', { name }),
-      },
-      Date.now(),
-    );
-    context.ui.reloadCommands();
-  } catch (error) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: t('Failed to uninstall extension "{{name}}": {{error}}', {
-          name,
-          error: getErrorMessage(error),
-        }),
-      },
-      Date.now(),
-    );
-  }
-}
-
-function getEnableDisableContext(
-  context: CommandContext,
-  argumentsString: string,
-): {
-  extensionManager: ExtensionManager;
-  names: string[];
-  scope: SettingScope;
-} | null {
-  const extensionManager = context.services.config?.getExtensionManager();
-  if (!(extensionManager instanceof ExtensionManager)) {
-    debugLogger.error(
-      `Cannot ${context.invocation?.name} extensions in this environment`,
-    );
-    return null;
-  }
-  const parts = argumentsString.split(' ');
-  const name = parts[0];
-  if (
-    name === '' ||
-    !(
-      (parts.length === 2 && parts[1].startsWith('--scope=')) || // --scope=<scope>
-      (parts.length === 3 && parts[1] === '--scope') // --scope <scope>
-    )
-  ) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: t(
-          'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]',
-          {
-            command: context.invocation?.name ?? '',
-          },
-        ),
-      },
-      Date.now(),
-    );
-    return null;
-  }
-  let scope: SettingScope;
-  // Transform `--scope=<scope>` to `--scope <scope>`.
-  if (parts.length === 2) {
-    parts.push(...parts[1].split('='));
-    parts.splice(1, 1);
-  }
-  switch (parts[2].toLowerCase()) {
-    case 'workspace':
-      scope = SettingScope.Workspace;
-      break;
-    case 'user':
-      scope = SettingScope.User;
-      break;
-    default:
-      context.ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: t(
-            'Unsupported scope "{{scope}}", should be one of "user" or "workspace"',
-            {
-              scope: parts[2],
-            },
-          ),
-        },
-        Date.now(),
-      );
-      return null;
-  }
-  let names: string[] = [];
-  if (name === '--all') {
-    let extensions = extensionManager.getLoadedExtensions();
-    if (context.invocation?.name === 'enable') {
-      extensions = extensions.filter((ext) => !ext.isActive);
-    }
-    if (context.invocation?.name === 'disable') {
-      extensions = extensions.filter((ext) => ext.isActive);
-    }
-    names = extensions.map((ext) => ext.name);
-  } else {
-    names = [name];
-  }
-
-  return {
-    extensionManager,
-    names,
-    scope,
-  };
-}
-
-async function disableAction(context: CommandContext, args: string) {
-  const enableContext = getEnableDisableContext(context, args);
-  if (!enableContext) return;
-
-  const { names, scope, extensionManager } = enableContext;
-  for (const name of names) {
-    await extensionManager.disableExtension(name, scope);
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: t('Extension "{{name}}" disabled for scope "{{scope}}"', {
-          name,
-          scope,
-        }),
-      },
-      Date.now(),
-    );
-    context.ui.reloadCommands();
-  }
-}
-
-async function enableAction(context: CommandContext, args: string) {
-  const enableContext = getEnableDisableContext(context, args);
-  if (!enableContext) return;
-
-  const { names, scope, extensionManager } = enableContext;
-  for (const name of names) {
-    await extensionManager.enableExtension(name, scope);
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: t('Extension "{{name}}" enabled for scope "{{scope}}"', {
-          name,
-          scope,
-        }),
-      },
-      Date.now(),
-    );
-    context.ui.reloadCommands();
-  }
-}
-
-async function detailAction(context: CommandContext, args: string) {
-  const extensionManager = context.services.config?.getExtensionManager();
-  if (!(extensionManager instanceof ExtensionManager)) {
-    debugLogger.error(
-      `Cannot ${context.invocation?.name} extensions in this environment`,
-    );
-    return;
-  }
-
-  const name = args.trim();
-  if (!name) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: t('Usage: /extensions detail <extension-name>'),
-      },
-      Date.now(),
-    );
-    return;
-  }
-
-  const extensions = context.services.config!.getExtensions();
-  const extension = extensions.find((extension) => extension.name === name);
-  if (!extension) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: t('Extension "{{name}}" not found.', { name }),
-      },
-      Date.now(),
-    );
-    return;
-  }
-  context.ui.addItem(
-    {
-      type: MessageType.INFO,
-      text: extensionToOutputString(
-        extension,
-        extensionManager,
-        process.cwd(),
-        true,
-      ),
-    },
-    Date.now(),
-  );
+  return undefined;
 }
 
 export async function completeExtensions(
@@ -585,47 +319,29 @@ const exploreExtensionsCommand: SlashCommand = {
     return t('Open extensions page in your browser');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   action: exploreAction,
   completion: completeExtensionsExplore,
+};
+
+const manageExtensionsCommand: SlashCommand = {
+  name: 'manage',
+  get description() {
+    return t('Manage installed extensions');
+  },
+  kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
+  action: listAction,
 };
 
 const listExtensionsCommand: SlashCommand = {
   name: 'list',
   get description() {
-    return t('List active extensions');
+    return t('List installed extensions');
   },
   kind: CommandKind.BUILT_IN,
-  action: listAction,
-};
-
-const updateExtensionsCommand: SlashCommand = {
-  name: 'update',
-  get description() {
-    return t('Update extensions. Usage: update <extension-names>|--all');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: updateAction,
-  completion: completeExtensions,
-};
-
-const disableCommand: SlashCommand = {
-  name: 'disable',
-  get description() {
-    return t('Disable an extension');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: disableAction,
-  completion: completeExtensionsAndScopes,
-};
-
-const enableCommand: SlashCommand = {
-  name: 'enable',
-  get description() {
-    return t('Enable an extension');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: enableAction,
-  completion: completeExtensionsAndScopes,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  action: listTextAction,
 };
 
 const installCommand: SlashCommand = {
@@ -634,27 +350,8 @@ const installCommand: SlashCommand = {
     return t('Install an extension from a git repo or local path');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   action: installAction,
-};
-
-const uninstallCommand: SlashCommand = {
-  name: 'uninstall',
-  get description() {
-    return t('Uninstall an extension');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: uninstallAction,
-  completion: completeExtensions,
-};
-
-const detailCommand: SlashCommand = {
-  name: 'detail',
-  get description() {
-    return t('Get detail of an extension');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: detailAction,
-  completion: completeExtensions,
 };
 
 export const extensionsCommand: SlashCommand = {
@@ -663,17 +360,18 @@ export const extensionsCommand: SlashCommand = {
     return t('Manage extensions');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   subCommands: [
     listExtensionsCommand,
-    updateExtensionsCommand,
-    disableCommand,
-    enableCommand,
+    manageExtensionsCommand,
     installCommand,
-    uninstallCommand,
     exploreExtensionsCommand,
-    detailCommand,
   ],
-  action: (context, args) =>
-    // Default to list if no subcommand is provided
-    listExtensionsCommand.action!(context, args),
+  action: async (context, args) => {
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode === 'interactive') {
+      return manageExtensionsCommand.action!(context, args);
+    }
+    return listTextAction(context, args);
+  },
 };

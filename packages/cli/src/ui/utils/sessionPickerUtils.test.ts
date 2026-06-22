@@ -5,7 +5,22 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { truncateText } from './sessionPickerUtils.js';
+import type { SessionListItem } from '@qwen-code/qwen-code-core';
+import { filterSessions, truncateText } from './sessionPickerUtils.js';
+import { getCachedStringWidth } from './textUtils.js';
+
+function s(overrides: Partial<SessionListItem>): SessionListItem {
+  return {
+    sessionId: overrides.sessionId ?? 'id',
+    cwd: '/cwd',
+    startTime: '2025-01-01T00:00:00.000Z',
+    mtime: 0,
+    prompt: '',
+    filePath: '/cwd/x.jsonl',
+    messageCount: 1,
+    ...overrides,
+  };
+}
 
 describe('sessionPickerUtils', () => {
   describe('truncateText', () => {
@@ -40,6 +55,60 @@ describe('sessionPickerUtils', () => {
 
     it('returns only the first line even if there are multiple line breaks', () => {
       expect(truncateText('hello\n\nworld', 20)).toBe('hello');
+    });
+
+    it('truncates CJK text by display width', () => {
+      const result = truncateText('修复登录问题'.repeat(8), 20);
+      expect(getCachedStringWidth(result)).toBeLessThanOrEqual(20);
+      expect(result).toBe('修复登录问题修复...');
+    });
+
+    it('does not split complex emoji grapheme clusters', () => {
+      expect(truncateText('🇨🇳abcdef', 2)).toBe('🇨🇳');
+      expect(truncateText('👩🏽abcdef', 6)).toBe('👩🏽a...');
+      expect(truncateText('👨‍👩‍👧‍👦abcdef', 6)).toBe('👨‍👩‍👧‍👦a...');
+    });
+
+    it('returns an empty string for non-positive widths', () => {
+      expect(truncateText('abcdef', 0)).toBe('');
+      expect(truncateText('abcdef', -1)).toBe('');
+    });
+  });
+
+  describe('filterSessions', () => {
+    const sessions: SessionListItem[] = [
+      s({ sessionId: 'a', prompt: 'fix login bug', gitBranch: 'main' }),
+      s({ sessionId: 'b', customTitle: 'Add OAuth flow', gitBranch: 'feat' }),
+      s({ sessionId: 'c', prompt: 'random work', gitBranch: 'hotfix/login' }),
+      s({ sessionId: 'd', prompt: 'unrelated', gitBranch: 'main' }),
+    ];
+
+    it('passes everything through when no filter is set', () => {
+      expect(filterSessions(sessions, false)).toEqual(sessions);
+      expect(filterSessions(sessions, false, 'main', '')).toEqual(sessions);
+    });
+
+    it('matches the query against prompt, customTitle, and gitBranch', () => {
+      const result = filterSessions(sessions, false, undefined, 'login');
+      expect(result.map((x) => x.sessionId)).toEqual(['a', 'c']);
+    });
+
+    it('is case-insensitive and trims surrounding whitespace', () => {
+      const result = filterSessions(sessions, false, undefined, '  OAUTH  ');
+      expect(result.map((x) => x.sessionId)).toEqual(['b']);
+    });
+
+    it('composes branch filter and query as AND', () => {
+      // Branch filter narrows to main; query then drops the unrelated row
+      // even though 'unrelated' is on main.
+      const result = filterSessions(sessions, true, 'main', 'login');
+      expect(result.map((x) => x.sessionId)).toEqual(['a']);
+    });
+
+    it('returns empty when the query matches nothing', () => {
+      expect(
+        filterSessions(sessions, false, undefined, 'definitelynotpresent'),
+      ).toEqual([]);
     });
   });
 });

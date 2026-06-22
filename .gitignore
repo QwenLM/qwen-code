@@ -24,6 +24,24 @@ package-lock.json
 *.iml
 .cursor
 .qoder
+.claude
+.codex
+
+# Qwen Code Configs
+.qwen/*
+!.qwen/commands/
+!.qwen/commands/**
+!.qwen/skills/
+!.qwen/skills/**
+# Re-ignore auto-generated skills (created by the managed-skill-extractor
+# agent with the mandatory `auto-skill-` directory prefix). Git's last-rule-
+# wins semantics keep hand-authored project skills tracked while excluding
+# these transient, session-specific directories. The `auto-skill-` prefix is
+# reserved for auto-generated skills — do not hand-author a project skill with
+# this prefix, or its directory will be ignored here.
+.qwen/skills/auto-skill-*/
+!.qwen/agents/
+!.qwen/agents/**
 
 # OS metadata
 .DS_Store
@@ -34,6 +52,8 @@ Thumbs.db
 
 # Ignore built ts files
 dist
+packages/audio-capture/build/
+packages/audio-capture/prebuilds/
 
 # Docker folder to help skip auth refreshes
 .docker
@@ -44,15 +64,18 @@ bundle
 junit.xml
 packages/*/coverage/
 
+# PR body draft
+pr_body.md
+
 # Generated files
 packages/cli/src/generated/
 packages/core/src/generated/
+packages/web-templates/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
-# Qwen Code Configs
-.qwen/
 logs/
+.repro-runs/
 # GHA credentials
 gha-creds-*.json
 
@@ -70,9 +93,23 @@ __pycache__/
 integration-tests/concurrent-runner/output/
 integration-tests/concurrent-runner/task-*
 
+integration-tests/terminal-capture/scenarios/screenshots/
+
+# Test-built worker artifact (fzfWorkerHandle.test.ts builds this on-the-fly)
+packages/core/src/utils/filesearch/fzfWorker.js
+
 # storybook
 *storybook.log
 storybook-static
 
 # test
 coverage/
+
+# Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
+packages/core/src/skills/bundled/qc-helper/docs
+tmp/
+
+# code graph skills
+.venv
+.codegraph
+.qwen/computer-use/installed.json

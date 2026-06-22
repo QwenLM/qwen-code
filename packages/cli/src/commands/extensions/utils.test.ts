@@ -13,11 +13,16 @@ const mockExtensionManagerInstance = {
   refreshCache: mockRefreshCache,
 };
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  ExtensionManager: vi
-    .fn()
-    .mockImplementation(() => mockExtensionManagerInstance),
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    ExtensionManager: vi
+      .fn()
+      .mockImplementation(() => mockExtensionManagerInstance),
+  };
+});
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: vi.fn().mockReturnValue({
@@ -131,5 +136,91 @@ describe('extensionToOutputString', () => {
     );
 
     expect(resultWithoutInline).toEqual(resultWithInlineFalse);
+  });
+
+  it('should include description when present', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: 'A helpful test extension',
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Description:');
+    expect(result).toContain('A helpful test extension');
+  });
+
+  it('should strip ANSI escape codes from description', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: '\x1b[31mMalicious\x1b[0m description',
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Malicious description');
+    expect(result).not.toContain('\x1b[31m');
+  });
+
+  it('should handle non-string description gracefully', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: 42,
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).not.toContain('Description:');
+  });
+
+  it('should not include description line when absent', () => {
+    const extension = createMockExtension();
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).not.toContain('Description:');
+  });
+
+  it('should redact URL credentials in install source output', () => {
+    const extension = createMockExtension({
+      installMetadata: {
+        type: 'git',
+        source: 'https://user:token@example.com/owner/repo.git',
+      },
+    });
+
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+      true,
+    );
+
+    expect(result).toContain(
+      'https://***REDACTED***@example.com/owner/repo.git',
+    );
+    expect(result).not.toContain('user');
+    expect(result).not.toContain('token');
   });
 });

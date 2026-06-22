@@ -93,9 +93,22 @@
   --app-list-border-radius: 4px;
   --app-list-gap: 2px;
 
+  /* Scrollbars - VSCode tokens */
+  --app-scrollbar-thumb: var(
+    --vscode-scrollbarSlider-background,
+    rgba(128, 128, 128, 0.35)
+  );
+  --app-scrollbar-thumb-hover: var(
+    --vscode-scrollbarSlider-hoverBackground,
+    rgba(128, 128, 128, 0.5)
+  );
+
   /* Buttons - VSCode tokens */
   --app-ghost-button-hover-background: var(--vscode-toolbar-hoverBackground);
-  --app-button-foreground: var(--vscode-button-foreground, var(--app-qwen-ivory));
+  --app-button-foreground: var(
+    --vscode-button-foreground,
+    var(--app-qwen-ivory)
+  );
   --app-button-background: var(
     --vscode-button-background,
     var(--app-qwen-clay-button-orange)
@@ -169,4 +182,16 @@ button {
 /* VSCode panel uses 100vh instead of 100% */
 .chat-container {
   height: 100vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.messages-container::-webkit-scrollbar-thumb {
+  background: var(--app-scrollbar-thumb);
+  border-radius: var(--corner-radius-small);
+}
+
+.messages-container::-webkit-scrollbar-thumb:hover {
+  background: var(--app-scrollbar-thumb-hover);
 }

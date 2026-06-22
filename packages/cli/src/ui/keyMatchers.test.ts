@@ -11,6 +11,7 @@ import { defaultKeyBindings } from '../config/keyBindings.js';
 import type { Key } from './hooks/useKeypress.js';
 
 describe('keyMatchers', () => {
+  const isWindows = process.platform === 'win32';
   const createKey = (name: string, mods: Partial<Key> = {}): Key => ({
     name,
     ctrl: false,
@@ -30,26 +31,31 @@ describe('keyMatchers', () => {
     [Command.KILL_LINE_LEFT]: (key: Key) => key.ctrl && key.name === 'u',
     [Command.CLEAR_INPUT]: (key: Key) => key.ctrl && key.name === 'c',
     [Command.DELETE_WORD_BACKWARD]: (key: Key) =>
-      (key.ctrl || key.meta) && key.name === 'backspace',
+      ((key.ctrl || key.meta) && key.name === 'backspace') ||
+      key.sequence === '\x1f',
     [Command.CLEAR_SCREEN]: (key: Key) => key.ctrl && key.name === 'l',
     [Command.HISTORY_UP]: (key: Key) => key.ctrl && key.name === 'p',
     [Command.HISTORY_DOWN]: (key: Key) => key.ctrl && key.name === 'n',
-    [Command.NAVIGATION_UP]: (key: Key) => key.name === 'up',
-    [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down',
+    [Command.NAVIGATION_UP]: (key: Key) => key.name === 'up' && !key.shift,
+    [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
       key.name === 'tab' || (key.name === 'return' && !key.ctrl),
-    // Completion navigation only uses arrow keys (not Ctrl+P/N)
-    // to allow Ctrl+P/N to always navigate history
-    [Command.COMPLETION_UP]: (key: Key) => key.name === 'up',
-    [Command.COMPLETION_DOWN]: (key: Key) => key.name === 'down',
+    // Completion navigation uses arrows plus readline/Vim-style Ctrl+P/N.
+    [Command.COMPLETION_UP]: (key: Key) =>
+      (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
+    [Command.COMPLETION_DOWN]: (key: Key) =>
+      (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
+    [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
+      key.name === 'space' && !key.ctrl && !key.meta,
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
-    [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) => key.ctrl && key.name === 'v',
+    [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>
+      (isWindows ? key.meta : key.ctrl || key.meta) && key.name === 'v',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
@@ -57,6 +63,11 @@ describe('keyMatchers', () => {
     [Command.QUIT]: (key: Key) => key.ctrl && key.name === 'c',
     [Command.EXIT]: (key: Key) => key.ctrl && key.name === 'd',
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
+    [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
+    [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
+    [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
+    [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
+      key.ctrl && key.name === 'b',
     [Command.REVERSE_SEARCH]: (key: Key) => key.ctrl && key.name === 'r',
     [Command.SUBMIT_REVERSE_SEARCH]: (key: Key) =>
       key.name === 'return' && !key.ctrl,
@@ -66,6 +77,21 @@ describe('keyMatchers', () => {
       key.ctrl && key.name === 'f',
     [Command.EXPAND_SUGGESTION]: (key: Key) => key.name === 'right',
     [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
+    // Selection list navigation: up/k (ctrl=false)/Ctrl+P move up; down/j (ctrl=false)/Ctrl+N move down
+    [Command.SELECTION_UP]: (key: Key) =>
+      (key.name === 'up' && !key.shift) ||
+      (key.name === 'k' && !key.ctrl) ||
+      (key.ctrl && key.name === 'p'),
+    [Command.SELECTION_DOWN]: (key: Key) =>
+      (key.name === 'down' && !key.shift) ||
+      (key.name === 'j' && !key.ctrl) ||
+      (key.ctrl && key.name === 'n'),
+    [Command.SCROLL_UP]: (key: Key) => key.shift && key.name === 'up',
+    [Command.SCROLL_DOWN]: (key: Key) => key.shift && key.name === 'down',
+    [Command.PAGE_UP]: (key: Key) => key.name === 'pageup',
+    [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
+    [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
+    [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
   };
 
   // Test data for each command with positive and negative test cases
@@ -123,6 +149,10 @@ describe('keyMatchers', () => {
       positive: [
         createKey('backspace', { ctrl: true }),
         createKey('backspace', { meta: true }),
+        // MinTTY (Git Bash on Windows) emits a bare \x1f byte for
+        // Ctrl+Backspace — see the matching comment in keyBindings.ts
+        // on the DELETE_WORD_BACKWARD default-binding array.
+        createKey('', { sequence: '\x1f' }),
       ],
       negative: [createKey('backspace'), createKey('delete', { ctrl: true })],
     },
@@ -148,12 +178,22 @@ describe('keyMatchers', () => {
     {
       command: Command.NAVIGATION_UP,
       positive: [createKey('up'), createKey('up', { ctrl: true })],
-      negative: [createKey('p'), createKey('u')],
+      negative: [
+        createKey('p'),
+        createKey('u'),
+        // shift: false — Shift+Up must NOT match (reserved for SCROLL_UP)
+        createKey('up', { shift: true }),
+      ],
     },
     {
       command: Command.NAVIGATION_DOWN,
       positive: [createKey('down'), createKey('down', { ctrl: true })],
-      negative: [createKey('n'), createKey('d')],
+      negative: [
+        createKey('n'),
+        createKey('d'),
+        // shift: false — Shift+Down must NOT match (reserved for SCROLL_DOWN)
+        createKey('down', { shift: true }),
+      ],
     },
 
     // Auto-completion
@@ -163,25 +203,25 @@ describe('keyMatchers', () => {
       negative: [createKey('return', { ctrl: true }), createKey('space')],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+P.
       command: Command.COMPLETION_UP,
-      positive: [createKey('up')],
+      positive: [createKey('up'), createKey('p', { ctrl: true })],
       negative: [
         createKey('p'),
         createKey('down'),
-        createKey('p', { ctrl: true }),
+        createKey('n', { ctrl: true }),
+        createKey('up', { shift: true }),
       ],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+N.
       command: Command.COMPLETION_DOWN,
-      positive: [createKey('down')],
+      positive: [createKey('down'), createKey('n', { ctrl: true })],
       negative: [
         createKey('n'),
         createKey('up'),
-        createKey('n', { ctrl: true }),
+        createKey('p', { ctrl: true }),
+        createKey('down', { shift: true }),
       ],
     },
 
@@ -216,8 +256,12 @@ describe('keyMatchers', () => {
     },
     {
       command: Command.PASTE_CLIPBOARD_IMAGE,
-      positive: [createKey('v', { ctrl: true })],
-      negative: [createKey('v'), createKey('c', { ctrl: true })],
+      positive: isWindows
+        ? [createKey('v', { meta: true })]
+        : [createKey('v', { ctrl: true }), createKey('v', { meta: true })],
+      negative: isWindows
+        ? [createKey('v', { ctrl: true }), createKey('v')]
+        : [createKey('v'), createKey('c', { ctrl: true })],
     },
 
     // App level bindings
@@ -246,6 +290,52 @@ describe('keyMatchers', () => {
       positive: [createKey('s', { ctrl: true })],
       negative: [createKey('s'), createKey('l', { ctrl: true })],
     },
+    {
+      command: Command.RETRY_LAST,
+      positive: [createKey('y', { ctrl: true })],
+      negative: [createKey('y'), createKey('r', { ctrl: true })],
+    },
+    {
+      command: Command.TOGGLE_COMPACT_MODE,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('p', { ctrl: true })],
+    },
+
+    // Selection list navigation
+    {
+      command: Command.SELECTION_UP,
+      positive: [
+        createKey('up'),
+        createKey('k'),
+        createKey('p', { ctrl: true }),
+      ],
+      negative: [
+        createKey('p'),
+        createKey('n', { ctrl: true }),
+        createKey('u'),
+        // ctrl: false on k — Ctrl+K must NOT match (would conflict with KILL_LINE_RIGHT)
+        createKey('k', { ctrl: true }),
+        // shift: false on up — Shift+Up must NOT match (reserved for SCROLL_UP)
+        createKey('up', { shift: true }),
+      ],
+    },
+    {
+      command: Command.SELECTION_DOWN,
+      positive: [
+        createKey('down'),
+        createKey('j'),
+        createKey('n', { ctrl: true }),
+      ],
+      negative: [
+        createKey('n'),
+        createKey('p', { ctrl: true }),
+        createKey('d'),
+        // ctrl: false on j — Ctrl+J must NOT match (preserves Ctrl+J = newline in some terminals)
+        createKey('j', { ctrl: true }),
+        // shift: false on down — Shift+Down must NOT match (reserved for SCROLL_DOWN)
+        createKey('down', { shift: true }),
+      ],
+    },
 
     // Shell commands
     {
@@ -267,6 +357,59 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_SHELL_INPUT_FOCUS,
       positive: [createKey('f', { ctrl: true })],
       negative: [createKey('f')],
+    },
+    {
+      command: Command.TOGGLE_RENDER_MODE,
+      positive: [createKey('m', { meta: true })],
+      negative: [
+        createKey('m'),
+        createKey('m', { ctrl: true }),
+        createKey('', { sequence: 'µ' }),
+        createKey('', { sequence: 'µ', paste: true }),
+      ],
+    },
+    {
+      command: Command.PROMOTE_SHELL_TO_BACKGROUND,
+      positive: [createKey('b', { ctrl: true })],
+      // No bare `b`, no Ctrl+other, no meta+b — Ctrl is required so
+      // typing `b` mid-prompt isn't accidentally swallowed.
+      negative: [
+        createKey('b'),
+        createKey('b', { meta: true }),
+        createKey('a', { ctrl: true }),
+      ],
+    },
+
+    // Viewport scroll commands
+    {
+      command: Command.SCROLL_UP,
+      positive: [createKey('up', { shift: true })],
+      negative: [createKey('up'), createKey('up', { ctrl: true })],
+    },
+    {
+      command: Command.SCROLL_DOWN,
+      positive: [createKey('down', { shift: true })],
+      negative: [createKey('down'), createKey('down', { ctrl: true })],
+    },
+    {
+      command: Command.PAGE_UP,
+      positive: [createKey('pageup'), createKey('pageup', { ctrl: true })],
+      negative: [createKey('pagedown'), createKey('up')],
+    },
+    {
+      command: Command.PAGE_DOWN,
+      positive: [createKey('pagedown'), createKey('pagedown', { ctrl: true })],
+      negative: [createKey('pageup'), createKey('down')],
+    },
+    {
+      command: Command.SCROLL_HOME,
+      positive: [createKey('home', { ctrl: true })],
+      negative: [createKey('home'), createKey('home', { shift: true })],
+    },
+    {
+      command: Command.SCROLL_END,
+      positive: [createKey('end', { ctrl: true })],
+      negative: [createKey('end'), createKey('end', { shift: true })],
     },
   ];
 

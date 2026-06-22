@@ -19,8 +19,24 @@ export const DEFAULT_LSP_REQUEST_TIMEOUT_MS = 15000;
 /** Default delay for TypeScript server warm-up in milliseconds */
 export const DEFAULT_LSP_WARMUP_DELAY_MS = 150;
 
+/** Default delay after opening a document to allow the LSP server to process it */
+export const DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS = 200;
+
 /** Default timeout for command existence check in milliseconds */
 export const DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS = 2000;
+
+/** Default delay for workspace symbol warmup after opening a file, in milliseconds */
+export const DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS = 1500;
+
+/**
+ * Default delay before retrying a document-level operation (definitions,
+ * references, hover, documentSymbols, etc.) when the first attempt returns
+ * empty results right after we sent textDocument/didOpen.
+ *
+ * Slow servers like jdtls (Java) and clangd (C++) need significantly more
+ * time than the initial 200ms didOpen delay to build their AST / index.
+ */
+export const DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS = 2000;
 
 // ============================================================================
 // Retry Constants

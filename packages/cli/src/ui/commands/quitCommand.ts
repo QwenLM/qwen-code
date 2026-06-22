@@ -15,6 +15,7 @@ export const quitCommand: SlashCommand = {
     return t('exit the cli');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
   action: (context) => {
     const now = Date.now();
     const { sessionStartTime } = context.session.stats;

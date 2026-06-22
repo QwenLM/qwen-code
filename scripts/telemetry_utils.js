@@ -13,28 +13,59 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { bootstrapHomeEnv, resolvePath } from './lib/qwen-home-bootstrap.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const projectRoot = path.resolve(__dirname, '..');
-const projectHash = crypto
-  .createHash('sha256')
-  .update(projectRoot)
-  .digest('hex');
 
-// User-level .gemini directory in home
-const USER_GEMINI_DIR = path.join(os.homedir(), '.qwen');
-// Project-level .gemini directory in the workspace
-const WORKSPACE_GEMINI_DIR = path.join(projectRoot, '.qwen');
+bootstrapHomeEnv();
 
-// Telemetry artifacts are stored in a hashed directory under the user's ~/.qwen/tmp
-export const OTEL_DIR = path.join(USER_GEMINI_DIR, 'tmp', projectHash, 'otel');
+/**
+ * Generates a unique hash for a project based on its root path.
+ * On Windows, paths are case-insensitive, so we normalize to lowercase
+ * to ensure the same physical path always produces the same hash.
+ * This logic must match getProjectHash() in packages/core/src/utils/paths.ts
+ */
+function getProjectHash(projectRoot) {
+  // On Windows, normalize path to lowercase for case-insensitive matching
+  const normalizedPath =
+    os.platform() === 'win32' ? projectRoot.toLowerCase() : projectRoot;
+  return crypto.createHash('sha256').update(normalizedPath).digest('hex');
+}
+
+const projectHash = getProjectHash(projectRoot);
+
+// Runtime base directory for ephemeral data (tmp, otel, etc.)
+// Priority: QWEN_RUNTIME_DIR > QWEN_HOME > ~/.qwen
+function getRuntimeBaseDir() {
+  const runtimeDir = process.env.QWEN_RUNTIME_DIR;
+  if (runtimeDir) {
+    return resolvePath(runtimeDir);
+  }
+  const homeEnv = process.env.QWEN_HOME;
+  if (homeEnv) {
+    return resolvePath(homeEnv);
+  }
+  return path.join(os.homedir(), '.qwen');
+}
+
+// Project-level .qwen directory in the workspace
+const WORKSPACE_QWEN_DIR = path.join(projectRoot, '.qwen');
+
+// Telemetry artifacts are stored in a hashed directory under the runtime dir
+export const OTEL_DIR = path.join(
+  getRuntimeBaseDir(),
+  'tmp',
+  projectHash,
+  'otel',
+);
 export const BIN_DIR = path.join(OTEL_DIR, 'bin');
 
 // Workspace settings remain in the project's .gemini directory
 export const WORKSPACE_SETTINGS_FILE = path.join(
-  WORKSPACE_GEMINI_DIR,
+  WORKSPACE_QWEN_DIR,
   'settings.json',
 );
 

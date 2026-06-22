@@ -1,0 +1,274 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Code
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import path from 'path';
+import { pathToFileURL } from 'node:url';
+import { parseInsightMessage, Storage } from '@qwen-code/qwen-code-core';
+import { insightCommand } from './insightCommand.js';
+import type { CommandContext } from './types.js';
+import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+
+const mockGenerateStaticInsight = vi.fn();
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    openBrowserSecurely: mockOpenBrowserSecurely,
+  };
+});
+
+vi.mock('../../services/insight/generators/StaticInsightGenerator.js', () => ({
+  StaticInsightGenerator: vi.fn(() => ({
+    generateStaticInsight: mockGenerateStaticInsight,
+  })),
+}));
+
+describe('insightCommand', () => {
+  let mockContext: CommandContext;
+
+  beforeEach(() => {
+    Storage.setRuntimeBaseDir(path.resolve('runtime-output'));
+    mockGenerateStaticInsight.mockResolvedValue(
+      path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+    );
+    mockOpenBrowserSecurely.mockClear();
+    mockOpenBrowserSecurely.mockResolvedValue(undefined);
+
+    mockContext = createMockCommandContext({
+      services: {
+        config: {} as CommandContext['services']['config'],
+      },
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+        setDebugMessage: vi.fn(),
+      },
+    } as unknown as CommandContext);
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    vi.restoreAllMocks();
+  });
+
+  it('uses runtime base dir to locate projects directory', async () => {
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    await insightCommand.action(mockContext, '');
+
+    expect(mockGenerateStaticInsight).toHaveBeenCalledWith(
+      path.join(Storage.getRuntimeBaseDir(), 'projects'),
+      expect.any(Function),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      pathToFileURL(
+        path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+      ).href,
+      {
+        allowFile: true,
+        allowedFilePaths: [
+          path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+        ],
+      },
+    );
+  });
+
+  it('shows the generated file path before attempting to open the browser', async () => {
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    await insightCommand.action(mockContext, '');
+
+    const messages = vi
+      .mocked(mockContext.ui.addItem)
+      .mock.calls.map(([item]) =>
+        'text' in item && typeof item.text === 'string' ? item.text : '',
+      );
+    expect(messages).toContain(
+      `Insights generated at: ${path.resolve(
+        'runtime-output',
+        'insights',
+        'insight-2026-03-05.html',
+      )}. If the browser does not open automatically, open this file manually.`,
+    );
+    expect(
+      messages.some((message) => message.includes('Opening insights')),
+    ).toBe(false);
+  });
+
+  it('streams ACP progress messages without waiting for generation to finish', async () => {
+    let resolveInsight: ((outputPath: string) => void) | null = null;
+    let progressCallback:
+      | ((stage: string, progress: number, detail?: string) => void)
+      | null = null;
+
+    mockGenerateStaticInsight.mockImplementation(
+      async (
+        _projectsDir: string,
+        onProgress: (stage: string, progress: number, detail?: string) => void,
+      ) => {
+        progressCallback = onProgress;
+        return await new Promise<string>((resolve) => {
+          resolveInsight = resolve;
+        });
+      },
+    );
+
+    const acpContext = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {} as CommandContext['services']['config'],
+      },
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+        setDebugMessage: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    const actionPromise = insightCommand.action(acpContext, '');
+    const initialResult = await Promise.race([
+      actionPromise,
+      new Promise<'pending'>((resolve) => {
+        setTimeout(() => resolve('pending'), 0);
+      }),
+    ]);
+
+    expect(initialResult).not.toBe('pending');
+    expect(initialResult).toMatchObject({ type: 'stream_messages' });
+
+    if (!initialResult || initialResult === 'pending') {
+      throw new Error('ACP insight result did not resolve immediately');
+    }
+
+    const result = initialResult;
+    if (result.type !== 'stream_messages') {
+      throw new Error('ACP insight result must be stream_messages');
+    }
+
+    const messagesPromise = (async () => {
+      const messages: Array<{
+        messageType: 'info' | 'warning' | 'error';
+        content: string;
+      }> = [];
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+      return messages;
+    })();
+
+    const emitProgress = progressCallback as
+      | ((stage: string, progress: number, detail?: string) => void)
+      | null;
+    if (emitProgress) {
+      emitProgress('Analyzing sessions', 42, '21/50');
+    }
+    const finishInsight = resolveInsight as
+      | ((outputPath: string) => void)
+      | null;
+    if (finishInsight) {
+      finishInsight(
+        path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+      );
+    }
+
+    const messages = await messagesPromise;
+
+    expect(messages[0]).toEqual({
+      messageType: 'info',
+      content: 'This may take a couple minutes. Sit tight!',
+    });
+    expect(parseInsightMessage(messages[1].content)).toEqual({
+      type: 'insight_progress',
+      stage: 'Starting insight generation...',
+      progress: 0,
+      detail: undefined,
+    });
+    expect(parseInsightMessage(messages[2].content)).toEqual({
+      type: 'insight_progress',
+      stage: 'Analyzing sessions',
+      progress: 42,
+      detail: '21/50',
+    });
+    expect(parseInsightMessage(messages[3].content)).toEqual({
+      type: 'insight_ready',
+      path: path.resolve(
+        'runtime-output',
+        'insights',
+        'insight-2026-03-05.html',
+      ),
+    });
+  });
+
+  it('non_interactive: returns message with output path and does not open browser', async () => {
+    const nonInteractiveContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {} as CommandContext['services']['config'],
+      },
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+        setDebugMessage: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    const result = await insightCommand.action(nonInteractiveContext, '');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+    });
+    expect((result as { content: string }).content).toContain(
+      path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+    );
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+  });
+
+  it('non_interactive: returns error message when generation fails', async () => {
+    mockGenerateStaticInsight.mockRejectedValue(new Error('disk full'));
+
+    const nonInteractiveContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {} as CommandContext['services']['config'],
+      },
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+        setDebugMessage: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    const result = await insightCommand.action(nonInteractiveContext, '');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect((result as { content: string }).content).toContain('disk full');
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+  });
+});

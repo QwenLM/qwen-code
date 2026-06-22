@@ -10,7 +10,7 @@ import {
   validateModelConfig,
 } from './modelConfigResolver.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
 
 describe('modelConfigResolver', () => {
   describe('resolveModelConfig', () => {
@@ -95,7 +95,7 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.model).toBe('qwen3-coder-plus');
+        expect(result.config.model).toBe(MAINLINE_CODER_MODEL);
         expect(result.sources['model'].kind).toBe('default');
       });
 
@@ -157,17 +157,17 @@ describe('modelConfigResolver', () => {
         expect(result.sources['apiKey'].kind).toBe('computed');
       });
 
-      it('allows vision-model for Qwen OAuth', () => {
+      it('allows coder-model for Qwen OAuth', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {
-            model: 'vision-model',
+            model: 'coder-model',
           },
           settings: {},
           env: {},
         });
 
-        expect(result.config.model).toBe('vision-model');
+        expect(result.config.model).toBe('coder-model');
         expect(result.sources['model'].kind).toBe('cli');
       });
 
@@ -184,6 +184,114 @@ describe('modelConfigResolver', () => {
         expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
         expect(result.warnings).toHaveLength(1);
         expect(result.warnings[0]).toContain('unsupported-model');
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS applies in Qwen OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '45000',
+          },
+        });
+
+        expect(result.config.timeout).toBe(45000);
+        expect(result.sources['timeout']).toBeDefined();
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+        expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+      });
+
+      it('modelProvider timeout takes precedence over QWEN_CODE_API_TIMEOUT_MS in OAuth', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '45000',
+          },
+          modelProvider: {
+            id: 'qwen-oauth',
+            name: 'Qwen OAuth',
+            generationConfig: {
+              timeout: 120000,
+            },
+          },
+        });
+
+        expect(result.config.timeout).toBe(120000);
+        expect(result.sources['timeout'].kind).toBe('modelProviders');
+      });
+
+      it('invalid QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: 'not-a-number',
+          },
+        });
+
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('negative QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '-100',
+          },
+        });
+
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('zero QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '0',
+          },
+        });
+
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS works with float value in OAuth', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '12345.67',
+          },
+        });
+
+        expect(result.config.timeout).toBe(12345);
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS works with proxy in OAuth path', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.QWEN_OAUTH,
+          cli: {},
+          settings: {},
+          env: {
+            QWEN_CODE_API_TIMEOUT_MS: '60000',
+          },
+          proxy: 'http://proxy.example.com:8080',
+        });
+
+        expect(result.config.timeout).toBe(60000);
+        expect(result.config.proxy).toBe('http://proxy.example.com:8080');
+        expect(result.sources['timeout'].kind).toBe('env');
       });
     });
 
@@ -257,6 +365,235 @@ describe('modelConfigResolver', () => {
 
         expect(result.config.timeout).toBe(60000);
         expect(result.sources['timeout'].kind).toBe('modelProviders');
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS env var overrides settings timeout', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+        });
+
+        expect(result.config.timeout).toBe(900000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+      });
+
+      it('modelProvider timeout wins over QWEN_CODE_API_TIMEOUT_MS', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {},
+          env: {
+            MY_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+          modelProvider: {
+            id: 'model',
+            name: 'Model',
+            envKey: 'MY_KEY',
+            baseUrl: 'https://api.example.com',
+            generationConfig: {
+              timeout: 60000,
+            },
+          },
+        });
+
+        // modelProvider > env: modelProvider timeout should win
+        expect(result.config.timeout).toBe(60000);
+        expect(result.sources['timeout'].kind).toBe('modelProviders');
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS applies when modelProvider has no timeout', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {},
+          env: {
+            MY_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+          modelProvider: {
+            id: 'model',
+            name: 'Model',
+            envKey: 'MY_KEY',
+            baseUrl: 'https://api.example.com',
+            generationConfig: {},
+          },
+        });
+
+        expect(result.config.timeout).toBe(900000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+      });
+
+      it('ignores invalid QWEN_CODE_API_TIMEOUT_MS values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: 'invalid',
+          },
+        });
+
+        // Should fall back to settings value
+        expect(result.config.timeout).toBe(30000);
+        expect(result.sources['timeout'].kind).toBe('settings');
+      });
+
+      it('ignores negative or zero QWEN_CODE_API_TIMEOUT_MS values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '0',
+          },
+        });
+
+        // Should fall back to settings value
+        expect(result.config.timeout).toBe(30000);
+        expect(result.sources['timeout'].kind).toBe('settings');
+      });
+
+      it('timeout is undefined when not configured, default applied in buildClient', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+          },
+        });
+
+        // timeout is undefined here; DEFAULT_TIMEOUT (120000) is applied in
+        // the provider's buildClient() when timeout is not set.
+        expect(result.config.timeout).toBeUndefined();
+      });
+
+      it('QWEN_CODE_API_TIMEOUT_MS works for Anthropic auth type', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_ANTHROPIC,
+          cli: {},
+          settings: {},
+          env: {
+            ANTHROPIC_API_KEY: 'key',
+            ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+            QWEN_CODE_API_TIMEOUT_MS: '600000',
+          },
+        });
+
+        expect(result.config.timeout).toBe(600000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+      });
+
+      it('env var actually changes resolved timeout value', () => {
+        // Integration-style test: proves the env var flows through to the resolved config
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              timeout: 30000,
+            },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '900000',
+          },
+        });
+
+        // Timeout should be the env var value, not the settings value
+        expect(result.config.timeout).toBe(900000);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
+
+        // Prove it would be used by the client (default.ts:48 reads config.timeout)
+        const clientTimeout = result.config.timeout;
+        expect(clientTimeout).toBe(900000);
+      });
+
+      it('handles extremely large timeout values safely', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: { apiKey: 'key' },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '999999999',
+          },
+        });
+
+        expect(result.config.timeout).toBe(999999999);
+        expect(result.sources['timeout'].kind).toBe('env');
+      });
+
+      it('handles whitespace-padded env values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: { apiKey: 'key' },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: ' 300000 ',
+          },
+        });
+
+        // Number() implicitly trims whitespace, so this should parse correctly
+        expect(result.config.timeout).toBe(300000);
+        expect(result.sources['timeout'].kind).toBe('env');
+      });
+
+      it('ignores negative QWEN_CODE_API_TIMEOUT_MS values', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: { timeout: 30000 },
+          },
+          env: {
+            OPENAI_API_KEY: 'key',
+            QWEN_CODE_API_TIMEOUT_MS: '-100',
+          },
+        });
+
+        expect(result.config.timeout).toBe(30000);
+        expect(result.sources['timeout'].kind).toBe('settings');
       });
     });
 
@@ -346,6 +683,283 @@ describe('modelConfigResolver', () => {
       expect(result.valid).toBe(false);
       expect(result.errors[0].message).toContain('modelProviders');
       expect(result.errors[0].message).toContain('envKey');
+    });
+  });
+
+  describe('[Regression] timeout env override refactor', () => {
+    it('[Regression] OAuth path must apply QWEN_CODE_API_TIMEOUT_MS (was broken before fix #3629)', () => {
+      // Guards against the original bug where resolveQwenOAuthConfig()
+      // returned before applying the env override.
+      const result = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {},
+        env: {
+          QWEN_CODE_API_TIMEOUT_MS: '45000',
+        },
+      });
+
+      expect(result.config.timeout).toBe(45000);
+      expect(result.sources['timeout']).toBeDefined();
+      expect(result.sources['timeout'].kind).toBe('env');
+      expect(result.sources['timeout'].envKey).toBe('QWEN_CODE_API_TIMEOUT_MS');
+      expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+    });
+
+    it('[Regression] non-OAuth path must apply QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key' },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '900000',
+        },
+      });
+
+      expect(result.config.timeout).toBe(900000);
+      expect(result.sources['timeout'].kind).toBe('env');
+      expect(result.sources['timeout'].envKey).toBe('QWEN_CODE_API_TIMEOUT_MS');
+    });
+
+    it('[Regression] modelProvider timeout must win over env in both paths', () => {
+      // Non-OAuth
+      const nonOAuth = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          MY_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '900000',
+        },
+        modelProvider: {
+          id: 'model',
+          name: 'Model',
+          envKey: 'MY_KEY',
+          baseUrl: 'https://api.example.com',
+          generationConfig: { timeout: 60000 },
+        },
+      });
+      expect(nonOAuth.config.timeout).toBe(60000);
+      expect(nonOAuth.sources['timeout'].kind).toBe('modelProviders');
+
+      // OAuth
+      const oauth = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {},
+        env: {
+          QWEN_CODE_API_TIMEOUT_MS: '45000',
+        },
+        modelProvider: {
+          id: 'qwen-oauth',
+          name: 'Qwen OAuth',
+          generationConfig: { timeout: 120000 },
+        },
+      });
+      expect(oauth.config.timeout).toBe(120000);
+      expect(oauth.sources['timeout'].kind).toBe('modelProviders');
+    });
+
+    it('[Regression] refactor must not alter precedence: env > settings', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { timeout: 30000 },
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '900000',
+        },
+      });
+
+      // env must override settings
+      expect(result.config.timeout).toBe(900000);
+      expect(result.sources['timeout'].kind).toBe('env');
+    });
+  });
+
+  describe('[Additional] timeout env override edge cases', () => {
+    it('handles scientific notation in QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key' },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '1.5e5',
+        },
+      });
+
+      expect(result.config.timeout).toBe(150000);
+      expect(result.sources['timeout'].kind).toBe('env');
+    });
+
+    it('handles hex values in QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '0x2BF20', // 180000 in hex
+        },
+      });
+
+      expect(result.config.timeout).toBe(180000);
+      expect(result.sources['timeout'].kind).toBe('env');
+    });
+
+    it('ignores empty string QWEN_CODE_API_TIMEOUT_MS', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
+        env: {
+          OPENAI_API_KEY: 'key',
+          QWEN_CODE_API_TIMEOUT_MS: '',
+        },
+      });
+
+      expect(result.config.timeout).toBe(30000);
+      expect(result.sources['timeout'].kind).toBe('settings');
+    });
+
+    it('applies env override for every supported auth type', () => {
+      const authTypes = [
+        { type: AuthType.USE_OPENAI, env: { OPENAI_API_KEY: 'key' } },
+        {
+          type: AuthType.USE_ANTHROPIC,
+          env: {
+            ANTHROPIC_API_KEY: 'key',
+            ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+          },
+        },
+      ];
+
+      for (const { type, env } of authTypes) {
+        const result = resolveModelConfig({
+          authType: type,
+          cli: {},
+          settings: {
+            ...(type === AuthType.USE_OPENAI ? { apiKey: 'key' } : {}),
+          },
+          env: { ...env, QWEN_CODE_API_TIMEOUT_MS: '99999' },
+        });
+
+        expect(result.config.timeout).toBe(99999);
+        expect(result.sources['timeout'].kind).toBe('env');
+      }
+    });
+  });
+
+  describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
+    it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
+      // REPRODUCES issue-4219:
+      // When the model is supplied only via OPENAI_MODEL (no modelProviders entry),
+      // resolveGenerationConfig() iterates MODEL_GENERATION_CONFIG_FIELDS but never
+      // calls defaultModalities(). This leaves config.modalities undefined, causing
+      // image attachments to be silently dropped with an "Unsupported <modality>"
+      // message even though the model supports images.
+      //
+      // The modelRegistry path (resolveModelConfig -> resolveModelConfig in modelRegistry.ts)
+      // and the modelsConfig path (applyResolvedModelDefaults) both call defaultModalities()
+      // when generationConfig.modalities is undefined. The env-var-only path does not.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'qwen3.6-35b-a3b',
+        },
+        // No modelProvider — this is the env-var-only path
+      });
+
+      expect(result.config.model).toBe('qwen3.6-35b-a3b');
+
+      // The qwen3.6-35b pattern in modalityDefaults.ts maps to { image: true, video: true }.
+      // The env-var-only path must auto-detect this — just as the modelProviders path does
+      // in modelsConfig.ts applyResolvedModelDefaults() lines 791-797.
+      expect(result.config.modalities).toBeDefined();
+      expect(result.config.modalities?.image).toBe(true);
+      expect(result.config.modalities?.video).toBe(true);
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: modalities defaults to {} for unknown model (text-only)', () => {
+      // Locks the invariant: defaultModalities() returns {} (text-only) for
+      // unknown model patterns, never undefined. After this fix, env-var-only
+      // setups never re-expose `modalities === undefined` for downstream
+      // consumers to misinterpret as "unresolved" (issue #4219).
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'some-unknown-model-xyz',
+        },
+      });
+
+      expect(result.config.modalities).toEqual({});
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('Qwen OAuth path: modalities auto-detected for default coder-model', () => {
+      // resolveGenerationConfig is shared by both the OpenAI and Qwen OAuth
+      // paths; the latter (resolveQwenOAuthConfig) passes the resolved Qwen
+      // OAuth model name (defaults to DEFAULT_QWEN_MODEL = 'coder-model') as
+      // modelId, so the new modalities fallback also fires here.
+      //
+      // modalityDefaults.ts maps /^coder-model$/ to { image: true, video: true }
+      // because the Qwen OAuth coder-model now supports vision (see warning
+      // text at modelConfigResolver.ts ~L330). This test pins that down so a
+      // future edit to MODALITY_PATTERNS doesn't silently regress OAuth.
+      const result = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {},
+        env: {},
+      });
+
+      expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+      expect(result.config.modalities).toEqual({ image: true, video: true });
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: explicit settings.generationConfig.modalities is not overridden by fallback', () => {
+      // Locks the `=== undefined` guard: when user explicitly configures
+      // modalities in settings, the fallback must not clobber them with
+      // defaultModalities() — even for a model whose name would otherwise
+      // auto-resolve to multimodal.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          generationConfig: {
+            modalities: {
+              image: false,
+              pdf: false,
+              video: false,
+              audio: false,
+            },
+          },
+        },
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'qwen3.6-35b-a3b', // defaultModalities → { image: true, video: true }
+        },
+      });
+
+      expect(result.config.modalities?.image).toBe(false);
+      expect(result.config.modalities?.video).toBe(false);
+      expect(result.sources['modalities'].kind).toBe('settings');
     });
   });
 });
