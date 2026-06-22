@@ -42,8 +42,8 @@ qwen mcp
 
 Most users only need these two scopes:
 
-- **Project scope (default)**: `.qwen/settings.json` in your project root
-- **User scope**: `~/.qwen/settings.json` across all projects on your machine
+- **User scope (default)**: `~/.qwen/settings.json` across all projects on your machine
+- **Project scope**: `.qwen/settings.json` in your project root
 
 Write to user scope:
 
@@ -94,7 +94,7 @@ JSON (`.qwen/settings.json`):
 }
 ```
 
-CLI (writes to project scope by default):
+CLI (writes to user scope by default):
 
 ```bash
 qwen mcp add pythonTools -e DATABASE_URL=$DB_CONNECTION_STRING -e API_KEY=$EXTERNAL_API_KEY \
@@ -450,7 +450,7 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 | `<name>`                    | A unique name for the server.                                       | —                                      | `example-server`                                                   |
 | `<commandOrUrl>`            | The command to execute (for `stdio`) or the URL (for `http`/`sse`). | —                                      | `/usr/bin/python` or `http://localhost:8`                          |
 | `[args...]`                 | Optional arguments for a `stdio` command.                           | —                                      | `--port 5000`                                                      |
-| `-s`, `--scope`             | Configuration scope (user or project).                              | `project`                              | `-s user`                                                          |
+| `-s`, `--scope`             | Configuration scope (user or project).                              | `user`                                 | `-s user`                                                          |
 | `-t`, `--transport`         | Transport type (`stdio`, `sse`, `http`).                            | `stdio`                                | `-t sse`                                                           |
 | `-e`, `--env`               | Set environment variables.                                          | —                                      | `-e KEY=value`                                                     |
 | `-H`, `--header`            | Set HTTP headers for SSE and HTTP transports.                       | —                                      | `-H "X-Api-Key: abc123"`                                           |
