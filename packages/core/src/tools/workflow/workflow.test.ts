@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { WorkflowTool } from './workflow.js';
 import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
@@ -48,6 +51,48 @@ describe('WorkflowTool', () => {
   it('rejects build() when script is empty string', () => {
     const tool = new WorkflowTool(fakeConfig());
     expect(() => tool.build({ script: '' })).toThrow(/script/);
+  });
+
+  // ── P7b-A1: saved-workflow scriptPath path ──────────────────────────────
+
+  it('rejects build() when both script and scriptPath are given', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    expect(() =>
+      tool.build({ script: 'return 1', scriptPath: '/x/y.js' }),
+    ).toThrow(/exactly one/);
+  });
+
+  it('build() accepts a scriptPath without inline script', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const invocation = tool.build({
+      scriptPath: '/abs/deep-research.js',
+    });
+    expect(invocation.params.scriptPath).toBe('/abs/deep-research.js');
+    // Description reflects the saved-workflow filename, not a char count.
+    expect(invocation.getDescription()).toContain('deep-research.js');
+  });
+
+  it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-'));
+    const scriptPath = path.join(dir, 'greet.js');
+    await fs.writeFile(scriptPath, 'return await agent("hi");', 'utf8');
+    try {
+      const { config, registry } = configWithRegistry();
+      const tool = new WorkflowTool(config, {
+        dispatch: async (prompt) => `T:${prompt}`,
+      });
+      const invocation = tool.build({ scriptPath });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(JSON.stringify(result.llmContent)).toContain('T:hi');
+      // The registry entry carries the resolved absolute path (provenance for
+      // the snapshot writer + the save dialog's "already saved" branch).
+      const entries = registry.list();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].scriptPath).toBe(scriptPath);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('build() returns an invocation that exposes the script as description', () => {

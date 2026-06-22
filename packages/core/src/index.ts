@@ -229,6 +229,16 @@ export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-snapshot.js';
+export {
+  listSavedWorkflows,
+  resolveSavedWorkflowScript,
+  validateWorkflowName,
+  getSavedWorkflowDirs,
+  WORKFLOW_NAME_PATTERN,
+  type SavedWorkflowEntry,
+  type SavedWorkflowSource,
+  type ResolvedSavedWorkflow,
+} from './agents/runtime/workflow-saved.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';

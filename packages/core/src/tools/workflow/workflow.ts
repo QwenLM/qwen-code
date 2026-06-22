@@ -42,11 +42,23 @@ import type { JournalReplay } from '../../agents/runtime/workflow-journal.js';
 import { writeWorkflowSnapshot } from '../../agents/workflow-snapshot.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { randomBytes } from 'node:crypto';
+import * as path from 'node:path';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
 
 export interface WorkflowParams {
-  /** Inline JavaScript source for the workflow. Required in P1. */
-  script: string;
+  /**
+   * Inline JavaScript source for the workflow. Provide exactly one of
+   * `script` or `scriptPath`.
+   */
+  script?: string;
+  /**
+   * P7b: absolute path to a saved workflow `.js` file to load and run
+   * instead of inline `script`. Set by the `/<name>` saved-workflow slash
+   * command (`SavedWorkflowLoader`). Read at execution time so edits to the
+   * saved file take effect on the next run; the resolved path is recorded on
+   * the registry entry as run provenance.
+   */
+  scriptPath?: string;
   /** Optional structured value bound to the `args` global inside the script. */
   args?: unknown;
   /**
@@ -118,6 +130,15 @@ const WORKFLOW_PARAM_SCHEMA = {
         'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',
     },
+    scriptPath: {
+      type: 'string',
+      description:
+        'Optional. Absolute path to a saved workflow `.js` file to load and ' +
+        'run instead of inline `script`. Primarily set by the `/<name>` ' +
+        'saved-workflow slash command. Provide exactly ONE of `script` or ' +
+        '`scriptPath`. The file is read at execution time, so edits to a ' +
+        'saved workflow take effect on the next run.',
+    },
     args: {
       description:
         'Optional structured value bound to the `args` global. Pass actual JSON, not a stringified value.',
@@ -133,7 +154,10 @@ const WORKFLOW_PARAM_SCHEMA = {
         'and args as the original run for the cache to apply.',
     },
   },
-  required: ['script'],
+  // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
+  // expressed as a plain `required` list, so it's enforced in
+  // `validateToolParamValues`. Inline authoring (the LLM path) should always
+  // pass `script` — the `script` property description states this.
 } as const;
 
 class WorkflowToolInvocation extends BaseToolInvocation<
@@ -149,7 +173,10 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `Run a workflow script (${this.params.script.length} chars)`;
+    if (this.params.scriptPath && this.params.script === undefined) {
+      return `Run saved workflow (${path.basename(this.params.scriptPath)})`;
+    }
+    return `Run a workflow script (${this.params.script?.length ?? 0} chars)`;
   }
 
   override toolLocations(): ToolLocation[] {
@@ -186,6 +213,23 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       );
     const orchestrator = new WorkflowOrchestrator(dispatch);
 
+    // P7b: resolve the script source. A `/<name>` saved-workflow slash
+    // command dispatches `{scriptPath}` instead of inline `script`; read the
+    // file here (fresh, so edits to a saved workflow take effect on the next
+    // run). The resolved absolute path is recorded on the registry entry as
+    // run provenance — it is never re-read mid-run. `validateToolParamValues`
+    // has already guaranteed exactly one of `script` / `scriptPath` is set.
+    let resolvedScript = this.params.script ?? '';
+    let resolvedScriptPath = this.params.scriptPath;
+    if (this.params.scriptPath && this.params.script === undefined) {
+      const loaded = await resolveSavedWorkflowScript(
+        { scriptPath: this.params.scriptPath },
+        this.config,
+      );
+      resolvedScript = loaded.script;
+      resolvedScriptPath = loaded.scriptPath;
+    }
+
     // P4b: pre-generate the runId so the registry record exists before
     // the first sandbox event fires. Without this, `agentDispatched` /
     // `phaseStarted` callbacks would have no entry to update.
@@ -221,7 +265,10 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       tokenBudgetTotal: budget.total,
       // P7b: carry the script source so a completed run can be snapshotted
       // to disk and saved to `.qwen/workflows/<name>.js` from the dialog.
-      script: this.params.script,
+      // `scriptPath` is set when the run was launched from a saved file (the
+      // save dialog then offers "already saved" for it).
+      script: resolvedScript,
+      scriptPath: resolvedScriptPath,
     });
     // The emitter forwards sandbox + dispatch events into the registry
     // AND fires `updateOutput` so the tool's renderDisplay block (a
@@ -265,7 +312,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
 
     try {
       const outcome = await orchestrator.run({
-        script: this.params.script,
+        script: resolvedScript,
         args: this.params.args,
         abortOnTimeout: dispatchController,
         runId,
@@ -632,8 +679,17 @@ export class WorkflowTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: WorkflowParams,
   ): string | null {
-    if (typeof params.script !== 'string' || params.script.length === 0) {
-      return 'WorkflowTool: `script` parameter is required and must be a non-empty string.';
+    const hasScript =
+      typeof params.script === 'string' && params.script.length > 0;
+    const hasPath =
+      typeof params.scriptPath === 'string' && params.scriptPath.length > 0;
+    // XOR: inline `script` (LLM authoring) or `scriptPath` (a saved-workflow
+    // slash command), never both, never neither.
+    if (!hasScript && !hasPath) {
+      return 'WorkflowTool: provide `script` (inline source) or `scriptPath` (a saved workflow file).';
+    }
+    if (hasScript && hasPath) {
+      return 'WorkflowTool: provide exactly one of `script` or `scriptPath`, not both.';
     }
     return null;
   }
