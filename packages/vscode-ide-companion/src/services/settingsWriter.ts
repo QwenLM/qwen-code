@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   ALL_PROVIDERS,
   AuthType,
+  Protocol,
   CUSTOM_API_KEY_ENV_PREFIX,
   Storage,
   applyProviderInstallPlan,
@@ -278,9 +279,15 @@ function findOpenaiModels(
     return [];
   }
   for (const key of [AuthType.USE_OPENAI, 'use_openai']) {
-    const arr = modelProviders[key];
-    if (Array.isArray(arr) && arr.length > 0) {
-      return arr as Array<Record<string, unknown>>;
+    const entry = modelProviders[key];
+    if (Array.isArray(entry) && entry.length > 0) {
+      return entry as Array<Record<string, unknown>>;
+    }
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      const models = (entry as Record<string, unknown>)['models'];
+      if (Array.isArray(models)) {
+        return models as Array<Record<string, unknown>>;
+      }
     }
   }
   return [];
@@ -326,7 +333,10 @@ export function writeCodingPlanConfig(
     ...model,
     envKey: planConfig.envKey,
   }));
-  providers[AuthType.USE_OPENAI] = [...planModels, ...nonCodingPlan];
+  providers[AuthType.USE_OPENAI] = {
+    protocol: Protocol.OPENAI,
+    models: [...planModels, ...nonCodingPlan],
+  };
 
   // Coding Plan metadata — write to the providerMetadata namespace that
   // the CLI now reads from. Remove legacy top-level key if present.
@@ -393,7 +403,10 @@ export function writeModelProvidersConfig(params: {
     settings.modelProviders as Record<string, unknown>,
   );
   const nonTarget = existing.filter((e) => e.envKey !== 'OPENAI_API_KEY');
-  providers[AuthType.USE_OPENAI] = [...modelArray, ...nonTarget];
+  providers[AuthType.USE_OPENAI] = {
+    protocol: Protocol.OPENAI,
+    models: [...modelArray, ...nonTarget],
+  };
 
   // Active model
   if (params.activeModel) {

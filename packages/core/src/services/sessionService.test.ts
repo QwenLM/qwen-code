@@ -1941,6 +1941,84 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('forks only the active branch after rewind', async () => {
+      const oldId = '12121212-1212-1212-1212-121212121212';
+      const newId = '34343434-3434-3434-3434-343434343434';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(chatsDir, `${oldId}.jsonl`),
+        [
+          {
+            uuid: 'u1',
+            parentUuid: null,
+            sessionId: oldId,
+            type: 'user',
+            timestamp: '2026-04-22T00:00:00.000Z',
+            cwd,
+            version: 'test',
+            message: { role: 'user', parts: [{ text: 'first' }] },
+          },
+          {
+            uuid: 'u2',
+            parentUuid: 'u1',
+            sessionId: oldId,
+            type: 'assistant',
+            timestamp: '2026-04-22T00:00:01.000Z',
+            cwd,
+            version: 'test',
+            message: { role: 'model', parts: [{ text: 'first reply' }] },
+          },
+          {
+            uuid: 'u3',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'user',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            message: { role: 'user', parts: [{ text: 'second' }] },
+          },
+          {
+            uuid: 'u4',
+            parentUuid: 'u3',
+            sessionId: oldId,
+            type: 'assistant',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd,
+            version: 'test',
+            message: { role: 'model', parts: [{ text: 'second reply' }] },
+          },
+          {
+            uuid: 'rewind-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'rewind',
+            timestamp: '2026-04-22T00:00:04.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: { targetTurnIndex: 1, truncatedCount: 2 },
+          },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+
+      expect(result.copiedCount).toBe(3);
+      expect(
+        loaded?.conversation.messages.flatMap(
+          (message) => message.message?.parts?.map((part) => part.text) ?? [],
+        ),
+      ).toEqual(['first', 'first reply']);
+    });
+
     it('throws when the source session does not exist', async () => {
       const oldId = '33333333-3333-3333-3333-333333333333';
       const newId = '44444444-4444-4444-4444-444444444444';

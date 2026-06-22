@@ -20,7 +20,10 @@ import {
   resolvePromptDeadlineMs,
 } from './server.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
-import { resolveWebShellDir, isDocumentNavigation } from './webShellStatic.js';
+import {
+  resolveWebShellDir,
+  isDocumentNavigation,
+} from './web-shell-static.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
@@ -62,6 +65,7 @@ import {
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -76,7 +80,7 @@ import {
   type BridgeSpawnRequest,
   type AcpSessionBridge,
   type SessionMetadataUpdate,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import type { BridgeEvent, SubscribeOptions } from './event-bus.js';
 import type {
   ServeSessionContextStatus,
@@ -95,7 +99,7 @@ import type {
   ServeWorkspaceToolsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
-import type { DaemonLogger } from './daemonLogger.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 
 const baseOpts: ServeOptions = {
@@ -382,6 +386,11 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  launchSessionForkAgentImpl?: (
+    sessionId: string,
+    directive: string,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ sessionId: string; description: string; launched: boolean }>;
   setToolEnabledImpl?: (
     toolName: string,
     enabled: boolean,
@@ -550,6 +559,11 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  forkCalls: Array<{
+    sessionId: string;
+    directive: string;
     context?: BridgeClientRequestContext;
   }>;
   setToolEnabledCalls: Array<{
@@ -841,6 +855,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const forkCalls: FakeBridge['forkCalls'] = [];
+  const launchSessionForkAgentImpl =
+    opts.launchSessionForkAgentImpl ??
+    (async (sessionId: string, directive: string) => ({
+      sessionId,
+      description: directive.slice(0, 60),
+      launched: true,
+    }));
   const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
   const setToolEnabledImpl =
     opts.setToolEnabledImpl ??
@@ -963,6 +985,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    forkCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1187,6 +1210,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     async generateSessionBtw(sessionId, _question, _signal, _context) {
       return { sessionId, answer: 'mock btw answer' };
+    },
+    async launchSessionForkAgent(sessionId, directive, context) {
+      forkCalls.push({
+        sessionId,
+        directive,
+        ...(context ? { context } : {}),
+      });
+      return launchSessionForkAgentImpl(sessionId, directive, context);
     },
     enqueueMidTurnMessage(sessionId, message, context) {
       enqueueMidTurnCalls.push({
@@ -6093,6 +6124,94 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/fork', () => {
+    it('202 with directive and client identity on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        description: 'review the current code',
+        launched: true,
+      });
+      expect(bridge.forkCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          directive: 'review the current code',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('400 when directive is missing or empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const missing = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('missing_directive');
+
+      const empty = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: '   ' });
+      expect(empty.status).toBe(400);
+      expect(empty.body.code).toBe('missing_directive');
+      expect(bridge.forkCalls).toEqual([]);
+    });
+
+    it('404 when bridge throws SessionNotFoundError', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/missing/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('409 when bridge reports the session is busy', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionBusyError(
+            sessionId,
+            'Cannot fork while a response or tool call is in progress',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_busy',
+        sessionId: 'session-A',
+      });
+      expect(res.headers['retry-after']).toBe('5');
+    });
+  });
+
   describe('POST /session/:id/language', () => {
     it('200 with language result on success', async () => {
       const bridge = fakeBridge();
@@ -10936,15 +11055,16 @@ describe('auth device-flow routes', () => {
     // through `sendBridgeError`'s generic 500 path. Build a fake
     // provider whose start always throws.
     const { UpstreamDeviceFlowError } = await import('./auth/device-flow.js');
-    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
-      providerId: 'qwen-oauth',
-      async start() {
-        throw new UpstreamDeviceFlowError('mocked upstream outage');
-      },
-      async poll() {
-        return { kind: 'pending' as const };
-      },
-    };
+    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider =
+      {
+        providerId: 'qwen-oauth',
+        async start() {
+          throw new UpstreamDeviceFlowError('mocked upstream outage');
+        },
+        async poll() {
+          return { kind: 'pending' as const };
+        },
+      };
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
       bridge,
@@ -12112,7 +12232,7 @@ describe('sendBridgeError daemonLog routing', () => {
   it('routes 5xx errors through daemonLog when provided', async () => {
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'daemon-log-'));
     const stderrLines: string[] = [];
-    const { initDaemonLogger } = await import('./daemonLogger.js');
+    const { initDaemonLogger } = await import('./daemon-logger.js');
     const daemonLog = initDaemonLogger({
       boundWorkspace: '/w',
       pid: 1,

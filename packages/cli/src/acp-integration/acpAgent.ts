@@ -58,9 +58,12 @@ import {
   redactUrlCredentials,
   computeUniqueBranchTitle,
   unregisterGoalHook,
+  ToolNames,
+  FORK_SUBAGENT_TYPE,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
+  AgentParams,
   ApprovalMode,
   Config,
   ConversationRecord,
@@ -72,6 +75,7 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
+  Protocol,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -131,7 +135,6 @@ import {
 } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
-import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -214,6 +217,32 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
+
+function collapseForkDirective(directive: string, maxLength: number): string {
+  const oneLine = directive.replace(/\s+/g, ' ').trim();
+  return oneLine.length > maxLength
+    ? `${oneLine.slice(0, maxLength - 3)}…`
+    : oneLine;
+}
+
+function deriveForkDescription(directive: string): string {
+  return collapseForkDirective(directive, 60);
+}
+
+function truncateForkDirectiveForHistory(directive: string): string {
+  return collapseForkDirective(directive, 200);
+}
+
+function hasFailedDisplayStatus(
+  display: unknown,
+): display is { status: 'failed' } {
+  return (
+    display !== null &&
+    typeof display === 'object' &&
+    'status' in display &&
+    (display as { status?: unknown }).status === 'failed'
+  );
+}
 
 function sanitizeProviderBaseUrl(baseUrl: string): string {
   const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
@@ -1424,8 +1453,17 @@ function readProviderModels(
   const modelProviders = toRecord(
     (settings.merged as Record<string, unknown>)['modelProviders'],
   );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
+  const entry = modelProviders[protocol];
+  const entryRecord =
+    typeof entry === 'object' && entry !== null
+      ? (entry as Record<string, unknown>)
+      : undefined;
+  const models = Array.isArray(entry)
+    ? entry
+    : Array.isArray(entryRecord?.['models'])
+      ? (entryRecord['models'] as ProviderModelConfig[])
+      : [];
+  return models.filter(isProviderModelConfig);
 }
 
 function findExistingProviderModels(
@@ -1562,7 +1600,7 @@ function readProviderSetupInputs(
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | AuthType
+    | Protocol
     | undefined;
   if (
     protocol &&
@@ -2506,6 +2544,16 @@ function createWorkspaceMcpBudget(
   });
 }
 
+const MAX_ACP_SESSION_PAGE_SIZE = 100;
+
+function normalizeAcpSessionListSize(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    return undefined;
+  }
+  return Math.min(Math.max(value, 1), MAX_ACP_SESSION_PAGE_SIZE);
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
@@ -2704,7 +2752,7 @@ class QwenAgent implements Agent {
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
-    const method = z.nativeEnum(AuthType).parse(methodId);
+    const method = methodId as AuthType;
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
@@ -2865,22 +2913,28 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    const numericCursor = params.cursor ? Number(params.cursor) : undefined;
+    let numericCursor: number | undefined;
+    if (params.cursor != null && params.cursor !== '') {
+      const parsedCursor = Number(params.cursor);
+      if (!Number.isFinite(parsedCursor)) {
+        throw RequestError.invalidParams(
+          undefined,
+          `Invalid cursor: "${params.cursor}" is not a valid numeric cursor`,
+        );
+      }
+      numericCursor = parsedCursor;
+    }
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends
     // before it reaches this handler. Carry page size through `_meta.size`
     // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
-    const metaSize = params._meta?.['size'];
-    const size =
-      typeof metaSize === 'number' && metaSize > 0
-        ? Math.floor(metaSize)
-        : undefined;
+    const size = normalizeAcpSessionListSize(params._meta?.['size']);
 
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
-        cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+        cursor: numericCursor,
         size,
       });
     });
@@ -5732,6 +5786,90 @@ class QwenAgent implements Agent {
           throw err;
         }
         return { sessionId, answer: result.text || null };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const directive =
+          typeof params['directive'] === 'string' ? params['directive'] : '';
+        const trimmed = directive.trim();
+        if (!trimmed) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing directive',
+          );
+        }
+
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        if (!config.getModel()) {
+          throw RequestError.invalidParams(undefined, 'No model configured.');
+        }
+
+        let hasHistory = false;
+        try {
+          hasHistory =
+            (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
+        } catch (error) {
+          debugLogger.debug('Failed to read history before /fork:', error);
+        }
+        if (!hasHistory) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Cannot fork before the first conversation turn.',
+          );
+        }
+
+        const agentTool = config.getToolRegistry().getTool(ToolNames.AGENT);
+        if (!agentTool) {
+          throw RequestError.invalidParams(
+            undefined,
+            'The agent tool is unavailable; cannot fork.',
+          );
+        }
+
+        const description = deriveForkDescription(trimmed);
+        const agentParams: AgentParams = {
+          description,
+          prompt: trimmed,
+          subagent_type: FORK_SUBAGENT_TYPE,
+          run_in_background: true,
+        };
+        const result = await agentTool
+          .build(agentParams)
+          .execute(new AbortController().signal);
+        if (hasFailedDisplayStatus(result?.returnDisplay)) {
+          const reason =
+            typeof result.llmContent === 'string' && result.llmContent.trim()
+              ? result.llmContent.trim()
+              : 'the background agent could not be started.';
+          throw RequestError.invalidParams(
+            undefined,
+            `Failed to launch fork: ${reason}`,
+          );
+        }
+
+        try {
+          config.getGeminiClient().addHistory({
+            role: 'user',
+            parts: [
+              {
+                text: `User launched a background fork via /fork. Directive (truncated): ${truncateForkDirectiveForHistory(
+                  trimmed,
+                )}`,
+              },
+            ],
+          });
+        } catch (error) {
+          debugLogger.debug('Failed to record fork event in history:', error);
+        }
+
+        return { sessionId, description, launched: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];

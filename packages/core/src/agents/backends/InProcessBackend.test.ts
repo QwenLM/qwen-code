@@ -15,11 +15,18 @@ import { createContentGenerator } from '../../core/contentGenerator.js';
 const mockContentGenerator = {
   generateContentStream: vi.fn(),
 };
-vi.mock('../../core/contentGenerator.js', () => ({
-  createContentGenerator: vi.fn().mockResolvedValue({
-    generateContentStream: vi.fn(),
-  }),
-}));
+vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
+  const actual: Record<string, unknown> = (await importOriginal()) as Record<
+    string,
+    unknown
+  >;
+  return {
+    ...actual,
+    createContentGenerator: vi.fn().mockResolvedValue({
+      generateContentStream: vi.fn(),
+    }),
+  };
+});
 
 // Mock AgentCore and AgentInteractive to avoid real model calls.
 // The mock must also expose the observable-state accessors that
@@ -133,6 +140,7 @@ function createMockConfig() {
     getAuthType: vi.fn().mockReturnValue('openai'),
     getModelsConfig: vi.fn().mockReturnValue({
       getResolvedModel: vi.fn().mockReturnValue(undefined),
+      getProtocol: vi.fn().mockImplementation((authType) => authType),
     }),
   } as never;
 }

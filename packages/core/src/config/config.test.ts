@@ -36,6 +36,7 @@ import type {
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
+  Protocol,
   createContentGenerator,
   createContentGeneratorConfig,
   resolveContentGeneratorConfigWithSources,
@@ -1032,6 +1033,80 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    describe('shouldAutoOpenArtifact', () => {
+      const browserEnvKeys = [
+        'QWEN_ARTIFACT_NO_AUTO_OPEN',
+        'BROWSER',
+        'CI',
+        'DEBIAN_FRONTEND',
+        'SSH_CONNECTION',
+        'DISPLAY',
+        'WAYLAND_DISPLAY',
+        'MIR_SOCKET',
+      ] as const;
+      const originalEnv: Partial<
+        Record<(typeof browserEnvKeys)[number], string>
+      > = {};
+
+      beforeEach(() => {
+        for (const key of browserEnvKeys) {
+          originalEnv[key] = process.env[key];
+          delete process.env[key];
+        }
+        process.env['DISPLAY'] = ':0';
+      });
+
+      afterEach(() => {
+        for (const key of browserEnvKeys) {
+          if (originalEnv[key] === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = originalEnv[key];
+          }
+        }
+      });
+
+      it('auto-opens artifacts by default', () => {
+        const config = new Config(baseParams);
+        expect(config.shouldAutoOpenArtifact()).toBe(true);
+      });
+
+      it('honors artifact.autoOpen=false from settings', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: false,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('lets QWEN_ARTIFACT_NO_AUTO_OPEN override settings', () => {
+        process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] = '1';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('honors global browser launch suppression', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+          noBrowser: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('honors CI browser launch suppression', () => {
+        process.env['CI'] = 'true';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
@@ -1387,14 +1462,28 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'coder-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'qwen3.7-max',
-              name: 'qwen3.7-max',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          [AuthType.USE_ANTHROPIC]: {
+            protocol: Protocol.ANTHROPIC,
+            models: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1410,22 +1499,28 @@ describe('Server Config (config.ts)', () => {
         model: 'shared-model',
         fastModel: 'openai:shared-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'shared-model',
-              name: 'OpenAI shared model',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'shared-model',
-              name: 'Anthropic shared model',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'shared-model',
+                name: 'OpenAI shared model',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          [AuthType.USE_ANTHROPIC]: {
+            protocol: Protocol.ANTHROPIC,
+            models: [
+              {
+                id: 'shared-model',
+                name: 'Anthropic shared model',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1439,14 +1534,17 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'qwen-oauth:coder-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'qwen3.7-max',
-              name: 'qwen3.7-max',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1460,20 +1558,23 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'qwen3.7-max',
-              name: 'qwen3.7-max',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-            {
-              id: 'fast-model',
-              name: 'fast-model',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+              {
+                id: 'fast-model',
+                name: 'fast-model',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1489,14 +1590,17 @@ describe('Server Config (config.ts)', () => {
         model: 'gpt-4',
         fastModel: 'openai:deepseek-v4-flash',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'deepseek-v4-flash',
-              name: 'deepseek-v4-flash',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'deepseek-v4-flash',
+                name: 'deepseek-v4-flash',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1519,14 +1623,17 @@ describe('Server Config (config.ts)', () => {
           baseUrl: { kind: 'programmatic', detail: 'test' },
         },
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'registry-model',
-              name: 'Registry Model',
-              baseUrl: 'https://api.openai.com/v1',
-              envKey: 'OPENAI_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'registry-model',
+                name: 'Registry Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
         },
       });
       config.getModelsConfig().detectAndCaptureRuntimeModel();
@@ -1541,14 +1648,17 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'missing-fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'claude-opus-4-7',
-              name: 'claude-opus-4-7',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
-            },
-          ],
+          [AuthType.USE_ANTHROPIC]: {
+            protocol: Protocol.ANTHROPIC,
+            models: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1562,14 +1672,17 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'missing-fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'claude-opus-4-7',
-              name: 'claude-opus-4-7',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
-            },
-          ],
+          [AuthType.USE_ANTHROPIC]: {
+            protocol: Protocol.ANTHROPIC,
+            models: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1585,14 +1698,17 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'openai:',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'deepseek-v4-flash',
-              name: 'deepseek-v4-flash',
-              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-              envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'deepseek-v4-flash',
+                name: 'deepseek-v4-flash',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1606,14 +1722,17 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'fast',
         modelProvidersConfig: {
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'claude-opus-4-7',
-              name: 'claude-opus-4-7',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
-            },
-          ],
+          [AuthType.USE_ANTHROPIC]: {
+            protocol: Protocol.ANTHROPIC,
+            models: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -1627,20 +1746,23 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         authType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: [
-            {
-              id: 'model-a',
-              name: 'Model A',
-              baseUrl: 'https://api.example.com/v1',
-              envKey: 'API_KEY_A',
-            },
-            {
-              id: 'model-b',
-              name: 'Model B',
-              baseUrl: 'https://api.example.com/v1',
-              envKey: 'API_KEY_B',
-            },
-          ],
+          openai: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'model-a',
+                name: 'Model A',
+                baseUrl: 'https://api.example.com/v1',
+                envKey: 'API_KEY_A',
+              },
+              {
+                id: 'model-b',
+                name: 'Model B',
+                baseUrl: 'https://api.example.com/v1',
+                envKey: 'API_KEY_B',
+              },
+            ],
+          },
         },
       });
 
@@ -4697,14 +4819,17 @@ describe('Model Switching and Config Updates', () => {
         authType: AuthType.USE_OPENAI,
         model: 'gpt-4o',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'gpt-4o',
-              name: 'GPT-4o',
-              baseUrl: 'https://api.openai.example.com/v1',
-              envKey: 'OPENAI_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'gpt-4o',
+                name: 'GPT-4o',
+                baseUrl: 'https://api.openai.example.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
         },
       });
 
@@ -4717,14 +4842,17 @@ describe('Model Switching and Config Updates', () => {
         authType: AuthType.USE_OPENAI,
         model: 'custom-runtime-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: [
-            {
-              id: 'gpt-4o',
-              name: 'GPT-4o',
-              baseUrl: 'https://api.openai.example.com/v1',
-              envKey: 'OPENAI_API_KEY',
-            },
-          ],
+          [AuthType.USE_OPENAI]: {
+            protocol: Protocol.OPENAI,
+            models: [
+              {
+                id: 'gpt-4o',
+                name: 'GPT-4o',
+                baseUrl: 'https://api.openai.example.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
         },
       });
 

@@ -829,9 +829,7 @@ describe('BackgroundTasksDialog', () => {
 
   // ── R2 #15: WorkflowDetailBody budget chip rendering ────────────────
 
-  function workflowEntry(
-    overrides: Partial<DialogEntry> = {},
-  ): DialogEntry {
+  function workflowEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
     const base = {
       id: 'wf_test1234',
       kind: 'workflow' as const,

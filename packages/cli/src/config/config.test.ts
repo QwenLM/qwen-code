@@ -974,6 +974,21 @@ describe('loadCliConfig', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
+  it('should propagate artifact auto-open setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        artifact: {
+          autoOpen: false,
+        },
+      },
+      argv,
+    );
+
+    expect(config.shouldAutoOpenArtifact()).toBe(false);
+  });
+
   it('places session-injected (ACP/IDE) MCP servers at the top precedence tier', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

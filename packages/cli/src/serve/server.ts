@@ -9,6 +9,13 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
+import type {
+  ApprovalMode,
+  Protocol,
+  Extension,
+  ExtensionInstallMetadata,
+  ExtensionSetting,
+} from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
   ALL_PROVIDERS,
@@ -30,13 +37,9 @@ import {
   recordDaemonHttpRequest,
   recordDaemonHttpResponse,
   withDaemonRequestSpan,
-  type ApprovalMode,
-  type Extension,
-  type ExtensionInstallMetadata,
-  type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import type { DaemonLogger } from './daemonLogger.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -65,11 +68,11 @@ import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
-import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import {
   buildDaemonStatusResponse,
   parseDaemonStatusDetail,
-} from './daemonStatus.js';
+} from './daemon-status.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -99,7 +102,7 @@ import {
   WorkspaceMismatchError,
   type BridgeSessionSummary,
   type AcpSessionBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import {
   getAdvertisedServeFeatures,
   getServeProtocolVersions,
@@ -118,7 +121,7 @@ import { getDemoHtml } from './demo.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
-} from './webShellStatic.js';
+} from './web-shell-static.js';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 import {
@@ -133,7 +136,7 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
-import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
+import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
   createRateLimiter,
   setRateLimiter,
@@ -2720,7 +2723,7 @@ export function createServeApp(
           knownProvider.protocolOptions && knownProvider.protocolOptions.length
             ? knownProvider.protocolOptions
             : [knownProvider.protocol];
-        if (!allowedProtocols.includes(installRequest.protocol)) {
+        if (!allowedProtocols.includes(installRequest.protocol as Protocol)) {
           res.status(400).json({
             error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
             code: 'unsupported_protocol',
@@ -2994,6 +2997,35 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'POST /session/:id/branch',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/fork', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const directive = body['directive'];
+    if (typeof directive !== 'string' || directive.trim().length === 0) {
+      res.status(400).json({
+        error: '`directive` is required and must be a non-empty string',
+        code: 'missing_directive',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.launchSessionForkAgent(
+        sessionId,
+        directive,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(202).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/fork',
         sessionId,
       });
     }

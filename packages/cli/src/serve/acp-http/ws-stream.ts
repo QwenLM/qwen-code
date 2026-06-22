@@ -6,7 +6,7 @@
 
 import type { WebSocket } from 'ws';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { TransportStream } from './transportStream.js';
+import type { TransportStream } from './transport-stream.js';
 
 export class WsStream implements TransportStream {
   readonly kind = 'ws' as const;

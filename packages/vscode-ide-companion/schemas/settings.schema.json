@@ -14,7 +14,7 @@
       "additionalProperties": true
     },
     "modelProviders": {
-      "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
+      "description": "Model providers configuration grouped by authType. Each authType maps to a ProviderConfig object with protocol and models fields.",
       "type": "object",
       "additionalProperties": true
     },
@@ -235,6 +235,11 @@
         },
         "hideWindowTitle": {
           "description": "Hide the window title bar",
+          "type": "boolean",
+          "default": false
+        },
+        "disableWorkflowKeywordTrigger": {
+          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
           "type": "boolean",
           "default": false
         },
@@ -2683,6 +2688,11 @@
       "description": "Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
       "type": "object",
       "properties": {
+        "autoOpen": {
+          "description": "Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.",
+          "type": "boolean",
+          "default": true
+        },
         "publisher": {
           "description": "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload). Options: local, host, oss",
           "enum": [
@@ -2762,7 +2772,7 @@
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",
-      "default": 4
+      "default": 5
     }
   },
   "additionalProperties": true

@@ -29,6 +29,7 @@ import type {
   DaemonSessionContextUsageStatus,
   BranchSessionRequest,
   DaemonBranchedSession,
+  DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
@@ -79,6 +80,7 @@ import type {
   DaemonToolToggleResult,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
+  ForkSessionRequest,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
@@ -1261,6 +1263,27 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/branch');
         }
         return (await res.json()) as DaemonBranchedSession;
+      },
+    );
+  }
+
+  async forkSession(
+    sessionId: string,
+    req: ForkSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonForkSessionResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/fork`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ directive: req.directive }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/fork');
+        }
+        return (await res.json()) as DaemonForkSessionResult;
       },
     );
   }

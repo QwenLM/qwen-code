@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { useMemo } from 'react';
+import { useMemo, useRef, useCallback } from 'react';
+import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
@@ -58,6 +59,11 @@ import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import { useThinkingViewer } from '../contexts/ThinkingViewerContext.js';
+import { useMouseEvents } from '../hooks/useMouseEvents.js';
+import type { MouseEvent } from '../utils/mouse.js';
+import { measureElementPosition } from '../utils/measure-element-position.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -86,14 +92,83 @@ interface HistoryItemDisplayProps {
    */
   summaryAbsorbed?: boolean;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  /** Force thinking blocks expanded (e.g. in SessionPreview). */
+  thoughtExpanded?: boolean;
+  /** Aggregated text from this thought + its continuation items. */
+  thinkingFullText?: string;
 }
+
+/**
+ * Wraps ThinkMessage with mouse click-to-open handling.
+ * Extracted so that non-thought HistoryItemDisplay instances
+ * don't pay the useMouseEvents/useRef/useCallback hook cost.
+ */
+const ClickableThinkMessage: React.FC<{
+  text: string;
+  viewerText: string;
+  isPending: boolean;
+  expanded: boolean;
+  availableTerminalHeight?: number;
+  contentWidth: number;
+  durationMs?: number;
+}> = ({
+  text,
+  viewerText,
+  isPending,
+  expanded,
+  availableTerminalHeight,
+  contentWidth,
+  durationMs,
+}) => {
+  const ref = useRef<DOMElement>(null);
+  const { openThinkingViewer } = useThinkingViewer();
+  const isActive = !isPending && !expanded;
+  const sanitizedViewerText = useMemo(
+    () => escapeAnsiCtrlCodes(viewerText),
+    [viewerText],
+  );
+
+  useMouseEvents(
+    useCallback(
+      (event: MouseEvent) => {
+        if (event.name !== 'left-press' || !ref.current) return;
+        const metrics = measureElementPosition(ref.current);
+        const col = event.col - 1;
+        const row = event.row - 1;
+        if (
+          col >= metrics.x &&
+          col < metrics.x + metrics.width &&
+          row >= metrics.y &&
+          row < metrics.y + metrics.height
+        ) {
+          openThinkingViewer({ text: sanitizedViewerText, durationMs });
+        }
+      },
+      [openThinkingViewer, sanitizedViewerText, durationMs],
+    ),
+    { isActive },
+  );
+
+  return (
+    <Box ref={isActive ? ref : undefined}>
+      <ThinkMessage
+        text={text}
+        isPending={isPending}
+        expanded={expanded}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+        durationMs={durationMs}
+      />
+    </Box>
+  );
+};
 
 function getHistoryItemMarginTop(item: HistoryItem): number {
   switch (item.type) {
     case 'gemini':
+    case 'gemini_thought':
       return 1;
     case 'gemini_content':
-    case 'gemini_thought':
     case 'gemini_thought_content':
     case 'info':
     case 'success':
@@ -134,10 +209,14 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   compactLabel,
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
+  thoughtExpanded,
+  thinkingFullText,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
   const { compactMode } = useCompactMode();
+  const contextThoughtExpanded = useThoughtExpanded();
+  const resolvedThoughtExpanded = thoughtExpanded ?? contextThoughtExpanded;
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -197,10 +276,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'gemini_thought' && (
-        <ThinkMessage
+        <ClickableThinkMessage
           text={itemForDisplay.text.trimEnd()}
+          viewerText={(thinkingFullText || itemForDisplay.text).trimEnd()}
           isPending={isPending}
-          expanded={!compactMode}
+          expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
@@ -212,7 +292,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <ThinkMessageContent
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
-          expanded={!compactMode}
+          expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }

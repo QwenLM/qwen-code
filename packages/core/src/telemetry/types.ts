@@ -1281,6 +1281,47 @@ export class SpeculationEvent implements BaseTelemetryEvent {
   }
 }
 
+/** #4721 P-telemetry: the `workflow` keyword steered a turn toward the tool. */
+export class WorkflowKeywordEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_keyword';
+  'event.timestamp': string;
+
+  constructor() {
+    this['event.name'] = 'qwen-code.workflow_keyword';
+    this['event.timestamp'] = new Date().toISOString();
+  }
+}
+
+/** #4721 P-telemetry: a workflow run reached a terminal state. */
+export class WorkflowRunEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_run';
+  'event.timestamp': string;
+  status: string;
+  agents_dispatched: number;
+  agents_completed: number;
+  phase_count: number;
+  tokens_spent: number;
+  duration_ms: number;
+
+  constructor(params: {
+    status: string;
+    agents_dispatched: number;
+    agents_completed: number;
+    phase_count: number;
+    tokens_spent: number;
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.workflow_run';
+    this['event.timestamp'] = new Date().toISOString();
+    this.status = params.status;
+    this.agents_dispatched = params.agents_dispatched;
+    this.agents_completed = params.agents_completed;
+    this.phase_count = params.phase_count;
+    this.tokens_spent = params.tokens_spent;
+    this.duration_ms = params.duration_ms;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Managed Auto-Memory Events
 // ---------------------------------------------------------------------------

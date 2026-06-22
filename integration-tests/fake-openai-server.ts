@@ -183,7 +183,7 @@ function writeNonStreamed(
           index: 0,
           message: {
             role: 'assistant',
-            content: message.content ?? '',
+            content: message.content ?? null,
             ...(message.toolCalls ? { tool_calls: message.toolCalls } : {}),
           },
           finish_reason: finishReason(message),
@@ -235,11 +235,28 @@ function writeStreamed(
             index,
             id: toolCall.id,
             type: toolCall.type,
-            function: toolCall.function,
+            function: {
+              name: toolCall.function.name,
+              arguments: '',
+            },
           },
         ],
       }),
     );
+    if (toolCall.function.arguments) {
+      send(
+        chunk({
+          tool_calls: [
+            {
+              index,
+              function: {
+                arguments: toolCall.function.arguments,
+              },
+            },
+          ],
+        }),
+      );
+    }
   }
   send(chunk({}, finishReason(message), message.usage ?? DEFAULT_USAGE));
   res.write('data: [DONE]\n\n');

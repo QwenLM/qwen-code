@@ -27,6 +27,8 @@ describe('ArtifactTool', () => {
     ({
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => workdir,
+      shouldAutoOpenArtifact: () =>
+        process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] !== '1',
     }) as unknown as Config;
 
   const writeFragment = async (name: string, content: string) => {
@@ -51,6 +53,11 @@ describe('ArtifactTool', () => {
     await fs.rm(outDir, { recursive: true, force: true });
     delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
     vi.restoreAllMocks();
+  });
+
+  it('describes browser opening as settings-dependent', () => {
+    expect(tool.description).toContain('depending on settings');
+    expect(tool.description).not.toContain('and opens it in the browser');
   });
 
   it('publishes a fragment, wraps it, and opens the url', async () => {
@@ -122,7 +129,7 @@ describe('ArtifactTool', () => {
     const failingTool = new ArtifactTool(
       makeConfig(),
       {
-        kind: 'fail',
+        kind: 'oss',
         publish: async () => {
           throw new Error('network timeout');
         },
@@ -153,6 +160,74 @@ describe('ArtifactTool', () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
+  it('skips auto-open when disabled by settings', async () => {
+    const file = await writeFragment('p.html', '<p>x</p>');
+    const noAutoOpenTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        shouldAutoOpenArtifact: () => false,
+      } as unknown as Config,
+      new LocalPublisher(outDir),
+      openSpy as unknown as UrlOpener,
+    );
+
+    const res = await noAutoOpenTool.build({ file_path: file }).execute(signal);
+
+    expect(res.error).toBeUndefined();
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('omits browser launch from confirmation when auto-open is disabled', async () => {
+    const file = await writeFragment('p.html', '<p>x</p>');
+    const noAutoOpenTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        shouldAutoOpenArtifact: () => false,
+      } as unknown as Config,
+      new LocalPublisher(outDir),
+      openSpy as unknown as UrlOpener,
+    );
+
+    const details = await noAutoOpenTool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+
+    expect(details.type).toBe('info');
+    if (details.type !== 'info') {
+      throw new Error(`Unexpected confirmation type: ${details.type}`);
+    }
+    expect(details.prompt).toBe('Publish p.html as an interactive Artifact.');
+  });
+
+  it('reuses the confirmation auto-open decision during execution', async () => {
+    const shouldAutoOpenArtifact = vi
+      .fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    const consistentTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        shouldAutoOpenArtifact,
+      } as unknown as Config,
+      new LocalPublisher(outDir),
+      openSpy as unknown as UrlOpener,
+    );
+    const file = await writeFragment('p.html', '<p>x</p>');
+    const invocation = consistentTool.build({ file_path: file });
+
+    const details = await invocation.getConfirmationDetails(signal);
+    const res = await invocation.execute(signal);
+
+    expect(details.type).toBe('info');
+    if (details.type !== 'info') {
+      throw new Error(`Unexpected confirmation type: ${details.type}`);
+    }
+    expect(details.prompt).toContain('and open it in your browser');
+    expect(res.error).toBeUndefined();
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(shouldAutoOpenArtifact).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a relative file_path at build time', () => {
     expect(() => tool.build({ file_path: 'relative.html' })).toThrow(
       /absolute/i,
@@ -164,5 +239,104 @@ describe('ArtifactTool', () => {
     const res = await tool.build({ file_path: file }).execute(signal);
     const html = await fs.readFile(res.resultFilePaths![0], 'utf8');
     expect(html).toContain('<title>release-notes</title>');
+  });
+
+  it('tells the user a remote backend uploads, but a local one does not', async () => {
+    const file = path.join(workdir, 'p.html');
+    const remoteTool = new ArtifactTool(
+      makeConfig(),
+      { kind: 'oss', publish: async () => ({ id: 'x', url: 'https://h/x' }) },
+      openSpy as unknown as UrlOpener,
+    );
+    const remote = await remoteTool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+    expect((remote as { prompt: string }).prompt).toMatch(
+      /remote host \(oss\)/i,
+    );
+
+    const hostTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'host',
+        publish: async () => ({ id: 'x', url: 'https://h/x' }),
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const host = await hostTool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+    expect((host as { prompt: string }).prompt).toMatch(
+      /remote host \(custom upload\)/i,
+    );
+
+    const local = await tool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+    expect((local as { prompt: string }).prompt).not.toMatch(/remote/i);
+  });
+
+  it('reports a cancellation when the publisher aborts', async () => {
+    const file = await writeFragment('page.html', '<p>x</p>');
+    const abortErr = Object.assign(new Error('aborted'), {
+      name: 'AbortError',
+    });
+    const cancelTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'oss',
+        publish: async () => {
+          throw abortErr;
+        },
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const res = await cancelTool.build({ file_path: file }).execute(signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toMatch(/cancelled/i);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports a cancellation for a Node abort error', async () => {
+    const file = await writeFragment('page.html', '<p>x</p>');
+    const abortErr = Object.assign(new Error('aborted'), {
+      code: 'ABORT_ERR',
+    });
+    const cancelTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'oss',
+        publish: async () => {
+          throw abortErr;
+        },
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const res = await cancelTool.build({ file_path: file }).execute(signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toMatch(/cancelled/i);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports a cancellation when the signal is aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const file = await writeFragment('page.html', '<p>x</p>');
+    const cancelTool = new ArtifactTool(
+      makeConfig(),
+      {
+        kind: 'oss',
+        publish: async () => {
+          throw new Error('network failure');
+        },
+      },
+      openSpy as unknown as UrlOpener,
+    );
+    const res = await cancelTool
+      .build({ file_path: file })
+      .execute(controller.signal);
+    expect(res.error).toBeUndefined();
+    expect(res.llmContent).toMatch(/cancelled/i);
+    expect(openSpy).not.toHaveBeenCalled();
   });
 });

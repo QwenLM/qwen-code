@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  AuthType,
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
@@ -18,13 +17,14 @@ import {
   providerMatchesCredentials,
   type ProviderConfig,
 } from '@qwen-code/qwen-code-core';
+import { Protocol } from '../../core/contentGenerator.js';
 
 function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
     id: 'test',
     label: 'Test',
     description: 'A test provider',
-    protocol: AuthType.USE_OPENAI,
+    protocol: Protocol.OPENAI,
     baseUrl: 'https://api.test.com/v1',
     envKey: 'TEST_API_KEY',
     models: [{ id: 'model-a', contextWindowSize: 8192, enableThinking: true }],
@@ -43,7 +43,7 @@ describe('buildInstallPlan', () => {
     });
 
     expect(plan.providerId).toBe('test');
-    expect(plan.authType).toBe(AuthType.USE_OPENAI);
+    expect(plan.authType).toBe(Protocol.OPENAI);
     expect(plan.env).toEqual({ TEST_API_KEY: 'sk-test' });
     expect(plan.modelSelection).toEqual({ modelId: 'model-a' });
     expect(plan.modelProviders?.[0]?.models[0]).toMatchObject({
@@ -211,14 +211,14 @@ describe('buildInstallPlan', () => {
       modelNamePrefix: '',
     });
     const plan = buildInstallPlan(config, {
-      protocol: AuthType.USE_ANTHROPIC,
+      protocol: Protocol.ANTHROPIC,
       baseUrl: 'https://custom.com',
       apiKey: 'sk-c',
       modelIds: ['m1'],
     });
 
-    expect(plan.authType).toBe(AuthType.USE_ANTHROPIC);
-    expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_ANTHROPIC);
+    expect(plan.authType).toBe(Protocol.ANTHROPIC);
+    expect(plan.modelProviders?.[0]?.authType).toBe(Protocol.ANTHROPIC);
   });
 });
 
@@ -368,10 +368,10 @@ describe('getDefaultModelIds', () => {
 describe('shouldShowStep', () => {
   it('shows protocol step only when multiple options', () => {
     const single = makeConfig({
-      protocolOptions: [AuthType.USE_OPENAI],
+      protocolOptions: [Protocol.OPENAI],
     });
     const multi = makeConfig({
-      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+      protocolOptions: [Protocol.OPENAI, Protocol.ANTHROPIC],
     });
     expect(shouldShowStep(single, 'protocol')).toBe(false);
     expect(shouldShowStep(multi, 'protocol')).toBe(true);
@@ -620,28 +620,28 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
   // Treating non-string envKey as "no match" made custom providers invisible
   // to findProviderByCredentials → /doctor and system-info diagnostics.
   it('matches a custom-style provider whose envKey is a function deriving from baseUrl', () => {
-    const derivedFor = (_protocol: AuthType, baseUrl: string) =>
+    const derivedFor = (_protocol: Protocol, baseUrl: string) =>
       `QWEN_CUSTOM_${Buffer.from(baseUrl).toString('hex').slice(0, 8)}`;
     const config = makeConfig({
       id: 'custom-like',
       envKey: derivedFor,
       baseUrl: undefined, // user-picked
-      protocol: AuthType.USE_OPENAI,
+      protocol: Protocol.OPENAI,
     });
 
     const url = 'https://api.example.com/v1';
-    const expectedKey = derivedFor(AuthType.USE_OPENAI, url);
+    const expectedKey = derivedFor(Protocol.OPENAI, url);
     expect(providerMatchesCredentialsSrc(config, url, expectedKey)).toBe(true);
   });
 
   it('does not match when the derived key differs from the supplied envKey', () => {
-    const derivedFor = (_protocol: AuthType, baseUrl: string) =>
+    const derivedFor = (_protocol: Protocol, baseUrl: string) =>
       `QWEN_CUSTOM_${baseUrl.length}`;
     const config = makeConfig({
       id: 'custom-like',
       envKey: derivedFor,
       baseUrl: undefined,
-      protocol: AuthType.USE_OPENAI,
+      protocol: Protocol.OPENAI,
     });
     expect(
       providerMatchesCredentialsSrc(
@@ -675,28 +675,24 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
     // from config.protocol. The matcher must try every protocolOption so a
     // custom provider configured under Anthropic/Gemini still gets matched
     // back from the on-disk envKey.
-    const derivedFor = (protocol: AuthType, baseUrl: string) =>
+    const derivedFor = (protocol: Protocol, baseUrl: string) =>
       `QWEN_CUSTOM_${protocol.toUpperCase()}_${baseUrl.length}`;
     const config = makeConfig({
       id: 'custom-like',
       envKey: derivedFor,
       baseUrl: undefined,
-      protocol: AuthType.USE_OPENAI, // default
-      protocolOptions: [
-        AuthType.USE_OPENAI,
-        AuthType.USE_ANTHROPIC,
-        AuthType.USE_GEMINI,
-      ],
+      protocol: Protocol.OPENAI, // default
+      protocolOptions: [Protocol.OPENAI, Protocol.ANTHROPIC, Protocol.GEMINI],
     });
 
     const url = 'https://api.example.com/v1';
     // User picked Anthropic at install time, so the persisted key derives
     // from USE_ANTHROPIC, not the default USE_OPENAI.
-    const anthropicKey = derivedFor(AuthType.USE_ANTHROPIC, url);
+    const anthropicKey = derivedFor(Protocol.ANTHROPIC, url);
     expect(providerMatchesCredentialsSrc(config, url, anthropicKey)).toBe(true);
 
     // Gemini path also matches.
-    const geminiKey = derivedFor(AuthType.USE_GEMINI, url);
+    const geminiKey = derivedFor(Protocol.GEMINI, url);
     expect(providerMatchesCredentialsSrc(config, url, geminiKey)).toBe(true);
   });
 });

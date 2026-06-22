@@ -77,7 +77,7 @@ import {
   type A2uiActionResult,
   type McpServerCell,
   type McpServerConfigLike,
-} from './a2uiAction.js';
+} from './a2ui-action.js';
 
 function makeApp(opts: {
   servers?: McpServerCell[];

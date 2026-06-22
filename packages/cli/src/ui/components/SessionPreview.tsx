@@ -170,6 +170,7 @@ export function SessionPreview(props: SessionPreviewProps) {
                 item={item}
                 terminalWidth={boxWidth}
                 isPending={false}
+                thoughtExpanded={true}
               />
             )),
             footerSeparator,
