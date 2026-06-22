@@ -588,13 +588,20 @@ jobs:
           ${failed_jobs}
           BODY
 
+          # `in:title` is a fuzzy full-text search, so anchor the reuse on an
+          # exact "Release Failed for <tag> on " title prefix — otherwise a tag
+          # that is a prefix of another (v0.18.1 vs v0.18.10) could reuse the
+          # wrong release's issue. Prefer a workflow-owned (github-actions[bot])
+          # match so a same-titled human/foreign issue sorting first can't make
+          # us skip an existing bot issue and open duplicates.
           existing_issue="$(
             gh issue list --repo "${GH_REPO}" \
               --state open \
               --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
-              --limit 1 \
-              --json number,url,labels,author \
-              --jq '.[0] // empty'
+              --limit 30 \
+              --json number,url,labels,author,title \
+            | jq -c --arg tag "${RELEASE_TAG}" \
+              '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "github-actions[bot]"))[0] // .[0]) // empty'
           )"
           if [[ -n "${existing_issue}" ]]; then
             issue_number="$(jq -r '.number' <<<"${existing_issue}")"
@@ -606,7 +613,7 @@ jobs:
             elif jq -e \
               '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
               <<<"${existing_issue}" > /dev/null; then
-              echo "Existing ${issue_url} has an autofix exclusion label; skipping dispatch."
+              echo "::warning::Release failed but existing ${issue_url} has an autofix exclusion label; no autofix dispatched."
               exit 0
             else
               gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
