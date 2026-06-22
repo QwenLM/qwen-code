@@ -210,6 +210,28 @@ describe('LspTool', () => {
         } as LspToolParams);
         expect(result).toBeNull();
       });
+
+      it('rejects fractional callHierarchyItem positions', () => {
+        const item: LspCallHierarchyItem = {
+          name: 'testFunc',
+          uri: 'file:///test.ts',
+          range: {
+            start: { line: 0.5, character: 0 },
+            end: { line: 0, character: 10 },
+          },
+          selectionRange: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 10 },
+          },
+        };
+        const result = tool.validateToolParams({
+          operation: 'incomingCalls',
+          callHierarchyItem: item,
+        } as LspToolParams);
+        expect(result).toBe(
+          'params/callHierarchyItem/range/start/line must be integer',
+        );
+      });
     });
 
     describe('numeric parameter validation', () => {
@@ -219,7 +241,7 @@ describe('LspTool', () => {
           filePath: 'src/app.ts',
           line: 0,
         } as LspToolParams);
-        expect(result).toBe('line must be a positive number.');
+        expect(result).toBe('line must be a positive integer.');
       });
 
       it('rejects negative line', () => {
@@ -228,7 +250,25 @@ describe('LspTool', () => {
           filePath: 'src/app.ts',
           line: -1,
         } as LspToolParams);
-        expect(result).toBe('line must be a positive number.');
+        expect(result).toBe('line must be a positive integer.');
+      });
+
+      it('rejects fractional line', () => {
+        const result = tool.validateToolParams({
+          operation: 'goToDefinition',
+          filePath: 'src/app.ts',
+          line: 1.5,
+        } as LspToolParams);
+        expect(result).toBe('params/line must be integer');
+      });
+
+      it('rejects unsafe integer line', () => {
+        const result = tool.validateToolParams({
+          operation: 'goToDefinition',
+          filePath: 'src/app.ts',
+          line: Number.MAX_SAFE_INTEGER + 1,
+        } as LspToolParams);
+        expect(result).toBe('line must be a positive integer.');
       });
 
       it('rejects non-positive character', () => {
@@ -238,7 +278,41 @@ describe('LspTool', () => {
           line: 1,
           character: 0,
         } as LspToolParams);
-        expect(result).toBe('character must be a positive number.');
+        expect(result).toBe('character must be a positive integer.');
+      });
+
+      it('rejects fractional character', () => {
+        const result = tool.validateToolParams({
+          operation: 'goToDefinition',
+          filePath: 'src/app.ts',
+          line: 1,
+          character: 1.5,
+        } as LspToolParams);
+        expect(result).toBe('params/character must be integer');
+      });
+
+      it('rejects fractional range end positions', () => {
+        const result = tool.validateToolParams({
+          operation: 'codeActions',
+          filePath: 'src/app.ts',
+          line: 1,
+          character: 1,
+          endLine: 2.5,
+          endCharacter: 3.5,
+        } as LspToolParams);
+        expect(result).toBe('params/endLine must be integer');
+      });
+
+      it('rejects fractional end character', () => {
+        const result = tool.validateToolParams({
+          operation: 'codeActions',
+          filePath: 'src/app.ts',
+          line: 1,
+          character: 1,
+          endLine: 2,
+          endCharacter: 3.5,
+        } as LspToolParams);
+        expect(result).toBe('params/endCharacter must be integer');
       });
 
       it('rejects non-positive limit', () => {
@@ -247,7 +321,16 @@ describe('LspTool', () => {
           filePath: 'src/app.ts',
           limit: 0,
         } as LspToolParams);
-        expect(result).toBe('limit must be a positive number.');
+        expect(result).toBe('limit must be a positive integer.');
+      });
+
+      it('rejects fractional limit', () => {
+        const result = tool.validateToolParams({
+          operation: 'documentSymbol',
+          filePath: 'src/app.ts',
+          limit: 2.5,
+        } as LspToolParams);
+        expect(result).toBe('params/limit must be integer');
       });
     });
 
@@ -913,27 +996,7 @@ describe('LspTool', () => {
     });
   });
 
-  describe('schema compatibility with Claude Code', () => {
-    /**
-     * Claude Code LSP tool schema reference:
-     * {
-     *   "name": "lsp",
-     *   "input_schema": {
-     *     "type": "object",
-     *     "properties": {
-     *       "operation": { "type": "string", "enum": [...] },
-     *       "filePath": { "type": "string" },
-     *       "line": { "type": "number" },
-     *       "character": { "type": "number" },
-     *       "includeDeclaration": { "type": "boolean" },
-     *       "query": { "type": "string" },
-     *       "callHierarchyItem": { ... }
-     *     },
-     *     "required": ["operation"]
-     *   }
-     * }
-     */
-
+  describe('schema shape', () => {
     it('has correct tool name', () => {
       const tool = createTool();
       expect(tool.schema.name).toBe('lsp');
@@ -1048,8 +1111,22 @@ describe('LspTool', () => {
           character?: { type?: string };
         };
       };
-      expect(schema.properties?.line?.type).toBe('number');
-      expect(schema.properties?.character?.type).toBe('number');
+      expect(schema.properties?.line?.type).toBe('integer');
+      expect(schema.properties?.character?.type).toBe('integer');
+    });
+
+    it('range and limit extension properties have integer type', () => {
+      const tool = createTool();
+      const schema = tool.schema.parametersJsonSchema as {
+        properties?: {
+          endLine?: { type?: string };
+          endCharacter?: { type?: string };
+          limit?: { type?: string };
+        };
+      };
+      expect(schema.properties?.endLine?.type).toBe('integer');
+      expect(schema.properties?.endCharacter?.type).toBe('integer');
+      expect(schema.properties?.limit?.type).toBe('integer');
     });
 
     it('includeDeclaration property has correct type', () => {
@@ -1121,8 +1198,8 @@ describe('LspTool', () => {
         const posDef = schema.definitions?.LspPosition;
         expect(posDef).toBeDefined();
         expect(posDef?.type).toBe('object');
-        expect(posDef?.properties?.line?.type).toBe('number');
-        expect(posDef?.properties?.character?.type).toBe('number');
+        expect(posDef?.properties?.line?.type).toBe('integer');
+        expect(posDef?.properties?.character?.type).toBe('integer');
         expect(posDef?.required).toEqual(['line', 'character']);
       });
 

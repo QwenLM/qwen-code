@@ -1047,20 +1047,20 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
             description: 'File path (absolute or workspace-relative).',
           },
           line: {
-            type: 'number',
+            type: 'integer',
             description: '1-based line number for the target location.',
           },
           character: {
-            type: 'number',
+            type: 'integer',
             description:
               '1-based character/column number for the target location.',
           },
           endLine: {
-            type: 'number',
+            type: 'integer',
             description: '1-based end line number for range-based operations.',
           },
           endCharacter: {
-            type: 'number',
+            type: 'integer',
             description: '1-based end character for range-based operations.',
           },
           includeDeclaration: {
@@ -1081,7 +1081,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
             description: 'Optional LSP server name to target.',
           },
           limit: {
-            type: 'number',
+            type: 'integer',
             description: 'Optional maximum number of results to return.',
           },
           diagnostics: {
@@ -1101,8 +1101,8 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
           LspPosition: {
             type: 'object',
             properties: {
-              line: { type: 'number' },
-              character: { type: 'number' },
+              line: { type: 'integer' },
+              character: { type: 'integer' },
             },
             required: ['line', 'character'],
           },
@@ -1200,20 +1200,35 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
       }
     }
 
-    if (params.line !== undefined && params.line < 1) {
-      return 'line must be a positive number.';
+    if (
+      params.line !== undefined &&
+      (!Number.isSafeInteger(params.line) || params.line < 1)
+    ) {
+      return 'line must be a positive integer.';
     }
-    if (params.character !== undefined && params.character < 1) {
-      return 'character must be a positive number.';
+    if (
+      params.character !== undefined &&
+      (!Number.isSafeInteger(params.character) || params.character < 1)
+    ) {
+      return 'character must be a positive integer.';
     }
-    if (params.endLine !== undefined && params.endLine < 1) {
-      return 'endLine must be a positive number.';
+    if (
+      params.endLine !== undefined &&
+      (!Number.isSafeInteger(params.endLine) || params.endLine < 1)
+    ) {
+      return 'endLine must be a positive integer.';
     }
-    if (params.endCharacter !== undefined && params.endCharacter < 1) {
-      return 'endCharacter must be a positive number.';
+    if (
+      params.endCharacter !== undefined &&
+      (!Number.isSafeInteger(params.endCharacter) || params.endCharacter < 1)
+    ) {
+      return 'endCharacter must be a positive integer.';
     }
-    if (params.limit !== undefined && params.limit <= 0) {
-      return 'limit must be a positive number.';
+    if (
+      params.limit !== undefined &&
+      (!Number.isSafeInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'limit must be a positive integer.';
     }
 
     return null;
