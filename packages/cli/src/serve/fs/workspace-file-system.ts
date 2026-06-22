@@ -391,6 +391,15 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           `line must be a positive integer, got ${opts.line}`,
         );
       }
+      if (
+        opts.limit !== undefined &&
+        (!Number.isSafeInteger(opts.limit) || opts.limit < 1)
+      ) {
+        throw new FsError(
+          'parse_error',
+          `limit must be a positive integer, got ${opts.limit}`,
+        );
+      }
       const snapshot = await readTextSnapshotFromResolvedFile(p, opts);
       const ignoreVerdict = shouldIgnore(
         p,
