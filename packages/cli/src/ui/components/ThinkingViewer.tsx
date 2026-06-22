@@ -5,7 +5,7 @@
  */
 
 import type { FC } from 'react';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useKeypress, type Key } from '../hooks/useKeypress.js';
@@ -44,6 +44,10 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
 
   const lines = data.text.split('\n');
   const maxScroll = Math.max(0, lines.length - contentHeight);
+
+  useEffect(() => {
+    setScrollOffset((prev) => Math.min(prev, maxScroll));
+  }, [maxScroll]);
 
   const scrollBy = useCallback(
     (delta: number) => {

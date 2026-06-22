@@ -155,30 +155,27 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const boxWidth = mainAreaWidth || contentWidth;
 
   const thoughtRef = useRef<DOMElement>(null);
-  const isCommittedThought =
-    !isPending &&
-    (itemForDisplay.type === 'gemini_thought' ||
-      itemForDisplay.type === 'gemini_thought_content');
+  const isClickableThought =
+    !isPending && !thoughtExpanded && itemForDisplay.type === 'gemini_thought';
 
-  const thoughtText =
-    isCommittedThought && 'text' in itemForDisplay
-      ? (itemForDisplay as { text: string }).text
-      : '';
-  const thoughtDurationMs =
-    itemForDisplay.type === 'gemini_thought'
-      ? itemForDisplay.durationMs
-      : undefined;
+  const thoughtText = isClickableThought ? itemForDisplay.text : '';
+  const thoughtDurationMs = isClickableThought
+    ? itemForDisplay.durationMs
+    : undefined;
 
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
         if (event.name !== 'left-press' || !thoughtRef.current) return;
         const metrics = measureElementPosition(thoughtRef.current);
+        // SGR mouse coordinates are 1-based; yoga layout is 0-based
+        const col = event.col - 1;
+        const row = event.row - 1;
         if (
-          event.col >= metrics.x &&
-          event.col < metrics.x + metrics.width &&
-          event.row >= metrics.y &&
-          event.row < metrics.y + metrics.height
+          col >= metrics.x &&
+          col < metrics.x + metrics.width &&
+          row >= metrics.y &&
+          row < metrics.y + metrics.height
         ) {
           openThinkingViewer({
             text: thoughtText,
@@ -188,7 +185,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       },
       [openThinkingViewer, thoughtText, thoughtDurationMs],
     ),
-    { isActive: isCommittedThought && !thoughtExpanded },
+    { isActive: isClickableThought },
   );
 
   return (
@@ -243,7 +240,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'gemini_thought' && (
-        <Box ref={isCommittedThought ? thoughtRef : undefined}>
+        <Box ref={isClickableThought ? thoughtRef : undefined}>
           <ThinkMessage
             text={itemForDisplay.text.trimEnd()}
             isPending={isPending}
@@ -257,17 +254,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         </Box>
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (
-        <Box ref={isCommittedThought ? thoughtRef : undefined}>
-          <ThinkMessageContent
-            text={itemForDisplay.text.trimEnd()}
-            isPending={isPending}
-            expanded={thoughtExpanded}
-            availableTerminalHeight={
-              availableTerminalHeightGemini ?? availableTerminalHeight
-            }
-            contentWidth={contentWidth}
-          />
-        </Box>
+        <ThinkMessageContent
+          text={itemForDisplay.text.trimEnd()}
+          isPending={isPending}
+          expanded={thoughtExpanded}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          contentWidth={contentWidth}
+        />
       )}
       {itemForDisplay.type === 'info' && (
         <InfoMessage

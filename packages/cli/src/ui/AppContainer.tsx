@@ -3116,6 +3116,14 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
+      // ThinkingViewer owns all input while open; only ESC passes through
+      if (thinkingViewerData) {
+        if (keyMatchers[Command.ESCAPE](key)) {
+          closeThinkingViewer();
+        }
+        return;
+      }
+
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -3145,12 +3153,6 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
-        // Close thinking viewer overlay first if open
-        if (thinkingViewerData) {
-          closeThinkingViewer();
-          return;
-        }
-
         // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
         // the Esc to switch to NORMAL mode. Without this guard, both handlers
         // fire on the same keypress — vim switches mode AND AppContainer
@@ -3943,12 +3945,13 @@ export const AppContainer = (props: AppContainerProps) => {
                 <TerminalOutputProvider value={writeRaw}>
                   <ThinkingViewerProvider value={thinkingViewerValue}>
                     <ShellFocusContext.Provider value={isFocused}>
-                      <App />
-                      {thinkingViewerData && (
+                      {thinkingViewerData ? (
                         <ThinkingViewer
                           data={thinkingViewerData}
                           onClose={closeThinkingViewer}
                         />
+                      ) : (
+                        <App />
                       )}
                     </ShellFocusContext.Provider>
                   </ThinkingViewerProvider>
