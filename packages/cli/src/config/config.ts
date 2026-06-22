@@ -1885,6 +1885,7 @@ export async function loadCliConfig(
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
     mcpServers,
+    topTierMcpServers,
     pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)

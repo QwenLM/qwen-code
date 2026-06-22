@@ -530,6 +530,140 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('MCP hot-reload (sub-task 3)', () => {
+    const srvA: MCPServerConfig = { command: 'a' };
+    const srvB: MCPServerConfig = { command: 'b' };
+
+    it('setMcpServers REPLACES (not merges) and works post-init', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA },
+      });
+      await config.initialize();
+
+      // addMcpServers would throw post-init; setMcpServers must not.
+      config.setMcpServers({ b: srvB });
+
+      const settingsLayer = config.getSettingsMcpServers();
+      expect(settingsLayer).toEqual({ b: srvB });
+      expect(settingsLayer).not.toHaveProperty('a');
+    });
+
+    it('reinitializeMcpServers is a safe no-op before initialize()', async () => {
+      const config = new Config({ ...baseParams });
+      // No tool registry yet — must not throw and must not connect.
+      await expect(
+        config.reinitializeMcpServers({ a: srvA }),
+      ).resolves.toBeUndefined();
+      expect(config.getSettingsMcpServers()).toEqual({ a: srvA });
+    });
+
+    it('records MCP servers removed by a reconcile and self-heals on re-add', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+
+      // Drop `a` → tracked as recently removed.
+      await config.reinitializeMcpServers({ b: srvB });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['a']);
+
+      // Drop `b` too → both tracked.
+      await config.reinitializeMcpServers({});
+      expect(config.getRecentlyRemovedMcpServers().sort()).toEqual(['a', 'b']);
+
+      // Re-add `a` → it self-heals out of the set; `b` stays removed.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['b']);
+    });
+
+    it('reinitializeMcpServers replaces config then drives incremental reconcile', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      await config.reinitializeMcpServers({ b: srvB });
+
+      expect(config.getSettingsMcpServers()).toEqual({ b: srvB });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(
+        config,
+      );
+    });
+
+    it('coalesces a reconcile request that arrives mid-flight into one extra pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Make the first pass hang until we release it, so the second call
+      // arrives while the first is in flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      const first = config.reinitializeMcpServers({ b: srvB });
+      // Second call lands mid-flight → coalesced, not a third pass.
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      release();
+      await Promise.all([first, second]);
+
+      // One in-flight pass + one drained follow-up = exactly 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('rethrows a failed reconcile and resets the in-progress guard so the next call still runs', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // First pass fails — reinitialize must surface the error.
+      manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+        new Error('reconcile boom'),
+      );
+      await expect(config.reinitializeMcpServers({ b: srvB })).rejects.toThrow(
+        'reconcile boom',
+      );
+
+      // Guard must have been reset in `finally`; a subsequent call must not be
+      // silently coalesced/dropped — it runs a fresh pass.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('admission-list setters and getMcpGating round-trip', () => {
+      const config = new Config({ ...baseParams });
+      config.setExcludedMcpServers(['x']);
+      config.setAllowedMcpServers(['y']);
+      config.setPendingMcpServers(['z']);
+      expect(config.getMcpGating()).toEqual({
+        excluded: ['x'],
+        allowed: ['y'],
+        pending: ['z'],
+      });
+      expect(config.getAllowedMcpServers()).toEqual(['y']);
+    });
+  });
+
   describe('MemoryPressureMonitor isolation', () => {
     it('returns a distinct monitor for child Configs created via Object.create', async () => {
       const parent = new Config(baseParams);

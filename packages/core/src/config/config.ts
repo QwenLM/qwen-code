@@ -12,7 +12,7 @@ import * as path from 'node:path';
 import process from 'node:process';
 
 // External dependencies
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
 // Types
 import type {
@@ -783,6 +783,13 @@ export interface ConfigParameters {
   toolCallCommand?: string;
   mcpServerCommand?: string;
   mcpServers?: Record<string, MCPServerConfig>;
+  /**
+   * Session-injected (ACP/IDE) + `--mcp-config` servers that sit above the
+   * settings layer and `.mcp.json` and are never gated (#4615). Retained so the
+   * hot-reload subscriber (sub-task 3) can re-assemble the effective map the
+   * same way boot did. See `assembleMcpServers`.
+   */
+  topTierMcpServers?: Record<string, MCPServerConfig>;
   lsp?: {
     enabled?: boolean;
   };
@@ -1252,13 +1259,33 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  /**
+   * Names of MCP servers that were present in the effective server map but
+   * disappeared after a runtime reconcile (hot-reload / `/reload`). Used only
+   * to give a precise "this MCP server was removed this session" message when
+   * the model later calls a tool that no longer exists (see
+   * `CoreToolScheduler.getToolNotFoundMessage`). Self-heals: a name is dropped
+   * from the set the moment the server reappears in the effective map.
+   */
+  private readonly recentlyRemovedMcpServers = new Set<string>();
+  private readonly topTierMcpServers:
+    | Record<string, MCPServerConfig>
+    | undefined;
   private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private lspInitializationError?: string;
-  private readonly allowedMcpServers?: string[];
+  private allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  /**
+   * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
+   * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
+   * shares no such lock; without this, two `reinitializeMcpServers` calls could
+   * interleave their `discoverAllMcpToolsIncremental` passes. See sub-task 3.
+   */
+  private mcpReconcileInProgress = false;
+  private mcpReconcilePending = false;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -1451,6 +1478,7 @@ export class Config {
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
     this.mcpServers = params.mcpServers;
+    this.topTierMcpServers = params.topTierMcpServers;
     this.lspEnabled = params.lsp?.enabled ?? false;
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
@@ -1632,7 +1660,19 @@ export class Config {
 
     const proxyUrl = this.getProxy();
     if (proxyUrl) {
-      setGlobalDispatcher(new ProxyAgent(proxyUrl));
+      // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
+      // honored. A bare ProxyAgent tunnels EVERY request — including local
+      // MCP servers reached over `http://localhost:...` — through the proxy,
+      // which typically can't route back to localhost and fails with an
+      // opaque `fetch failed`. EnvHttpProxyAgent connects hosts listed in
+      // `NO_PROXY` (e.g. `localhost,127.0.0.1`) directly while still proxying
+      // everything else (LLM API calls, remote MCP). The explicit
+      // `--proxy` / `settings.proxy` value (resolved by `getProxy()`)
+      // overrides env `http(s)_proxy`; `NO_PROXY` continues to come from the
+      // environment. See issue #3696 (local MCP + corporate proxy).
+      setGlobalDispatcher(
+        new EnvHttpProxyAgent({ httpProxy: proxyUrl, httpsProxy: proxyUrl }),
+      );
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -3345,6 +3385,15 @@ export class Config {
     return this.mcpServers;
   }
 
+  /**
+   * Session-injected + `--mcp-config` ("top-tier") servers captured at boot, so
+   * the hot-reload subscriber can re-assemble the effective MCP map exactly the
+   * way boot did. See sub-task 3 and `assembleMcpServers`.
+   */
+  getTopTierMcpServers(): Record<string, MCPServerConfig> | undefined {
+    return this.topTierMcpServers;
+  }
+
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
     let mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
@@ -3440,6 +3489,157 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  /**
+   * Replace the settings-layer MCP server map at runtime (hot-reload).
+   * Unlike {@link addMcpServers}, this bypasses the `initialized` guard and
+   * REPLACES (not merges) so removals take effect. The runtime overlay
+   * ({@link addRuntimeMcpServer}) and extension contributions are unaffected —
+   * {@link getMcpServers} still layers them on top. See sub-task 3.
+   */
+  setMcpServers(servers: Record<string, MCPServerConfig> | undefined): void {
+    this.mcpServers = servers;
+  }
+
+  /**
+   * Replace the allow-list of MCP server names at runtime (hot-reload). When
+   * set, {@link getMcpServers} only yields servers whose name is in this list.
+   * `allowedMcpServers` is consulted as a filter inside `getMcpServers()`, so
+   * without this setter an allow-list edit would silently require a restart.
+   */
+  setAllowedMcpServers(allowed: string[] | undefined): void {
+    this.allowedMcpServers = allowed;
+  }
+
+  getAllowedMcpServers(): string[] | undefined {
+    return this.allowedMcpServers;
+  }
+
+  /**
+   * Replace the pending-approval set of gated MCP server names at runtime
+   * (hot-reload). The discovery layer skips these BEFORE any connection side
+   * effect, so a hot-reload must recompute them (#4615) lest it connect a
+   * newly-added but unapproved `.mcp.json`/workspace server.
+   */
+  setPendingMcpServers(pending: string[] | undefined): void {
+    this.pendingMcpServers = pending;
+  }
+
+  /**
+   * Snapshot of the three connection-admission lists consulted by discovery,
+   * used by the hot-reload subscriber as the pre-image to diff against. Paired
+   * with {@link setExcludedMcpServers} / {@link setAllowedMcpServers} /
+   * {@link setPendingMcpServers}.
+   */
+  getMcpGating(): {
+    excluded?: string[];
+    allowed?: string[];
+    pending?: string[];
+  } {
+    return {
+      excluded: this.excludedMcpServers,
+      allowed: this.allowedMcpServers,
+      pending: this.pendingMcpServers,
+    };
+  }
+
+  /**
+   * Names of MCP servers removed during this session by a runtime reconcile and
+   * not since re-added. Consumed by the tool-not-found path to explain that a
+   * now-missing `mcp__<server>__*` tool belongs to a server the user removed
+   * mid-session, rather than emitting an unrelated fuzzy suggestion. Maintained
+   * by {@link reinitializeMcpServers}.
+   */
+  getRecentlyRemovedMcpServers(): string[] {
+    return [...this.recentlyRemovedMcpServers];
+  }
+
+  /**
+   * Apply a new settings-layer MCP map and incrementally reconcile live
+   * connections (connect added, disconnect removed, restart changed; unchanged
+   * servers untouched). Safe no-op before {@link initialize}. A shared
+   * "reconcile in progress" guard serializes against a concurrent caller (e.g.
+   * `/reload`): a request arriving mid-flight is coalesced into a single
+   * follow-up pass so the latest config always wins. See sub-task 3.
+   */
+  async reinitializeMcpServers(
+    servers: Record<string, MCPServerConfig> | undefined,
+  ): Promise<void> {
+    this.debugLogger.debug(
+      `[mcp-hot-reload] reinitializeMcpServers: servers=[${Object.keys(
+        servers ?? {},
+      ).join(
+        ', ',
+      )}] initialized=${this.initialized} inProgress=${this.mcpReconcileInProgress}`,
+    );
+
+    // Track which servers disappeared from / reappeared in the *effective* map
+    // (settings + extensions + runtime) so the tool-not-found path can tell the
+    // model a missing tool belongs to a server removed this session. Diff the
+    // merged map (not just `servers`) so a server still provided by an
+    // extension is not falsely flagged as removed. Re-added names self-heal.
+    const prevEffective = new Set(Object.keys(this.getMcpServers() ?? {}));
+    this.setMcpServers(servers);
+    const nextEffective = Object.keys(this.getMcpServers() ?? {});
+    for (const name of nextEffective) {
+      this.recentlyRemovedMcpServers.delete(name);
+    }
+    for (const name of prevEffective) {
+      if (!nextEffective.includes(name)) {
+        this.recentlyRemovedMcpServers.add(name);
+      }
+    }
+    if (!this.initialized) {
+      // No tool registry yet — boot-time discovery will pick up the new map.
+      this.debugLogger.debug(
+        '[mcp-hot-reload] not initialized yet — deferring to boot-time discovery (no-op)',
+      );
+      return;
+    }
+    if (this.mcpReconcileInProgress) {
+      // Coalesce: a pass is already running and will re-check after it
+      // finishes. Mark that the desired state advanced so it runs again.
+      this.mcpReconcilePending = true;
+      this.debugLogger.debug(
+        '[mcp-hot-reload] reconcile already in flight — coalescing into a follow-up pass',
+      );
+      return;
+    }
+    this.mcpReconcileInProgress = true;
+    try {
+      const registry = this.getToolRegistry();
+      this.debugLogger.debug(
+        '[mcp-hot-reload] running incremental reconcile (pass 1)',
+      );
+      await registry.getMcpClientManager().discoverAllMcpToolsIncremental(this);
+      // Drain any change that arrived while this pass was in flight. The pool
+      // path returns the in-flight promise rather than queuing, so awaiting is
+      // not enough — re-run once more to pick up the latest config.
+      let pass = 1;
+      while (this.mcpReconcilePending) {
+        this.mcpReconcilePending = false;
+        pass += 1;
+        this.debugLogger.debug(
+          `[mcp-hot-reload] running coalesced incremental reconcile (pass ${pass})`,
+        );
+        await registry
+          .getMcpClientManager()
+          .discoverAllMcpToolsIncremental(this);
+      }
+      this.debugLogger.debug(
+        `[mcp-hot-reload] reconcile complete after ${pass} pass(es); live servers=[${Object.keys(
+          this.getMcpServers() ?? {},
+        ).join(', ')}]`,
+      );
+    } catch (err) {
+      this.debugLogger.error(
+        `[mcp-hot-reload] reconcile failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+      throw err;
+    } finally {
+      this.mcpReconcileInProgress = false;
+    }
   }
 
   /**

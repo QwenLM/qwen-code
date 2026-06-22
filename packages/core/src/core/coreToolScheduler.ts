@@ -1617,9 +1617,63 @@ export class CoreToolScheduler {
       }
     }
 
+    // MCP tool whose server is gone / unconfigured: explain in MCP terms
+    // instead of falling through to a Levenshtein suggestion that would surface
+    // unrelated tools (e.g. "did you mean computer_use__click?").
+    const mcpMessage = this.getMcpToolUnavailableMessage(unknownToolName);
+    if (mcpMessage) {
+      return mcpMessage;
+    }
+
     // Standard "not found" message with Levenshtein suggestions
     const suggestion = this.getToolSuggestion(unknownToolName, topN);
     return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
+  }
+
+  /**
+   * For an `mcp__<server>__<tool>` name whose tool is not registered, explains
+   * *why* in MCP terms — the server was removed this session, is not (or no
+   * longer) configured, or is configured but lacks that tool — instead of
+   * letting the generic Levenshtein path suggest unrelated tools. Returns null
+   * for non-MCP names so they keep the existing suggestion behaviour unchanged.
+   *
+   * Detection is by prefix-membership against known server names (each
+   * sanitized the way `generateValidName` builds the registered tool name),
+   * never by parsing the server back out of the unknown name: the `__`
+   * separator is ambiguous and long names are truncated, so extraction is
+   * unreliable. A name we cannot classify falls through to the generic message.
+   */
+  private getMcpToolUnavailableMessage(unknownToolName: string): string | null {
+    if (!unknownToolName.startsWith('mcp__')) {
+      return null;
+    }
+    // Mirror generateValidName's per-char sanitization when rebuilding a
+    // server's registered prefix. The trailing `__` makes the match exact at a
+    // server boundary (so `foo` does not match a `foobar` server). Truncation
+    // (>63-char names) is the rare case we let fall through.
+    const prefixOf = (server: string): string =>
+      `mcp__${server}__`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+
+    // (B) Removed this session — precise, names the server.
+    const removed = this.config.getRecentlyRemovedMcpServers?.() ?? [];
+    const removedHit = removed.find((s) =>
+      unknownToolName.startsWith(prefixOf(s)),
+    );
+    if (removedHit) {
+      return `Tool "${unknownToolName}" is unavailable: the MCP server "${removedHit}" was removed during this session, so its tools were unloaded. Re-add it to your settings to use this tool again.`;
+    }
+
+    // (A) Not (or no longer) a configured MCP server.
+    const configured = Object.keys(this.config.getMcpServers?.() ?? {});
+    const serverHit = configured.find((s) =>
+      unknownToolName.startsWith(prefixOf(s)),
+    );
+    if (!serverHit) {
+      return `Tool "${unknownToolName}" not found: no MCP server providing it is currently configured. If you recently removed or renamed an MCP server, its tools are no longer available.`;
+    }
+
+    // Server is configured but this exact tool is not registered.
+    return `Tool "${unknownToolName}" not found on MCP server "${serverHit}". The server may be disconnected, still starting up, or the tool was renamed.`;
   }
 
   /** Suggests similar tool names using Levenshtein distance. */

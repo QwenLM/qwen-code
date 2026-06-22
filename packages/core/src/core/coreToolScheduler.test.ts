@@ -2989,6 +2989,118 @@ describe('CoreToolScheduler', () => {
     );
   });
 
+  describe('MCP tool-not-found messaging', () => {
+    const makeScheduler = (opts: {
+      mcpServers?: Record<string, unknown>;
+      removed?: string[];
+      allToolNames?: string[];
+    }) => {
+      const mockToolRegistry = {
+        getAllToolNames: () => opts.allToolNames ?? [],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getMcpServers: () => opts.mcpServers,
+        getRecentlyRemovedMcpServers: () => opts.removed ?? [],
+      } as unknown as Config;
+      return new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+    };
+
+    it('names a server removed this session (precise, branch B)', () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(msg).toContain('"pangu-server"');
+      expect(msg).toContain('removed during this session');
+    });
+
+    it('reports an MCP tool with no configured server (branch A)', () => {
+      const scheduler = makeScheduler({ mcpServers: {}, removed: [] });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__ghost__do_thing',
+      );
+      expect(msg).toContain(
+        'no MCP server providing it is currently configured',
+      );
+    });
+
+    it('reports a configured server that lacks the tool', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        removed: [],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__missing_tool',
+      );
+      expect(msg).toContain('on MCP server "pangu-server"');
+    });
+
+    it('prefers the removed-this-session message over the generic one', () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(msg).toContain('removed during this session');
+      expect(msg).not.toContain('currently configured');
+    });
+
+    it('returns null for non-MCP names (keeps generic suggestion path)', () => {
+      const scheduler = makeScheduler({ mcpServers: {}, removed: [] });
+      // @ts-expect-error accessing private method
+      expect(scheduler.getMcpToolUnavailableMessage('list_fils')).toBeNull();
+    });
+
+    it('a prefix server name does not match a longer server (boundary)', () => {
+      // `foo` must NOT claim a `mcp__foobar__*` tool.
+      const scheduler = makeScheduler({ mcpServers: {}, removed: ['foo'] });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage('mcp__foobar__x');
+      expect(msg).not.toContain('removed during this session');
+      expect(msg).toContain('no MCP server providing it');
+    });
+
+    it('getToolNotFoundMessage routes MCP names to the MCP branch, others to Levenshtein', async () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+        allToolNames: ['list_files', 'read_file'],
+      });
+      // @ts-expect-error accessing private method
+      const mcpMsg = await scheduler.getToolNotFoundMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(mcpMsg).toContain('removed during this session');
+      expect(mcpMsg).not.toContain('Did you mean');
+
+      // @ts-expect-error accessing private method
+      const genericMsg = await scheduler.getToolNotFoundMessage('list_fils');
+      expect(genericMsg).toContain('Did you mean');
+    });
+  });
+
   describe('getToolSuggestion', () => {
     it('should suggest the top N closest tool names for a typo', () => {
       // Create mocked tool registry
