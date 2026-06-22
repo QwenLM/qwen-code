@@ -3385,6 +3385,41 @@ describe('setApprovalMode with folder trust', () => {
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
     });
+
+    // Regression for #5574: the gate state records whether the model or the
+    // user entered plan mode, so exit_plan_mode can decide whether to gate.
+    it('marks the plan gate entry as user-initiated by default', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+    });
+
+    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Simulate the Shift+Tab cycle order:
+      // default → auto-edit → auto → yolo → plan
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      // prePlanMode is yolo purely because it precedes plan in the cycle —
+      // it does NOT mean the user wants autonomous execution.
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
   });
 
   describe('AUTO mode', () => {

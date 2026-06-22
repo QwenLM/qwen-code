@@ -3621,7 +3621,10 @@ export class Config {
     return this.planGateState;
   }
 
-  setApprovalMode(mode: ApprovalMode): void {
+  setApprovalMode(
+    mode: ApprovalMode,
+    options?: { enteredByModel?: boolean },
+  ): void {
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -3634,8 +3637,14 @@ export class Config {
     // Track the mode before entering plan mode so it can be restored later
     if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
       this.prePlanMode = this.approvalMode;
-      // Begin a fresh Plan Mode Entry for the Plan Approval Gate.
-      this.planGateState = createPlanGateState(++this.planGateEntryCounter);
+      // Begin a fresh Plan Mode Entry for the Plan Approval Gate. Only the
+      // model's enter_plan_mode tool marks the entry as model-initiated; every
+      // user-driven entry (Shift+Tab, /plan, dialog) defaults to false so the
+      // user always gets the confirmation dialog on exit (issue #5574).
+      this.planGateState = createPlanGateState(
+        ++this.planGateEntryCounter,
+        options?.enteredByModel ?? false,
+      );
     } else if (
       mode !== ApprovalMode.PLAN &&
       this.approvalMode === ApprovalMode.PLAN
