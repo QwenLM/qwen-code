@@ -54,13 +54,11 @@ import {
   shouldRunVisionBridge,
   hasImageParts,
   splitImageParts,
-  VISION_BRIDGE_MAX_IMAGES,
   generateToolUseSummary,
   getActiveGoal,
   activeGoalEquals,
   setActiveGoal,
   clearActiveGoal,
-  formatOmittedReasons,
   createDuplicateProviderToolCallResponse,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
@@ -109,22 +107,11 @@ const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
 const VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT = 2048;
-const NOTICE_CONTROL_CHARS = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
   responseParts: Part[];
-}
-
-function formatVisionBridgeNoticeLabel(label: string): string {
-  return (
-    label
-      .replace(/\r\n?|[\u2028\u2029]/g, ' ')
-      .replace(NOTICE_CONTROL_CHARS, '')
-      .replace(/\s+/g, ' ')
-      .trim() || 'vision model'
-  );
 }
 
 function truncateVisionBridgeTranscript(transcript: string): string {
@@ -136,49 +123,37 @@ function truncateVisionBridgeTranscript(transcript: string): string {
     .trimEnd()}\n[Transcript truncated]`;
 }
 
-function stripVisionBridgeImages(parts: PartListUnion): Part[] {
-  return splitImageParts(parts).nonImageParts;
-}
-
 /**
  * Build the user-facing notice shown when the vision bridge runs. On success it
  * states which model was used, how many images were converted (and omitted),
- * notes the data egress, and includes the generated transcription so the user
- * can catch misreads. On failure it surfaces the reason.
+ * discloses the data egress (and endpoint, since auto-select can route to a
+ * different host than the primary model), and includes the generated
+ * transcription so the user can catch misreads. On failure it surfaces the
+ * reason.
  *
  * @param result The structured result returned by the vision bridge.
  * @returns A multi-line notice string for the message history.
  */
 function formatVisionBridgeNotice(result: VisionBridgeResult): string {
-  const modelName = formatVisionBridgeNoticeLabel(
-    result.modelId ?? 'vision model',
-  );
+  const modelName = result.modelId ?? 'vision model';
   const target = result.modelEndpoint
-    ? `${modelName} (${formatVisionBridgeNoticeLabel(result.modelEndpoint)})`
+    ? `${modelName} (${result.modelEndpoint})`
     : modelName;
+  const egressNote = result.egressOccurred
+    ? ` Your image and prompt/context were sent to ${target}.`
+    : '';
   if (result.status === 'failed') {
-    const egress = result.egressOccurred
-      ? ` Your image and prompt/context were sent to ${target}.`
-      : '';
     const reason = result.egressOccurred
       ? 'the vision model request failed'
       : 'the vision bridge could not run';
-    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egress} The image was not interpreted.`;
+    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
-    const egress = result.egressOccurred
-      ? ` Your image and prompt/context were sent to ${target}.`
-      : '';
-    return `🔎 Vision bridge cancelled.${egress}`;
+    return `🔎 Vision bridge cancelled.${egressNote}`;
   }
-  const omittedReasons = formatOmittedReasons(
-    result.omittedInvalidCount,
-    result.omittedCappedCount,
-  );
-  const omitted = omittedReasons ? ` (${omittedReasons})` : '';
-  // The egress disclosure is always shown. Name the endpoint too - cross-provider
-  // auto-select can route to a different
-  // host than the primary model.
+  // On success the image was always sent, so disclose egress unconditionally.
+  const omitted =
+    result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
   const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   return result.transcript
     ? `${header}\n${truncateVisionBridgeTranscript(result.transcript)}`
@@ -855,32 +830,22 @@ export const useGeminiStream = (
       parts: PartListUnion | null,
       timestamp: number,
       signal: AbortSignal,
-      maxImages = VISION_BRIDGE_MAX_IMAGES,
-    ): Promise<{
-      parts: PartListUnion | null;
-      shouldProceed: boolean;
-      convertedCount: number;
-    }> => {
+    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
       if (
         parts === null ||
         !hasImageParts(parts) ||
         !shouldRunVisionBridge(config)
       ) {
-        return { parts, shouldProceed: true, convertedCount: 0 };
+        return { parts, shouldProceed: true };
       }
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
-      const bridgeResult = await runVisionBridge({
-        config,
-        parts,
-        signal,
-        maxImages,
-      });
+      const bridgeResult = await runVisionBridge({ config, parts, signal });
       debugLogger.debug(
         `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
       );
-      // Always surface one notice: egress disclosure on success, reason on
-      // failure, and egress disclosure after cancellation if data was sent.
+      // Surface one notice: egress + transcript on success, reason on failure,
+      // and egress disclosure after cancellation if data was already sent.
       if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
         addItem(
           {
@@ -894,40 +859,18 @@ export const useGeminiStream = (
         );
       }
       if (signal.aborted) {
-        return {
-          parts: null,
-          shouldProceed: false,
-          convertedCount: bridgeResult.convertedCount,
-        };
+        return { parts: null, shouldProceed: false };
       }
       if (bridgeResult.applied && bridgeResult.parts != null) {
-        return {
-          parts: bridgeResult.parts,
-          shouldProceed: true,
-          convertedCount: bridgeResult.convertedCount,
-        };
+        return { parts: bridgeResult.parts, shouldProceed: true };
       }
-      if (bridgeResult.status === 'failed') {
-        // Defensive fallback for legacy/invalid failed results without
-        // transformed text. Current failures include a no-image note.
-        const fallbackParts = stripVisionBridgeImages(parts);
-        return fallbackParts.length > 0
-          ? {
-              parts: fallbackParts,
-              shouldProceed: true,
-              convertedCount: bridgeResult.convertedCount,
-            }
-          : {
-              parts: null,
-              shouldProceed: false,
-              convertedCount: bridgeResult.convertedCount,
-            };
-      }
-      return {
-        parts,
-        shouldProceed: true,
-        convertedCount: bridgeResult.convertedCount,
-      };
+      // The bridge produced no usable replacement. Never forward images to a
+      // text-only model (it can't read them): drop them and proceed on the
+      // remaining text, or stop if nothing is left.
+      const textOnly = splitImageParts(parts).nonImageParts;
+      return textOnly.length > 0
+        ? { parts: textOnly, shouldProceed: true }
+        : { parts: null, shouldProceed: false };
     },
     [addItem, config],
   );
@@ -2828,7 +2771,6 @@ export const useGeminiStream = (
         if (shouldTrackMidTurnAbort) {
           auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
-        let remainingBridgeImages = VISION_BRIDGE_MAX_IMAGES;
         try {
           for (let index = 0; index < drained.length; index += 1) {
             if (midTurnAbort.signal.aborted) {
@@ -2913,11 +2855,6 @@ export const useGeminiStream = (
               resolvedMidTurnQuery,
               midTurnTimestamp + index,
               midTurnAbort.signal,
-              remainingBridgeImages,
-            );
-            remainingBridgeImages = Math.max(
-              0,
-              remainingBridgeImages - bridgeResult.convertedCount,
             );
             if (!bridgeResult.shouldProceed) {
               if (midTurnAbort.signal.aborted) {

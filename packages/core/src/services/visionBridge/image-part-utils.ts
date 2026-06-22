@@ -7,10 +7,11 @@
 import type { Part, PartListUnion } from '@google/genai';
 
 /**
- * Maximum base64 payload size (in MB) a single image part may carry before the
- * vision bridge refuses it. Mirrors the limit already enforced when files are
- * read into `inlineData` parts (`fileUtils.ts`), so the bridge never tries a
- * side call that the provider would reject for size.
+ * Conservative cap on a single image part's base64 length (in MB) before the
+ * vision bridge refuses it, so the bridge never makes a side call a provider
+ * would reject for size. Measured on the base64 string, which overstates the
+ * decoded bytes by ~33%, keeping this comfortably under the repo's ~10MB
+ * decoded inline-media ceiling.
  */
 const MAX_IMAGE_BASE64_MB = 9.9;
 
@@ -98,25 +99,21 @@ export function splitImageParts(input: PartListUnion): SplitParts {
 }
 
 /**
- * Validate that an image part is safe to send to the bridge model.
+ * Report whether an image part is safe to send to the bridge model.
  *
  * Guards against empty/corrupt payloads and payloads that exceed the provider
- * size limit. Callers should drop parts that fail validation and report them
- * to the user rather than attempting a side call that is certain to fail.
+ * size limit. Callers should drop parts that fail so they never attempt a side
+ * call that is certain to fail.
  *
- * @param part The image part to validate.
- * @returns `null` when valid, otherwise a human-readable reason string.
+ * @param part The image part to check.
+ * @returns `true` when the part carries non-empty, within-limit image data.
  */
-export function validateImagePart(part: Part): string | null {
+export function isUsableImagePart(part: Part): boolean {
   const data = part.inlineData?.data;
   if (typeof data !== 'string' || data.length === 0) {
-    return 'image data is empty or unreadable';
+    return false;
   }
-  const sizeMb = data.length / (1024 * 1024);
-  if (sizeMb > MAX_IMAGE_BASE64_MB) {
-    return `image exceeds the ${MAX_IMAGE_BASE64_MB}MB limit (${sizeMb.toFixed(2)}MB encoded)`;
-  }
-  return null;
+  return data.length / (1024 * 1024) <= MAX_IMAGE_BASE64_MB;
 }
 
 /**

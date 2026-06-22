@@ -94,24 +94,6 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
 ];
 
 /**
- * Return the default input modalities for a known model based on its name.
- *
- * Uses the same normalize-then-regex pattern as {@link tokenLimit}.
- * Returns `undefined` when no model-name pattern matches.
- */
-export function detectDefaultModalities(
-  model: string,
-): InputModalities | undefined {
-  const norm = normalize(model);
-  for (const [regex, modalities] of MODALITY_PATTERNS) {
-    if (regex.test(norm)) {
-      return { ...modalities };
-    }
-  }
-  return undefined;
-}
-
-/**
  * Return the default input modalities for a model based on its name.
  *
  * Uses the same normalize-then-regex pattern as {@link tokenLimit}.
@@ -119,9 +101,11 @@ export function detectDefaultModalities(
  * unsupported media types that would cause unrecoverable API errors.
  */
 export function defaultModalities(model: string): InputModalities {
-  const modalities = detectDefaultModalities(model);
-  if (modalities) {
-    return modalities;
+  const norm = normalize(model);
+  for (const [regex, modalities] of MODALITY_PATTERNS) {
+    if (regex.test(norm)) {
+      return { ...modalities };
+    }
   }
   return {};
 }

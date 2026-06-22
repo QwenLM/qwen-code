@@ -613,24 +613,6 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
-    it('returns the main generator when baseUrl hint matches the main provider', async () => {
-      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
-        authType: AuthType.QWEN_OAUTH,
-        model: 'main-model',
-        baseUrl: 'https://main.example.com/v1',
-      });
-      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
-
-      const resolved = await c.resolveForModel('main-model', {
-        authType: AuthType.QWEN_OAUTH,
-        baseUrl: 'https://main.example.com/v1',
-      });
-
-      expect(resolved.contentGenerator).toBe(mockContentGenerator);
-      expect(getResolvedModel).not.toHaveBeenCalled();
-      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
-    });
-
     it('returns the active runtime generator when model matches the runtime view', async () => {
       const runtimeContentGenerator = {
         generateContent: vi.fn(),
@@ -723,43 +705,6 @@ describe('BaseLlmClient', () => {
       // Falls back to main authType for retry classification.
       expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
-    });
-
-    it('throws instead of falling back when an explicit provider hint cannot be resolved', async () => {
-      getResolvedModel.mockReturnValue(undefined);
-
-      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
-
-      await expect(
-        c.resolveForModel('missing-vision-model', {
-          authType: AuthType.USE_OPENAI,
-          baseUrl: 'https://vision.example.com/v1',
-        }),
-      ).rejects.toThrow(
-        /missing-vision-model.*authType=openai.*baseUrl=https:\/\/vision\.example\.com\/v1/,
-      );
-      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
-    });
-
-    it('throws instead of falling back when explicit provider generator creation fails', async () => {
-      getResolvedModel.mockReturnValue({
-        authType: AuthType.USE_ANTHROPIC,
-        envKey: 'ANTHROPIC_API_KEY',
-        baseUrl: 'https://api.anthropic.com',
-      });
-      mockCreateContentGenerator.mockRejectedValue(
-        new Error('SDK init failed'),
-      );
-
-      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
-
-      await expect(
-        c.resolveForModel(fastModel, {
-          authType: AuthType.USE_ANTHROPIC,
-          baseUrl: 'https://api.anthropic.com',
-        }),
-      ).rejects.toThrow(/SDK init failed/);
-      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
     });
 
     it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
@@ -962,110 +907,6 @@ describe('BaseLlmClient', () => {
       expect(retryWithBackoff).toHaveBeenCalledWith(
         expect.any(Function),
         expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
-      );
-    });
-
-    it('generateText uses provider hints to resolve duplicated model ids exactly', async () => {
-      const targetBaseUrl = 'https://vision.example.com/v1';
-      getResolvedModel.mockImplementation(
-        (authType: string, model: string, baseUrl?: string) => {
-          if (
-            authType === AuthType.USE_ANTHROPIC &&
-            model === 'shared-model' &&
-            baseUrl === targetBaseUrl
-          ) {
-            return {
-              id: 'shared-model',
-              authType: AuthType.USE_ANTHROPIC,
-              envKey: 'ANTHROPIC_API_KEY',
-              baseUrl: targetBaseUrl,
-            };
-          }
-          if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
-            return {
-              id: 'shared-model',
-              authType: AuthType.USE_OPENAI,
-              envKey: 'OPENAI_API_KEY',
-              baseUrl: 'https://wrong.example.com/v1',
-            };
-          }
-          return undefined;
-        },
-      );
-      fastGenerateContent.mockResolvedValue({
-        candidates: [
-          {
-            content: { role: 'model', parts: [{ text: 'described' }] },
-            index: 0,
-          },
-        ],
-      });
-
-      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
-
-      const result = await c.generateText({
-        contents: [{ role: 'user', parts: [{ text: 'describe image' }] }],
-        model: 'shared-model',
-        modelAuthType: AuthType.USE_ANTHROPIC,
-        modelBaseUrl: targetBaseUrl,
-        abortSignal: new AbortController().signal,
-        promptId: 'vision-bridge',
-      });
-
-      expect(result.text).toBe('described');
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        AuthType.USE_ANTHROPIC,
-        'shared-model',
-        targetBaseUrl,
-      );
-      expect(getResolvedModel).toHaveBeenCalledTimes(1);
-      expect(getResolvedModel).not.toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
-        'shared-model',
-      );
-      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
-        crossProviderConfig,
-        'shared-model',
-        expect.objectContaining({
-          authType: AuthType.USE_ANTHROPIC,
-          baseUrl: targetBaseUrl,
-        }),
-      );
-      expect(retryWithBackoff).toHaveBeenCalledWith(
-        expect.any(Function),
-        expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
-      );
-    });
-
-    it('calls onDispatch before each generateText dispatch attempt', async () => {
-      const onDispatch = vi.fn();
-      vi.mocked(retryWithBackoff).mockImplementationOnce(async (fn) => {
-        await expect((fn as () => Promise<unknown>)()).rejects.toThrow(
-          'rate limited',
-        );
-        return await (fn as () => Promise<GenerateContentResponse>)();
-      });
-      mockGenerateContent
-        .mockRejectedValueOnce(new Error('rate limited'))
-        .mockResolvedValueOnce(createMockTextResponse('ok'));
-
-      const c = new BaseLlmClient(mockContentGenerator, mockConfig);
-
-      const result = await c.generateText({
-        contents: [{ role: 'user', parts: [{ text: 'say hi' }] }],
-        model: 'test-model',
-        abortSignal: new AbortController().signal,
-        onDispatch,
-      });
-
-      expect(result.text).toBe('ok');
-      expect(onDispatch).toHaveBeenCalledTimes(2);
-      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
-      expect(onDispatch.mock.invocationCallOrder[0]).toBeLessThan(
-        mockGenerateContent.mock.invocationCallOrder[0],
-      );
-      expect(onDispatch.mock.invocationCallOrder[1]).toBeLessThan(
-        mockGenerateContent.mock.invocationCallOrder[1],
       );
     });
   });

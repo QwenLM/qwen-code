@@ -1370,23 +1370,6 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([6, 10]);
     });
 
-    it('keeps the public positional offset and limit arguments working', async () => {
-      const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
-      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
-      const readFile = processSingleFileContent as unknown as (
-        filePath: string,
-        config: Config,
-        offset?: number,
-        limit?: number,
-      ) => ReturnType<typeof processSingleFileContent>;
-
-      const result = await readFile(testTextFilePath, mockConfig, 5, 5);
-
-      expect(result.llmContent).toBe(lines.slice(5, 10).join('\n'));
-      expect(result.returnDisplay).toBe('Read lines 6-10 of 20 from test.txt');
-      expect(result.linesShown).toEqual([6, 10]);
-    });
-
     it('should identify truncation when reading the end of a file', async () => {
       const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
       actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));

@@ -20,7 +20,6 @@ import type {
   ContentGeneratorConfig,
   InputModalities,
 } from '../core/contentGenerator.js';
-import { detectDefaultModalities } from '../core/modalityDefaults.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -2548,29 +2547,17 @@ export class Config {
   }
 
   /**
-   * Resolve the effective input modalities of the current primary model.
-   *
-   * Prefers explicitly configured modalities (e.g. from `modelProviders`) and
-   * falls back to name-based detection when the model name is known. Used to
+   * Resolve the effective input modalities of the current primary model. The
+   * content generator config always carries resolved modalities (name-based
+   * detection fills them in, defaulting unknown models to text-only), which is
+   * the same source the file reader uses to decide media support. Used to
    * decide whether the vision bridge should run.
    *
    * @returns The resolved input modalities. Unknown models are treated as
    * text-only so bridge features can conservatively adapt image inputs.
    */
   getEffectiveInputModalities(): InputModalities {
-    const cg = this.getContentGeneratorConfig();
-    const model = cg?.model ?? this.getModel();
-    if (cg?.modalities !== undefined) {
-      const source = this.getContentGeneratorConfigSources()?.['modalities'];
-      if (
-        source?.kind === 'computed' &&
-        detectDefaultModalities(model) === undefined
-      ) {
-        return {};
-      }
-      return cg.modalities;
-    }
-    return detectDefaultModalities(model) ?? {};
+    return this.getContentGeneratorConfig()?.modalities ?? {};
   }
 
   /**
@@ -2653,18 +2640,12 @@ export class Config {
 
   /**
    * Pick an image-capable model from the registered models to use as the
-   * vision bridge model. This lets the bridge work out-of-the-box for users
-   * who already have a multimodal provider configured.
+   * vision bridge model. This lets the bridge work out-of-the-box when the user
+   * already has a vision model on the SAME provider as their text-only primary
+   * (see {@link selectVisionBridgeModel} — it never reaches across providers).
+   * `runSideQuery` resolves the chosen model's credentials by id.
    *
-   * Selection prefers a model on the same provider as the primary model (same
-   * endpoint, then same auth type) before falling back to any image-capable
-   * model. See {@link selectVisionBridgeModel} for the full precedence.
-   *
-   * Uses all configured models (across auth types), not just the current
-   * auth type's, so a vision model registered under a different provider can
-   * still be auto-selected; `runSideQuery` resolves its credentials.
-   *
-   * @returns A registered image-capable model selection, or `undefined`.
+   * @returns A same-provider image-capable model, or `undefined`.
    */
   getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
     const contentGeneratorConfig = this.getContentGeneratorConfig();

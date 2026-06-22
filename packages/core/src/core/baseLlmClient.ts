@@ -61,10 +61,6 @@ export interface GenerateTextOptions {
   contents: Content[];
   /** The specific model to use for this task. */
   model: string;
-  /** Optional provider hint for ambiguous model ids. */
-  modelAuthType?: AuthType;
-  /** Optional endpoint hint for ambiguous model ids within one auth type. */
-  modelBaseUrl?: string;
   /**
    * Task-specific system instructions. Passed through to the underlying
    * content generator without the geminiClient main-prompt fallback or
@@ -88,8 +84,6 @@ export interface GenerateTextOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
-  /** Called immediately before each provider request attempt is dispatched. */
-  onDispatch?: () => void;
 }
 
 /**
@@ -139,10 +133,6 @@ export interface GenerateJsonOptions {
   schema: Record<string, unknown>;
   /** The specific model to use for this task. */
   model: string;
-  /** Optional provider hint for ambiguous model ids. */
-  modelAuthType?: AuthType;
-  /** Optional endpoint hint for ambiguous model ids within one auth type. */
-  modelBaseUrl?: string;
   /**
    * Task-specific system instructions.
    * If omitted, no system instruction is sent.
@@ -169,8 +159,6 @@ export interface GenerateJsonOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
-  /** Called immediately before each provider request attempt is dispatched. */
-  onDispatch?: () => void;
 }
 
 /**
@@ -233,15 +221,11 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
-    } = await this.resolveForModel(model, {
-      authType: options.modelAuthType,
-      baseUrl: options.modelBaseUrl,
-    });
+    } = await this.resolveForModel(model);
 
     try {
-      const apiCall = () => {
-        options.onDispatch?.();
-        return contentGenerator.generateContent(
+      const apiCall = () =>
+        contentGenerator.generateContent(
           {
             model: requestModel,
             config: {
@@ -252,7 +236,6 @@ export class BaseLlmClient {
           },
           promptId ?? '',
         );
-      };
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
@@ -355,15 +338,11 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
-    } = await this.resolveForModel(model, {
-      authType: options.modelAuthType,
-      baseUrl: options.modelBaseUrl,
-    });
+    } = await this.resolveForModel(model);
 
     try {
-      const apiCall = () => {
-        options.onDispatch?.();
-        return contentGenerator.generateContent(
+      const apiCall = () =>
+        contentGenerator.generateContent(
           {
             model: requestModel,
             config: requestConfig,
@@ -371,7 +350,6 @@ export class BaseLlmClient {
           },
           promptId ?? '',
         );
-      };
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
@@ -469,22 +447,10 @@ export class BaseLlmClient {
    * authType so quota detection and provider-specific retry logic line up.
    *
    * Falls back to the main generator when the target model is not registered
-   * or generator creation fails (e.g. tests without full auth setup). Explicit
-   * provider hints fail loudly instead of silently substituting the main
-   * generator.
+   * or generator creation fails (e.g. tests without full auth setup).
    */
-  async resolveForModel(
-    model: string,
-    hint: { authType?: AuthType; baseUrl?: string } = {},
-  ): Promise<ResolvedGeneratorForModel> {
-    const hasExplicitProviderHint = Boolean(hint.authType || hint.baseUrl);
-    const parsedSelector = this.resolveModelSelector(model);
-    const selector = hint.authType
-      ? {
-          authType: hint.authType,
-          modelId: parsedSelector?.modelId ?? model,
-        }
-      : parsedSelector;
+  async resolveForModel(model: string): Promise<ResolvedGeneratorForModel> {
+    const selector = this.resolveModelSelector(model);
     const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
     const mainModel = this.config.getModel() ?? model;
     const mainGeneratorConfig = this.config.getContentGeneratorConfig();
@@ -493,8 +459,7 @@ export class BaseLlmClient {
 
     if (
       requestModel === mainModel &&
-      (!selector?.authType || selector.authType === mainAuthType) &&
-      (!hint.baseUrl || hint.baseUrl === mainGeneratorConfig?.baseUrl)
+      (!selector?.authType || selector.authType === mainAuthType)
     ) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
@@ -504,25 +469,11 @@ export class BaseLlmClient {
       };
     }
 
-    const resolvedModel = this.resolveModelAcrossAuthTypes(
-      model,
-      selector,
-      hint.baseUrl,
-    );
-    if (!resolvedModel && hasExplicitProviderHint) {
-      throw new Error(
-        `Model "${model}" could not be resolved for the requested provider hint ` +
-          `(authType=${hint.authType ?? 'none'}, baseUrl=${hint.baseUrl ?? 'none'}).`,
-      );
-    }
-
     const contentGenerator = await this.createContentGeneratorForModel(
       model,
       selector,
-      hint.baseUrl,
-      hasExplicitProviderHint,
-      resolvedModel,
     );
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
     const retryErrorCodes =
@@ -552,19 +503,14 @@ export class BaseLlmClient {
   private resolveModelAcrossAuthTypes(
     model: string,
     selector: ResolvedModelId | undefined,
-    baseUrl?: string,
   ): ResolvedModelConfig | undefined {
     const modelsConfig = this.config.getModelsConfig?.();
     if (!modelsConfig) return undefined;
     if (!selector) return undefined;
     const modelId = selector.modelId;
-    const getResolvedModel = (authType: AuthType) =>
-      baseUrl
-        ? modelsConfig.getResolvedModel(authType, modelId, baseUrl)
-        : modelsConfig.getResolvedModel(authType, modelId);
 
     if (selector.authType) {
-      return getResolvedModel(selector.authType);
+      return modelsConfig.getResolvedModel(selector.authType, modelId);
     }
 
     const allAuthTypes: AuthType[] = [
@@ -577,13 +523,13 @@ export class BaseLlmClient {
 
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
     if (mainAuthType) {
-      const resolved = getResolvedModel(mainAuthType);
+      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
       if (resolved) return resolved;
     }
 
     for (const authType of allAuthTypes) {
       if (authType === mainAuthType) continue;
-      const resolved = getResolvedModel(authType);
+      const resolved = modelsConfig.getResolvedModel(authType, modelId);
       if (resolved) return resolved;
     }
 
@@ -593,20 +539,19 @@ export class BaseLlmClient {
   private async createContentGeneratorForModel(
     model: string,
     selector: ResolvedModelId | undefined,
-    baseUrl?: string,
-    throwOnCreateFailure = false,
-    resolvedModel?: ResolvedModelConfig,
   ): Promise<ContentGenerator> {
-    const cacheKey = `${selector?.authType ?? ''}:${selector?.modelId ?? model}:${baseUrl ?? ''}`;
+    const cacheKey = selector
+      ? `${selector.authType ?? ''}:${selector.modelId}`
+      : model;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+
     if (!resolvedModel) {
-      const message = `Model "${model}" not found in registry across all authTypes.`;
-      if (throwOnCreateFailure) {
-        throw new Error(message);
-      }
-      debugLogger.warn(`${message} Falling back to main generator.`);
+      debugLogger.warn(
+        `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+      );
       // Do not cache the fallback: getCurrentContentGenerator() reads the
       // runtime view from AsyncLocalStorage, which can differ between calls
       // (e.g. inside a subagent vs. on the main session). Caching here would
@@ -631,14 +576,11 @@ export class BaseLlmClient {
 
         return await createContentGenerator(targetConfig, this.config);
       } catch (err: unknown) {
-        this.perModelGeneratorCache.delete(cacheKey);
-        if (throwOnCreateFailure) {
-          throw err;
-        }
         debugLogger.warn(
           `Failed to create content generator for model "${model}", falling back to main generator.`,
           err instanceof Error ? err.message : String(err),
         );
+        this.perModelGeneratorCache.delete(cacheKey);
         return this.getCurrentContentGenerator();
       }
     })();

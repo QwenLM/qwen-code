@@ -12,7 +12,7 @@ import {
   isImagePart,
   normalizeParts,
   splitImageParts,
-  validateImagePart,
+  isUsableImagePart,
 } from './image-part-utils.js';
 
 const imagePart: Part = {
@@ -82,22 +82,22 @@ describe('splitImageParts', () => {
   });
 });
 
-describe('validateImagePart', () => {
-  it('returns null for a valid image', () => {
-    expect(validateImagePart(imagePart)).toBeNull();
+describe('isUsableImagePart', () => {
+  it('accepts a valid image', () => {
+    expect(isUsableImagePart(imagePart)).toBe(true);
   });
 
-  it('flags empty data', () => {
+  it('rejects empty data', () => {
     expect(
-      validateImagePart({ inlineData: { mimeType: 'image/png', data: '' } }),
-    ).toMatch(/empty|unreadable/);
+      isUsableImagePart({ inlineData: { mimeType: 'image/png', data: '' } }),
+    ).toBe(false);
   });
 
-  it('flags oversized data', () => {
+  it('rejects oversized data', () => {
     const huge = 'a'.repeat(11 * 1024 * 1024);
     expect(
-      validateImagePart({ inlineData: { mimeType: 'image/png', data: huge } }),
-    ).toMatch(/limit/);
+      isUsableImagePart({ inlineData: { mimeType: 'image/png', data: huge } }),
+    ).toBe(false);
   });
 });
 

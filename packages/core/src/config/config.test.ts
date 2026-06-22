@@ -1293,47 +1293,29 @@ describe('Server Config (config.ts)', () => {
   describe('getEffectiveInputModalities', () => {
     type MutableConfigInternals = {
       contentGeneratorConfig: ContentGeneratorConfig;
-      contentGeneratorConfigSources: Record<string, { kind: string }>;
     };
 
-    it('uses explicit configured modalities', () => {
+    // Mirrors exactly what fileUtils uses to decide media support, so the file
+    // reader's strip decision and the vision-bridge gate can never disagree.
+    it('returns the resolved modalities from the content generator config', () => {
       const config = new Config(baseParams);
       const internals = config as unknown as MutableConfigInternals;
       internals.contentGeneratorConfig = {
         model: 'custom-model',
         modalities: { image: true },
       } as ContentGeneratorConfig;
-      internals.contentGeneratorConfigSources = {
-        modalities: { kind: 'user' },
-      };
 
       expect(config.getEffectiveInputModalities()).toEqual({ image: true });
     });
 
-    it('treats computed modalities for unknown models as text-only', () => {
+    it('treats a model with no resolved modalities as text-only', () => {
       const config = new Config(baseParams);
       const internals = config as unknown as MutableConfigInternals;
       internals.contentGeneratorConfig = {
         model: 'custom-unknown-model',
-        modalities: { image: true },
       } as ContentGeneratorConfig;
-      internals.contentGeneratorConfigSources = {
-        modalities: { kind: 'computed' },
-      };
 
       expect(config.getEffectiveInputModalities()).toEqual({});
-    });
-
-    it('falls back to name-based modalities for known models', () => {
-      const config = new Config({
-        ...baseParams,
-        model: 'qwen3-vl-plus',
-      });
-
-      expect(config.getEffectiveInputModalities()).toMatchObject({
-        image: true,
-        video: true,
-      });
     });
   });
 

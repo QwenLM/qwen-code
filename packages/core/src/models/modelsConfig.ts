@@ -309,9 +309,8 @@ export class ModelsConfig {
   getResolvedModel(
     authType: AuthType,
     modelId: string,
-    baseUrl?: string,
   ): ResolvedModelConfig | undefined {
-    return this.modelRegistry.getModel(authType, modelId, baseUrl);
+    return this.modelRegistry.getModel(authType, modelId);
   }
 
   /**

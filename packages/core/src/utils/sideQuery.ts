@@ -13,7 +13,6 @@ import type {
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import type { AuthType } from '../core/contentGenerator.js';
 import { SchemaValidator } from './schemaValidator.js';
 
 export interface SideQueryJsonOptions<TResponse> {
@@ -29,10 +28,6 @@ export interface SideQueryJsonOptions<TResponse> {
    * summarization in web-fetch).
    */
   model?: string;
-  /** Optional provider hint for ambiguous model ids. */
-  modelAuthType?: AuthType;
-  /** Optional endpoint hint for ambiguous model ids within one auth type. */
-  modelBaseUrl?: string;
   systemInstruction?: string | Part | Part[] | Content;
   promptId?: string;
   purpose?: string;
@@ -55,8 +50,6 @@ export interface SideQueryJsonOptions<TResponse> {
    * pass `1` to avoid burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
-  /** Called immediately before the provider request is dispatched. */
-  onDispatch?: () => void;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -83,10 +76,6 @@ export interface SideQueryTextOptions {
    * summarization in web-fetch).
    */
   model?: string;
-  /** Optional provider hint for ambiguous model ids. */
-  modelAuthType?: AuthType;
-  /** Optional endpoint hint for ambiguous model ids within one auth type. */
-  modelBaseUrl?: string;
   systemInstruction?: string | Part | Part[] | Content;
   promptId?: string;
   purpose?: string;
@@ -105,8 +94,6 @@ export interface SideQueryTextOptions {
    * burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
-  /** Called immediately before the provider request is dispatched. */
-  onDispatch?: () => void;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -230,15 +217,12 @@ export async function runSideQuery<TResponse>(
       schema: options.schema,
       abortSignal: options.abortSignal,
       model,
-      modelAuthType: options.modelAuthType,
-      modelBaseUrl: options.modelBaseUrl,
       systemInstruction,
       promptId,
       config: requestConfig,
       ...(options.maxAttempts !== undefined && {
         maxAttempts: options.maxAttempts,
       }),
-      onDispatch: options.onDispatch,
     })) as TResponse;
 
     const schemaError = SchemaValidator.validate(options.schema, response);
@@ -257,8 +241,6 @@ export async function runSideQuery<TResponse>(
   const result = await config.getBaseLlmClient().generateText({
     contents: options.contents,
     model,
-    modelAuthType: options.modelAuthType,
-    modelBaseUrl: options.modelBaseUrl,
     systemInstruction,
     abortSignal: options.abortSignal,
     promptId,
@@ -266,7 +248,6 @@ export async function runSideQuery<TResponse>(
     ...(options.maxAttempts !== undefined && {
       maxAttempts: options.maxAttempts,
     }),
-    onDispatch: options.onDispatch,
   });
 
   const customError = options.validate?.(result.text);
