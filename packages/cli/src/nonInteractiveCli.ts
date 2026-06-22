@@ -121,12 +121,15 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
 function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
   const detail = reason ? ` (${loopType}: ${reason})` : '';
-  // The turn cap runs before the skipLoopDetection gate, so that setting can't
-  // disable it — don't suggest it for TURN_TOOL_CALL_CAP.
-  const hint =
-    loopType === LoopType.TURN_TOOL_CALL_CAP
-      ? ' This is an always-on per-turn tool-call cap and cannot be disabled via `model.skipLoopDetection`.'
-      : ' Set the `model.skipLoopDetection` setting to true to disable.';
+  // The consecutive-identical guard and the per-turn cap both run before the
+  // skipLoopDetection gate, so that setting can't disable them — don't suggest
+  // it for those always-on loop types.
+  const isAlwaysOn =
+    loopType === LoopType.TURN_TOOL_CALL_CAP ||
+    loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
+  const hint = isAlwaysOn
+    ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
+    : ' Set the `model.skipLoopDetection` setting to true to disable.';
   return `Loop detection halted the run${detail}.${hint}`;
 }
 
