@@ -363,7 +363,7 @@ export class LspConfigLoader {
     if (typeof value !== 'number') {
       return undefined;
     }
-    if (!Number.isFinite(value) || value < 0) {
+    if (!Number.isSafeInteger(value) || value < 0) {
       return undefined;
     }
     return value;

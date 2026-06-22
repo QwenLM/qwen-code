@@ -122,7 +122,7 @@ Example:
 | `startupTimeout`        | number   | `10000`   | Startup timeout in milliseconds                         |
 | `shutdownTimeout`       | number   | `5000`    | Shutdown timeout in milliseconds                        |
 | `restartOnCrash`        | boolean  | `false`   | Auto-restart on crash                                   |
-| `maxRestarts`           | number   | `3`       | Maximum restart attempts                                |
+| `maxRestarts`           | integer  | `3`       | Maximum restart attempts (non-negative)                 |
 | `trustRequired`         | boolean  | `true`    | Require trusted workspace                               |
 
 ### TCP/Socket Transport

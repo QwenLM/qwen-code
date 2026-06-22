@@ -154,6 +154,44 @@ describe('LspConfigLoader config-driven behavior', () => {
       mock.restore();
     }
   });
+
+  it('rejects fractional maxRestarts from .lsp.json', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+            maxRestarts: 1.5,
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.maxRestarts).toBeUndefined();
+  });
+
+  it('accepts integer maxRestarts from .lsp.json', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+            maxRestarts: 2,
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.maxRestarts).toBe(2);
+  });
 });
 
 describe('LspConfigLoader extension configs', () => {
