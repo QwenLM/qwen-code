@@ -2865,7 +2865,17 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    const numericCursor = params.cursor ? Number(params.cursor) : undefined;
+    let numericCursor: number | undefined;
+    if (params.cursor != null && params.cursor !== '') {
+      const parsedCursor = Number(params.cursor);
+      if (!Number.isFinite(parsedCursor)) {
+        throw RequestError.invalidParams(
+          undefined,
+          `Invalid cursor: "${params.cursor}" is not a valid numeric cursor`,
+        );
+      }
+      numericCursor = parsedCursor;
+    }
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends
@@ -2880,7 +2890,7 @@ class QwenAgent implements Agent {
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
-        cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+        cursor: numericCursor,
         size,
       });
     });
