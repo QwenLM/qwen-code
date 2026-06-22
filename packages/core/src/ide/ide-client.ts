@@ -75,6 +75,15 @@ type ParsedConnectionLockFile = {
   parsed: IdeConnectionConfig;
 };
 
+function isValidIdeServerPort(port: string): boolean {
+  if (!/^\d+$/.test(port)) {
+    return false;
+  }
+
+  const portNumber = Number(port);
+  return portNumber >= 1 && portNumber <= 65535;
+}
+
 function getRealPath(path: string): string {
   try {
     return fs.realpathSync(path);
@@ -546,6 +555,10 @@ export class IdeClient {
   private getPortFromEnv(): string | undefined {
     const port = process.env['QWEN_CODE_IDE_SERVER_PORT'];
     if (!port) {
+      return undefined;
+    }
+    if (!isValidIdeServerPort(port)) {
+      debugLogger.debug('Ignoring invalid QWEN_CODE_IDE_SERVER_PORT:', port);
       return undefined;
     }
     return port;

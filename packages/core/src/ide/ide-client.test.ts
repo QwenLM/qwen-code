@@ -237,29 +237,50 @@ describe('IdeClient', () => {
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     });
 
-    it('should connect using HTTP when port is provided in environment variables', async () => {
-      vi.mocked(fs.promises.readFile).mockRejectedValue(
-        new Error('File not found'),
-      );
-      (
-        vi.mocked(fs.promises.readdir) as Mock<
-          (path: fs.PathLike) => Promise<string[]>
-        >
-      ).mockResolvedValue([]);
-      process.env['QWEN_CODE_IDE_SERVER_PORT'] = '9090';
+    it.each(['1', '9090', '65535'])(
+      'should connect using HTTP when port %s is provided in environment variables',
+      async (port) => {
+        vi.mocked(fs.promises.readFile).mockRejectedValue(
+          new Error('File not found'),
+        );
+        (
+          vi.mocked(fs.promises.readdir) as Mock<
+            (path: fs.PathLike) => Promise<string[]>
+          >
+        ).mockResolvedValue([]);
+        process.env['QWEN_CODE_IDE_SERVER_PORT'] = port;
 
-      const ideClient = await IdeClient.getInstance();
-      await ideClient.connect();
+        const ideClient = await IdeClient.getInstance();
+        await ideClient.connect();
 
-      expect(StreamableHTTPClientTransport).toHaveBeenCalledWith(
-        new URL('http://127.0.0.1:9090/mcp'),
-        expect.any(Object),
-      );
-      expect(mockClient.connect).toHaveBeenCalledWith(mockHttpTransport);
-      expect(ideClient.getConnectionStatus().status).toBe(
-        IDEConnectionStatus.Connected,
-      );
-    });
+        expect(StreamableHTTPClientTransport).toHaveBeenCalledWith(
+          new URL(`http://127.0.0.1:${port}/mcp`),
+          expect.any(Object),
+        );
+        expect(mockClient.connect).toHaveBeenCalledWith(mockHttpTransport);
+        expect(ideClient.getConnectionStatus().status).toBe(
+          IDEConnectionStatus.Connected,
+        );
+      },
+    );
+
+    it.each(['0', '65536', '9090abc'])(
+      'should ignore invalid HTTP port %s from environment variables',
+      async (port) => {
+        vi.mocked(Client).mockClear();
+        vi.mocked(StreamableHTTPClientTransport).mockClear();
+        process.env['QWEN_CODE_IDE_SERVER_PORT'] = port;
+
+        const ideClient = await IdeClient.getInstance();
+        await ideClient.connect();
+
+        expect(Client).not.toHaveBeenCalled();
+        expect(StreamableHTTPClientTransport).not.toHaveBeenCalled();
+        expect(ideClient.getConnectionStatus().status).toBe(
+          IDEConnectionStatus.Disconnected,
+        );
+      },
+    );
 
     it('should fall back to host.docker.internal when localhost fails in container', async () => {
       process.env['QWEN_CODE_IDE_SERVER_PORT'] = '9090';
@@ -500,6 +521,39 @@ describe('IdeClient', () => {
 
       expect(result).toEqual(config);
       expect(fs.promises.readdir).not.toHaveBeenCalled();
+      delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+    });
+
+    it('should ignore invalid env port while resolving lock files', async () => {
+      process.env['QWEN_CODE_IDE_SERVER_PORT'] = '../evil';
+      vi.mocked(fs.promises.readFile).mockClear();
+      vi.mocked(fs.promises.readdir).mockClear();
+      vi.mocked(fs.promises.readFile).mockRejectedValue(new Error('not found'));
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue([]);
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(result).toBeUndefined();
+      expect(fs.promises.readFile).not.toHaveBeenCalledWith(
+        path.join('/home/test', '.qwen', 'evil.lock'),
+        'utf8',
+      );
+      expect(fs.promises.readFile).not.toHaveBeenCalledWith(
+        path.join('/tmp', 'qwen-code-ide-server-../evil.json'),
+        'utf8',
+      );
+      expect(fs.promises.readdir).toHaveBeenCalledWith(
+        path.join('/home/test', '.qwen', 'ide'),
+      );
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     });
 
