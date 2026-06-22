@@ -140,16 +140,21 @@ function formatUnavailableVoiceModelMessage(
   );
 }
 
-// Get an array of the available model IDs as strings
-function getAvailableModelIds(context: CommandContext) {
+// Get an array of the available model IDs as strings, filtered by mode
+function getAvailableModelIds(
+  context: CommandContext,
+  mode: 'main' | 'fast' | 'voice' = 'main',
+) {
   const { services } = context;
   const { config } = services;
   if (!config) {
     return [];
   }
-  const availableModels = config
-    .getAvailableModels()
-    .filter((m) => !m.fastOnly && !m.voiceOnly);
+  const availableModels = config.getAvailableModels().filter((m) => {
+    if (mode === 'fast') return !m.voiceOnly;
+    if (mode === 'voice') return !m.fastOnly;
+    return !m.fastOnly && !m.voiceOnly;
+  });
   return availableModels.map((model) => model.id);
 }
 
@@ -181,9 +186,19 @@ export const modelCommand: SlashCommand = {
       if (flagCompletions.length > 0) {
         return flagCompletions;
       }
-      if (partialArg.trim()) {
-        return getAvailableModelIds(context).filter((id) =>
-          id.startsWith(partialArg.trim()),
+      const trimmed = partialArg.trim();
+      if (trimmed) {
+        let mode: 'main' | 'fast' | 'voice' = 'main';
+        let modelPrefix = trimmed;
+        if (trimmed.startsWith('--fast ')) {
+          mode = 'fast';
+          modelPrefix = trimmed.slice('--fast '.length);
+        } else if (trimmed.startsWith('--voice ')) {
+          mode = 'voice';
+          modelPrefix = trimmed.slice('--voice '.length);
+        }
+        return getAvailableModelIds(context, mode).filter((id) =>
+          id.startsWith(modelPrefix),
         );
       }
       return null;
