@@ -13,6 +13,8 @@ import { createWorkspaceProvidersStatusProvider } from './workspace-providers-st
 
 const coreMock = vi.hoisted(() => ({
   throwModelsConfigError: false,
+  modelsConfigErrorMessage:
+    'Failed loading provider https://user:secret@broken.example/v1',
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -21,9 +23,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   class TestModelsConfig extends actual.ModelsConfig {
     constructor(options: ConstructorParameters<typeof actual.ModelsConfig>[0]) {
       if (coreMock.throwModelsConfigError) {
-        throw new Error(
-          'Failed loading provider https://user:secret@broken.example/v1',
-        );
+        throw new Error(coreMock.modelsConfigErrorMessage);
       }
       super(options);
     }
@@ -60,6 +60,8 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       'system-defaults.json',
     );
     coreMock.throwModelsConfigError = false;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:secret@broken.example/v1';
     resetHomeEnvBootstrapForTesting();
   });
 
@@ -162,7 +164,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       security: { auth: { selectedType: 'openai' } },
       model: {
         name: 'shared-model',
-        baseUrl: 'https://user:sec)ret@stale.example/v1',
+        baseUrl: 'https://user:sec ret@stale.example/v1',
       },
       modelProviders: {
         openai: {
@@ -171,7 +173,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
             {
               id: 'shared-model',
               name: 'Shared Current',
-              baseUrl: 'https://user:current)secret@current.example/v1',
+              baseUrl: `https://user:cur'rent@current.example/v1`,
             },
           ],
         },
@@ -185,7 +187,8 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(warning).toContain('https://stale.example/v1');
     expect(warning).toContain('https://current.example/v1');
     expect(JSON.stringify(result)).not.toContain('secret');
-    expect(JSON.stringify(result)).not.toContain('sec)ret');
+    expect(JSON.stringify(result)).not.toContain('sec ret');
+    expect(JSON.stringify(result)).not.toContain(`cur'rent`);
   });
 
   it('does not mark baseUrl variants current when no baseUrl is resolved', async () => {
@@ -241,6 +244,33 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('includes only non-empty fast model settings in current selection', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      fastModel: 'fast-model',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const withFastModel = await provider(workspace, false);
+    expect(withFastModel.current?.fastModelId).toBe('fast-model');
+
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      fastModel: '',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const withEmptyFastModel = await provider(workspace, false);
+    expect(withEmptyFastModel.current).not.toHaveProperty('fastModelId');
+  });
+
   it('does not include runtime models in the workspace provider catalog', async () => {
     const provider = createWorkspaceProvidersStatusProvider({
       argv: { model: 'runtime-only-model' },
@@ -289,6 +319,8 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
   it('sanitizes credentials from provider construction errors', async () => {
     coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:sec ret@broken.example/v1';
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
@@ -300,7 +332,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     const result = await provider(workspace, true);
 
     expect(JSON.stringify(result)).toContain('https://broken.example/v1');
-    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(JSON.stringify(result)).not.toContain('sec ret');
     expect(result.initialized).toBe(false);
   });
 

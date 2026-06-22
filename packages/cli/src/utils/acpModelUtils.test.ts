@@ -10,6 +10,7 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
   parseAcpModelOption,
+  sanitizeProviderBaseUrl,
 } from './acpModelUtils.js';
 
 describe('acpModelUtils', () => {
@@ -43,5 +44,26 @@ describe('acpModelUtils', () => {
 
   it('returns whole input as modelId when trailing parens are empty', () => {
     expect(parseAcpModelOption('qwen3()')).toEqual({ modelId: 'qwen3()' });
+  });
+
+  it.each([
+    ['not-a-url', 'not-a-url'],
+    ['https://api.example/v1', 'https://api.example/v1'],
+    ['https://api.example/v1/@scope', 'https://api.example/v1/@scope'],
+    ['https://user@api.example/v1', 'https://api.example/v1'],
+    ['https://user:secret@api.example/v1', 'https://api.example/v1'],
+    [
+      'https://user:secret@api.example/v1/@scope',
+      'https://api.example/v1/@scope',
+    ],
+    ['https://user:p ass@api.example/v1', 'https://api.example/v1'],
+    [`https://user:p'ass@api.example/v1`, 'https://api.example/v1'],
+    ['https://user:p%2Fx@api.example/v1', 'https://api.example/v1'],
+    ['https://user:p/x@api.example/v1', 'https://api.example/v1'],
+    ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
+    ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
+    ['https://user:secret@api.example', 'https://api.example'],
+  ])('sanitizes provider base URL credentials for %s', (input, expected) => {
+    expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });
 });

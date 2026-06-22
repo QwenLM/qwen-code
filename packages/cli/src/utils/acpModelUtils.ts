@@ -26,15 +26,46 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
   }
 
   const authorityStart = scheme[0].length;
-  const rest = baseUrl.slice(authorityStart);
-  const authorityEnd = rest.search(/[/?#]/);
-  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
-  const at = authority.lastIndexOf('@');
-  if (at === -1) {
-    return baseUrl;
-  }
+  const stripAt = (at: number) =>
+    `${baseUrl.slice(0, authorityStart)}${baseUrl.slice(at + 1)}`;
+  const authorityEnd = findAuthorityEnd(baseUrl, authorityStart);
+  const authorityAt = baseUrl
+    .slice(authorityStart, authorityEnd)
+    .lastIndexOf('@');
+  const authorityAtIndex =
+    authorityAt === -1 ? -1 : authorityStart + authorityAt;
 
-  return `${baseUrl.slice(0, authorityStart)}${authority.slice(at + 1)}${rest.slice(authority.length)}`;
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.username || parsed.password) {
+      return authorityAtIndex >= authorityStart
+        ? stripAt(authorityAtIndex)
+        : baseUrl;
+    }
+    return baseUrl;
+  } catch {
+    const at = baseUrl.lastIndexOf('@');
+    if (at < authorityStart) {
+      return baseUrl;
+    }
+
+    const possibleUserInfo = baseUrl.slice(authorityStart, at);
+    if (!possibleUserInfo.includes(':')) {
+      return baseUrl;
+    }
+    return stripAt(at);
+  }
+}
+
+function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
+  const slash = baseUrl.indexOf('/', authorityStart);
+  const query = baseUrl.indexOf('?', authorityStart);
+  const hash = baseUrl.indexOf('#', authorityStart);
+  let end = baseUrl.length;
+  if (slash !== -1) end = Math.min(end, slash);
+  if (query !== -1) end = Math.min(end, query);
+  if (hash !== -1) end = Math.min(end, hash);
+  return end;
 }
 
 /**

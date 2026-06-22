@@ -276,11 +276,81 @@ function modelBaseUrlKey(
 }
 
 const URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s'"`<>]+/g;
+const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
 function sanitizeProviderWarning(warning: string): string {
-  return warning.replace(URL_LIKE_PATTERN, (url) =>
+  let result = '';
+  let index = 0;
+  let next = findNextUrlStart(warning, index);
+
+  while (next) {
+    result += warning.slice(index, next.index);
+
+    const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
+    const segment = warning.slice(next.index, segmentEnd);
+    result += sanitizeProviderWarningSegment(segment, next.marker.length);
+
+    index = segmentEnd;
+    next = findNextUrlStart(warning, index);
+  }
+
+  return result + warning.slice(index);
+}
+
+function findNextUrlStart(
+  value: string,
+  from: number,
+): { index: number; marker: string } | undefined {
+  URL_START_PATTERN.lastIndex = from;
+  const match = URL_START_PATTERN.exec(value);
+  return match ? { index: match.index, marker: match[0] } : undefined;
+}
+
+function findUrlSegmentEnd(
+  value: string,
+  start: number,
+  marker: string,
+): number {
+  const afterMarker = start + marker.length;
+  const carriageReturn = value.indexOf('\r', afterMarker);
+  const lineFeed = value.indexOf('\n', afterMarker);
+  let lineEnd = value.length;
+  if (carriageReturn !== -1) lineEnd = Math.min(lineEnd, carriageReturn);
+  if (lineFeed !== -1) lineEnd = Math.min(lineEnd, lineFeed);
+
+  const nextUrl = findNextUrlStart(value, afterMarker);
+
+  return Math.min(lineEnd, nextUrl?.index ?? value.length);
+}
+
+function sanitizeProviderWarningSegment(
+  segment: string,
+  markerLength: number,
+): string {
+  const at = segment.indexOf('@', markerLength);
+  if (
+    at !== -1 &&
+    hasCredentialPrefix(segment, markerLength, at) &&
+    segment[at + 1] !== undefined &&
+    /[A-Za-z0-9.[\]-]/.test(segment[at + 1])
+  ) {
+    return `${segment.slice(0, markerLength)}${segment.slice(at + 1)}`;
+  }
+
+  return segment.replace(URL_LIKE_PATTERN, (url) =>
     sanitizeProviderBaseUrl(url),
   );
+}
+
+function hasCredentialPrefix(
+  segment: string,
+  markerLength: number,
+  at: number,
+): boolean {
+  const colon = segment.indexOf(':', markerLength);
+  if (colon === -1 || colon > at) return false;
+  const username = segment.slice(markerLength, colon);
+  return !/[/?#\s'"`<>]/.test(username);
 }
 
 function buildCurrent(
