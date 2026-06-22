@@ -14,6 +14,7 @@ import { BackgroundAgentResumeService } from './background-agent-resume.js';
 import {
   getAgentJsonlPath,
   getAgentMetaPath,
+  readAgentMeta,
   writeAgentMeta,
 } from './agent-transcript.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
@@ -1798,6 +1799,485 @@ describe('BackgroundAgentResumeService', () => {
         },
       }),
     );
+  });
+
+  it('revives a completed background agent from its transcript and bumps resumeCount', async () => {
+    const sessionId = 'session-revive';
+    const agentId = 'agent-revive';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+    const sessionDir = path.dirname(metaPath);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+      resumeCount: 0,
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Finished research' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'All done' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    const oldSessionMtime = new Date('2026-04-20T00:00:00.000Z');
+    fs.utimesSync(sessionDir, oldSessionMtime, oldSessionMtime);
+
+    // Real terminal lifecycle: run, then complete (sets notified=true).
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Finished research',
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+
+    const execute = vi.fn(
+      async (_context: { get: (key: string) => unknown }) => undefined,
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'iterated',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const revived = await service.reviveCompletedBackgroundAgent(
+      agentId,
+      'now write the summary',
+    );
+
+    expect(revived).toBeDefined();
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const contextArg = execute.mock.calls[0]?.[0];
+    expect(contextArg).toBeDefined();
+    expect(contextArg?.get('task_prompt')).toBe('now write the summary');
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    expect(meta.resumeCount).toBe(1);
+    expect(fs.statSync(sessionDir).mtime.getTime()).toBeGreaterThan(
+      oldSessionMtime.getTime(),
+    );
+  });
+
+  it('does not revive non-completed or transcript-less entries', async () => {
+    const { service, subagentManager } = createService();
+
+    // Still running → not revivable.
+    registry.register({
+      agentId: 'still-running',
+      description: 'r',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: '/tmp/x.jsonl',
+      metaPath: '/tmp/x.meta.json',
+    });
+    await expect(
+      service.reviveCompletedBackgroundAgent('still-running', 'go'),
+    ).resolves.toBeUndefined();
+
+    // Completed but no metaPath → not revivable.
+    registry.register({
+      agentId: 'completed-bare',
+      description: 'c',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: '/tmp/y.jsonl',
+    });
+    registry.complete('completed-bare', 'done');
+    await expect(
+      service.reviveCompletedBackgroundAgent('completed-bare', 'go'),
+    ).resolves.toBeUndefined();
+
+    // Failed (terminal but not completed) → not revivable.
+    registry.register({
+      agentId: 'failed-agent',
+      description: 'f',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: '/tmp/z.jsonl',
+      metaPath: '/tmp/z.meta.json',
+    });
+    registry.fail('failed-agent', 'exploded');
+    await expect(
+      service.reviveCompletedBackgroundAgent('failed-agent', 'go'),
+    ).resolves.toBeUndefined();
+
+    // Unknown id → not revivable.
+    await expect(
+      service.reviveCompletedBackgroundAgent('nope', 'go'),
+    ).resolves.toBeUndefined();
+
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
+  it('does not mutate a completed entry when revive preflight fails', async () => {
+    const { service, subagentManager } = createService();
+    const missingMetaAgentId = 'completed-missing-meta';
+    const missingOutputAgentId = 'completed-missing-output';
+    const corruptOutputAgentId = 'completed-corrupt-output';
+
+    registry.register({
+      agentId: missingMetaAgentId,
+      description: 'missing meta',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: path.join(tempDir, 'missing-meta.jsonl'),
+      metaPath: path.join(tempDir, 'missing-meta.meta.json'),
+    });
+    registry.complete(missingMetaAgentId, 'done');
+
+    const validMetaPath = path.join(tempDir, 'missing-output.meta.json');
+    writeAgentMeta(validMetaPath, {
+      agentId: missingOutputAgentId,
+      agentType: 'researcher',
+      description: 'missing output',
+      parentSessionId: 'session-missing-output',
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    registry.register({
+      agentId: missingOutputAgentId,
+      description: 'missing output',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: path.join(tempDir, 'missing-output.jsonl'),
+      metaPath: validMetaPath,
+    });
+    registry.complete(missingOutputAgentId, 'done');
+
+    const corruptMetaPath = path.join(tempDir, 'corrupt-output.meta.json');
+    const corruptOutputPath = path.join(tempDir, 'corrupt-output.jsonl');
+    writeAgentMeta(corruptMetaPath, {
+      agentId: corruptOutputAgentId,
+      agentType: 'researcher',
+      description: 'corrupt output',
+      parentSessionId: 'session-corrupt-output',
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(corruptOutputPath, 'not-json\n', 'utf8');
+    registry.register({
+      agentId: corruptOutputAgentId,
+      description: 'corrupt output',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: corruptOutputPath,
+      metaPath: corruptMetaPath,
+    });
+    registry.complete(corruptOutputAgentId, 'done');
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(missingMetaAgentId, 'go'),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.reviveCompletedBackgroundAgent(missingOutputAgentId, 'go'),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.reviveCompletedBackgroundAgent(corruptOutputAgentId, 'go'),
+    ).resolves.toBeUndefined();
+
+    expect(registry.get(missingMetaAgentId)?.status).toBe('completed');
+    expect(registry.get(missingMetaAgentId)?.result).toBe('done');
+    expect(registry.get(missingOutputAgentId)?.status).toBe('completed');
+    expect(registry.get(missingOutputAgentId)?.result).toBe('done');
+    expect(registry.get(corruptOutputAgentId)?.status).toBe('completed');
+    expect(registry.get(corruptOutputAgentId)?.result).toBe('done');
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
+  it('restores the completed entry when revive setup fails after the state flip', async () => {
+    const sessionId = 'session-revive-setup-fails';
+    const agentId = 'agent-revive-setup-fails';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Finished research' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+    const original = registry.get(agentId);
+    expect(original?.notified).toBe(true);
+
+    const restoredStates: Array<{
+      status: string;
+      notified: boolean;
+      outputOffset: number;
+    }> = [];
+    registry.setStatusChangeCallback((entry) => {
+      if (entry?.agentId === agentId && entry.status === 'completed') {
+        restoredStates.push({
+          status: entry.status,
+          notified: entry.notified,
+          outputOffset: entry.outputOffset,
+        });
+      }
+    });
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockRejectedValue(
+      new Error('setup failed'),
+    );
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
+    ).resolves.toBeUndefined();
+
+    const restored = registry.get(agentId);
+    expect(restored?.status).toBe('completed');
+    expect(restored?.result).toBe('All done');
+    expect(restored?.notified).toBe(true);
+    expect(restoredStates.at(-1)).toEqual({
+      status: 'completed',
+      notified: true,
+      outputOffset: original?.outputOffset,
+    });
+    const restoredMeta = readAgentMeta(metaPath);
+    expect(restoredMeta?.lastError).toBeUndefined();
+    expect(restoredMeta?.status).toBe('completed');
+  });
+
+  it('emits one start event and one terminal notification when a completed agent is revived', async () => {
+    const sessionId = 'session-revive-notify';
+    const agentId = 'agent-revive-notify';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Finished research' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+    expect(registry.get(agentId)?.notified).toBe(true);
+
+    // Attach the callback only AFTER the initial completion so the assertion
+    // counts the revived run's terminal notification in isolation.
+    const notifications: string[] = [];
+    registry.setNotificationCallback((_display, _model, meta) => {
+      notifications.push(meta.status);
+    });
+    const started: string[] = [];
+    registry.setRegisterCallback((entry) => {
+      started.push(entry.status);
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'iterated',
+    };
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await service.reviveCompletedBackgroundAgent(agentId, 'keep going');
+
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(notifications).toEqual(['completed']);
+    expect(started).toEqual(['running']);
+  });
+
+  it('does not revive when the background concurrency cap is full', async () => {
+    registry = new BackgroundTaskRegistry({ maxConcurrentBackgroundAgents: 1 });
+    const sessionId = 'session-revive-cap';
+    const agentId = 'agent-revive-cap';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Finished research' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    // Complete the target first (so it doesn't count toward the running cap),
+    // then fill the single slot with a live agent.
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+    registry.register({
+      agentId: 'blocker',
+      description: 'blocker',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: path.join(tempDir, 'blocker.jsonl'),
+    });
+
+    const { service, subagentManager } = createService();
+
+    const revived = await service.reviveCompletedBackgroundAgent(
+      agentId,
+      'keep going',
+    );
+
+    // At-capacity revive fails cleanly: the finished entry is NOT stranded as
+    // paused, and no agent run is started.
+    expect(revived).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('completed');
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
   });
 });
 

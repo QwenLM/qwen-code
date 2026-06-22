@@ -106,10 +106,16 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * For AUTO/YOLO pre-plan modes (without user takeover), the gate runs
-   * inside execute() and no user confirmation prompt is needed. For
-   * DEFAULT/AUTO_EDIT (or after user takeover), the existing confirmation
-   * UI handles approval.
+   * The Plan Approval Gate auto-approves (runs inside execute(), no user prompt)
+   * only when the model entered plan mode itself via enter_plan_mode while the
+   * session was AUTO/YOLO — an autonomous flow that should not be interrupted.
+   *
+   * When the user entered plan mode explicitly (Shift+Tab, /plan, the dialog),
+   * the confirmation UI always handles approval, even if prePlanMode happens to
+   * be AUTO/YOLO. Note the Shift+Tab cycle order (…→auto→yolo→plan) means a
+   * manual entry ALWAYS lands with prePlanMode === 'yolo', so prePlanMode alone
+   * cannot distinguish the two cases — `enteredByModel` is the discriminator
+   * (issue #5574).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const prePlanMode = this.config.getPrePlanMode();
@@ -117,6 +123,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     if (
       isAutonomousPrePlanMode(prePlanMode) &&
       gateState &&
+      gateState.enteredByModel &&
       gateState.gateMode !== 'user_takeover'
     ) {
       return 'allow';
@@ -199,10 +206,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         return this.approveAndRestore(plan, prePlanMode, 'Gate user override');
       }
 
-      // ── Path B: AUTO/YOLO gate path (no takeover) ──────────────
+      // ── Path B: AUTO/YOLO gate path (model-initiated, no takeover) ──
       if (
         isAutonomousPrePlanMode(prePlanMode) &&
         gateState &&
+        gateState.enteredByModel &&
         gateState.gateMode !== 'user_takeover'
       ) {
         // Update the gate state with the latest resolution summary

@@ -566,6 +566,25 @@ describe('useSlashCommandProcessor', () => {
       expect(mockOpenModelDialog).toHaveBeenCalled();
     });
 
+    it('should handle "dialog: voice-model" action', async () => {
+      const command = createTestCommand({
+        name: 'voicemodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'voice-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/voicemodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        voiceModelMode: true,
+      });
+    });
+
     it('awaits direct resume session switching before returning handled', async () => {
       const actions = createMockActions();
       let resolveResume: (() => void) | undefined;

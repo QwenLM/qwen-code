@@ -943,6 +943,95 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
     });
 
+    describe('isArtifactEnabled', () => {
+      const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+      const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+
+      beforeEach(() => {
+        delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+        delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+      });
+
+      afterEach(() => {
+        if (originalForceEnable === undefined) {
+          delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+        } else {
+          process.env['QWEN_CODE_ENABLE_ARTIFACT'] = originalForceEnable;
+        }
+        if (originalDisable === undefined) {
+          delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+        } else {
+          process.env['QWEN_CODE_DISABLE_ARTIFACT'] = originalDisable;
+        }
+      });
+
+      it('is disabled by default', () => {
+        const config = new Config(baseParams);
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('honors settings when interactive and not in SDK mode', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: true,
+          sdkMode: false,
+        });
+        expect(config.isArtifactEnabled()).toBe(true);
+      });
+
+      it('lets QWEN_CODE_DISABLE_ARTIFACT override settings and env enablement', () => {
+        process.env['QWEN_CODE_DISABLE_ARTIFACT'] = '1';
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: true,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('stays disabled in SDK mode even when force-enabled', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          interactive: true,
+          sdkMode: true,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('stays disabled outside interactive mode even when force-enabled', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: false,
+          interactive: true,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(true);
+      });
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
@@ -3384,6 +3473,41 @@ describe('setApprovalMode with folder trust', () => {
       // Setting PLAN again should not overwrite prePlanMode
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+
+    // Regression for #5574: the gate state records whether the model or the
+    // user entered plan mode, so exit_plan_mode can decide whether to gate.
+    it('marks the plan gate entry as user-initiated by default', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+    });
+
+    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Simulate the Shift+Tab cycle order:
+      // default → auto-edit → auto → yolo → plan
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      // prePlanMode is yolo purely because it precedes plan in the cycle —
+      // it does NOT mean the user wants autonomous execution.
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
     });
   });
 

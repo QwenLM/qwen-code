@@ -1948,6 +1948,24 @@ export async function loadCliConfig(
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    artifactEnabled: settings.experimental?.artifact ?? false,
+    artifactPublisher: settings.artifact?.publisher ?? 'local',
+    artifactHost: settings.artifact?.host
+      ? {
+          uploadCommand: settings.artifact?.host?.uploadCommand ?? '',
+          urlTemplate: settings.artifact?.host?.urlTemplate ?? '',
+          keyPrefix: settings.artifact?.host?.keyPrefix,
+        }
+      : undefined,
+    artifactOss: settings.artifact?.oss
+      ? {
+          bucket: settings.artifact?.oss?.bucket ?? '',
+          endpoint: settings.artifact?.oss?.endpoint ?? '',
+          keyPrefix: settings.artifact?.oss?.keyPrefix,
+          acl: settings.artifact?.oss?.acl,
+          publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
+        }
+      : undefined,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,

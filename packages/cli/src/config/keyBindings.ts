@@ -43,6 +43,7 @@ export enum Command {
   // Text input
   SUBMIT = 'submit',
   NEWLINE = 'newline',
+  VOICE_PUSH_TO_TALK = 'voicePushToTalk',
 
   // External tools
   OPEN_EXTERNAL_EDITOR = 'openExternalEditor',
@@ -196,6 +197,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'return', shift: true },
     { key: 'j', ctrl: true },
   ],
+  [Command.VOICE_PUSH_TO_TALK]: [{ key: 'space', ctrl: false, meta: false }],
 
   // External tools
   [Command.OPEN_EXTERNAL_EDITOR]: [
