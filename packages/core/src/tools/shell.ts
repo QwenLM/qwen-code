@@ -4736,7 +4736,7 @@ export class ShellTool extends BaseDeclarativeTool<
               'Optional: Whether to run the command in background. If not specified, defaults to false (foreground execution). Explicitly set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
           },
           timeout: {
-            type: 'number',
+            type: 'integer',
             description: 'Optional timeout in milliseconds (max 600000)',
           },
           description: {

@@ -238,6 +238,17 @@ describe('MonitorTool', () => {
       }
     ).createInvocation(params);
 
+  describe('schema', () => {
+    it('declares integer-only auto-stop params as integers', () => {
+      const schema = monitorTool.schema.parametersJsonSchema as {
+        properties: Record<string, { type: string }>;
+      };
+
+      expect(schema.properties['max_events'].type).toBe('integer');
+      expect(schema.properties['idle_timeout_ms'].type).toBe('integer');
+    });
+  });
+
   describe('confirmation details', () => {
     it('includes command-scoped permission rules for monitor commands', async () => {
       const invocation = createInvocation({
@@ -499,6 +510,12 @@ describe('MonitorTool', () => {
       );
     });
 
+    it('rejects fractional max_events', () => {
+      expect(validate({ command: 'tail -f log', max_events: 1.5 })).toBe(
+        'max_events must be a positive integer.',
+      );
+    });
+
     it('rejects max_events over limit', () => {
       expect(validate({ command: 'tail -f log', max_events: 20000 })).toBe(
         'max_events cannot exceed 10000.',
@@ -509,6 +526,12 @@ describe('MonitorTool', () => {
       expect(validate({ command: 'tail -f log', idle_timeout_ms: -100 })).toBe(
         'idle_timeout_ms must be a positive integer.',
       );
+    });
+
+    it('rejects fractional idle_timeout_ms', () => {
+      expect(
+        validate({ command: 'tail -f log', idle_timeout_ms: 1000.5 }),
+      ).toBe('idle_timeout_ms must be a positive integer.');
     });
 
     it('rejects idle_timeout_ms over limit', () => {

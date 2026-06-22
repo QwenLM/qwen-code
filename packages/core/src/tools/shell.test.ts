@@ -62,6 +62,9 @@ interface ShellToolParameterJsonSchema {
     command: {
       description: string;
     };
+    timeout: {
+      type: string;
+    };
   };
 }
 
@@ -6041,6 +6044,13 @@ describe('ShellTool', () => {
   });
 
   describe('timeout parameter', () => {
+    it('declares timeout as an integer in the tool schema', () => {
+      const schema = shellTool.schema
+        .parametersJsonSchema as ShellToolParameterJsonSchema;
+
+      expect(schema.properties.timeout.type).toBe('integer');
+    });
+
     it('should validate timeout parameter correctly', async () => {
       // Valid timeout
       expect(() => {
@@ -6087,23 +6097,23 @@ describe('ShellTool', () => {
         });
       }).toThrow('Timeout cannot exceed 600000ms (10 minutes).');
 
-      // Non-integer timeout
+      // Non-integer timeout (schema validation catches this first)
       expect(() => {
         shellTool.build({
           command: 'echo test',
           is_background: false,
           timeout: 5000.5,
         });
-      }).toThrow('Timeout must be an integer number of milliseconds.');
+      }).toThrow('params/timeout must be integer');
 
-      // Non-number timeout (schema validation catches this first)
+      // Non-number timeout
       expect(() => {
         shellTool.build({
           command: 'echo test',
           is_background: false,
           timeout: 'invalid' as unknown as number,
         });
-      }).toThrow('params/timeout must be number');
+      }).toThrow('params/timeout must be integer');
     });
 
     it('should include timeout in description for foreground commands', async () => {
