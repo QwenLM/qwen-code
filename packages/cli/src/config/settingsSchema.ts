@@ -2804,6 +2804,16 @@ const SETTINGS_SCHEMA = {
       'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
     showInDialog: false,
     properties: {
+      autoOpen: {
+        type: 'boolean',
+        label: 'Auto-open Artifacts',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.',
+        showInDialog: false,
+      },
       publisher: {
         type: 'enum',
         label: 'Artifact Publisher',

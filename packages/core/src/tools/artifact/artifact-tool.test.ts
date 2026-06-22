@@ -27,6 +27,8 @@ describe('ArtifactTool', () => {
     ({
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => workdir,
+      shouldAutoOpenArtifact: () =>
+        process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] !== '1',
     }) as unknown as Config;
 
   const writeFragment = async (name: string, content: string) => {
@@ -51,6 +53,11 @@ describe('ArtifactTool', () => {
     await fs.rm(outDir, { recursive: true, force: true });
     delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
     vi.restoreAllMocks();
+  });
+
+  it('describes browser opening as settings-dependent', () => {
+    expect(tool.description).toContain('depending on settings');
+    expect(tool.description).not.toContain('and opens it in the browser');
   });
 
   it('publishes a fragment, wraps it, and opens the url', async () => {
@@ -151,6 +158,74 @@ describe('ArtifactTool', () => {
     const res = await tool.build({ file_path: file }).execute(signal);
     expect(res.error).toBeUndefined();
     expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips auto-open when disabled by settings', async () => {
+    const file = await writeFragment('p.html', '<p>x</p>');
+    const noAutoOpenTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        shouldAutoOpenArtifact: () => false,
+      } as unknown as Config,
+      new LocalPublisher(outDir),
+      openSpy as unknown as UrlOpener,
+    );
+
+    const res = await noAutoOpenTool.build({ file_path: file }).execute(signal);
+
+    expect(res.error).toBeUndefined();
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('omits browser launch from confirmation when auto-open is disabled', async () => {
+    const file = await writeFragment('p.html', '<p>x</p>');
+    const noAutoOpenTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        shouldAutoOpenArtifact: () => false,
+      } as unknown as Config,
+      new LocalPublisher(outDir),
+      openSpy as unknown as UrlOpener,
+    );
+
+    const details = await noAutoOpenTool
+      .build({ file_path: file })
+      .getConfirmationDetails(signal);
+
+    expect(details.type).toBe('info');
+    if (details.type !== 'info') {
+      throw new Error(`Unexpected confirmation type: ${details.type}`);
+    }
+    expect(details.prompt).toBe('Publish p.html as an interactive Artifact.');
+  });
+
+  it('reuses the confirmation auto-open decision during execution', async () => {
+    const shouldAutoOpenArtifact = vi
+      .fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    const consistentTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        shouldAutoOpenArtifact,
+      } as unknown as Config,
+      new LocalPublisher(outDir),
+      openSpy as unknown as UrlOpener,
+    );
+    const file = await writeFragment('p.html', '<p>x</p>');
+    const invocation = consistentTool.build({ file_path: file });
+
+    const details = await invocation.getConfirmationDetails(signal);
+    const res = await invocation.execute(signal);
+
+    expect(details.type).toBe('info');
+    if (details.type !== 'info') {
+      throw new Error(`Unexpected confirmation type: ${details.type}`);
+    }
+    expect(details.prompt).toContain('and open it in your browser');
+    expect(res.error).toBeUndefined();
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(shouldAutoOpenArtifact).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a relative file_path at build time', () => {
