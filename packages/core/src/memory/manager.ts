@@ -76,7 +76,12 @@ import {
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
-import { stageSkillDirs } from './pending-skills.js';
+import {
+  stageSkillDirs,
+  acceptPendingSkill,
+  rejectPendingSkill,
+  type PendingSkill,
+} from './pending-skills.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
@@ -405,7 +410,7 @@ export class MemoryManager {
   // run on every UserQuery.
   private readonly subscribers = new Set<() => void>();
   private readonly subscribersByType = new Map<
-    'extract' | 'dream',
+    'extract' | 'dream' | 'skill-review',
     Set<() => void>
   >();
   // ── In-flight promises (for drain) ──────────────────────────────────────────
@@ -461,7 +466,7 @@ export class MemoryManager {
    */
   subscribe(
     listener: () => void,
-    opts?: { taskType?: 'extract' | 'dream' },
+    opts?: { taskType?: 'extract' | 'dream' | 'skill-review' },
   ): () => void {
     if (opts?.taskType) {
       const type = opts.taskType;
@@ -491,7 +496,7 @@ export class MemoryManager {
    */
   private notify(taskType?: 'extract' | 'dream' | 'skill-review'): void {
     for (const fn of this.subscribers) fn();
-    if (taskType && taskType !== 'skill-review') {
+    if (taskType) {
       const typed = this.subscribersByType.get(taskType);
       if (typed) for (const fn of typed) fn();
     }
@@ -1062,6 +1067,41 @@ export class MemoryManager {
    */
   getTask(taskId: string): MemoryTaskRecord | undefined {
     return this.tasks.get(taskId);
+  }
+
+  /** Promote one staged skill (by dir name) for the given skill-review task. */
+  async acceptPendingSkillFromTask(
+    taskId: string,
+    skillName: string,
+  ): Promise<void> {
+    await this.resolvePendingSkill(taskId, skillName, 'accept');
+  }
+
+  /** Discard one staged skill (by dir name) for the given skill-review task. */
+  async rejectPendingSkillFromTask(
+    taskId: string,
+    skillName: string,
+  ): Promise<void> {
+    await this.resolvePendingSkill(taskId, skillName, 'reject');
+  }
+
+  private async resolvePendingSkill(
+    taskId: string,
+    skillName: string,
+    action: 'accept' | 'reject',
+  ): Promise<void> {
+    const record = this.tasks.get(taskId);
+    if (!record) return;
+    const list = (record.metadata?.['pendingSkills'] as PendingSkill[]) ?? [];
+    const target = list.find((p) => p.name === skillName);
+    if (!target) return;
+    if (action === 'accept') {
+      await acceptPendingSkill(target);
+    } else {
+      await rejectPendingSkill(target);
+    }
+    const remaining = list.filter((p) => p.name !== skillName);
+    this.update(record, { metadata: { pendingSkills: remaining } });
   }
 
   /**

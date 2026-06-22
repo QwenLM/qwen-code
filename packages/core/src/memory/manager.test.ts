@@ -548,6 +548,129 @@ describe('MemoryManager', () => {
     });
   });
 
+  // ─── skill-review subscription + accept/reject ───────────────────────────
+
+  describe('skill-review subscriptions and pending APIs', () => {
+    let tempDir: string;
+    let projectRoot: string;
+    let skillFilePath: string;
+
+    beforeEach(async () => {
+      vi.resetAllMocks();
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-pending-'));
+      projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const skillDir = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+      );
+      await fs.mkdir(skillDir, { recursive: true });
+      skillFilePath = path.join(skillDir, 'SKILL.md');
+      await fs.writeFile(
+        skillFilePath,
+        '---\ndescription: Foo skill\n---\n# Foo\n',
+      );
+    });
+
+    afterEach(async () => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    /** Produce a completed skill-review task with one pending skill. */
+    async function scheduleAndAwait(mgr: MemoryManager) {
+      vi.mocked(runSkillReviewByAgent).mockResolvedValue({
+        touchedSkillFiles: [skillFilePath],
+      });
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      });
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+      return record;
+    }
+
+    it('skill-review notify wakes type-filtered skill-review subscribers', async () => {
+      const mgr = new MemoryManager();
+      const fn = vi.fn();
+      const dreamFn = vi.fn();
+      const unsub = mgr.subscribe(fn, { taskType: 'skill-review' });
+      const unsubDream = mgr.subscribe(dreamFn, { taskType: 'dream' });
+
+      await scheduleAndAwait(mgr);
+
+      // At minimum storeWith (running) + update (completed) = 2 notifies
+      expect(fn.mock.calls.length).toBeGreaterThanOrEqual(1);
+      // skill-review notifies must NOT wake dream-filtered subscribers
+      expect(dreamFn).not.toHaveBeenCalled();
+      unsub();
+      unsubDream();
+    });
+
+    it('acceptPendingSkillFromTask promotes the skill and removes it from pendingSkills', async () => {
+      const mgr = new MemoryManager();
+      const record = await scheduleAndAwait(mgr);
+
+      const taskId = record.id;
+      await mgr.acceptPendingSkillFromTask(taskId, 'auto-skill-foo');
+
+      // The skill must now exist at its final path under .qwen/skills/
+      const finalPath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await expect(fs.access(finalPath)).resolves.toBeUndefined();
+
+      // The task record must reflect 0 remaining pending skills
+      const updated = mgr.getTask(taskId);
+      const remaining = updated?.metadata?.['pendingSkills'] as unknown[];
+      expect(remaining).toHaveLength(0);
+    });
+
+    it('rejectPendingSkillFromTask deletes the staged skill and removes it from pendingSkills', async () => {
+      const mgr = new MemoryManager();
+      const record = await scheduleAndAwait(mgr);
+
+      const taskId = record.id;
+      await mgr.rejectPendingSkillFromTask(taskId, 'auto-skill-foo');
+
+      // The skill must NOT exist under .qwen/skills/
+      const finalPath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await expect(fs.access(finalPath)).rejects.toThrow();
+
+      // The staged dir must also be gone
+      const stagedPath = path.join(
+        projectRoot,
+        '.qwen',
+        'pending-skills',
+        'auto-skill-foo',
+      );
+      await expect(fs.access(stagedPath)).rejects.toThrow();
+
+      // The task record must reflect 0 remaining pending skills
+      const updated = mgr.getTask(taskId);
+      const remaining = updated?.metadata?.['pendingSkills'] as unknown[];
+      expect(remaining).toHaveLength(0);
+    });
+  });
+
   // ─── scheduleDream() ─────────────────────────────────────────────────────
 
   describe('scheduleDream()', () => {
