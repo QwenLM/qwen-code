@@ -892,7 +892,7 @@ describe('WorkflowOrchestrator', () => {
 
   it('P6: a normal run journals a started+result per agent() call', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
-    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
       path: 'mem',
       append: (e: import('./workflow-journal.js').JournalEntry) => {
@@ -921,7 +921,7 @@ describe('WorkflowOrchestrator', () => {
   it('P6: resume serves the cached prefix without re-dispatching', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     // Run 1: record the journal.
-    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal1 = {
       append: (e: import('./workflow-journal.js').JournalEntry) => {
         entries.push(e);
@@ -958,7 +958,7 @@ describe('WorkflowOrchestrator', () => {
   it('P6: first miss runs live and the suffix goes live (first-miss invalidates suffix)', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     // Run 1 journaled agents a, b, c.
-    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal1 = {
       append: (e: import('./workflow-journal.js').JournalEntry) => {
         entries.push(e);
@@ -997,7 +997,7 @@ describe('WorkflowOrchestrator', () => {
 
   it('P6: cache hit advances the registry counters (agentDispatched + agentCompleted)', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
-    const entries: import('./workflow-journal.js').JournalEntry[] = [];
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal1 = {
       append: (e: import('./workflow-journal.js').JournalEntry) => {
         entries.push(e);
@@ -1031,7 +1031,7 @@ describe('WorkflowOrchestrator', () => {
     process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
     try {
       const { buildReplay } = await import('./workflow-journal.js');
-      const entries: import('./workflow-journal.js').JournalEntry[] = [];
+      const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
       const journal1 = {
         append: (e: import('./workflow-journal.js').JournalEntry) => {
           entries.push(e);
