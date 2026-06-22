@@ -31,8 +31,8 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 - **File:** `read-file.ts`
 - **Parameters:**
   - `path` (string, required): The absolute path to the file to read.
-  - `offset` (number, optional): For text files, the 0-based line number to start reading from. Requires `limit` to be set.
-  - `limit` (number, optional): For text files, the maximum number of lines to read. If omitted, reads a default maximum (e.g., 2000 lines) or the entire file if feasible.
+  - `offset` (integer, optional): For text files, the 0-based line number to start reading from. Requires `limit` to be set.
+  - `limit` (integer, optional): For text files, the maximum number of lines to read. If omitted, reads a default maximum (e.g., 2000 lines) or the entire file if feasible.
 - **Behavior:**
   - For text files: Returns the content. If `offset` and `limit` are used, returns only that slice of lines. Indicates if content was truncated due to line limits or line length limits.
   - For media files (images, PDFs, audio, video): If the current model supports the file's modality, returns the file content as a base64-encoded `inlineData` object. If the model does not support the modality, returns an error message with guidance (e.g., suggesting skills or external tools).

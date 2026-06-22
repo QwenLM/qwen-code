@@ -145,7 +145,25 @@ describe('ReadFileTool', () => {
         offset: -1,
       };
       expect(() => tool.build(params)).toThrow(
-        'Offset must be a non-negative number',
+        'Offset must be a non-negative integer',
+      );
+    });
+
+    it('should throw error if offset is fractional', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        offset: 1.5,
+      };
+      expect(() => tool.build(params)).toThrow('params/offset must be integer');
+    });
+
+    it('should throw error if offset exceeds the safe integer range', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        offset: Number.MAX_SAFE_INTEGER + 1,
+      };
+      expect(() => tool.build(params)).toThrow(
+        'Offset must be a non-negative integer',
       );
     });
 
@@ -155,7 +173,25 @@ describe('ReadFileTool', () => {
         limit: 0,
       };
       expect(() => tool.build(params)).toThrow(
-        'Limit must be a positive number',
+        'Limit must be a positive integer',
+      );
+    });
+
+    it('should throw error if limit is fractional', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        limit: 2.5,
+      };
+      expect(() => tool.build(params)).toThrow('params/limit must be integer');
+    });
+
+    it('should throw error if limit exceeds the safe integer range', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        limit: Number.MAX_SAFE_INTEGER + 1,
+      };
+      expect(() => tool.build(params)).toThrow(
+        'Limit must be a positive integer',
       );
     });
 
