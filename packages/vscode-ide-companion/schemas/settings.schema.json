@@ -1217,9 +1217,10 @@
       "default": false
     },
     "stopHookBlockingCap": {
-      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
-      "type": "number",
-      "default": 8
+      "type": "integer",
+      "minimum": 1,
+      "default": 8,
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP."
     },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",
