@@ -2999,6 +2999,35 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/fork', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const directive = body['directive'];
+    if (typeof directive !== 'string' || directive.trim().length === 0) {
+      res.status(400).json({
+        error: '`directive` is required and must be a non-empty string',
+        code: 'missing_directive',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.launchSessionForkAgent(
+        sessionId,
+        directive,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(202).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/fork',
+        sessionId,
+      });
+    }
+  });
+
   app.get('/session/:id/context', async (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;

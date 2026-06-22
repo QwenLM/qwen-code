@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
 
 describe('matchMcpServerPrefix', () => {
   it('matches a configured server name prefix and returns the remainder', () => {
@@ -38,5 +38,28 @@ describe('matchMcpServerPrefix', () => {
     expect(
       matchMcpServerPrefix('__proto__:x', new Set(Object.keys({}))),
     ).toBeNull();
+  });
+});
+
+describe('buildMcpResourceRef', () => {
+  it('builds the canonical `<server>:<uri>` reference', () => {
+    expect(buildMcpResourceRef('demo', 'file:///docs/spec.md')).toBe(
+      'demo:file:///docs/spec.md',
+    );
+  });
+
+  it('round-trips through matchMcpServerPrefix (it is the inverse)', () => {
+    for (const [server, uri] of [
+      ['demo', 'file:///docs/spec.md'],
+      ['my:server', 'res://x'], // server name containing a colon
+      ['s', ''], // empty uri
+      ['srv', 'weird:uri://with:colons'],
+    ] as const) {
+      const ref = buildMcpResourceRef(server, uri);
+      expect(matchMcpServerPrefix(ref, new Set([server]))).toEqual({
+        serverName: server,
+        rest: uri,
+      });
+    }
   });
 });

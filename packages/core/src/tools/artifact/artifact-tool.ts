@@ -17,7 +17,11 @@ import type { PermissionDecision } from '../../permissions/types.js';
 import { ToolErrorType } from '../tool-error.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { makeRelative, shortenPath, unescapePath } from '../../utils/paths.js';
-import { getErrorMessage, isNodeError } from '../../utils/errors.js';
+import {
+  getErrorMessage,
+  isAbortError,
+  isNodeError,
+} from '../../utils/errors.js';
 import { openBrowserSecurely } from '../../utils/secure-browser-launcher.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
@@ -87,17 +91,32 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     return Promise.resolve('ask');
   }
 
-  override getConfirmationDetails(): Promise<ToolCallConfirmationDetails> {
+  override getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
     const relativePath = makeRelative(
       this.params.file_path,
       this.config.getTargetDir(),
     );
+    const backendLabel =
+      this.publisher.kind === 'host' ? 'custom upload' : this.publisher.kind;
+    const openSuffix = this.shouldAutoOpen
+      ? ' and open it in your browser'
+      : '';
+    const remoteOpenSuffix = this.shouldAutoOpen
+      ? ' and opens the shareable link in your browser'
+      : '';
+    // Remote backends (host/oss) upload the HTML to a server and hand back a
+    // shareable link — say so in the prompt so the user knows the page leaves
+    // their machine before they approve.
+    const prompt =
+      this.publisher.kind === 'local'
+        ? `Publish ${shortenPath(relativePath)} as an interactive Artifact${openSuffix}.`
+        : `Publish ${shortenPath(relativePath)} as an interactive Artifact. This uploads the page to a remote host (${backendLabel})${remoteOpenSuffix}.`;
     const details: ToolInfoConfirmationDetails = {
       type: 'info',
       title: 'Publish Artifact',
-      prompt: `Publish ${shortenPath(relativePath)} as an interactive Artifact${
-        this.shouldAutoOpen ? ' and open it in your browser' : ''
-      }.`,
+      prompt,
       onConfirm: async () => {
         // Persistence handled by coreToolScheduler via PM rules.
       },
@@ -169,6 +188,15 @@ class ArtifactToolInvocation extends BaseToolInvocation<
       url = published.url;
       filePath = published.filePath;
     } catch (err) {
+      // A user-initiated cancel (Esc / aborted signal) is not a failure —
+      // surface it as a cancellation rather than a publish error.
+      if (signal.aborted || isAbortError(err)) {
+        const message = 'Artifact publishing was cancelled.';
+        return {
+          llmContent: message,
+          returnDisplay: message,
+        };
+      }
       const message = `Failed to publish artifact: ${getErrorMessage(err)}`;
       return {
         llmContent: message,
@@ -202,10 +230,9 @@ class ArtifactToolInvocation extends BaseToolInvocation<
 }
 
 /**
- * The Artifact tool (option B): publishes a self-contained HTML fragment as a
- * local interactive page and opens it. Backend is pluggable via
- * {@link ArtifactPublisher} so remote/shared publishing (option C) can drop in
- * later without changing the tool.
+ * The Artifact tool: publishes a self-contained HTML fragment as an interactive
+ * page and opens it. The backend is pluggable via {@link ArtifactPublisher}
+ * (local file://, a custom upload command, or native OSS).
  */
 export class ArtifactTool extends BaseDeclarativeTool<
   ArtifactToolParams,
