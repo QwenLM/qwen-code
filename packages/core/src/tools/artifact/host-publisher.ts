@@ -75,6 +75,16 @@ function substituteKey(token: string, key: string): string {
   return token.split('{key}').join(key);
 }
 
+function normalizeKeyPrefix(raw: string | undefined): string {
+  const prefix = (raw || 'artifacts').replace(/^\/+|\/+$/g, '');
+  if (!prefix) {
+    throw new Error(
+      'artifact.host.keyPrefix must not be empty or "/" after stripping slashes.',
+    );
+  }
+  return prefix;
+}
+
 /**
  * Option C: uploads the artifact via a user-configured command and returns the
  * shareable URL. The remote key is `{prefix}/{id}/index.html` (id = source path
@@ -110,16 +120,18 @@ export class HostPublisher implements ArtifactPublisher {
         'artifact.host.uploadCommand must include the {file} placeholder (the local HTML path to upload).',
       );
     }
+    if (!uploadCommand.includes('{key}')) {
+      throw new Error(
+        'artifact.host.uploadCommand must include the {key} placeholder so the upload destination matches the returned URL.',
+      );
+    }
     if (!urlTemplate.includes('{key}')) {
       throw new Error(
         'artifact.host.urlTemplate must include the {key} placeholder (the remote object key).',
       );
     }
 
-    const prefix = (this.config.keyPrefix ?? 'artifacts').replace(
-      /^\/+|\/+$/g,
-      '',
-    );
+    const prefix = normalizeKeyPrefix(this.config.keyPrefix);
     const key = `${prefix}/${input.id}/index.html`;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-'));
     const file = path.join(dir, 'index.html');

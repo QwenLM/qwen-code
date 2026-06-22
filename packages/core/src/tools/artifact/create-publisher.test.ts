@@ -49,4 +49,14 @@ describe('createArtifactPublisher', () => {
   it('returns OssPublisher for the oss kind', () => {
     expect(createArtifactPublisher(cfg('oss'))).toBeInstanceOf(OssPublisher);
   });
+
+  it('rejects unknown publisher kinds', () => {
+    const config = {
+      getArtifactPublisherKind: () => 's3',
+    } as unknown as Config;
+
+    expect(() => createArtifactPublisher(config)).toThrow(
+      /unknown artifact publisher kind/i,
+    );
+  });
 });

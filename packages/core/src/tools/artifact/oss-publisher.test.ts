@@ -137,6 +137,29 @@ describe('OssPublisher', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it('hides OSS error response bodies from thrown errors', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('secret AccessKeyId', { status: 403 })),
+    );
+    try {
+      await expect(
+        new OssPublisher(
+          { bucket: 'bkt', endpoint: 'oss-cn-hangzhou.aliyuncs.com' },
+          { credentials: () => creds, now: fixedNow },
+        ).publish(input),
+      ).rejects.toThrow('OSS upload failed: 403');
+      await expect(
+        new OssPublisher(
+          { bucket: 'bkt', endpoint: 'oss-cn-hangzhou.aliyuncs.com' },
+          { credentials: () => creds, now: fixedNow },
+        ).publish(input),
+      ).rejects.not.toThrow('AccessKeyId');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('honors a custom keyPrefix', async () => {
     let url = '';
     const httpPut: HttpPut = async (u) => {
@@ -147,6 +170,31 @@ describe('OssPublisher', () => {
       { httpPut, credentials: () => creds, now: fixedNow },
     ).publish(input);
     expect(url).toBe('https://bkt.e.aliyuncs.com/pages/cafe1234/index.html');
+  });
+
+  it('rejects invalid keyPrefix values', async () => {
+    const httpPut = vi.fn<HttpPut>(async () => {});
+    await expect(
+      new OssPublisher(
+        {
+          bucket: 'bkt',
+          endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+          keyPrefix: '/',
+        },
+        { httpPut, credentials: () => creds, now: fixedNow },
+      ).publish(input),
+    ).rejects.toThrow(/keyPrefix/i);
+    await expect(
+      new OssPublisher(
+        {
+          bucket: 'bkt',
+          endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+          keyPrefix: 'bad prefix',
+        },
+        { httpPut, credentials: () => creds, now: fixedNow },
+      ).publish(input),
+    ).rejects.toThrow(/keyPrefix/i);
+    expect(httpPut).not.toHaveBeenCalled();
   });
 
   it('rejects when bucket/endpoint/credentials are missing', async () => {

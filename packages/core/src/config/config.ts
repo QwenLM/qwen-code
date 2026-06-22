@@ -3956,9 +3956,10 @@ export class Config {
   isArtifactEnabled(): boolean {
     // Artifacts are experimental and opt-in. Publishing writes outside the
     // project and opens a browser, so it is limited to interactive, non-SDK
-    // sessions. QWEN_DISABLE_ARTIFACT hard-disables; QWEN_CODE_ENABLE_ARTIFACT
-    // force-enables (still subject to the interactive/SDK gate).
-    if (process.env['QWEN_DISABLE_ARTIFACT'] === '1') return false;
+    // sessions. QWEN_CODE_DISABLE_ARTIFACT hard-disables;
+    // QWEN_CODE_ENABLE_ARTIFACT force-enables (still subject to the
+    // interactive/SDK gate).
+    if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode || !this.interactive) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
     return this.artifactEnabled;

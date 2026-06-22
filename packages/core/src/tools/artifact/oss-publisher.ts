@@ -31,20 +31,23 @@ export type HttpPut = (
 const defaultHttpPut: HttpPut = async (url, headers, body, signal) => {
   const timeout = AbortSignal.timeout(60_000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers,
-    body,
-    signal: combinedSignal,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(
-      `OSS upload failed: ${res.status} ${res.statusText}${
-        text ? ` — ${text.slice(0, 300)}` : ''
-      }`,
-    );
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body,
+      signal: combinedSignal,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`OSS upload to ${url} failed: ${message}`);
   }
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`OSS upload failed: ${res.status} ${res.statusText}`);
+  }
+  await res.body?.cancel().catch(() => {});
 };
 
 /** Reads OSS credentials from the environment (OSS_* or ALIBABA_CLOUD_*). */
@@ -113,6 +116,21 @@ function normalizeEndpoint(raw: string): string {
   return endpoint;
 }
 
+function normalizeKeyPrefix(raw: string | undefined): string {
+  const prefix = (raw || 'artifacts').replace(/^\/+|\/+$/g, '');
+  if (!prefix) {
+    throw new Error(
+      'artifact.oss.keyPrefix must not be empty or "/" after stripping slashes.',
+    );
+  }
+  if (/[#?%\s]/.test(prefix)) {
+    throw new Error(
+      'artifact.oss.keyPrefix must not contain #, ?, %, or whitespace.',
+    );
+  }
+  return prefix;
+}
+
 /**
  * Option C, native Aliyun OSS backend (zero new dependencies). Uploads the
  * artifact with a self-signed PUT Object request over the built-in fetch and
@@ -154,10 +172,7 @@ export class OssPublisher implements ArtifactPublisher {
       );
     }
 
-    const prefix = (this.config.keyPrefix ?? 'artifacts').replace(
-      /^\/+|\/+$/g,
-      '',
-    );
+    const prefix = normalizeKeyPrefix(this.config.keyPrefix);
     const key = `${prefix}/${input.id}/index.html`;
     const acl = this.config.acl ?? 'public-read';
     const date = (this.deps.now ? this.deps.now() : new Date()).toUTCString();

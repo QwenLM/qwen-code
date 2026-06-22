@@ -18,7 +18,8 @@ import { OssPublisher } from './oss-publisher.js';
  * rather than silently falling back.
  */
 export function createArtifactPublisher(config: Config): ArtifactPublisher {
-  switch (config.getArtifactPublisherKind()) {
+  const kind = config.getArtifactPublisherKind();
+  switch (kind) {
     case 'host':
       return new HostPublisher(
         config.getArtifactHostConfig() ?? {
@@ -30,7 +31,11 @@ export function createArtifactPublisher(config: Config): ArtifactPublisher {
       return new OssPublisher(
         config.getArtifactOssConfig() ?? { bucket: '', endpoint: '' },
       );
-    default:
+    case 'local':
       return new LocalPublisher();
+    default: {
+      const unknown: never = kind;
+      throw new Error(`Unknown artifact publisher kind: ${unknown}`);
+    }
   }
 }

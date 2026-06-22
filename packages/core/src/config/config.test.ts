@@ -945,11 +945,11 @@ describe('Server Config (config.ts)', () => {
 
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
-      const originalDisable = process.env['QWEN_DISABLE_ARTIFACT'];
+      const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
 
       beforeEach(() => {
         delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
-        delete process.env['QWEN_DISABLE_ARTIFACT'];
+        delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
       });
 
       afterEach(() => {
@@ -959,9 +959,9 @@ describe('Server Config (config.ts)', () => {
           process.env['QWEN_CODE_ENABLE_ARTIFACT'] = originalForceEnable;
         }
         if (originalDisable === undefined) {
-          delete process.env['QWEN_DISABLE_ARTIFACT'];
+          delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
         } else {
-          process.env['QWEN_DISABLE_ARTIFACT'] = originalDisable;
+          process.env['QWEN_CODE_DISABLE_ARTIFACT'] = originalDisable;
         }
       });
 
@@ -980,8 +980,8 @@ describe('Server Config (config.ts)', () => {
         expect(config.isArtifactEnabled()).toBe(true);
       });
 
-      it('lets QWEN_DISABLE_ARTIFACT override settings and env enablement', () => {
-        process.env['QWEN_DISABLE_ARTIFACT'] = '1';
+      it('lets QWEN_CODE_DISABLE_ARTIFACT override settings and env enablement', () => {
+        process.env['QWEN_CODE_DISABLE_ARTIFACT'] = '1';
         process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
 
         const config = new Config({

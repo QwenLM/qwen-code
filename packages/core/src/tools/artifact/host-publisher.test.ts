@@ -80,7 +80,7 @@ describe('HostPublisher', () => {
       filePath = args.find((a) => a.endsWith('.html'))!;
     };
     await new HostPublisher(
-      { uploadCommand: 'up {file}', urlTemplate: 'https://h/{key}' },
+      { uploadCommand: 'up {file} {key}', urlTemplate: 'https://h/{key}' },
       run,
     ).publish(input);
     await expect(fs.access(filePath)).rejects.toThrow();
@@ -92,7 +92,7 @@ describe('HostPublisher', () => {
       filePaths.push(args.find((a) => a.endsWith('.html'))!);
     };
     const pub = new HostPublisher(
-      { uploadCommand: 'up {file}', urlTemplate: 'https://h/{key}' },
+      { uploadCommand: 'up {file} {key}', urlTemplate: 'https://h/{key}' },
       run,
     );
 
@@ -106,7 +106,7 @@ describe('HostPublisher', () => {
     const run = vi.fn<RunCommand>(async () => {});
     await expect(
       new HostPublisher(
-        { uploadCommand: 'up {file}', urlTemplate: 'https://h/static' },
+        { uploadCommand: 'up {file} {key}', urlTemplate: 'https://h/static' },
         run,
       ).publish(input),
     ).rejects.toThrow(/\{key\}/i);
@@ -145,7 +145,7 @@ describe('HostPublisher', () => {
       throw new Error('boom');
     };
     const pub = new HostPublisher(
-      { uploadCommand: 'up {file}', urlTemplate: 'https://h/{key}' },
+      { uploadCommand: 'up {file} {key}', urlTemplate: 'https://h/{key}' },
       run,
     );
     await expect(pub.publish(input)).rejects.toThrow(/boom/);
@@ -158,6 +158,18 @@ describe('HostPublisher', () => {
     [
       { uploadCommand: 'up nofile', urlTemplate: 'https://h/{key}' },
       /\{file\}/i,
+    ],
+    [
+      { uploadCommand: 'up {file}', urlTemplate: 'https://h/{key}' },
+      /\{key\}/i,
+    ],
+    [
+      {
+        uploadCommand: 'up {file} {key}',
+        urlTemplate: 'https://h/{key}',
+        keyPrefix: '/',
+      },
+      /keyPrefix/i,
     ],
   ])('rejects misconfiguration %#', async (config, re) => {
     const run = vi.fn<RunCommand>(async () => {});

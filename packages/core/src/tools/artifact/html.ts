@@ -82,7 +82,12 @@ export function validateSelfContained(fragment: string): string | null {
   }
 
   const extScript =
-    /\b(?:fetch|WebSocket)\s*\(\s*["']\s*(?:https?|wss?):\/\//i.exec(scan) ??
+    /\b(?:fetch|WebSocket|XMLHttpRequest)\s*\(\s*["']\s*(?:https?|wss?):\/\//i.exec(
+      scan,
+    ) ??
+    /\bimport\s*\(\s*["'](?:https?:)?\/\//i.exec(scan) ??
+    /\bwindow\.open\s*\(/i.exec(scan) ??
+    /\blocation\.\w+\s*[=(]/i.exec(scan) ??
     /\bnavigator\.sendBeacon\s*\(\s*["']\s*(?:https?:)?\/\//i.exec(scan);
   if (extScript) {
     return `Artifact must be self-contained — found browser network egress (${truncate(extScript[0])}). Embed data in the artifact instead of fetching it at runtime.`;
