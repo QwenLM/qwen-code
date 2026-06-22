@@ -47,6 +47,7 @@ jobs:
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
+      ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
     steps:
       - name: 'Detect release version-sync PR'
         id: 'release_sync'
@@ -83,6 +84,31 @@ jobs:
 
           echo "skip_ci=${skip_ci}" >> "${GITHUB_OUTPUT}"
           echo "skip_ci=${skip_ci}"
+
+      # Route the (required) Linux Test job for in-repo PRs onto the self-hosted
+      # ECS runner so maintainer changes skip the shared GitHub-hosted Linux
+      # queue. A PR whose head branch lives in this repository can only have been
+      # pushed by someone with write access (read/triage roles cannot push
+      # branches and must fork), so an in-repo head is a reliable "has write
+      # access" signal. Forks always stay on hosted runners, so untrusted code
+      # never executes on the self-hosted machine. Set the
+      # MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to force
+      # every PR back onto hosted runners if the ECS runner is unavailable.
+      - name: 'Select Linux runner'
+        id: 'pick_runner'
+        env:
+          SAME_REPO: "${{ github.event.pull_request.head.repo.full_name == github.repository }}"
+          ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
+        run: |-
+          # Default to the shared GitHub-hosted Linux runner.
+          ubuntu_runner='["ubuntu-latest"]'
+          # In-repo branch (author had write access) and ECS routing enabled:
+          # use the self-hosted ECS runner instead.
+          if [[ "${ECS_DISABLED}" != "true" && "${SAME_REPO}" == "true" ]]; then
+            ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          fi
+          echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
+          echo "Selected Linux runner: ${ubuntu_runner}"
 
   lint:
     name: 'Lint'
@@ -158,7 +184,7 @@ jobs:
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     if: '${{ !cancelled() }}'
-    runs-on: '${{ matrix.runner }}'
+    runs-on: '${{ fromJSON(matrix.runner) }}'
     permissions:
       contents: 'read'
       checks: 'write'
@@ -168,15 +194,18 @@ jobs:
       matrix:
         include:
           - os: 'macos-latest'
-            runner: 'macos-latest'
+            runner: '["macos-latest"]'
             node-version: '22.x'
             upload-coverage: 'false'
+          # Linux runner is chosen by classify_pr: self-hosted ECS for in-repo
+          # (write-access) PRs, GitHub-hosted for forks. Falls back to the hosted
+          # runner when classify_pr did not run (e.g. push / merge_group events).
           - os: 'ubuntu-latest'
-            runner: 'ubuntu-latest'
+            runner: "${{ needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]' }}"
             node-version: '22.x'
             upload-coverage: 'true'
           - os: 'windows-latest'
-            runner: 'windows-2022'
+            runner: '["windows-2022"]'
             node-version: '22.x'
             upload-coverage: 'false'
     steps:
