@@ -238,6 +238,11 @@
           "type": "boolean",
           "default": false
         },
+        "disableWorkflowKeywordTrigger": {
+          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
+          "type": "boolean",
+          "default": false
+        },
         "showStatusInTitle": {
           "description": "Show Qwen Code session name and status in the terminal window title",
           "type": "boolean",

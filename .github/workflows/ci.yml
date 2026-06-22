@@ -43,10 +43,12 @@ jobs:
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' }}"
-    runs-on: 'ubuntu-latest'
+    # Gate runs on ECS for in-repo PRs too, else a busy hosted pool delays it and blocks the ECS-bound jobs. The kill-switch is read here, so flipping it reverts everything to hosted.
+    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
+      ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
     steps:
       - name: 'Detect release version-sync PR'
         id: 'release_sync'
@@ -84,11 +86,26 @@ jobs:
           echo "skip_ci=${skip_ci}" >> "${GITHUB_OUTPUT}"
           echo "skip_ci=${skip_ci}"
 
+      # In-repo PR (head branch in this repo => author has write access) runs the
+      # Linux Test on ECS; forks stay hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
+      - name: 'Select Linux runner'
+        id: 'pick_runner'
+        env:
+          SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
+          ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
+        run: |-
+          ubuntu_runner='["ubuntu-latest"]'
+          if [[ "${ECS_DISABLED}" != "true" && "${SAME_REPO}" == "true" ]]; then
+            ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          fi
+          echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
+          echo "Selected Linux runner: ${ubuntu_runner}"
+
   lint:
     name: 'Lint'
     needs: 'classify_pr'
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
-    runs-on: 'ubuntu-latest'
+    runs-on: "${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]') }}"
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -96,14 +113,28 @@ jobs:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
 
-      - name: 'Set up Node.js 22.x'
+      # Self-hosted reuses the machine's Node (nodejs.org unreachable via proxy); linters are pre-installed on PATH so scripts/lint.js skips downloading them.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
           cache: 'npm'
 
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set MAINTAINER_ECS_RUNNER_DISABLED='true' to route PRs back to hosted runners."
+            exit 1
+          fi
+          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
+            echo "::warning::Expected Node 22.x but found $(node -v); lint results may diverge from local development."
+          fi
+
       - name: 'Install dependencies and run prepare'
-        run: 'npm ci'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
 
       - name: 'Check lockfile'
         run: 'npm run check:lockfile'
@@ -158,7 +189,7 @@ jobs:
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     if: '${{ !cancelled() }}'
-    runs-on: '${{ matrix.runner }}'
+    runs-on: '${{ fromJSON(matrix.runner) }}'
     permissions:
       contents: 'read'
       checks: 'write'
@@ -168,15 +199,15 @@ jobs:
       matrix:
         include:
           - os: 'macos-latest'
-            runner: 'macos-latest'
+            runner: '["macos-latest"]'
             node-version: '22.x'
             upload-coverage: 'false'
           - os: 'ubuntu-latest'
-            runner: 'ubuntu-latest'
+            runner: "${{ needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]' }}"
             node-version: '22.x'
             upload-coverage: 'true'
           - os: 'windows-latest'
-            runner: 'windows-2022'
+            runner: '["windows-2022"]'
             node-version: '22.x'
             upload-coverage: 'false'
     steps:
@@ -184,14 +215,27 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
 
-      - name: 'Set up Node.js ${{ matrix.node-version }}'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+      # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
+      - name: 'Set up Node.js ${{ matrix.node-version }} (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
+        run: |-
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node ${{ matrix.node-version }} or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route PRs back to hosted runners."
+            exit 1
+          fi
+          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
+            echo "::warning::Expected Node 22.x but found $(node -v); tests will run against the runner's Node."
+          fi
 
       - name: 'Configure npm for rate limiting'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -303,6 +347,44 @@ jobs:
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
+
+  # Fast PR-safe integration coverage. This job intentionally runs only the
+  # no-AK subset that uses local fakes or no model transport, so fork PRs get
+  # daemon/SSE smoke coverage without repository secrets.
+  integration_no_ak:
+    name: 'Integration Tests (No-AK Smoke)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name == 'pull_request' && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Configure npm for rate limiting'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Run no-AK integration smoke tests'
+        run: |-
+          npm run test:integration:no-ak:sandbox:none
 
   # Integration tests run only in the merge queue, not on every PR push.
   # They are the suite that previously ran *only* in the nightly Release

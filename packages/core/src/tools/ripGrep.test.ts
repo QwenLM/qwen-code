@@ -1008,6 +1008,15 @@ describe('RipGrepTool', () => {
       expect(result.resultFilePaths).toEqual([
         path.join(tempRootDir, 'visible.txt'),
       ]);
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toEqual([
+        path.join(tempRootDir, 'nested', '.qwenignore'),
+        path.join(tempRootDir, '.qwenignore'),
+      ]);
     });
 
     it('should pass configured custom ignore files to ripgrep', async () => {

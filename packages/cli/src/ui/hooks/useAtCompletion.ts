@@ -9,7 +9,7 @@ import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
 import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
-import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
 
 /**
  * `@server:uri` MCP resource completion. Returns suggestions when `pattern`
@@ -50,11 +50,14 @@ function getMcpResourceSuggestions(
       const bPrefix = b.uri.startsWith(partialUri) ? 0 : 1;
       return aPrefix - bPrefix || a.uri.localeCompare(b.uri);
     });
-  return matches.slice(0, MAX_SUGGESTIONS_TO_SHOW * 3).map((r) => ({
-    label: `${serverName}:${r.uri}`,
-    value: `${serverName}:${r.uri}`,
-    isDirectory: false,
-  }));
+  return matches.slice(0, MAX_SUGGESTIONS_TO_SHOW * 3).map((r) => {
+    const ref = buildMcpResourceRef(serverName, r.uri);
+    return {
+      label: ref,
+      value: ref,
+      isDirectory: false,
+    };
+  });
 }
 
 export enum AtCompletionStatus {

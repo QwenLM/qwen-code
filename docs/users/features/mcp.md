@@ -177,8 +177,11 @@ The prompt's messages are sent to the model, which then acts on them.
 
 Resources a server advertises via `resources/list` are discovered per
 server. Open the management dialog with `/mcp` and select a server to see
-its **Resources** count alongside its tools and prompts. As with prompts,
-the `resources` capability is not required to be declared.
+its **Resources** count alongside its tools and prompts. Choose **View
+resources** to browse the server's resource URIs; selecting one shows its
+description and MIME type along with the exact `@server:uri` reference to
+paste into a message. As with prompts, the `resources` capability is not
+required to be declared.
 
 Inject a resource's contents into your message with the `@server:uri`
 syntax — type `@`, then the server name, a colon, and the resource URI:

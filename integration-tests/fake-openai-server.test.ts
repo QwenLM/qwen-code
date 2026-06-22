@@ -11,6 +11,24 @@ import {
   type FakeOpenAIServer,
 } from './fake-openai-server.js';
 
+type StreamToolCallDelta = {
+  index: number;
+  id?: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+};
+
+type StreamChunk = {
+  choices: Array<{
+    delta: {
+      tool_calls?: StreamToolCallDelta[];
+    };
+  }>;
+};
+
 let server: FakeOpenAIServer | undefined;
 
 afterEach(async () => {
@@ -69,6 +87,85 @@ describe('fake OpenAI server', () => {
     expect(streamText).toContain('"write_file"');
     expect(streamText).toContain('data: [DONE]');
     expect(server.requests).toHaveLength(2);
+  });
+
+  it('serves non-streaming tool calls with null content', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      toolCalls: [
+        fakeToolCall('write_file', {
+          file_path: '/tmp/fake.txt',
+          content: 'fake',
+        }),
+      ],
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use a tool' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [{ function: { name: 'write_file' } }],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+    });
+  });
+
+  it('streams tool call arguments as deltas', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      toolCalls: [
+        fakeToolCall(
+          'write_file',
+          {
+            file_path: '/tmp/fake.txt',
+            content: 'fake',
+          },
+          'call_fixed',
+        ),
+      ],
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'write' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const toolCallDeltas = (await response.text())
+      .split('\n\n')
+      .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+      .map((line) => JSON.parse(line.slice('data: '.length)) as StreamChunk)
+      .flatMap((chunk) => chunk.choices[0]?.delta.tool_calls ?? []);
+    expect(toolCallDeltas).toEqual([
+      {
+        index: 0,
+        id: 'call_fixed',
+        type: 'function',
+        function: { name: 'write_file', arguments: '' },
+      },
+      {
+        index: 0,
+        function: {
+          arguments: '{"file_path":"/tmp/fake.txt","content":"fake"}',
+        },
+      },
+    ]);
   });
 
   it('returns 404 for wrong methods or paths', async () => {

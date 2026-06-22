@@ -85,7 +85,12 @@ function getRipgrepJsonPath(match: RipgrepJsonMatch): string | undefined {
  * **Known staleness window:** an ignore file created mid-session will not be
  * picked up until the entry rotates out of the FIFO (256 entries).
  */
-const qwenIgnoreCache = new Map<string, readonly string[]>();
+interface QwenIgnoreFileForRipgrep {
+  ignoreFileName: string;
+  ignoreFilePath: string;
+}
+
+const qwenIgnoreCache = new Map<string, readonly QwenIgnoreFileForRipgrep[]>();
 const RIPGREP_CACHE_MAX = 256;
 function trimCache<K, V>(m: Map<K, V>): void {
   if (m.size <= RIPGREP_CACHE_MAX) return;
@@ -121,8 +126,8 @@ function toAbsoluteResultPath(
   return absolutePath;
 }
 
-function isQwenIgnoreFilePath(ignoreFilePath: string): boolean {
-  return path.basename(ignoreFilePath) === '.qwenignore';
+function isQwenIgnoreFileName(ignoreFileName: string): boolean {
+  return ignoreFileName === '.qwenignore';
 }
 
 /**
@@ -484,22 +489,25 @@ class GrepToolInvocation extends BaseToolInvocation<
           continue;
         }
         const cacheKey = [ignoreRoot, ...ignoreFileNames].join('\0');
-        let qwenIgnorePaths = qwenIgnoreCache.get(cacheKey);
-        if (qwenIgnorePaths === undefined) {
-          qwenIgnorePaths = ignoreFileNames
-            .map((ignoreFileName) => path.join(ignoreRoot, ignoreFileName))
-            .filter((candidate) => fs.existsSync(candidate));
-          qwenIgnoreCache.set(cacheKey, qwenIgnorePaths);
+        let qwenIgnoreFiles = qwenIgnoreCache.get(cacheKey);
+        if (qwenIgnoreFiles === undefined) {
+          qwenIgnoreFiles = ignoreFileNames
+            .map((ignoreFileName) => ({
+              ignoreFileName,
+              ignoreFilePath: path.join(ignoreRoot, ignoreFileName),
+            }))
+            .filter(({ ignoreFilePath }) => fs.existsSync(ignoreFilePath));
+          qwenIgnoreCache.set(cacheKey, qwenIgnoreFiles);
           trimCache(qwenIgnoreCache);
         }
-        for (const qwenIgnorePath of qwenIgnorePaths) {
-          if (!seenIgnoreFiles.has(qwenIgnorePath)) {
-            if (isQwenIgnoreFilePath(qwenIgnorePath)) {
-              qwenIgnorePathsForRipgrep.push(qwenIgnorePath);
+        for (const { ignoreFileName, ignoreFilePath } of qwenIgnoreFiles) {
+          if (!seenIgnoreFiles.has(ignoreFilePath)) {
+            if (isQwenIgnoreFileName(ignoreFileName)) {
+              qwenIgnorePathsForRipgrep.push(ignoreFilePath);
             } else {
-              nonQwenIgnorePaths.push(qwenIgnorePath);
+              nonQwenIgnorePaths.push(ignoreFilePath);
             }
-            seenIgnoreFiles.add(qwenIgnorePath);
+            seenIgnoreFiles.add(ignoreFilePath);
           }
         }
       }

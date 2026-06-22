@@ -176,6 +176,12 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
+    case 'session_rewound':
+      return normalizeSessionRewound(event, base);
+
+    case 'session_branched':
+      return normalizeSessionBranched(event, base);
+
     case 'prompt_cancelled': {
       // Forward the optional `reason` (e.g. `'forward_failed'` from the
       // bridge's C3 compensating broadcast) so consumers can distinguish a
@@ -330,6 +336,48 @@ function normalizeStateResyncRequired(
       reason,
       lastDeliveredId,
       earliestAvailableId,
+    },
+  ];
+}
+
+function normalizeSessionRewound(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const promptId = getString(event.data, 'promptId');
+  const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
+  if (!promptId || targetTurnIndex === undefined) {
+    return fallbackDebug(event, base, 'malformed session_rewound payload');
+  }
+  const sessionId = getString(event.data, 'sessionId');
+  return [
+    {
+      ...base,
+      type: 'session.rewound',
+      promptId,
+      targetTurnIndex,
+      ...(sessionId ? { sessionId } : {}),
+    },
+  ];
+}
+
+function normalizeSessionBranched(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sourceSessionId = getString(event.data, 'sourceSessionId');
+  const newSessionId = getString(event.data, 'newSessionId');
+  const displayName = getString(event.data, 'displayName');
+  if (!sourceSessionId || !newSessionId || !displayName) {
+    return fallbackDebug(event, base, 'malformed session_branched payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'session.branched',
+      sourceSessionId,
+      newSessionId,
+      displayName,
     },
   ];
 }

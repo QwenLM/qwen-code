@@ -20,7 +20,7 @@ import {
 } from 'vitest';
 import { Storage, QWEN_DIR } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
-import type { AcpSessionBridge } from './acpSessionBridge.js';
+import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { BridgeEvent } from './event-bus.js';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 

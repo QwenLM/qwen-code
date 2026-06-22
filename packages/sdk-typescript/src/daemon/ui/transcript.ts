@@ -327,6 +327,17 @@ function applyDaemonTranscriptEvent(
       // stream (or `selectors`) to drop a catch-up indicator. No
       // transcript mutation.
       break;
+    case 'session.rewound':
+      rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      break;
+    case 'session.branched':
+      appendStatusBlock(
+        next,
+        'status',
+        `Branched conversation "${event.displayName}". You are now in the branch.`,
+        event,
+      );
+      break;
     case 'workspace.memory.changed':
     case 'workspace.agent.changed':
     case 'workspace.tool.toggled':
@@ -969,6 +980,16 @@ function appendStatusBlock(
     event.data !== undefined
       ? { data: event.data }
       : {}),
+    ...(event?.type === 'session.branched'
+      ? {
+          source: 'session_branched',
+          data: {
+            sourceSessionId: event.sourceSessionId,
+            newSessionId: event.newSessionId,
+            displayName: event.displayName,
+          },
+        }
+      : {}),
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
@@ -1171,6 +1192,58 @@ function takeBlocksOwnership(state: DaemonTranscriptState): void {
   state.blocks = [...state.blocks];
   state.blockIndexById = { ...state.blockIndexById };
   ownedBlocks.set(state, state.blocks);
+}
+
+// Applies a daemon rewind event to this in-memory transcript only. The target
+// user turn and everything after it are removed so the rendered session view
+// matches the already-rewound backend state.
+function rewindTranscriptToUserTurn(
+  state: DaemonTranscriptState,
+  targetTurnIndex: number,
+): void {
+  let userTurn = 0;
+  let lastUserIndex = -1;
+  for (let index = 0; index < state.blocks.length; index += 1) {
+    if (state.blocks[index]?.kind !== 'user') continue;
+    lastUserIndex = index;
+    if (userTurn === targetTurnIndex) {
+      truncateTranscriptBeforeBlock(state, index);
+      return;
+    }
+    userTurn += 1;
+  }
+  if (lastUserIndex >= 0 && targetTurnIndex >= userTurn) {
+    truncateTranscriptBeforeBlock(state, lastUserIndex);
+  }
+}
+
+function truncateTranscriptBeforeBlock(
+  state: DaemonTranscriptState,
+  blockIndex: number,
+): void {
+  takeBlocksOwnership(state);
+  state.blocks = state.blocks.slice(0, blockIndex);
+  ownedBlocks.set(state, state.blocks);
+  state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  state.toolBlockByCallId = {};
+  state.permissionBlockByRequestId = {};
+  for (const block of state.blocks) {
+    if (block.kind === 'tool')
+      state.toolBlockByCallId[block.toolCallId] = block.id;
+    if (block.kind === 'permission') {
+      state.permissionBlockByRequestId[block.requestId] = block.id;
+    }
+  }
+  state.trimmedToolNotificationByCallId = {};
+  state.activeUserBlockId = undefined;
+  state.activeAssistantBlockId = undefined;
+  state.activeThoughtBlockId = undefined;
+  state.activeAssistantBlockByParent = {};
+  state.activeThoughtBlockByParent = {};
+  state.currentToolCallId = undefined;
+  state.pendingUserShellCommand = undefined;
+  state.lastFollowupSuggestion = undefined;
+  state.toolProgress = {};
 }
 
 function appendBlock(

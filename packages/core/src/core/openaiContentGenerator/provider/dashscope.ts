@@ -220,6 +220,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...(this.buildMetadata(userPromptId) || {}),
         /* @ts-expect-error dashscope exclusive */
         vl_high_resolution_images: true,
+        // Default-on for supported reasoning models; user extra_body wins.
+        // Several vision models (e.g. qwen3.6-plus, qwen3.7-plus) are reasoning
+        // models that need this flag for multi-turn reasoning continuity.
+        // (No @ts-expect-error needed: TS flags only the first excess property
+        // in this cast, already suppressed on vl_high_resolution_images above.)
+        preserve_thinking: true,
         ...(extraBody ? extraBody : {}),
       } as OpenAI.Chat.ChatCompletionCreateParams;
     }
@@ -229,6 +235,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
+      // Default-on for supported reasoning models; user extra_body wins.
+      /* @ts-expect-error dashscope exclusive */
+      preserve_thinking: true,
       ...(extraBody ? extraBody : {}),
     } as OpenAI.Chat.ChatCompletionCreateParams;
   }
