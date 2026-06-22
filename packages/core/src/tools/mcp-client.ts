@@ -88,6 +88,17 @@ export function getMcpOAuthDialogInstruction(
   ].join(' ');
 }
 
+function getSseOAuth401Message(
+  mcpServerName: string,
+  hasStoredTokens: boolean,
+): string {
+  return hasStoredTokens
+    ? `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
+        getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
+    : `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
+        getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+}
+
 async function readResponseBodyExcerpt(
   response: Response,
 ): Promise<string | undefined> {
@@ -1336,25 +1347,11 @@ export async function connectToMcpServer(
               clientId: credentials.clientId,
             }),
           );
-          if (hasStoredTokens) {
-            debugLogger.warn(
-              `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-                getMcpOAuthDialogInstruction('re-authenticate', mcpServerName),
-            );
-          } else {
-            debugLogger.warn(
-              `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-                getMcpOAuthDialogInstruction('authenticate', mcpServerName),
-            );
-          }
+          debugLogger.warn(
+            getSseOAuth401Message(mcpServerName, hasStoredTokens),
+          );
         }
-        throw new Error(
-          hasStoredTokens
-            ? `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-              getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
-            : `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-              getMcpOAuthDialogInstruction('authenticate', mcpServerName),
-        );
+        throw new Error(getSseOAuth401Message(mcpServerName, hasStoredTokens));
       }
 
       // Try to extract www-authenticate header from the error

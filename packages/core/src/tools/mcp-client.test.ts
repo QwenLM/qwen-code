@@ -1566,6 +1566,36 @@ describe('mcp-client', () => {
     });
 
     describe('authenticated Streamable HTTP compatibility fetch', () => {
+      it('throws the /mcp instruction when OAuth has no valid token', async () => {
+        const getValidToken = vi.fn().mockResolvedValue(null);
+        vi.mocked(MCPOAuthProvider).mockImplementation(
+          () =>
+            ({
+              getValidToken,
+            }) as unknown as MCPOAuthProvider,
+        );
+
+        await expect(
+          createTransport(
+            'oauth-test-server',
+            {
+              httpUrl: 'http://test-server',
+              oauth: {
+                enabled: true,
+                clientId: 'client-id',
+              },
+            },
+            false,
+          ),
+        ).rejects.toThrow(
+          "Open the /mcp dialog in Qwen Code to authenticate with MCP server 'oauth-test-server'.",
+        );
+        expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
+          enabled: true,
+          clientId: 'client-id',
+        });
+      });
+
       it('wires the compatibility fetch for OAuth httpUrl transports', async () => {
         const getValidToken = vi.fn().mockResolvedValue('oauth-token');
         vi.mocked(MCPOAuthProvider).mockImplementation(

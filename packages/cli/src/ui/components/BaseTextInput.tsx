@@ -22,6 +22,7 @@
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useRef } from 'react';
 import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
+import { addLayoutListener } from 'ink/dom';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -144,6 +145,47 @@ export function getAbsolutePosition(
   }
 
   return { top, left };
+}
+
+function findRootNode(node: DOMElement | null): DOMElement | undefined {
+  let current: DOMElement | undefined = node ?? undefined;
+  while (current?.parentNode) {
+    current = current.parentNode;
+  }
+  return current?.nodeName === 'ink-root' ? current : undefined;
+}
+
+function getPhysicalCursorPosition(
+  node: DOMElement | null,
+  {
+    showCursor,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    linesToRender,
+    prefixWidth,
+  }: {
+    showCursor: boolean;
+    cursorVisualRow: number;
+    cursorVisualCol: number;
+    scrollVisualRow: number;
+    linesToRender: string[];
+    prefixWidth: number;
+  },
+): { x: number; y: number } | undefined {
+  if (!showCursor) return undefined;
+
+  const position = getAbsolutePosition(node);
+  if (!position) return undefined;
+
+  const relativeRow = cursorVisualRow - scrollVisualRow;
+  const lineText = linesToRender[relativeRow] || '';
+  const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
+  const physicalCol = stringWidth(textBeforeCursor);
+  return {
+    x: position.left + prefixWidth + physicalCol,
+    y: position.top + relativeRow + 1,
+  };
 }
 
 // ─── Component ──────────────────────────────────────────────
@@ -275,30 +317,42 @@ export const BaseTextInput = ({
   const scrollVisualRow = buffer.visualScrollRow;
 
   // ── Physical cursor positioning for IME ──
-  // useBoxMetrics subscribes to Ink layout changes through public API. We still
-  // walk the parent chain to convert the component-relative Yoga layout into
-  // the absolute Ink output coordinates expected by useCursor.
-  const rootRef = useRef<DOMElement | null>(null);
-  const { hasMeasured } = useBoxMetrics(rootRef);
+  const boxRef = useRef<DOMElement | null>(null);
+  const { hasMeasured } = useBoxMetrics(boxRef);
   const { setCursorPosition } = useCursor();
+  const cursorStateRef = useRef({
+    showCursor,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    linesToRender,
+    prefixWidth,
+  });
+  cursorStateRef.current = {
+    showCursor,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    linesToRender,
+    prefixWidth,
+  };
+
+  const getCurrentCursorPosition = useCallback(
+    () => getPhysicalCursorPosition(boxRef.current, cursorStateRef.current),
+    [],
+  );
+
+  useEffect(() => {
+    const rootNode = findRootNode(boxRef.current);
+    if (!rootNode) return undefined;
+    return addLayoutListener(rootNode, () => {
+      setCursorPosition(getCurrentCursorPosition());
+    });
+  }, [getCurrentCursorPosition, setCursorPosition]);
+
   useEffect(() => () => setCursorPosition(undefined), [setCursorPosition]);
 
-  const cursorPosition =
-    showCursor && hasMeasured
-      ? (() => {
-          const position = getAbsolutePosition(rootRef.current);
-          if (!position) return undefined;
-
-          const relativeRow = cursorVisualRow - scrollVisualRow;
-          const lineText = linesToRender[relativeRow] || '';
-          const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
-          const physicalCol = stringWidth(textBeforeCursor);
-          return {
-            x: position.left + prefixWidth + physicalCol,
-            y: position.top + relativeRow + 1,
-          };
-        })()
-      : undefined;
+  const cursorPosition = hasMeasured ? getCurrentCursorPosition() : undefined;
 
   // useCursor propagates its latest value during Ink's insertion effect, so the
   // position must be set during render rather than in a normal effect.
@@ -319,7 +373,7 @@ export const BaseTextInput = ({
     : '─'.repeat(columns);
 
   return (
-    <Box ref={rootRef} flexDirection="column">
+    <Box ref={boxRef} flexDirection="column">
       <Text color={resolvedBorderColor} wrap="truncate-end">
         {topBorderLine}
       </Text>

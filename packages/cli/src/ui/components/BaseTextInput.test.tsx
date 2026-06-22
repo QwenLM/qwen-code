@@ -13,6 +13,9 @@ import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 
 const mockSetCursorPosition = vi.hoisted(() => vi.fn());
+const mockAddLayoutListener = vi.hoisted(() =>
+  vi.fn((_rootNode: DOMElement, _listener: () => void) => vi.fn()),
+);
 
 vi.mock('ink', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ink')>();
@@ -21,6 +24,14 @@ vi.mock('ink', async (importOriginal) => {
     useCursor: () => ({
       setCursorPosition: mockSetCursorPosition,
     }),
+  };
+});
+
+vi.mock('ink/dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink/dom')>();
+  return {
+    ...actual,
+    addLayoutListener: mockAddLayoutListener,
   };
 });
 
@@ -84,6 +95,9 @@ function captureKeypressHandler(): (key: Key) => void {
 describe('BaseTextInput', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAddLayoutListener.mockImplementation(
+      (_rootNode: DOMElement, _listener: () => void) => vi.fn(),
+    );
   });
 
   it('does not type the render-mode shortcut into the buffer', () => {
@@ -131,6 +145,27 @@ describe('BaseTextInput', () => {
     unmount();
 
     expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
+  });
+
+  it('updates the physical cursor position on root layout commits', () => {
+    const buffer = createBuffer();
+    let layoutListener: (() => void) | undefined;
+    mockAddLayoutListener.mockImplementation((_rootNode, listener) => {
+      layoutListener = listener;
+      return vi.fn();
+    });
+
+    render(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
+
+    expect(mockAddLayoutListener).toHaveBeenCalledWith(
+      expect.objectContaining({ nodeName: 'ink-root' }),
+      expect.any(Function),
+    );
+
+    mockSetCursorPosition.mockClear();
+    layoutListener?.();
+
+    expect(mockSetCursorPosition).toHaveBeenCalled();
   });
 });
 
