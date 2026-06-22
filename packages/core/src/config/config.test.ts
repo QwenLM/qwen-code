@@ -1032,6 +1032,44 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    describe('shouldAutoOpenArtifact', () => {
+      const originalNoAutoOpen = process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
+
+      beforeEach(() => {
+        delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
+      });
+
+      afterEach(() => {
+        if (originalNoAutoOpen === undefined) {
+          delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
+        } else {
+          process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] = originalNoAutoOpen;
+        }
+      });
+
+      it('auto-opens artifacts by default', () => {
+        const config = new Config(baseParams);
+        expect(config.shouldAutoOpenArtifact()).toBe(true);
+      });
+
+      it('honors artifact.autoOpen=false from settings', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: false,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('lets QWEN_ARTIFACT_NO_AUTO_OPEN override settings', () => {
+        process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] = '1';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();

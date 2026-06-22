@@ -54,7 +54,7 @@ Workflow:
 
 To update an artifact, call Artifact again with the SAME file path: it redeploys to the same URL. A different path creates a separate Artifact.
 
-Set QWEN_ARTIFACT_NO_AUTO_OPEN=1 to publish without launching a browser.`;
+Set artifact.autoOpen=false in settings.json, or QWEN_ARTIFACT_NO_AUTO_OPEN=1, to publish without launching a browser.`;
 
 const debugLogger = createDebugLogger('artifact');
 
@@ -79,7 +79,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     return `Publishing artifact from ${shortenPath(relativePath)}`;
   }
 
-  /** Publishing writes outside the project and opens a browser — always ask. */
+  /** Publishing writes outside the project and may open a browser — always ask. */
   override getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('ask');
   }
@@ -89,10 +89,13 @@ class ArtifactToolInvocation extends BaseToolInvocation<
       this.params.file_path,
       this.config.getTargetDir(),
     );
+    const autoOpen = this.config.shouldAutoOpenArtifact();
     const details: ToolInfoConfirmationDetails = {
       type: 'info',
       title: 'Publish Artifact',
-      prompt: `Publish ${shortenPath(relativePath)} as an interactive Artifact and open it in your browser.`,
+      prompt: `Publish ${shortenPath(relativePath)} as an interactive Artifact${
+        autoOpen ? ' and open it in your browser' : ''
+      }.`,
       onConfirm: async () => {
         // Persistence handled by coreToolScheduler via PM rules.
       },
@@ -174,7 +177,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
 
     // Open in the browser unless disabled. Best-effort: never fail the publish
     // because the browser could not be launched.
-    if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] !== '1') {
+    if (this.config.shouldAutoOpenArtifact()) {
       try {
         await this.openUrl(url, {
           allowFile: true,
