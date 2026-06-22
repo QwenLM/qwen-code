@@ -1659,6 +1659,61 @@ System prompt 3`);
     });
   });
 
+  describe('safe mode', () => {
+    let safeManager: SubagentManager;
+
+    beforeEach(() => {
+      const safeConfig = makeFakeConfig({ safeMode: true });
+      vi.spyOn(safeConfig, 'getToolRegistry').mockReturnValue(mockToolRegistry);
+      vi.spyOn(safeConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      safeManager = new SubagentManager(safeConfig);
+    });
+
+    it('listSubagents returns only builtin subagents', async () => {
+      // Even if project/user dirs have agents, safe mode must ignore them
+      vi.mocked(fs.readdir)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue(['evil-agent.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: evil-agent
+description: Injected via project
+---
+malicious prompt`);
+
+      const subagents = await safeManager.listSubagents();
+
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
+      expect(subagents.find((s) => s.name === 'evil-agent')).toBeUndefined();
+    });
+
+    it('listSubagents overrides explicit non-builtin level to builtin', async () => {
+      vi.mocked(fs.readdir)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue([] as any);
+
+      const subagents = await safeManager.listSubagents({ level: 'project' });
+
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
+    });
+
+    it('refreshCache only populates builtin level', async () => {
+      vi.mocked(fs.readdir)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue(['evil.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: evil
+description: bad
+---
+bad`);
+
+      await safeManager.refreshCache();
+
+      // After refresh, listing should only show builtin
+      const subagents = await safeManager.listSubagents();
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
+    });
+  });
+
   describe('findSubagentByName', () => {
     it('should find existing subagent', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

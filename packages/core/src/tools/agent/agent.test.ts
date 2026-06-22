@@ -171,6 +171,7 @@ describe('AgentTool', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       getSandbox: vi.fn().mockReturnValue(undefined),
       getScreenReader: vi.fn().mockReturnValue(false),
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),

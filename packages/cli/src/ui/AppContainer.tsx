@@ -1333,6 +1333,24 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const performMemoryRefresh = useCallback(async () => {
+    // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
+    if (config.isSafeMode()) {
+      config.setUserMemory('');
+      config.setGeminiMdFileCount(0);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry([], process.cwd()),
+      );
+      setGeminiMdFileCount(0);
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: 'Safe mode active — skipping context file refresh.',
+        },
+        Date.now(),
+      );
+      return;
+    }
+
     historyManager.addItem(
       {
         type: MessageType.INFO,

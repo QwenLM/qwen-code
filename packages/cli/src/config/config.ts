@@ -1421,7 +1421,7 @@ export async function loadCliConfig(
   );
 
   let outputLanguageFilePath: string | undefined;
-  if (!bareMode) {
+  if (!bareMode && !safeMode) {
     if (fs.existsSync(projectOutputLanguagePath)) {
       outputLanguageFilePath = projectOutputLanguagePath;
     } else if (fs.existsSync(globalOutputLanguagePath)) {
@@ -1432,7 +1432,7 @@ export async function loadCliConfig(
   const fileService = new FileDiscoveryService(cwd);
 
   const includeDirectories = (
-    bareMode ? [] : (settings.context?.includeDirectories ?? [])
+    bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? [])
   )
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
@@ -1727,7 +1727,7 @@ export async function loadCliConfig(
   }
 
   const sandboxConfig = await loadSandboxConfig(
-    bareMode ? ({} as Settings) : settings,
+    bareMode || safeMode ? ({} as Settings) : settings,
     argv,
   );
   const screenReader =
@@ -1833,9 +1833,10 @@ export async function loadCliConfig(
     sandbox: sandboxConfig,
     targetDir: cwd,
     includeDirectories,
-    loadMemoryFromIncludeDirectories: bareMode
-      ? includeDirectories.length > 0
-      : (settings.context?.loadFromIncludeDirectories ?? false),
+    loadMemoryFromIncludeDirectories:
+      bareMode || safeMode
+        ? includeDirectories.length > 0
+        : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,

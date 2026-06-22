@@ -435,7 +435,10 @@ export class SubagentManager {
       : ['project', 'user', 'builtin', 'extension'];
     const levelsToCheck: SubagentLevel[] = options.level
       ? this.config.isSafeMode() && options.level !== 'builtin'
-        ? ['builtin']
+        ? (debugLogger.debug(
+            `Safe mode: overriding requested level '${options.level}' to 'builtin'`,
+          ),
+          ['builtin'])
         : [options.level]
       : defaultLevels;
 

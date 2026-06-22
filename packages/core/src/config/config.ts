@@ -4144,7 +4144,7 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
     // Only return project hooks if workspace is trusted
@@ -4162,7 +4162,7 @@ export class Config {
    * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
     // Prefer new userHooks field, fall back to hooks for backward compatibility
