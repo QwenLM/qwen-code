@@ -81,8 +81,13 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     try {
       // Idempotent: only switch when not already in plan mode so we never
       // overwrite the saved prePlanMode.
+      // Mark this entry as model-initiated so exit_plan_mode runs the Plan
+      // Approval Gate for AUTO/YOLO sessions. User-initiated entries (Shift+Tab,
+      // /plan) leave this false and always get the confirmation dialog (#5574).
       if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
-        this.config.setApprovalMode(ApprovalMode.PLAN);
+        this.config.setApprovalMode(ApprovalMode.PLAN, {
+          enteredByModel: true,
+        });
       }
     } catch (error) {
       const errorMessage =
