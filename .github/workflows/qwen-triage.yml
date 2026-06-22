@@ -173,6 +173,18 @@ jobs:
         )
       )
     steps:
+      - name: 'Acknowledge triage request'
+        if: "github.event_name == 'issue_comment'"
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          COMMENT_ID: '${{ github.event.comment.id }}'
+        run: |-
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='eyes' > /dev/null ||
+            echo "Failed to add triage acknowledgement reaction; continuing." >&2
+
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
@@ -272,11 +284,11 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
     steps:
-      - name: 'Install tmux runner tools'
+      - name: 'Install PR resolver tools'
         run: |-
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq tmux util-linux
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq
 
           install -d -m 755 /etc/apt/keyrings
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -287,10 +299,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends gh
 
-          npm install -g '@qwen-code/qwen-code@latest'
-          qwen --version
           gh --version
-          tmux -V
 
       - name: 'Resolve PR and check state'
         id: 'pr'
@@ -348,6 +357,17 @@ jobs:
             echo "decision=na" >> "$GITHUB_OUTPUT"
           fi
 
+      # Install before checkout so PR-controlled .npmrc cannot affect npm.
+      - name: 'Install tmux runner tools'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -euo pipefail
+          apt-get install -y --no-install-recommends tmux util-linux
+
+          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          qwen --version
+          tmux -V
+
       - name: 'Clean stale review worktrees'
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
@@ -381,13 +401,15 @@ jobs:
           set +e
           {
             printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
-            runuser -u node -- npm ci --prefer-offline --no-audit --progress=false
+            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              npm ci --prefer-offline --no-audit --progress=false
             install_status=$?
             if [ "$install_status" -ne 0 ]; then
               printf '\n%s\n' "npm ci failed with exit code ${install_status}."
             else
               printf '\n%s\n' '$ npm run build'
-              runuser -u node -- npm run build
+              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+                npm run build
               build_status=$?
               if [ "$build_status" -ne 0 ]; then
                 printf '\n%s\n' "npm run build failed with exit code ${build_status}."
@@ -663,6 +685,9 @@ jobs:
             "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
             "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
           )
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
+          fi
 
           set +e
           timeout --kill-after=10s 20m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
@@ -771,17 +796,27 @@ jobs:
           # as markdown — which a
           # backtick fence (breakable by a long enough ``` run) cannot guarantee.
           # Order matters: escape & first so the < / > entities aren't re-escaped.
+          html_escape() {
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+          }
+
           emit_block() {
-            local summary="$1" file="$2" max="$3" content
+            local summary="$1" file="$2" max="$3" content truncated='' summary_html
             [ -n "$file" ] && [ -f "$file" ] || return 0
-            content="$(head -c "$max" "$file")"
+            summary_html="$(printf '%s' "$summary" | html_escape)"
             if [ "$(wc -c < "$file")" -gt "$max" ]; then
-              content="${content}"$'\n\n...truncated -- full log in the run artifacts.'
+              truncated=$'\n\n...truncated -- full log in the run artifacts.'
             fi
-            content="${content//&/&amp;}"
-            content="${content//</&lt;}"
-            content="${content//>/&gt;}"
-            printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary"
+            if ! content="$(
+              set -o pipefail
+              head -c "$max" "$file" | tr -d '\000' | html_escape
+            )"; then
+              echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
+              content='<em>Log could not be rendered; see run artifacts.</em>'
+            elif [ -n "$truncated" ]; then
+              content="${content}${truncated}"
+            fi
+            printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"
             printf '%s\n' "$content"
             printf '</code></pre>\n\n</details>\n\n'
           }
@@ -807,22 +842,68 @@ jobs:
             case "$PREPARE_FAILURE_PHASE" in
               install) PREPARE_COMMAND='npm ci' ;;
               build) PREPARE_COMMAND='npm run build' ;;
-              *) PREPARE_COMMAND="$PREPARE_FAILURE_PHASE" ;;
+              *)
+                PREPARE_COMMAND='install/build'
+                UNKNOWN_PREPARE_PHASE="$(
+                  printf '%s' "$PREPARE_FAILURE_PHASE" | tr -d '\000' | tr '\r\n' '  ' | head -c 200 | html_escape
+                )"
+                echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
+                ;;
             esac
+            if [ -z "$PREPARE_LOG" ]; then
+              PREPARE_LOG_NOTE='No prepare.log was found in tmux-results, so the install/build log section is omitted.'
+              echo "::warning::${PREPARE_LOG_NOTE}"
+            fi
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
               printf '**tmux real-user testing: fail** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The PR app could not be launched because `%s` failed before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              if [ -n "${PREPARE_LOG_NOTE:-}" ]; then
+                printf '%s\n\n' "$PREPARE_LOG_NOTE"
+              fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
             } > "$BODY_FILE"
           else
             REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
             TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            if [ -z "$REPORT" ] && [ -z "$TRANSCRIPT" ]; then
+              MISSING_ARTIFACTS_NOTE='No report.md or tmux-readable-full.log was found in tmux-results, so detailed report sections are omitted.'
+              echo "::warning::${MISSING_ARTIFACTS_NOTE}"
+            fi
+            case "${VERDICT:-}" in
+              infra-error)
+                VERDICT_LABEL='infra-error (crash/OOM)'
+                DESCRIPTION='The tmux test did not complete because the qwen process failed or was killed. This is not a pass/fail result for the affected flow; check runner resources and PR code for crashes or memory leaks.'
+                ;;
+              timeout)
+                VERDICT_LABEL='timeout'
+                DESCRIPTION='The tmux test did not complete before the time limit. This is not a pass/fail result for the affected flow; see the workflow run and artifacts for details.'
+                ;;
+              pass)
+                VERDICT_LABEL='pass'
+                DESCRIPTION='Launched the changed app in a real tmux session and exercised the affected flow.'
+                ;;
+              fail)
+                VERDICT_LABEL='fail'
+                DESCRIPTION='Launched the changed app in a real tmux session and exercised the affected flow.'
+                ;;
+              *)
+                VERDICT_LABEL='unknown'
+                UNKNOWN_VERDICT="$(
+                  printf '%s' "${VERDICT:-}" | tr -d '\000' | tr '\r\n' '  ' | head -c 200 | html_escape
+                )"
+                echo "::warning::Unrecognized tmux verdict: ${UNKNOWN_VERDICT}"
+                DESCRIPTION="The tmux test produced an unrecognized verdict (<code>${UNKNOWN_VERDICT}</code>), so this is not a pass/fail result for the affected flow. See the workflow run and artifacts for details."
+                ;;
+            esac
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
-              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT" "$RUN_URL"
-              printf 'Launched the changed app in a real tmux session and exercised the affected flow.\n\n'
+              printf '**tmux real-user testing: %s** - [workflow run](%s)\n\n' "$VERDICT_LABEL" "$RUN_URL"
+              printf '%s\n\n' "$DESCRIPTION"
+              if [ -n "${MISSING_ARTIFACTS_NOTE:-}" ]; then
+                printf '%s\n\n' "$MISSING_ARTIFACTS_NOTE"
+              fi
               emit_block 'E2E test report' "$REPORT" 20000
               emit_block 'Full tmux transcript' "$TRANSCRIPT" 30000
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'

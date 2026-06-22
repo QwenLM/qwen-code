@@ -71,6 +71,32 @@ describe('createVoiceRecorder', () => {
     expect(soxRecorder.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('logs the native backend failure when degrading to the fallback (#5583)', async () => {
+    const nativeRecorder = recorder({
+      start: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Native audio capture addon could not be loaded.'),
+        ),
+    });
+    const soxRecorder = recorder();
+
+    const voiceRecorder = createVoiceRecorder({
+      createNativeRecorder: vi.fn(() => nativeRecorder),
+      createSoxRecorder: vi.fn(() => soxRecorder),
+      platform: 'darwin',
+    });
+
+    await voiceRecorder.start();
+
+    expect(debugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Native audio capture addon could not be loaded.',
+      ),
+    );
+    expect(soxRecorder.start).toHaveBeenCalledTimes(1);
+  });
+
   it('prefers sox before arecord on Linux so tap mode can auto-stop on silence', async () => {
     const nativeRecorder = recorder({
       start: vi.fn().mockRejectedValue(new Error('native unavailable')),
