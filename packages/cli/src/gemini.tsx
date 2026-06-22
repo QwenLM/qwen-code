@@ -48,7 +48,10 @@ import {
   type InitializationResult,
 } from './core/initializer.js';
 import { handleList as handleListExtensions } from './commands/extensions/list.js';
-import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
+import {
+  initializeI18n,
+  resolveLanguageSetting,
+} from './i18n/index.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,

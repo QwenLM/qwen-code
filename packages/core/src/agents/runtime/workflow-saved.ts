@@ -164,7 +164,9 @@ async function readWorkflowFileSecurely(
       }),
     )
   ).filter((d): d is string => d !== null);
-  const inside = dirs.some((d) => real === d || real.startsWith(d + path.sep));
+  const inside = dirs.some(
+    (d) => real === d || real.startsWith(d + path.sep),
+  );
   if (!inside) {
     throw new Error(
       `refusing to load a workflow file outside the saved-workflow directories: '${filePath}'.`,
@@ -214,7 +216,7 @@ export async function resolveSavedWorkflowScript(
     const scriptPath = nameOrRef.scriptPath;
     if (typeof scriptPath !== 'string' || scriptPath.length === 0) {
       throw new Error(
-        'workflow() expects a workflow name (string) or {scriptPath: string}.',
+        "workflow() expects a workflow name (string) or {scriptPath: string}.",
       );
     }
     let script: string;
@@ -232,7 +234,7 @@ export async function resolveSavedWorkflowScript(
 
   if (typeof nameOrRef !== 'string') {
     throw new Error(
-      'workflow() expects a workflow name (string) or {scriptPath: string}.',
+      "workflow() expects a workflow name (string) or {scriptPath: string}.",
     );
   }
 

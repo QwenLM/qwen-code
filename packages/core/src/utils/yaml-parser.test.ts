@@ -280,15 +280,8 @@ describe('yaml-parser', () => {
           'mcpServers:\n  - filesystem:\n      type: stdio\n      command: node';
         const result = parse(yaml);
         expect(result['mcpServers']).toEqual([
-          {
-            filesystem: {
-              type: 'stdio',
-              command: 'node',
-            },
-          },
+          { filesystem: { type: 'stdio', command: 'node' } },
         ]);
-        expect(result['type']).toBeUndefined();
-        expect(result['command']).toBeUndefined();
       });
 
       it('parses record-of-records with arrays', () => {

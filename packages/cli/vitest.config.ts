@@ -57,10 +57,6 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/bridgeFileSystem.ts',
       ),
-      '@qwen-code/acp-bridge/mcpTimeouts': path.resolve(
-        __dirname,
-        '../acp-bridge/src/mcpTimeouts.ts',
-      ),
       '@qwen-code/acp-bridge/workspacePaths': path.resolve(
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',

@@ -28,31 +28,31 @@ import type { Config } from '../../config/config.js';
 // call site and the real AgentHeadless surface becomes a test failure.
 const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
   vi.hoisted(() => ({
-    created: [] as Array<{
-      name: string;
-      prompt: string;
-      signal?: AbortSignal;
-      promptConfigSystemPrompt?: string;
-      runConfig?: { max_turns?: number; max_time_minutes?: number };
-      toolConfig?: { tools?: string[]; disallowedTools?: string[] };
-    }>,
-    // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
-    // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
-    // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
-    nextTerminateMode: { value: 'GOAL' as string },
-    // R1 (#1 + #3): the production dispatch reads
-    // `subagent.getExecutionSummary().outputTokens` to feed budget. Tests
-    // set `nextOutputTokens.value` so the onTokens callback can be
-    // observed without standing up real telemetry.
-    nextOutputTokens: { value: 0 as number },
-    // R3 (wenshao #6): real `AgentHeadless.execute()` re-throws on
-    // reasoning-loop failure — its catch arm sets `terminateMode=ERROR`
-    // and then throws. Tests set `nextExecuteThrow.value` to a non-null
-    // error so the mock execute() re-throws the same way; R1's tests
-    // had execute() RETURN with ERROR mode, which is the rare
-    // `createChat` early-return path, NOT the production reasoning-
-    // loop throw path.
-    nextExecuteThrow: { value: null as Error | null },
+  created: [] as Array<{
+    name: string;
+    prompt: string;
+    signal?: AbortSignal;
+    promptConfigSystemPrompt?: string;
+    runConfig?: { max_turns?: number; max_time_minutes?: number };
+    toolConfig?: { tools?: string[]; disallowedTools?: string[] };
+  }>,
+  // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
+  // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
+  // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
+  nextTerminateMode: { value: 'GOAL' as string },
+  // R1 (#1 + #3): the production dispatch reads
+  // `subagent.getExecutionSummary().outputTokens` to feed budget. Tests
+  // set `nextOutputTokens.value` so the onTokens callback can be
+  // observed without standing up real telemetry.
+  nextOutputTokens: { value: 0 as number },
+  // R3 (wenshao #6): real `AgentHeadless.execute()` re-throws on
+  // reasoning-loop failure — its catch arm sets `terminateMode=ERROR`
+  // and then throws. Tests set `nextExecuteThrow.value` to a non-null
+  // error so the mock execute() re-throws the same way; R1's tests
+  // had execute() RETURN with ERROR mode, which is the rare
+  // `createChat` early-return path, NOT the production reasoning-
+  // loop throw path.
+  nextExecuteThrow: { value: null as Error | null },
   }));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
@@ -756,10 +756,7 @@ describe('WorkflowOrchestrator', () => {
       ref: string | { scriptPath: string },
     ) => {
       expect(ref).toBe('child');
-      return {
-        script: `return 'nested-' + (await agent('inner'));`,
-        name: 'child',
-      };
+      return { script: `return 'nested-' + (await agent('inner'));`, name: 'child' };
     };
     const outcome = await orchestrator.run({
       script: `const r = await workflow('child'); return 'parent:' + r;`,
@@ -811,8 +808,7 @@ describe('WorkflowOrchestrator', () => {
       expect(dispatchCalls).toBe(2);
       expect(String(caught)).toMatch(/exceeded the maximum of 2 agent/);
     } finally {
-      if (prev === undefined)
-        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      if (prev === undefined) delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
       else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
     }
   });
@@ -1062,8 +1058,7 @@ describe('WorkflowOrchestrator', () => {
       });
       expect(outcome.result).toBe('ok'); // no cap error despite 3 > 2
     } finally {
-      if (prev === undefined)
-        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      if (prev === undefined) delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
       else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
     }
   });
@@ -2023,8 +2018,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const reports: number[] = [];
-    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
-      reports.push(tokens),
+    const dispatch = createProductionDispatch(
+      config,
+      undefined,
+      (tokens) => reports.push(tokens),
     );
     const result = await dispatch('extract', {
       schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
@@ -2052,8 +2049,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     nextExecuteThrow.value = new Error('override-path boom');
     nextOutputTokens.value = 9999;
     const reports: number[] = [];
-    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
-      reports.push(tokens),
+    const dispatch = createProductionDispatch(
+      config,
+      undefined,
+      (tokens) => reports.push(tokens),
     );
     await expect(
       dispatch('q1', { label: 'thrown', schema: { type: 'object' } }),

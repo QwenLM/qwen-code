@@ -115,12 +115,7 @@ describe('WorkflowJournal', () => {
   it('append then load round-trips entries', async () => {
     const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
     await j.append({ type: 'started', key: 'k1', agentId: '1' });
-    await j.append({
-      type: 'result',
-      key: 'k1',
-      agentId: '1',
-      result: { v: 9 },
-    });
+    await j.append({ type: 'result', key: 'k1', agentId: '1', result: { v: 9 } });
     const replay = await j.load();
     expect(replay.results.get('k1')?.result).toEqual({ v: 9 });
     expect(replay.started.get('k1')).toHaveLength(1);

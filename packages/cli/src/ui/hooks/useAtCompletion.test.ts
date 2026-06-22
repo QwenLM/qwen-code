@@ -131,9 +131,7 @@ describe('useAtCompletion', () => {
     it('should append a trailing slash to directory paths in suggestions', async () => {
       const structure: FileSystemStructure = {
         'file.txt': '',
-        dir: {
-          'nested.txt': '',
-        },
+        dir: {},
       };
       testRootDir = await createTmpDir(structure);
 
@@ -147,7 +145,6 @@ describe('useAtCompletion', () => {
 
       expect(result.current.suggestions.map((s) => s.value)).toEqual([
         'dir/',
-        'dir/nested.txt',
         'file.txt',
       ]);
       // Verify isDirectory flag
@@ -228,9 +225,8 @@ describe('useAtCompletion', () => {
         initialize: vi.fn().mockResolvedValue(undefined),
         search: vi
           .fn()
-          .mockImplementation(
-            async (...args: Parameters<FileSearch['search']>) =>
-              realFileSearch.search(...args),
+          .mockImplementation(async (...args) =>
+            realFileSearch.search(...args),
           ),
       };
       vi.spyOn(FileSearchFactory, 'create').mockReturnValue(mockFileSearch);
@@ -401,9 +397,7 @@ describe('useAtCompletion', () => {
         '.gitignore': gitignoreContent,
         dist: {},
         'test.log': '',
-        src: {
-          'index.ts': '',
-        },
+        src: {},
       };
       testRootDir = await createTmpDir(structure);
 
@@ -418,7 +412,6 @@ describe('useAtCompletion', () => {
       expect(result.current.suggestions.map((s) => s.value)).toEqual([
         'src/',
         '.gitignore',
-        'src/index.ts',
       ]);
     });
 

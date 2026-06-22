@@ -4938,9 +4938,7 @@ describe('InputPrompt', () => {
       mockBuffer.setText('');
       mockBuffer.visualCursor = [0, 0];
 
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
+      const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
       await wait();
 
       stdin.write('[B'); // Down arrow at the bottom edge

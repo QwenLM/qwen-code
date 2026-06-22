@@ -369,14 +369,7 @@ export function createProductionDispatch(
     );
     return runStallResilient(
       (attemptSignal, emitter) =>
-        runSingleDispatch(
-          config,
-          prompt,
-          opts,
-          attemptSignal,
-          emitter,
-          onTokens,
-        ),
+        runSingleDispatch(config, prompt, opts, attemptSignal, emitter, onTokens),
       {
         stallMs,
         signal,
@@ -718,8 +711,7 @@ async function runOverridePath(
     // no emitter was passed (legacy / direct callers), fall back to a fresh
     // emitter only in schema mode (the watchdog is then absent, matching the
     // pre-P-stall behaviour for direct override-path callers).
-    const eventEmitter =
-      emitter ?? (schemaState ? new AgentEventEmitter() : undefined);
+    const eventEmitter = emitter ?? (schemaState ? new AgentEventEmitter() : undefined);
     if (schemaState && eventEmitter) {
       attachSchemaListeners(eventEmitter, schemaState);
     }
@@ -1344,8 +1336,7 @@ export class WorkflowOrchestrator {
                   `respawn(s) for runId=${runId}.`,
               );
             }
-            const label =
-              typeof opts.label === 'string' ? opts.label : undefined;
+            const label = typeof opts.label === 'string' ? opts.label : undefined;
             try {
               emitter?.agentDispatched?.(label);
             } catch (e) {

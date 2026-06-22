@@ -258,28 +258,30 @@ describe('downloadFromNpmRegistry', () => {
             ? {
                 statusCode: 200,
                 headers: {},
-                on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
-                  if (event === 'data') {
-                    handler(
-                      Buffer.from(
-                        JSON.stringify({
-                          'dist-tags': { latest: '1.0.0' },
-                          versions: {
-                            '1.0.0': {
-                              dist: {
-                                tarball:
-                                  'HTTPS://registry.example.com/@scope/pkg/-/pkg-1.0.0.tgz',
+                on: vi.fn(
+                  (event: string, handler: (data?: Buffer) => void) => {
+                    if (event === 'data') {
+                      handler(
+                        Buffer.from(
+                          JSON.stringify({
+                            'dist-tags': { latest: '1.0.0' },
+                            versions: {
+                              '1.0.0': {
+                                dist: {
+                                  tarball:
+                                    'HTTPS://registry.example.com/@scope/pkg/-/pkg-1.0.0.tgz',
+                                },
                               },
                             },
-                          },
-                        }),
-                      ),
-                    );
-                  }
-                  if (event === 'end') {
-                    handler();
-                  }
-                }),
+                          }),
+                        ),
+                      );
+                    }
+                    if (event === 'end') {
+                      handler();
+                    }
+                  },
+                ),
               }
             : {
                 statusCode: 200,

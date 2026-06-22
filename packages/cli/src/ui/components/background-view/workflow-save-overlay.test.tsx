@@ -99,9 +99,7 @@ describe('WorkflowSaveOverlay', () => {
         overwrite: false,
       }),
     );
-    expect(lastFrame() ?? '').toContain(
-      'Saved to /proj/.qwen/workflows/flow.js',
-    );
+    expect(lastFrame() ?? '').toContain('Saved to /proj/.qwen/workflows/flow.js');
     await press({ name: 'return' });
     expect(onClose).toHaveBeenCalledWith('flow');
   });

@@ -370,11 +370,7 @@ export const BaseTextInput = ({
         borderColor={resolvedBorderColor}
       >
         {resolvedPrefix}
-        <Box
-          flexGrow={1}
-          flexDirection="column"
-          backgroundColor={theme.background.primary}
-        >
+        <Box flexGrow={1} flexDirection="column" backgroundColor={theme.background.primary}>
           {buffer.text.length === 0 && placeholder ? (
             showCursor ? (
               <Text>

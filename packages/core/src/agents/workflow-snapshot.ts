@@ -163,16 +163,12 @@ async function pruneSnapshots(dir: string): Promise<void> {
       // those journal dirs to grow without bound, so prune both together.
       const runId = s.f.replace(/\.json$/, '');
       return Promise.all([
-        fs
-          .unlink(`${dir}/${s.f}`)
-          .catch((e) =>
-            debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
-          ),
-        fs
-          .rm(`${dir}/${runId}`, { recursive: true, force: true })
-          .catch((e) =>
-            debugLogger.warn(`prune journal dir failed for ${runId}: ${e}`),
-          ),
+        fs.unlink(`${dir}/${s.f}`).catch((e) =>
+          debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
+        ),
+        fs.rm(`${dir}/${runId}`, { recursive: true, force: true }).catch((e) =>
+          debugLogger.warn(`prune journal dir failed for ${runId}: ${e}`),
+        ),
       ]);
     }),
   );

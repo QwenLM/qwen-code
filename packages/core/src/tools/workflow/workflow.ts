@@ -543,7 +543,9 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
  */
 function resolveUsageBanner(
   config: Config,
-  registry: { shouldShowUsageWarning(): boolean } | undefined,
+  registry:
+    | { shouldShowUsageWarning(): boolean }
+    | undefined,
   budgetTotal: number | null,
 ): string {
   if (!registry) return '';

@@ -139,10 +139,7 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       await fs.mkdir(`${dir}/${runId}`, { recursive: true });
       await fs.writeFile(`${dir}/${runId}/journal.jsonl`, '{}\n', 'utf8');
       // Distinct runId per write; startTime ascending. Each write prunes.
-      await writeWorkflowSnapshot(
-        config,
-        task({ runId, startTime: 1_000 + i }),
-      );
+      await writeWorkflowSnapshot(config, task({ runId, startTime: 1_000 + i }));
     }
     const entries = await fs.readdir(dir);
     const files = entries.filter((f) => f.endsWith('.json'));

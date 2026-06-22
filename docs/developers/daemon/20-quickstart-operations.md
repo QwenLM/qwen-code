@@ -274,11 +274,11 @@ Key facts:
 
 The main assembly happens in `createServeApp()` in `server.ts`, which mounts four modular route files:
 
-| Routes                                                                                                                    | File                                                    | Mounting entry                                |
-| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------- |
-| `/health`, `/demo`, `/capabilities`, all session routes, device flow, permission vote, SSE, and single-server MCP restart | `packages/cli/src/serve/server.ts`                      | Registered directly inside `createServeApp()` |
-| `/workspace/memory` (GET/POST)                                                                                            | `packages/cli/src/serve/workspace-memory.ts`            | `mountWorkspaceMemoryRoutes()`                |
-| All `/workspace/agents` CRUD routes                                                                                       | `packages/cli/src/serve/workspace-agents.ts`            | `mountWorkspaceAgentsRoutes()`                |
+| Routes                                                                                                                    | File                                                  | Mounting entry                                |
+| ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------- |
+| `/health`, `/demo`, `/capabilities`, all session routes, device flow, permission vote, SSE, and single-server MCP restart | `packages/cli/src/serve/server.ts`                    | Registered directly inside `createServeApp()` |
+| `/workspace/memory` (GET/POST)                                                                                            | `packages/cli/src/serve/workspace-memory.ts`           | `mountWorkspaceMemoryRoutes()`                |
+| All `/workspace/agents` CRUD routes                                                                                       | `packages/cli/src/serve/workspace-agents.ts`           | `mountWorkspaceAgentsRoutes()`                |
 | `GET /file`, `/file/bytes`, `/list`, `/glob`, `/stat`                                                                     | `packages/cli/src/serve/routes/workspace-file-read.ts`  | `registerWorkspaceFileReadRoutes()`           |
 | `POST /file/write`, `/file/edit`                                                                                          | `packages/cli/src/serve/routes/workspace-file-write.ts` | `registerWorkspaceFileWriteRoutes()`          |
 

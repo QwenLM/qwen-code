@@ -117,9 +117,7 @@ export const WorkflowSaveOverlay: React.FC<WorkflowSaveOverlayProps> = ({
         return;
       }
       if (key.name === 'return') {
-        const err = !name
-          ? 'Workflow name is required.'
-          : validateWorkflowName(name);
+        const err = !name ? 'Workflow name is required.' : validateWorkflowName(name);
         if (err) {
           setMessage(err);
           setPhase('error');
@@ -163,10 +161,7 @@ export const WorkflowSaveOverlay: React.FC<WorkflowSaveOverlayProps> = ({
       {phase === 'overwrite' ? (
         <Box flexDirection="column" marginTop={1}>
           <Text color={theme.status.warning}>
-            {t('{{name}}.js already exists in {{scope}} scope.', {
-              name,
-              scope,
-            })}
+            {t('{{name}}.js already exists in {{scope}} scope.', { name, scope })}
           </Text>
           <Text color={theme.text.secondary}>
             {t('Overwrite? Enter / y to confirm · any other key cancels')}
@@ -207,7 +202,9 @@ export const WorkflowSaveOverlay: React.FC<WorkflowSaveOverlayProps> = ({
             <Text
               bold={scope === 'project'}
               color={
-                scope === 'project' ? theme.text.accent : theme.text.secondary
+                scope === 'project'
+                  ? theme.text.accent
+                  : theme.text.secondary
               }
             >
               {t('project')}

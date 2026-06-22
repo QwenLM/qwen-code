@@ -327,7 +327,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 
 | Concern              | File                                                        |
 | -------------------- | ----------------------------------------------------------- |
-| Bootstrap            | `packages/cli/src/serve/run-qwen-serve.ts`                  |
+| Bootstrap            | `packages/cli/src/serve/run-qwen-serve.ts`                    |
 | Express app          | `packages/cli/src/serve/server.ts`                          |
 | Capability registry  | `packages/cli/src/serve/capabilities.ts`                    |
 | Auth middleware      | `packages/cli/src/serve/auth.ts`                            |
