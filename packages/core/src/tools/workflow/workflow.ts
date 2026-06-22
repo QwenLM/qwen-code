@@ -159,7 +159,7 @@ const WORKFLOW_PARAM_SCHEMA = {
   // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
   // expressed as a plain `required` list, so it's enforced in
   // `validateToolParamValues`. Inline authoring (the LLM path) should always
-  // pass `script` — the `script` property description states this.
+  // pass `script`; the `scriptPath` property description states the XOR.
 } as const;
 
 class WorkflowToolInvocation extends BaseToolInvocation<
@@ -686,10 +686,13 @@ export class WorkflowTool extends BaseDeclarativeTool<
         'agents total; both env-overridable), per-call `agent({ schema, ' +
         "agentType, model, isolation: 'worktree' })` for structured-output " +
         'contracts, declarative-agent selection, model override, and git-' +
-        'worktree-isolated subagents. No resume and no background execution ' +
-        'yet (scheduled for later phases). Scripts run in a node:vm sandbox ' +
-        'without access to the filesystem or shell; all I/O happens through ' +
-        'the spawned agents.',
+        'worktree-isolated subagents. Pass `resumeFromRunId` to resume a prior ' +
+        'run — agent() calls whose rolling prefix-hash matches the journal are ' +
+        'served from cache for the longest unchanged prefix. Runs are tracked ' +
+        'in the background-tasks view and the `/workflows` dialog (live phase ' +
+        'tree, token usage, cancel). Scripts run in a node:vm sandbox without ' +
+        'access to the filesystem or shell; all I/O happens through the ' +
+        'spawned agents.',
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,
