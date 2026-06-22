@@ -52,7 +52,16 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
     # Same-repo guard: this job loads CI_BOT_PAT, so fork-triggered runs stay on hosted (ephemeral); only in-repo PR events use the persistent ECS runner.
-    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: >-
+      ${{
+        (
+          vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' &&
+          github.event.pull_request &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        fromJSON('["self-hosted", "linux", "x64", "ecs-qwen"]') ||
+        fromJSON('["ubuntu-latest"]')
+      }}
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -227,6 +236,17 @@ jobs:
               "sandbox": false
             }
           prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
+
+      - name: 'Drop autofix fast-path label from untrusted issue triage'
+        if: "always() && github.event_name == 'issues' && steps.resolve.outputs.number != ''"
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+        run: |-
+          # Newly opened issues are triaged from untrusted user text. Keep the
+          # scheduled autofix fast path limited to maintainer/workflow labels.
+          gh issue edit "${NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+            --remove-label 'autofix/ready' 2> /dev/null || true
 
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and

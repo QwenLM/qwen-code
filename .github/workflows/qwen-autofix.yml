@@ -124,7 +124,7 @@ jobs:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/autofix'
       BUG_LABEL: 'type/bug'
-      READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+      AUTOFIX_READY_LABEL: 'autofix/ready'
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
       # Comments from these accounts (triage/followup bots and the autofix bot's
       # own qwen-code-dev-bot identity) do not count as human engagement when
@@ -188,12 +188,13 @@ jobs:
                 "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
             }
 
-            echo "🔍 Scanning for ready-for-agent bugs (newest first)..."
-            # ready-for-agent is an explicit triage signal, so tier-1 takes
-            # candidates directly and skips the unattended filter — no need to
-            # fetch comments here (tier-2 below still fetches them for its filter).
+            echo "🔍 Scanning for autofix-ready bugs (newest first)..."
+            # autofix/ready is the explicit fast-path signal for scheduled
+            # autofix. Unlike status/ready-for-agent, it is not applied by the
+            # LLM triage path, so untrusted issue text cannot promote itself
+            # into tier-1. Tier-2 below still handles ordinary unattended bugs.
             gh issue list --repo "${REPO}" \
-              --search "is:open is:issue label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
+              --search "is:open is:issue label:${BUG_LABEL} label:${AUTOFIX_READY_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url \
               > "${WORKDIR}/scan.json"
             jq -c '.[0:10]' \
