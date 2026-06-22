@@ -658,7 +658,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   // Down from an empty composer (bottom edge, history exhausted), in visual
   // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
-  // Arena) → stay put. Always consumes the key.
+  // Arena) → background-tasks pill (if bg entries) → stay put. Always
+  // consumes the key. When both an Arena tab bar and the pill are shown,
+  // ↓ stops at the tab bar; AgentTabBar's own ↓ then descends into the pill.
   const descendFromComposer = useCallback((): boolean => {
     if (getVisibleBgAgents().length > 0) {
       setLivePanelFocused(true);
