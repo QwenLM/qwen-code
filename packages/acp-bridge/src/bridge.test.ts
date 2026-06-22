@@ -9337,11 +9337,13 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
         undefined,
       );
 
-      const seen: Array<{ type: string; modelId?: string }> = [];
+      const seen: Array<{ type: string; modelId?: string; value?: string }> =
+        [];
       for await (const e of iter) {
         seen.push({
           type: e.type,
           modelId: (e.data as { modelId?: string })?.modelId,
+          value: (e.data as { value?: string })?.value,
         });
         if (seen.filter((s) => s.type === 'model_switched').length === 2) break;
       }
@@ -9349,6 +9351,17 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       // First the requested change, then the corrective one from reconcile.
       expect(switches[0]?.modelId).toBe('qwen-max');
       expect(switches[1]?.modelId).toBe('qwen-turbo');
+      const requestedSwitchIndex = seen.findIndex(
+        (s) => s.type === 'model_switched' && s.modelId === 'qwen-max',
+      );
+      const settingsChangedIndex = seen.findIndex(
+        (s) => s.type === 'settings_changed' && s.value === 'qwen-max',
+      );
+      const correctiveSwitchIndex = seen.findIndex(
+        (s) => s.type === 'model_switched' && s.modelId === 'qwen-turbo',
+      );
+      expect(settingsChangedIndex).toBeGreaterThan(requestedSwitchIndex);
+      expect(settingsChangedIndex).toBeLessThan(correctiveSwitchIndex);
       abort.abort();
       await bridge.shutdown();
     });
