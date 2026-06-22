@@ -39,6 +39,7 @@ import {
 import { resolveSavedWorkflowScript } from '../../agents/runtime/workflow-saved.js';
 import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
 import type { JournalReplay } from '../../agents/runtime/workflow-journal.js';
+import { writeWorkflowSnapshot } from '../../agents/workflow-snapshot.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { randomBytes } from 'node:crypto';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
@@ -218,6 +219,9 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // immediately, before the first `budgetUpdated` fires. Stays
       // `null` when no env override.
       tokenBudgetTotal: budget.total,
+      // P7b: carry the script source so a completed run can be snapshotted
+      // to disk and saved to `.qwen/workflows/<name>.js` from the dialog.
+      script: this.params.script,
     });
     // The emitter forwards sandbox + dispatch events into the registry
     // AND fires `updateOutput` so the tool's renderDisplay block (a
@@ -400,6 +404,15 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     } finally {
       // T40: cancel any straggler subagent on natural completion.
       dispatchController.abort();
+      // P7b: persist a snapshot of the terminal run so `/workflows` can show
+      // it after a CLI restart. Runs on every terminal path (success / fail /
+      // cancel) because the registry entry has already transitioned by here.
+      // Best-effort: the writer swallows its own errors. Skipped when there's
+      // no registry entry (test-injected configs) or the entry is somehow
+      // still running (defensive).
+      if (registryEntry && registryEntry.status !== 'running') {
+        await writeWorkflowSnapshot(this.config, registryEntry);
+      }
     }
   }
 }

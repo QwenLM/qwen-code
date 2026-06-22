@@ -98,6 +98,21 @@ export interface WorkflowTask extends TaskBase {
    * than hidden.
    */
   perPhaseTokens: Map<string | null, number>;
+  /**
+   * P7b: the workflow script source (verbatim, as the tool received it).
+   * Used by the run-snapshot writer (so a persisted run carries its
+   * script) and the save-to-disk dialog (so a completed run can be saved
+   * to `.qwen/workflows/<name>.js`). Empty string for legacy callers that
+   * don't supply it.
+   */
+  script: string;
+  /**
+   * P7b: the path the script was loaded from, when the run was launched
+   * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
+   * slash command). `undefined` for inline scripts. A run launched from a
+   * file is already saved, so the save dialog offers "already saved".
+   */
+  scriptPath?: string;
   /** Final script return value once the run completes (success path). */
   result?: unknown;
   /** Error message on `failed` (terminal). */
@@ -123,6 +138,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'tokensSpent'
   | 'tokenBudgetTotal'
   | 'perPhaseTokens'
+  | 'script'
   | 'description'
 > & {
   // Allow the caller to omit `description` — we synthesize it from
@@ -135,6 +151,11 @@ export type WorkflowTaskRegistration = Omit<
    * does NOT re-write it because the budget's `total` is immutable.
    */
   tokenBudgetTotal?: number | null;
+  /**
+   * P7b: the workflow script source. Defaults to `''` when omitted (legacy
+   * callers / tests). Needed for run snapshots + the save-to-disk dialog.
+   */
+  script?: string;
 };
 
 /** Fires when a new entry is registered. */
@@ -213,6 +234,9 @@ export class WorkflowRunRegistry {
       entry.tokenBudgetTotal = null;
     }
     entry.perPhaseTokens = new Map();
+    // P7b: default the script source so the snapshot writer + save dialog
+    // always have a (possibly empty) string to work with.
+    if (entry.script === undefined) entry.script = '';
     if (!entry.description) {
       entry.description = entry.meta?.name ?? entry.runId;
     }
