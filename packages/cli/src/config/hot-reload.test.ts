@@ -108,6 +108,10 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
   const config = {
     getTargetDir: () => cwd,
     getSettingsMcpServers: () => state.settingsMcp,
+    // Stand-in for the effective (settings + extensions + runtime) map; the
+    // hot-reload listener snapshots its keys before narrowing the admission
+    // lists and passes them to reinitializeMcpServers.
+    getMcpServers: () => state.settingsMcp,
     getMcpGating: () => state.gating,
     setExcludedMcpServers,
     setAllowedMcpServers,
@@ -180,10 +184,31 @@ describe('registerMcpHotReload', () => {
     await listener([]);
 
     expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
-    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
-      a: { command: 'a' },
-      cliSrv: { command: 'cli' },
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith(
+      { a: { command: 'a' }, cliSrv: { command: 'cli' } },
+      expect.anything(),
+    );
+  });
+
+  it('passes the pre-gating effective snapshot to reinitializeMcpServers', async () => {
+    // The listener must capture the effective server set BEFORE narrowing the
+    // admission lists, so a server that becomes filtered out this reconcile is
+    // still recorded as removed (for the tool-not-found message). Here `b` is
+    // effective at call time and must appear in the snapshot handed to
+    // reinitializeMcpServers (its 2nd arg).
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' }, b: { command: 'b' } },
+      gating: { allowed: ['a', 'b'] },
     });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { a: { command: 'a' } };
+    await listener([]);
+
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
+    const firstCallArgs = fc.reinitializeMcpServers.mock.calls[0] as unknown[];
+    const prevEffective = firstCallArgs[1] as readonly string[] | undefined;
+    expect(prevEffective).toContain('b');
   });
 
   it('reconciles on an admission-list-only change (mcp.excluded), servers unchanged', async () => {

@@ -3562,9 +3562,18 @@ export class Config {
    * "reconcile in progress" guard serializes against a concurrent caller (e.g.
    * `/reload`): a request arriving mid-flight is coalesced into a single
    * follow-up pass so the latest config always wins. See sub-task 3.
+   *
+   * `prevEffectiveServerNames` is the effective server set captured by the
+   * caller BEFORE it narrowed the admission lists (`setAllowedMcpServers` etc.).
+   * The hot-reload path applies the new gating before calling this, so reading
+   * `getMcpServers()` here would filter the OLD map through the NEW allow-list
+   * and miss a server that was live but is now filtered out — it would never be
+   * recorded as removed-this-session. Callers that have not pre-applied gating
+   * (e.g. `/reload`) may omit it and we fall back to the current effective set.
    */
   async reinitializeMcpServers(
     servers: Record<string, MCPServerConfig> | undefined,
+    prevEffectiveServerNames?: readonly string[],
   ): Promise<void> {
     this.debugLogger.debug(
       `[mcp-hot-reload] reinitializeMcpServers: servers=[${Object.keys(
@@ -3579,7 +3588,11 @@ export class Config {
     // model a missing tool belongs to a server removed this session. Diff the
     // merged map (not just `servers`) so a server still provided by an
     // extension is not falsely flagged as removed. Re-added names self-heal.
-    const prevEffective = new Set(Object.keys(this.getMcpServers() ?? {}));
+    // Prefer the caller's pre-gating snapshot (see param doc) over reading the
+    // already-narrowed effective map.
+    const prevEffective = new Set(
+      prevEffectiveServerNames ?? Object.keys(this.getMcpServers() ?? {}),
+    );
     this.setMcpServers(servers);
     const nextEffective = Object.keys(this.getMcpServers() ?? {});
     for (const name of nextEffective) {
@@ -3639,6 +3652,11 @@ export class Config {
       throw err;
     } finally {
       this.mcpReconcileInProgress = false;
+      // Clear the coalesce flag too: if pass 1 threw, a pending follow-up
+      // request would otherwise stay stuck `true` and make the next
+      // (unrelated) reconcile run an extra no-op drain pass. The next real
+      // settings change re-triggers reconcile anyway.
+      this.mcpReconcilePending = false;
     }
   }
 

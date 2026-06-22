@@ -163,6 +163,13 @@ export function registerMcpHotReload(
     // #4615.
     const promptable = getPromptableMcpServers(next, cwd);
 
+    // Snapshot the effective server set BEFORE narrowing the admission lists
+    // below. `reinitializeMcpServers` diffs this against the post-reconcile set
+    // to record servers removed this session (for the tool-not-found message).
+    // Capturing it after the gating setters would filter the OLD map through
+    // the NEW allow-list, hiding a server that was live but is now excluded.
+    const prevEffectiveServerNames = Object.keys(config.getMcpServers() ?? {});
+
     // Push the admission lists BEFORE reconcile — the discovery pass inside
     // reinitializeMcpServers reads them to skip excluded / non-allowed /
     // pending servers.
@@ -171,7 +178,7 @@ export function registerMcpHotReload(
     config.setPendingMcpServers(nextGating.pending);
 
     try {
-      await config.reinitializeMcpServers(next);
+      await config.reinitializeMcpServers(next, prevEffectiveServerNames);
       const finalStatuses = Object.keys(next)
         .map((name) => `${name}=${getMCPServerStatus(name)}`)
         .join(', ');

@@ -47,7 +47,7 @@ function mkManager(
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -93,7 +93,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -156,7 +156,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srvA: {}, srvB: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -191,7 +191,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ gated: {}, ok: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -217,14 +217,16 @@ describe('McpClientManager', () => {
     expect(McpClient).not.toHaveBeenCalled();
   });
 
-  it('removeRuntimeMcpServer drops the server prompts (prompt-leak regression, sub-task 3)', async () => {
+  it('removeRuntimeMcpServer drops the server prompts and resources (leak regression, sub-task 3)', async () => {
     const removePromptsByServer = vi.fn();
+    const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
     const mockConfig = {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () => ({ removePromptsByServer }),
+      getResourceRegistry: () => ({ removeResourcesByServer }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
       getSessionId: () => 'sid-1',
@@ -241,16 +243,19 @@ describe('McpClientManager', () => {
 
     expect(removeMcpToolsByServer).toHaveBeenCalledWith('srv');
     expect(removePromptsByServer).toHaveBeenCalledWith('srv');
+    expect(removeResourcesByServer).toHaveBeenCalledWith('srv');
   });
 
-  it('removeServer (config-driven removal) drops the server prompts (prompt-leak regression, sub-task 3)', async () => {
+  it('removeServer (config-driven removal) drops the server prompts and resources (leak regression, sub-task 3)', async () => {
     const removePromptsByServer = vi.fn();
+    const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
     const mockConfig = {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () => ({ removePromptsByServer }),
+      getResourceRegistry: () => ({ removeResourcesByServer }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
       getSessionId: () => 'sid-1',
@@ -269,6 +274,7 @@ describe('McpClientManager', () => {
 
     expect(removeMcpToolsByServer).toHaveBeenCalledWith('srv');
     expect(removePromptsByServer).toHaveBeenCalledWith('srv');
+    expect(removeResourcesByServer).toHaveBeenCalledWith('srv');
   });
 
   it('stop() awaits in-flight pool discovery before releasing pool connections (W94/W108/W112)', async () => {
@@ -307,7 +313,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -366,7 +372,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -412,7 +418,7 @@ describe('McpClientManager', () => {
         isTrustedFolder: () => true,
         getMcpServers: () => ({}),
         getMcpServerCommand: () => undefined,
-        getResourceRegistry: () => ({}),
+        getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
         getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
         getWorkspaceContext: () => ({}),
         getDebugMode: () => false,
@@ -465,7 +471,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -524,7 +530,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -557,7 +563,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -599,7 +605,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -660,7 +666,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -727,7 +733,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -777,7 +783,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -819,7 +825,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ srv: {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -845,7 +851,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -879,7 +885,7 @@ describe('McpClientManager', () => {
         'without-instructions': {},
       }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -908,7 +914,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => false,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -934,7 +940,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => false,
       getMcpServers: () => ({ 'test-server': {} }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -964,7 +970,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'pending-server': { scope: 'project' } }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -994,7 +1000,7 @@ describe('McpClientManager', () => {
       isTrustedFolder: () => true,
       getMcpServers: () => ({ 'approved-server': { scope: 'project' } }),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
@@ -1028,6 +1034,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1065,6 +1072,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1098,6 +1106,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
@@ -1139,6 +1148,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
@@ -1200,6 +1210,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
@@ -1270,6 +1281,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
@@ -1338,6 +1350,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
@@ -1388,6 +1401,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
     } as unknown as Config;
@@ -1426,6 +1440,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1481,6 +1496,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: (name: string) => name === 'disabled',
@@ -1525,6 +1541,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: (name: string) => name === 'foo' && disabled,
@@ -1582,6 +1599,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1648,6 +1666,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1707,6 +1726,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1765,6 +1785,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1821,6 +1842,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1873,6 +1895,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1928,6 +1951,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1995,6 +2019,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -2060,6 +2085,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -2390,6 +2416,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -2559,6 +2586,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -3198,6 +3226,7 @@ describe('McpClientManager — PR 14b push events + hysteresis', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -3723,7 +3752,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       isTrustedFolder: () => true,
       getMcpServers: () => ({}),
       getMcpServerCommand: () => undefined,
-      getResourceRegistry: () => ({}),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
       getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,

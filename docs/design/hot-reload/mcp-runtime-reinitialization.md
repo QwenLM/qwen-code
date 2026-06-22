@@ -39,7 +39,7 @@ across the CLI / Core packages, decoupled through `Config` methods and one UI ev
                     CLI package                                  Core package
  ┌──────────────────────────────────────────┐       ┌────────────────────────────────────┐
  │ SettingsWatcher  (sub-task 1, merged)      │       │ Config                              │
- │   └─[Part B] hotReload.ts                   │ calls │   └─[Part A] reinitializeMcpServers │
+ │   └─[Part B] hot-reload.ts                  │ calls │   └─[Part A] reinitializeMcpServers │
  │       when to fire · recompute gating · gate│ ────▶ │       setMcpServers + incr. reconcile│
  │                                             │       │         (McpClientManager pool/single)│
  │   └─[Part D] useMcpApproval · approval modal │ ◀──── │   └─[Part A④] pool-path pending gate │
@@ -195,7 +195,7 @@ this MR) in turn.
 
 ### Part B — CLI: subscribe SettingsWatcher → MCP reconcile
 
-**New file: `packages/cli/src/config/hotReload.ts`**, wired after
+**New file: `packages/cli/src/config/hot-reload.ts`**, wired after
 `settingsWatcher.startWatching()` (`:785`) in `gemini.tsx`.
 
 ```ts
@@ -330,10 +330,10 @@ The two paths are **disconnected** at runtime.
 #### Fix: connect core→UI via an event, hand the decision to the UI
 
 1. **Add event** `AppEvent.McpPendingApprovalChanged` (`packages/cli/src/utils/events.ts`). Since
-   `appEvents` is in the CLI layer and `hotReload.ts` is too, the listener can emit directly, with
+   `appEvents` is in the CLI layer and `hot-reload.ts` is too, the listener can emit directly, with
    **no core change**.
 
-2. **`hotReload.ts` emits after reconcile** (placed after `await reinitializeMcpServers`, so
+2. **`hot-reload.ts` emits after reconcile** (placed after `await reinitializeMcpServers`, so
    `config.getMcpServers()` already reflects the new map; emit regardless of reconcile
    success/failure—a server left pending still needs a user decision).
 
@@ -380,7 +380,7 @@ consistent behavior.
 
 ```text
 ⑥' [CLI · Part D] after reconcile, if a strictly pending gated server exists:
-        hotReload → appEvents.emit(McpPendingApprovalChanged)
+        hot-reload → appEvents.emit(McpPendingApprovalChanged)
         → useMcpApproval.computePending() recomputes the queue → shows the approval modal
         → user approves: approveMcpServerForSession + discoverToolsForServer (connect with new config)
           user rejects: persist rejected, stay disconnected
@@ -392,12 +392,12 @@ consistent behavior.
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/utils/events.ts`            | add `AppEvent.McpPendingApprovalChanged`                                                                                   |
 | `packages/cli/src/config/mcpApprovals.ts`     | add `getPromptableMcpServers()` (strict `=== 'pending'`, distinct from the rejected-inclusive `getPendingGatedMcpServers`) |
-| `packages/cli/src/config/hotReload.ts`        | after reconcile, decide via `getPromptableMcpServers`; if non-empty, `appEvents.emit(McpPendingApprovalChanged)`           |
+| `packages/cli/src/config/hot-reload.ts`        | after reconcile, decide via `getPromptableMcpServers`; if non-empty, `appEvents.emit(McpPendingApprovalChanged)`           |
 | `packages/cli/src/ui/hooks/useMcpApproval.ts` | extract `computePending()`; compute once on mount + recompute on the event                                                 |
 
 #### Verification (Part D)
 
-- `hotReload.test.ts`: a gated server newly pending → emit; non-gated change → no emit;
+- `hot-reload.test.ts`: a gated server newly pending → emit; non-gated change → no emit;
   **reject→edit config → emit again** (the old name set-difference would be 0 times, locking down
   the #6 regression); reject→unrelated edit → no emit.
 - `mcpApprovals.test.ts`: the `getPromptableMcpServers` suite—no decision prompts, rejected does
@@ -455,9 +455,9 @@ the existing `needsAuth` override pattern, show the reason first
 yellow), and exclude these non-error approval-skips from the footer "see error logs" hint.
 
 > Keying on the write side's `getWorkingDir()` here is exactly the direction recommended by Part D's
-> "Known issue 1 (risk B)"—read and write approval with the same root. `hotReload.ts`'s existing
+> "Known issue 1 (risk B)"—read and write approval with the same root. `hot-reload.ts`'s existing
 > gating query still uses `getTargetDir()` (they are equal today); this section does not change its
-> behavior. It **does not touch** `mcpApprovals.ts` storage, the `hotReload.ts` removal/reconnect
+> behavior. It **does not touch** `mcpApprovals.ts` storage, the `hot-reload.ts` removal/reconnect
 > path, and adds no approval action.
 
 #### Key files (Part E)
@@ -494,7 +494,7 @@ yellow), and exclude these non-error approval-skips from the footer "see error l
 | `packages/core/src/config/config.ts`            | `setMcpServers()`, `setAllowedMcpServers()` + pending setter, `getMcpGating()` (returns `{ excluded, allowed, pending }`), `reinitializeMcpServers()` (with a reconcile-in-progress guard)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `packages/core/src/tools/mcp-client-manager.ts` | ① add `removePromptsByServer()` to `removeServer()` and `removeRuntimeMcpServer()`; ② in the shared-pool path `runDiscoverAllMcpToolsViaPool` (`:1461`), add the `isMcpServerPendingApproval` check before building `desiredIds` / before acquire (matching single-session admission); ③ **add fingerprint diff to the single-session path**: a new `connectionFingerprints` map; `discoverAllMcpToolsIncremental` also triggers disconnect+reconnect for a server that is "connected but its `connectionIdOf` fingerprint changed" (aligned with the pool path's `desiredIds`), clearing the map on every teardown path; ④ **clear old tools/prompts before reconnect**: when `discoverMcpToolsForServerInternal` replaces an existing client, `removeMcpToolsByServer` + `removePromptsByServer` before re-discovery—because `disconnect()` doesn't touch the registry and `discover()` only appends/overwrites by name, otherwise tools dropped/renamed by a config change would linger bound to a closed client (and linger on discovery failure too), matching the existing cleanup in `removeServer` / `addRuntimeMcpServer` |
 | `packages/cli/src/config/settingsSchema.ts`     | **prerequisite**: flip the three keys `mcpServers` (`:274`), `mcp.allowed`, `mcp.excluded` from `requiresRestart: true` to `false`, so the watcher no longer suppresses MCP-only edits; the parent `mcp` and `mcp.serverCommand` stay `true` (see the "Hard prerequisite" note above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `packages/cli/src/config/hotReload.ts` _(new)_  | `registerMcpHotReload()`: rebuild via `assembleMcpServers(..., topTierMcpServers)`; recompute the gating lists from current settings (see "admission stance decision"); gate via `mcpServersEqual` + `mcpGatingEqual` (built on `fast-deep-equal`); debounce + coalesce-and-recheck                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `packages/cli/src/config/hot-reload.ts` _(new)_  | `registerMcpHotReload()`: rebuild via `assembleMcpServers(..., topTierMcpServers)`; recompute the gating lists from current settings (see "admission stance decision"); gate via `mcpServersEqual` + `mcpGatingEqual` (built on `fast-deep-equal`); debounce + coalesce-and-recheck                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `packages/cli/package.json`                     | promote `fast-deep-equal` from a transitive to a **direct** dependency                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `packages/cli/src/gemini.tsx`                   | call `registerMcpHotReload` after `:785`; register the disposer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Tests _(alongside the schema flip)_             | `settingsSchema.test.ts` pins the three MCP keys' `requiresRestart` values (incl. `mcp` / `mcp.serverCommand` staying `true`); `settingsWatcher.test.ts` adds two positive regressions ("edit only `mcpServers` / only `mcp.excluded` → still notify"); `settingsUtils.test.ts` uses its **own mock schema**, unrelated to the real flip, no change needed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -525,7 +525,7 @@ yellow), and exclude these non-error approval-skips from the footer "see error l
 
 > These two are **high**-severity integration breaks: an MCP-only edit gets swallowed by the
 > watcher's restart-required suppression gate, so the Part B callback never fires. There **must** be
-> real watcher-layer coverage; directly calling the callback in `hotReload.test.ts` cannot catch
+> real watcher-layer coverage; directly calling the callback in `hot-reload.test.ts` cannot catch
 > this failure.
 
 3c. **schema pinning** (`settingsSchema.test.ts`): `mcpServers` / `mcp.allowed` / `mcp.excluded`
@@ -537,7 +537,7 @@ someone from flipping MCP keys back to restart-required and silently killing the
   `SettingsChangeEvent` (it would be suppressed before the flip). This is the end-to-end regression
   guard that the sub-task 3 listener can actually fire.
 
-### B. Subscriber gate-branch unit tests (cli, `hotReload.test.ts`)
+### B. Subscriber gate-branch unit tests (cli, `hot-reload.test.ts`)
 
 Fake a `SettingsWatcher`, covering every gate branch:
 
@@ -553,7 +553,7 @@ Fake a `SettingsWatcher`, covering every gate branch:
 8. **debounce**: multiple consecutive saves (< 300ms) trigger reconcile **once** (aligned with the
    watcher's 300ms debounce).
 
-### C. gate-helper pure-function unit tests (cli, `hotReload.test.ts`)
+### C. gate-helper pure-function unit tests (cli, `hot-reload.test.ts`)
 
 9. `mcpServersEqual`: different key order, same values → `true`; nested config fields (`args` /
    `env` / `headers`) change → `false`; `undefined` vs `{}` → `true`; add/remove a server →

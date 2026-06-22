@@ -3082,6 +3082,20 @@ describe('CoreToolScheduler', () => {
       expect(msg).toContain('no MCP server providing it');
     });
 
+    it('attributes the tool to the most specific server when names are prefixes', () => {
+      // Both `foo` and `foo__bar` exist; `mcp__foo__bar__baz` startsWith both
+      // `mcp__foo__` and `mcp__foo__bar__`. The longer (more specific) server
+      // must win regardless of iteration order — not the first match.
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['foo', 'foo__bar'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage('mcp__foo__bar__baz');
+      expect(msg).toContain('"foo__bar"');
+      expect(msg).toContain('removed during this session');
+    });
+
     it('getToolNotFoundMessage routes MCP names to the MCP branch, others to Levenshtein', async () => {
       const scheduler = makeScheduler({
         mcpServers: {},

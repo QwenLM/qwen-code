@@ -1360,6 +1360,9 @@ export class McpClientManager {
         // identical set immediately after.
         this.toolRegistry.removeMcpToolsByServer(serverName);
         this.cliConfig.getPromptRegistry().removePromptsByServer(serverName);
+        this.cliConfig
+          .getResourceRegistry()
+          .removeResourcesByServer(serverName);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
       }
     }
@@ -2498,10 +2501,11 @@ export class McpClientManager {
 
     // Remove tools for this server from registry
     this.toolRegistry.removeMcpToolsByServer(serverName);
-    // Also drop its prompts. Unlike `ToolRegistry.disconnectServer`, this
-    // config-driven removal path never cleaned up the prompt registry, so a
-    // removed/changed server leaked its prompts across a hot-reload.
+    // Also drop its prompts and resources. Unlike `ToolRegistry.disconnectServer`,
+    // this config-driven removal path never cleaned up the prompt/resource
+    // registries, so a removed/changed server leaked them across a hot-reload.
     this.cliConfig.getPromptRegistry().removePromptsByServer(serverName);
+    this.cliConfig.getResourceRegistry().removeResourcesByServer(serverName);
 
     // The server has been removed from configuration, so drop it from the
     // global status registry too — the health pill should no longer count it.
@@ -2910,6 +2914,8 @@ export class McpClientManager {
       }
       this.pooledConnections.delete(name);
       this.toolRegistry.removeMcpToolsByServer(name);
+      this.cliConfig.getPromptRegistry().removePromptsByServer(name);
+      this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
       this.stopHealthCheck(name);
     }
     const existingClient = this.clients.get(name);
@@ -2923,6 +2929,8 @@ export class McpClientManager {
       this.clients.delete(name);
       this.connectionFingerprints.delete(name);
       this.toolRegistry.removeMcpToolsByServer(name);
+      this.cliConfig.getPromptRegistry().removePromptsByServer(name);
+      this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
       // Do NOT releaseSlotName here — the budget slot carries over to
       // the new entry being spawned. Releasing + not re-reserving would
       // leave the running server unaccounted in the budget.
@@ -2981,8 +2989,11 @@ export class McpClientManager {
       } else if (this.budgetMode !== 'off') {
         this.releaseSlotName(name);
       }
-      // Clean up any partial state (including tools from partial discover)
+      // Clean up any partial state (including tools/prompts/resources from a
+      // partial discover) so a failed runtime add leaves nothing behind.
       this.toolRegistry.removeMcpToolsByServer(name);
+      this.cliConfig.getPromptRegistry().removePromptsByServer(name);
+      this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
       this.pooledConnections.delete(name);
       removeMCPServerStatus(name);
       const failedClient = this.clients.get(name);
@@ -3071,10 +3082,11 @@ export class McpClientManager {
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
 
-    // Cleanup: tool registry, prompts, status, health check, diagnostics
-    // (mirrors removeServer)
+    // Cleanup: tool registry, prompts, resources, status, health check,
+    // diagnostics (mirrors removeServer)
     this.toolRegistry.removeMcpToolsByServer(name);
     this.cliConfig.getPromptRegistry().removePromptsByServer(name);
+    this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
     removeMCPServerStatus(name);
     this.stopHealthCheck(name);
     this.consecutiveFailures.delete(name);

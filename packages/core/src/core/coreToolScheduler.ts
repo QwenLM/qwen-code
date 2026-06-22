@@ -1653,9 +1653,17 @@ export class CoreToolScheduler {
     // (>63-char names) is the rare case we let fall through.
     const prefixOf = (server: string): string =>
       `mcp__${server}__`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    // When one server name is a prefix of another after sanitization (e.g.
+    // `foo` vs `foo__bar`), a tool of the longer server also startsWith the
+    // shorter one's prefix. Match longest-first so the most specific server
+    // wins, instead of relying on iteration order.
+    const byPrefixLengthDesc = (a: string, b: string) =>
+      prefixOf(b).length - prefixOf(a).length;
 
     // (B) Removed this session — precise, names the server.
-    const removed = this.config.getRecentlyRemovedMcpServers?.() ?? [];
+    const removed = (this.config.getRecentlyRemovedMcpServers?.() ?? [])
+      .slice()
+      .sort(byPrefixLengthDesc);
     const removedHit = removed.find((s) =>
       unknownToolName.startsWith(prefixOf(s)),
     );
@@ -1664,7 +1672,9 @@ export class CoreToolScheduler {
     }
 
     // (A) Not (or no longer) a configured MCP server.
-    const configured = Object.keys(this.config.getMcpServers?.() ?? {});
+    const configured = Object.keys(this.config.getMcpServers?.() ?? {}).sort(
+      byPrefixLengthDesc,
+    );
     const serverHit = configured.find((s) =>
       unknownToolName.startsWith(prefixOf(s)),
     );

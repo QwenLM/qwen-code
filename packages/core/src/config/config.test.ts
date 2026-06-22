@@ -577,6 +577,29 @@ describe('Server Config (config.ts)', () => {
       expect(config.getRecentlyRemovedMcpServers()).toEqual(['b']);
     });
 
+    it('records a server hidden by a narrowed allow-list as removed (uses the caller pre-gating snapshot)', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+
+      // Both a and b are effective before any gating. Capture that set the way
+      // hot-reload.ts does — BEFORE narrowing the allow-list.
+      const prevEffective = Object.keys(config.getMcpServers() ?? {});
+      expect(prevEffective.sort()).toEqual(['a', 'b']);
+
+      // Narrow the allow-list to just `a` (mirrors editing mcp.allowed), then
+      // reconcile with the same server map. `b` is still configured but is now
+      // filtered out of the effective map.
+      config.setAllowedMcpServers(['a']);
+      await config.reinitializeMcpServers({ a: srvA, b: srvB }, prevEffective);
+
+      // `b` was live but is now excluded → must be recorded as removed so the
+      // tool-not-found path can explain it. Reading getMcpServers() through the
+      // already-narrowed allow-list (without the snapshot) would miss it.
+      expect(config.getRecentlyRemovedMcpServers()).toContain('b');
+    });
+
     it('reinitializeMcpServers replaces config then drives incremental reconcile', async () => {
       const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
       await config.initialize();
@@ -648,6 +671,39 @@ describe('Server Config (config.ts)', () => {
       // silently coalesced/dropped — it runs a fresh pass.
       await config.reinitializeMcpServers({ a: srvA });
       expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the coalesce flag when a reconcile throws, so the next call runs exactly one pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until we reject it; while it is in flight a second call
+      // arrives and is coalesced (sets the pending flag).
+      let reject!: (e: Error) => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((_, rej) => {
+            reject = rej;
+          }),
+      );
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      reject(new Error('reconcile boom'));
+      await expect(first).rejects.toThrow('reconcile boom');
+      await second; // coalesced call resolves immediately (early return)
+
+      // The throw must have cleared the pending flag too. A subsequent
+      // unrelated reconcile must run EXACTLY ONE pass — not an extra stale
+      // drain pass left over from the coalesced-then-aborted request.
+      manager.discoverAllMcpToolsIncremental.mockClear();
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
     });
 
     it('admission-list setters and getMcpGating round-trip', () => {
