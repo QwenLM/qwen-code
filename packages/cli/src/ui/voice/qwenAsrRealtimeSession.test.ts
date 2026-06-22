@@ -359,14 +359,15 @@ describe('qwenAsrRealtimeSession', () => {
     );
   });
 
-  it('rejects finish when the realtime socket closed before finish', async () => {
+  it('notifies and rejects finish when the realtime socket closed before finish', async () => {
     const socket = new FakeSocket();
+    const onError = vi.fn();
     const sessionPromise = openQwenAsrRealtimeStream(
       {
         baseUrl: 'https://dashscope.example/v1',
         model: 'qwen3-asr-flash-realtime',
       },
-      {},
+      { onError },
       { createWebSocket: () => socket },
     );
     socket.emit(
@@ -378,6 +379,11 @@ describe('qwenAsrRealtimeSession', () => {
 
     socket.emit('close');
 
+    expect(onError).toHaveBeenCalledWith(
+      new Error(
+        'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',
+      ),
+    );
     await expect(session.finish()).rejects.toThrow(
       'Qwen ASR realtime connection closed unexpectedly.',
     );

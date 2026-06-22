@@ -16,6 +16,7 @@ import type {
 
 // SoX `silence` effect: stop after 2.0s below 3% amplitude (matches CC).
 const SILENCE_EFFECT_ARGS = ['silence', '1', '0.1', '3%', '1', '2.0', '3%'];
+const MAX_STDERR_LENGTH = 4096;
 
 function toSoxError(error: Error): Error {
   if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -86,7 +87,12 @@ class SoxRecorder implements VoiceRecorder {
     ]);
     const child = this.child;
     child.stderr?.on('data', (chunk: Buffer) => {
-      this.stderr += chunk.toString();
+      if (this.stderr.length < MAX_STDERR_LENGTH) {
+        this.stderr = (this.stderr + chunk.toString()).slice(
+          0,
+          MAX_STDERR_LENGTH,
+        );
+      }
     });
     this.closePromise = new Promise((resolve) => {
       child.once('close', (code, signal) => {

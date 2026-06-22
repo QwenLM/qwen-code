@@ -125,6 +125,21 @@ describe('createSoxRecorder', () => {
     );
   });
 
+  it('caps captured sox stderr used in failure messages', async () => {
+    const child = new FakeChildProcess();
+    mocks.spawn.mockReturnValue(child);
+    mocks.mkdtemp.mockResolvedValue('/tmp/qwen-voice-abc');
+
+    const recorder = createSoxRecorder();
+    await startRecorder(recorder);
+    child.stderr.emit('data', Buffer.from('x'.repeat(5000)));
+    child.emit('close', 2);
+
+    await expect(recorder.stop()).rejects.toThrow(
+      `Voice recorder failed with exit code 2: ${'x'.repeat(4096)}.`,
+    );
+  });
+
   it('explains how to fix a missing sox executable', async () => {
     const child = new FakeChildProcess();
     mocks.spawn.mockReturnValue(child);

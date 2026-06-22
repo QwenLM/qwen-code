@@ -299,9 +299,11 @@ export function openQwenAsrRealtimeStream(
         finishResolve = null;
         finishReject = null;
       } else {
-        terminalError ??= new Error(
+        const error = new Error(
           'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',
         );
+        terminalError ??= error;
+        callbacks.onError?.(terminalError);
       }
     });
   });
