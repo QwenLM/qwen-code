@@ -149,5 +149,27 @@ describe('mcpCommand', () => {
         dialog: 'mcp',
       });
     });
+
+    it('should warn when using the legacy auth argument with a server name', async () => {
+      const result = await mcpCommand.action!(mockContext, 'auth server1');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'warning',
+        content:
+          "MCP OAuth is now managed in the /mcp dialog. Open /mcp, select 'server1', then use the Auth actions there.",
+      });
+    });
+
+    it('should warn when using the legacy noauth argument without a server name', async () => {
+      const result = await mcpCommand.action!(mockContext, 'noauth');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'warning',
+        content:
+          'MCP OAuth is now managed in the /mcp dialog. Open /mcp, select a server, then use the Auth actions there.',
+      });
+    });
   });
 });
