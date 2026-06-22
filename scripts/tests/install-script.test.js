@@ -3453,7 +3453,13 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
       const fakeBin = path.join(tmpDir, 'bin');
       mkdirSync(fakeBin, { recursive: true });
       writeFileSync(path.join(fakeBin, 'curl'), '#!/usr/bin/env sh\nexit 22\n');
+      // Shadow any system Node on PATH (e.g. /usr/bin/node on self-hosted
+      // runners) with a stub that fails version detection, so the npm fallback
+      // deterministically fails with "Unable to determine Node.js version"
+      // regardless of whether the host has Node installed in /usr/bin.
+      writeFileSync(path.join(fakeBin, 'node'), '#!/usr/bin/env sh\nexit 1\n');
       chmodSync(path.join(fakeBin, 'curl'), 0o755);
+      chmodSync(path.join(fakeBin, 'node'), 0o755);
 
       let failureMessage = '';
       try {
