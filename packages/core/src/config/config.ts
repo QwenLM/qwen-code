@@ -4003,7 +4003,7 @@ export class Config {
 
   shouldAutoOpenArtifact(): boolean {
     if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] === '1') return false;
-    return this.artifactAutoOpen;
+    return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
   }
 
   isWorkflowsEnabled(): boolean {

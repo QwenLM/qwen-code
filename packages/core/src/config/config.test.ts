@@ -1068,6 +1068,15 @@ describe('Server Config (config.ts)', () => {
         });
         expect(config.shouldAutoOpenArtifact()).toBe(false);
       });
+
+      it('honors global browser launch suppression', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+          noBrowser: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
     });
 
     it('skips inline MCP discovery by default (progressive availability)', async () => {
