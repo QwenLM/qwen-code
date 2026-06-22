@@ -3964,6 +3964,7 @@ export const AppContainer = (props: AppContainerProps) => {
                           <ThinkingViewer
                             data={thinkingViewerData}
                             onClose={closeThinkingViewer}
+                            useAlternateScreen={!useTerminalBuffer}
                           />
                         ) : (
                           <App />

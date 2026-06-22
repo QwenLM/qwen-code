@@ -21,6 +21,8 @@ import { THINKING_ICON } from './messages/ConversationMessages.js';
 interface ThinkingViewerProps {
   data: ThinkingViewerData;
   onClose: () => void;
+  /** When true, Ink already owns the alternate screen (VP mode) — skip escape writes. */
+  useAlternateScreen?: boolean;
 }
 
 function formatDuration(ms: number): string {
@@ -35,7 +37,11 @@ function formatDuration(ms: number): string {
 
 const WHEEL_LINES = 3;
 
-export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
+export const ThinkingViewer: FC<ThinkingViewerProps> = ({
+  data,
+  onClose,
+  useAlternateScreen = true,
+}) => {
   const { rows } = useTerminalSize();
   const [scrollOffset, setScrollOffset] = useState(0);
 
@@ -109,7 +115,7 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({ data, onClose }) => {
   const scrollIndicator = maxScroll > 0 ? ` (${scrollPercent}%)` : '';
 
   return (
-    <AlternateScreen>
+    <AlternateScreen disabled={!useAlternateScreen}>
       <Box
         flexDirection="column"
         borderStyle="round"

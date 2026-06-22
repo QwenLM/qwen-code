@@ -18,13 +18,19 @@ const SHOW_CURSOR = '\x1b[?25h';
 
 interface AlternateScreenProps {
   children: ReactNode;
+  /** Skip escape writes when the root Ink renderer already owns the alt screen (VP mode). */
+  disabled?: boolean;
 }
 
-export const AlternateScreen: FC<AlternateScreenProps> = ({ children }) => {
+export const AlternateScreen: FC<AlternateScreenProps> = ({
+  children,
+  disabled,
+}) => {
   const writeRaw = useTerminalOutput();
   const { rows } = useTerminalSize();
 
   useEffect(() => {
+    if (disabled) return;
     writeRaw(ENTER_ALT_SCREEN + CLEAR_SCREEN + HIDE_CURSOR);
     const onExit = () => writeRaw(SHOW_CURSOR + EXIT_ALT_SCREEN);
     process.on('exit', onExit);
@@ -32,7 +38,7 @@ export const AlternateScreen: FC<AlternateScreenProps> = ({ children }) => {
       process.removeListener('exit', onExit);
       writeRaw(SHOW_CURSOR + EXIT_ALT_SCREEN);
     };
-  }, [writeRaw]);
+  }, [writeRaw, disabled]);
 
   return (
     <Box flexDirection="column" height={rows}>
