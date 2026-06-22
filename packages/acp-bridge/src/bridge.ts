@@ -3429,8 +3429,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           data: eventData,
           ...(originatorClientId ? { originatorClientId } : {}),
         };
-        entry.events.publish(branchEnvelope);
-        broadcastWorkspaceEvent(branchEnvelope, sessionId);
+        // The branch announcement belongs to the new session only. Publishing
+        // it on the source session would persist in that session's replay ring.
+        newEntry?.events.publish(branchEnvelope);
 
         return {
           ...restored,

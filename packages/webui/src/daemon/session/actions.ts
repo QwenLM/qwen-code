@@ -28,6 +28,7 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
+import { persistStableClientId } from './clientLifecycle.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -789,10 +790,25 @@ export function createDaemonSessionActions({
       );
       try {
         const result = await withActionTimeout(
-          session.client.branchSession(session.sessionId, { name }),
+          session.client.branchSession(
+            session.sessionId,
+            { name },
+            session.clientId,
+          ),
           'Branch session timed out',
         );
-        await startSessionSwitch(result.sessionId, 'load');
+        persistStableClientId(result.clientId, result.sessionId);
+        void startSessionSwitch(result.sessionId, 'load').catch(
+          (switchError: unknown) => {
+            if (isAbortError(switchError)) return;
+            dispatchActionError(
+              addNotice,
+              'Branch session failed',
+              switchError,
+              'branch_session',
+            );
+          },
+        );
         return {
           sessionId: result.sessionId,
           displayName: result.displayName,
