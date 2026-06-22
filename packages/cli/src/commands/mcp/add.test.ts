@@ -58,7 +58,7 @@ describe('mcp add command', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
-    const yargsInstance = yargs([]).command(addCommand);
+    const yargsInstance = yargs([]).exitProcess(false).command(addCommand);
     parser = yargsInstance;
     mockSetValue = vi.fn();
     mockWriteStderrLine.mockClear();
@@ -94,6 +94,34 @@ describe('mcp add command', () => {
       }),
     });
   });
+
+  it('should persist positive integer timeout values', async () => {
+    await parser.parseAsync('add my-server /path/to/server --timeout 30000');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        command: '/path/to/server',
+        timeout: 30000,
+      }),
+    });
+  });
+
+  it.each(['0', '-1', '1.5', 'abc'])(
+    'should reject invalid timeout value %s',
+    async (timeout) => {
+      await expect(async () => {
+        await parser.parseAsync([
+          'add',
+          'my-server',
+          '/path/to/server',
+          '--timeout',
+          timeout,
+        ]);
+      }).rejects.toThrow('--timeout must be a positive integer.');
+
+      expect(mockSetValue).not.toHaveBeenCalled();
+    },
+  );
 
   it('should auto-detect http transport when commandOrUrl is an https URL', async () => {
     await parser.parseAsync('add http-server https://example.com/mcp');

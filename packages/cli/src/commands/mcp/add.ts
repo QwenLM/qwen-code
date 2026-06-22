@@ -246,6 +246,12 @@ export const addCommand: CommandModule = {
       .option('timeout', {
         describe: 'Set connection timeout in milliseconds',
         type: 'number',
+        coerce: (value: number) => {
+          if (!Number.isInteger(value) || value <= 0) {
+            throw new Error('--timeout must be a positive integer.');
+          }
+          return value;
+        },
       })
       .option('trust', {
         describe:
