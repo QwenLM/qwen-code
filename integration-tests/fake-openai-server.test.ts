@@ -25,10 +25,14 @@ describe('fake OpenAI server', () => {
         ? { content: 'hello from fake model' }
         : {
             toolCalls: [
-              fakeToolCall('write_file', {
-                file_path: '/tmp/fake.txt',
-                content: 'fake',
-              }),
+              fakeToolCall(
+                'write_file',
+                {
+                  file_path: '/tmp/fake.txt',
+                  content: 'fake',
+                },
+                'call_write_file',
+              ),
             ],
           },
     );
@@ -67,8 +71,66 @@ describe('fake OpenAI server', () => {
     const streamText = await streaming.text();
     expect(streamText).toContain('"tool_calls"');
     expect(streamText).toContain('"write_file"');
+    expect(streamText).toContain('"id":"call_write_file"');
+    expect(streamText).toContain('"function":{"name":"write_file"}');
+    expect(streamText).toContain(
+      '"function":{"arguments":"{\\"file_path\\":\\"/tmp/fake.txt\\",\\"content\\":\\"fake\\"}"}',
+    );
+    expect(streamText).not.toContain(
+      '"function":{"name":"write_file","arguments":',
+    );
     expect(streamText).toContain('data: [DONE]');
     expect(server.requests).toHaveLength(2);
+  });
+
+  it('serves non-streaming tool calls with null content', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      toolCalls: [
+        fakeToolCall(
+          'write_file',
+          {
+            file_path: '/tmp/fake.txt',
+            content: 'fake',
+          },
+          'call_write_file',
+        ),
+      ],
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'write' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_write_file',
+                type: 'function',
+                function: {
+                  name: 'write_file',
+                  arguments: JSON.stringify({
+                    file_path: '/tmp/fake.txt',
+                    content: 'fake',
+                  }),
+                },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+    });
   });
 
   it('returns 404 for wrong methods or paths', async () => {
