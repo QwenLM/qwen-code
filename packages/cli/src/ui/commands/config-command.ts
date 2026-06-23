@@ -12,6 +12,7 @@ import type {
 import { CommandKind } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import type { SettingDefinition } from '../../config/settingsSchema.js';
+import { t } from '../../i18n/index.js';
 import {
   getAllSettingKeys,
   getFlattenedSchema,
@@ -193,7 +194,9 @@ function padRight(str: string, len: number): string {
 
 export const configCommand: SlashCommand = {
   name: 'config',
-  description: 'Get or set any setting by dot-path key',
+  get description() {
+    return t('Get or set any setting by dot-path key');
+  },
   argumentHint: '<key>[=<value>] or --help',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'],

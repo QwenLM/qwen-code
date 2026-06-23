@@ -628,6 +628,8 @@ export default {
   // ============================================================================
   // Commands - General (continued)
   // ============================================================================
+  'Get or set any setting by dot-path key':
+    '通过点号路径键查看或设置任意配置项',
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':

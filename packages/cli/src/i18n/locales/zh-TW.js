@@ -589,6 +589,8 @@ export default {
   'checking...': '檢查中...',
   'not updatable': '不可更新',
   error: '錯誤',
+  'Get or set any setting by dot-path key':
+    '透過點號路徑鍵查看或設定任意設定項',
   'View and edit Qwen Code settings': '查看和編輯 Qwen Code 設置',
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
