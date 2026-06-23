@@ -3436,6 +3436,13 @@ export function createServeApp(
           pendingCount: err.pendingCount,
         });
       }
+      if (daemonLog && err instanceof InvalidClientIdError) {
+        daemonLog.warn('prompt admission rejected: invalid client id', {
+          sessionId,
+          promptId,
+          ...(clientId !== undefined ? { clientId } : {}),
+        });
+      }
       sendBridgeError(res, err, {
         route: 'POST /session/:id/prompt',
         sessionId,

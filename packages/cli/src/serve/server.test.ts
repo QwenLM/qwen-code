@@ -1084,6 +1084,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       resumeCalls.push(req);
       return result;
     },
+    // Keep non-async so prompt admission failures can throw synchronously.
     sendPrompt(sessionId, req, signal, context) {
       promptCalls.push({
         sessionId,
@@ -5327,7 +5328,8 @@ describe('createServeApp', () => {
           throw new InvalidClientIdError('session-A', 'client-stale');
         },
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
       const res = await request(app)
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -5341,6 +5343,13 @@ describe('createServeApp', () => {
         clientId: 'client-stale',
       });
       expect(res.body.promptId).toBeUndefined();
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'prompt admission rejected: invalid client id',
+        expect.objectContaining({
+          sessionId: 'session-A',
+          clientId: 'client-stale',
+        }),
+      );
     });
 
     it('503 without promptId when bridge rejects prompt admission synchronously', async () => {
