@@ -194,6 +194,22 @@ function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+export async function waitForServeRuntimeOrExit(
+  handle: Pick<RunHandle, 'runtimeReady' | 'close'>,
+): Promise<void> {
+  try {
+    await handle.runtimeReady;
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: runtime startup failed after listener was ready: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    await handle.close().catch(() => undefined);
+    process.exit(1);
+  }
+}
+
 function applyRateLimitEnvDefaults(
   options: ServeOptions,
   env: NodeJS.ProcessEnv,
@@ -462,8 +478,9 @@ export async function tryRunServeFastPath(
   writeServeWarnings(parsed);
 
   const { runQwenServe } = await import('./run-qwen-serve.js');
+  let handle: RunHandle;
   try {
-    const handle = await runQwenServe(parsed.options, {
+    handle = await runQwenServe(parsed.options, {
       ...(settings ? { bootSettings: settings } : {}),
       resolveOnListen: true,
     });
@@ -476,6 +493,7 @@ export async function tryRunServeFastPath(
     process.exit(1);
   }
 
+  await waitForServeRuntimeOrExit(handle);
   await blockForever();
   return true;
 }

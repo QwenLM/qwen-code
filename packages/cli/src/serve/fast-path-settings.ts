@@ -10,6 +10,15 @@ import * as path from 'node:path';
 import * as dotenv from 'dotenv';
 import stripJsonComments from 'strip-json-comments';
 import { V1_INDICATOR_KEYS } from '../config/migration/versions/v1-to-v2-shared.js';
+import {
+  DEFAULT_EXCLUDED_ENV_VARS,
+  HOME_ENV_BOOTSTRAP_KEYS,
+  PROJECT_ENV_HARDCODED_EXCLUSIONS,
+} from '../config/shared-env-keys.js';
+import {
+  getGlobalQwenDirLite,
+  SETTINGS_DIRECTORY_NAME,
+} from '../config/storage-paths-lite.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 
@@ -22,24 +31,6 @@ export type ServeFastPathSettings = Pick<
     consensusQuorum?: unknown;
   };
 };
-const SETTINGS_DIRECTORY_NAME = '.qwen';
-const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
-const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
-const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
-const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
-  'QWEN_HOME',
-  'QWEN_RUNTIME_DIR',
-  'QWEN_CODE_MCP_APPROVALS_PATH',
-  'QWEN_CODE_TRUSTED_FOLDERS_PATH',
-  ENV_CORRUPTED_PATH,
-  ENV_WAS_RECOVERED,
-];
-const HOME_ENV_BOOTSTRAP_KEYS = [
-  'QWEN_HOME',
-  'QWEN_RUNTIME_DIR',
-  'QWEN_CODE_MCP_APPROVALS_PATH',
-  'QWEN_CODE_TRUSTED_FOLDERS_PATH',
-] as const;
 const V2_SETTINGS_VERSION = 2;
 const TRUST_FOLDER = 'TRUST_FOLDER';
 const TRUST_PARENT = 'TRUST_PARENT';
@@ -69,38 +60,8 @@ function getSystemDefaultsPath(): string {
   );
 }
 
-function resolveGlobalConfigPath(dir: string): string {
-  let resolved = dir;
-  if (
-    resolved === '~' ||
-    resolved.startsWith('~/') ||
-    resolved.startsWith('~\\')
-  ) {
-    const relativeSegments =
-      resolved === '~'
-        ? []
-        : resolved
-            .slice(2)
-            .split(/[/\\]+/)
-            .filter(Boolean);
-    resolved = path.join(os.homedir(), ...relativeSegments);
-  }
-  if (!path.isAbsolute(resolved)) {
-    resolved = path.resolve(resolved);
-  }
-  return resolved;
-}
-
-function getGlobalQwenDirFastPath(): string {
-  const envDir = process.env['QWEN_HOME'];
-  if (envDir) {
-    return resolveGlobalConfigPath(envDir);
-  }
-  const homeDir = os.homedir();
-  if (!homeDir) {
-    return path.join(os.tmpdir(), SETTINGS_DIRECTORY_NAME);
-  }
-  return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
+export function getGlobalQwenDirFastPath(): string {
+  return getGlobalQwenDirLite();
 }
 
 function getTrustedFoldersPathFastPath(): string {

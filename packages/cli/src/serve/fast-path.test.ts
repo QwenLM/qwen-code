@@ -16,13 +16,16 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import { join } from 'node:path';
+import { Storage } from '@qwen-code/qwen-code-core';
 
 import {
   bootstrapServeFastPathEnvironment,
   parseServeFastPathArgs,
   tryRunServeFastPath,
+  waitForServeRuntimeOrExit,
 } from './fast-path.js';
 import {
+  getGlobalQwenDirFastPath,
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   resetServeFastPathHomeEnvBootstrapForTesting,
@@ -333,6 +336,60 @@ describe('serve fast path argument parsing', () => {
 });
 
 describe('serve fast path environment bootstrap', () => {
+  it('matches Storage.getGlobalQwenDir path resolution', () => {
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-storage-cwd-')),
+    );
+    tempQwenHome = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-storage-home-')),
+    );
+    process.chdir(tempWorkspace);
+
+    for (const qwenHome of [
+      undefined,
+      tempQwenHome,
+      '~',
+      '~/qwen-fast-path',
+      '~\\qwen-fast-path',
+      'relative-qwen-home',
+    ]) {
+      if (qwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = qwenHome;
+      }
+
+      expect(getGlobalQwenDirFastPath()).toBe(Storage.getGlobalQwenDir());
+    }
+  });
+
+  it('closes the listener and exits when runtime startup fails after listen', async () => {
+    const stderrWrites: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    await expect(
+      waitForServeRuntimeOrExit({
+        runtimeReady: Promise.reject(new Error('runtime boom')),
+        close,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(stderrWrites.join('')).toContain(
+      'qwen serve: runtime startup failed after listener was ready: runtime boom',
+    );
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
   it('rejects malformed user settings so the full settings loader can handle it', async () => {
     const qwenHome = useTempQwenHome();
     writeFileSync(join(qwenHome, 'settings.json'), '{');

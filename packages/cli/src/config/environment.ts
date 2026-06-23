@@ -10,32 +10,19 @@ import * as os from 'node:os';
 import * as dotenv from 'dotenv';
 import { getErrorMessage, QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  DEFAULT_EXCLUDED_ENV_VARS,
+  HOME_ENV_BOOTSTRAP_KEYS,
+  PROJECT_ENV_HARDCODED_EXCLUSIONS,
+} from './shared-env-keys.js';
+export {
+  DEFAULT_EXCLUDED_ENV_VARS,
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
+} from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
 
 export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
-export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
-export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
-export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
-
-// QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
-// credentials, installation IDs, etc.) is written. A project `.env` must never
-// redirect these — that would split global state between the real home and a
-// project-controlled directory. Always excluded from project .env files,
-// regardless of user-configurable `advanced.excludedEnvVars`.
-const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
-  'QWEN_HOME',
-  'QWEN_RUNTIME_DIR',
-  'QWEN_CODE_MCP_APPROVALS_PATH',
-  'QWEN_CODE_TRUSTED_FOLDERS_PATH',
-  ENV_CORRUPTED_PATH,
-  ENV_WAS_RECOVERED,
-];
-const HOME_ENV_BOOTSTRAP_KEYS = [
-  'QWEN_HOME',
-  'QWEN_RUNTIME_DIR',
-  'QWEN_CODE_MCP_APPROVALS_PATH',
-  'QWEN_CODE_TRUSTED_FOLDERS_PATH',
-] as const;
 
 const RELOAD_EXCLUDED_KEYS = new Set([
   ...PROJECT_ENV_HARDCODED_EXCLUSIONS,

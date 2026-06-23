@@ -560,6 +560,13 @@ describe('runQwenServe runtime startup failures', () => {
 
     try {
       await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(503);
+      expect(await healthRes.json()).toMatchObject({
+        status: 'degraded',
+        error: 'runtime boom',
+      });
+
       const capabilitiesRes = await fetch(`${handle.url}/capabilities`, {
         headers: { Origin: handle.url },
       });

@@ -7,7 +7,10 @@
 import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
-import * as os from 'node:os';
+import {
+  getGlobalQwenDirLite,
+  resolveConfigPathLite,
+} from '../config/storage-paths-lite.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export type DaemonLogLevel = 'INFO' | 'WARN' | 'ERROR';
@@ -109,43 +112,11 @@ const NOOP_LOGGER: DaemonLogger = {
   flush: () => Promise.resolve(),
 };
 
-function resolveConfigPath(dir: string, cwd?: string): string {
-  let resolved = dir;
-  if (
-    resolved === '~' ||
-    resolved.startsWith('~/') ||
-    resolved.startsWith('~\\')
-  ) {
-    const relativeSegments =
-      resolved === '~'
-        ? []
-        : resolved
-            .slice(2)
-            .split(/[/\\]+/)
-            .filter(Boolean);
-    resolved = nodePath.join(os.homedir(), ...relativeSegments);
-  }
-  if (!nodePath.isAbsolute(resolved)) {
-    resolved = cwd
-      ? nodePath.resolve(cwd, resolved)
-      : nodePath.resolve(resolved);
-  }
-  return resolved;
-}
-
-function getGlobalQwenDir(): string {
-  const envDir = process.env['QWEN_HOME'];
-  if (envDir) return resolveConfigPath(envDir);
-  const homeDir = os.homedir();
-  if (!homeDir) return nodePath.join(os.tmpdir(), '.qwen');
-  return nodePath.join(homeDir, '.qwen');
-}
-
 function getRuntimeBaseDir(runtimeOutputDir?: string, cwd?: string): string {
   const envDir = process.env['QWEN_RUNTIME_DIR'];
-  if (envDir) return resolveConfigPath(envDir);
-  if (runtimeOutputDir) return resolveConfigPath(runtimeOutputDir, cwd);
-  return getGlobalQwenDir();
+  if (envDir) return resolveConfigPathLite(envDir);
+  if (runtimeOutputDir) return resolveConfigPathLite(runtimeOutputDir, cwd);
+  return getGlobalQwenDirLite();
 }
 
 export function resolveDaemonLogBaseDir(

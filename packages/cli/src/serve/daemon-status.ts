@@ -25,7 +25,7 @@ const SECTION_TIMEOUT_MS = 1_000;
 const CAPACITY_WARNING_RATIO = 0.8;
 
 export type DaemonStatusDetail = 'summary' | 'full';
-type DaemonStatusLevel = 'ok' | 'warning' | 'error';
+export type DaemonStatusLevel = 'ok' | 'warning' | 'error';
 type SectionStatus = DaemonStatusLevel | 'unavailable';
 type IssueSeverity = 'warning' | 'error';
 type SectionSummary = Record<string, string | number | boolean | null>;
@@ -117,6 +117,77 @@ interface FullDaemonStatus {
   };
 }
 
+interface DaemonStatusSecurity {
+  tokenConfigured: boolean;
+  requireAuth: boolean;
+  loopbackBind: boolean;
+  allowOriginConfigured: boolean;
+  allowOriginMode: string;
+  sessionShellCommandEnabled: boolean;
+}
+
+interface DaemonStatusLimits {
+  maxSessions: number | null;
+  maxPendingPromptsPerSession: number | null;
+  listenerMaxConnections: number | null;
+  eventRingSize: number;
+  promptDeadlineMs: number | null;
+  writerIdleTimeoutMs: number | null;
+  channelIdleTimeoutMs: number;
+  sessionIdleTimeoutMs: number;
+  acpConnectionCap: number | null;
+}
+
+interface DaemonStatusRuntime {
+  loading?: boolean;
+  error?: string;
+  sessions: { active: number };
+  permissions: {
+    pending: number;
+    policy: string;
+  };
+  channel: { live: boolean };
+  transport: {
+    restSseActive: number;
+    acp: {
+      enabled: boolean;
+      connections: number;
+      connectionStreams: number;
+      sessionStreams: number;
+      sseStreams: number;
+      wsStreams: number;
+      pendingClientRequests: number;
+    };
+  };
+  rateLimit: {
+    enabled: boolean;
+    rejectedSinceStart: Record<RateLimitTier, number>;
+  };
+  process: NodeJS.MemoryUsage;
+}
+
+export interface DaemonStatusResponse {
+  v: 1;
+  detail: DaemonStatusDetail;
+  generatedAt: string;
+  status: DaemonStatusLevel;
+  issues: DaemonStatusIssue[];
+  daemon: StatusRecord & {
+    pid: number;
+    uptimeMs: number;
+    mode: ServeOptions['mode'];
+    workspaceCwd: string;
+  };
+  security: DaemonStatusSecurity;
+  limits: DaemonStatusLimits;
+  capabilities: {
+    protocolVersions: ServeProtocolVersions;
+    features: string[];
+  };
+  runtime: DaemonStatusRuntime;
+  full?: FullDaemonStatus;
+}
+
 class SectionTimeoutError extends Error {
   constructor(
     readonly section: string,
@@ -140,7 +211,7 @@ export function parseDaemonStatusDetail(
 export async function buildDaemonStatusResponse(
   detail: DaemonStatusDetail,
   input: BuildDaemonStatusOptions,
-): Promise<Record<string, unknown>> {
+): Promise<DaemonStatusResponse> {
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();

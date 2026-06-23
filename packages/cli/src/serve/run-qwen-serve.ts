@@ -68,7 +68,9 @@ import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import {
   parseDaemonStatusDetail,
+  type DaemonStatusIssue,
   type DaemonStartupSnapshot,
+  type DaemonStatusResponse,
 } from './daemon-status.js';
 import {
   finalizeStartupProfile,
@@ -770,6 +772,15 @@ function createBootstrapServeApp(input: {
   app.use(hostAllowlist(opts.hostname, getPort));
 
   const healthHandler = (_req: Request, res: Response): void => {
+    const runtimeError = getRuntimeError();
+    if (runtimeError !== undefined) {
+      res.status(503).json({
+        status: 'degraded',
+        error: runtimeError,
+      });
+      return;
+    }
+
     res.status(200).json({ status: 'ok' });
   };
   const loopback = isLoopbackBind(opts.hostname);
@@ -807,7 +818,7 @@ function createBootstrapServeApp(input: {
     }
     const runtimeError = getRuntimeError();
     const runtimeFailed = runtimeError !== undefined;
-    const issue = runtimeError
+    const issue: DaemonStatusIssue = runtimeError
       ? {
           code: 'daemon_runtime_failed',
           severity: 'error',
@@ -818,7 +829,7 @@ function createBootstrapServeApp(input: {
           severity: 'warning',
           message: 'Daemon runtime is still starting.',
         };
-    res.status(200).json({
+    const response: DaemonStatusResponse = {
       v: 1,
       detail: detail.detail,
       generatedAt: new Date().toISOString(),
@@ -914,7 +925,9 @@ function createBootstrapServeApp(input: {
             },
           }
         : {}),
-    });
+    };
+
+    res.status(200).json(response);
   });
 
   app.use((_req: Request, res: Response): void => {

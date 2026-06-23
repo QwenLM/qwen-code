@@ -133,6 +133,13 @@ process.on('uncaughtException', (error) => {
 runCliEntry().catch((error: unknown) => {
   void handleCriticalError(error).catch((handlerError: unknown) => {
     console.error('An unexpected critical error occurred:');
+    console.error('Original error:');
+    if (error instanceof Error) {
+      console.error(error.stack);
+    } else {
+      console.error(String(error));
+    }
+    console.error('Error handler failed:');
     if (handlerError instanceof Error) {
       console.error(handlerError.stack);
     } else {
