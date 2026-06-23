@@ -172,8 +172,16 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   voiceConfig: VoiceTranscriptionConfig,
   lookupHost?: VoiceHostLookup,
 ): Promise<void> {
-  const hostname = new URL(voiceConfig.baseUrl).hostname;
-  if (isLoopbackHost(hostname) || isIP(normalizeHostname(hostname)) !== 0) {
+  const hostname = normalizeHostname(new URL(voiceConfig.baseUrl).hostname);
+  if (isLoopbackHost(hostname)) {
+    return;
+  }
+  if (isIP(hostname) !== 0) {
+    if (isPrivateNetworkIp(hostname)) {
+      throw new Error(
+        `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
+      );
+    }
     return;
   }
   let result: { address: string } | Array<{ address: string }>;

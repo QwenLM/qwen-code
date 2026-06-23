@@ -27,6 +27,12 @@ import { createServeApp } from '../server.js';
 import type { ServeOptions } from '../types.js';
 import { registerWorkspaceVoiceRoutes } from './workspace-voice.js';
 
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+}));
+
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
   port: 4170,
@@ -145,6 +151,7 @@ describe('workspace voice routes', () => {
   let h: Harness;
 
   beforeEach(async () => {
+    mockWriteStderrLine.mockClear();
     h = await makeHarness();
   });
 
@@ -295,6 +302,52 @@ describe('workspace voice routes', () => {
       true,
       'user',
       'client-1',
+    );
+  });
+
+  it('POST broadcasts fallback voice writes that committed before a later failure', async () => {
+    await writeVoiceModelSettings(h);
+    const broadcastSettingsChanged = vi.fn();
+    const persistSetting = vi.fn(
+      async (
+        _workspace: string,
+        _scope: SettingScope,
+        key: string,
+        _value: unknown,
+      ) => {
+        if (key === 'general.voice.mode') {
+          throw new Error('disk full');
+        }
+      },
+    );
+    const app = express();
+    app.use(express.json({ limit: '10mb' }));
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSetting,
+      broadcastSettingsChanged,
+      parseAndValidateClientId: vi.fn(() => 'client-1'),
+      transcribe: h.transcribe,
+    });
+
+    const res = await request(app).post('/workspace/voice').send({
+      voiceModel: 'qwen3-asr-flash',
+      mode: 'hold',
+    });
+
+    expect(res.status).toBe(500);
+    expect(broadcastSettingsChanged).toHaveBeenCalledTimes(1);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'voiceModel',
+      'qwen3-asr-flash',
+      'user',
+      'client-1',
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('partial persist error'),
     );
   });
 
@@ -596,7 +649,9 @@ describe('workspace voice routes', () => {
   it('POST /workspace/voice/transcribe redacts unexpected ASR errors', async () => {
     await writeVoiceModelSettings(h);
     h.transcribe.mockRejectedValueOnce(
-      new Error('upstream failed with Bearer sk-secret and sk-secret'),
+      new Error(
+        'upstream failed with Authorization: ApiKey top-secret and sk-secret',
+      ),
     );
 
     const res = await request(h.app)
@@ -608,8 +663,15 @@ describe('workspace voice routes', () => {
 
     expect(res.status).toBe(502);
     expect(res.body.code).toBe('voice_transcription_failed');
-    expect(res.body.error).toContain('[REDACTED]');
+    expect(res.body.error).toBe('Voice transcription failed');
     expect(JSON.stringify(res.body)).not.toContain('sk-secret');
+    expect(JSON.stringify(res.body)).not.toContain('top-secret');
+    const stderrOutput = mockWriteStderrLine.mock.calls
+      .map((call) => String(call[0]))
+      .join('\n');
+    expect(stderrOutput).toContain('[REDACTED]');
+    expect(stderrOutput).not.toContain('sk-secret');
+    expect(stderrOutput).not.toContain('top-secret');
   });
 
   it('POST /workspace/voice/transcribe rejects unsupported content types', async () => {

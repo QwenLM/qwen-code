@@ -5,6 +5,7 @@
  */
 
 import {
+  createDebugLogger,
   ModelsConfig,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
@@ -28,6 +29,8 @@ import {
   type RecordedVoiceAudio,
   type VoiceModelSource,
 } from './voice-transcriber.js';
+
+const debugLogger = createDebugLogger('VOICE_SERVICE');
 
 export interface WorkspaceVoiceModelDescriptor {
   id: string;
@@ -92,6 +95,14 @@ export function listAvailableVoiceModels(
   const idCounts = new Map<string, number>();
   for (const model of models) {
     idCounts.set(model.id, (idCounts.get(model.id) ?? 0) + 1);
+  }
+  const duplicateIds = [...idCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([id]) => id);
+  if (duplicateIds.length > 0) {
+    debugLogger.debug(
+      `Skipping duplicate voice model ids: ${duplicateIds.join(', ')}`,
+    );
   }
 
   return models

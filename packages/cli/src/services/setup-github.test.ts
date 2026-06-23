@@ -17,9 +17,8 @@ import {
   type SetupGithubFileOps,
 } from './setup-github.js';
 
-const mockProxyAgent = vi.hoisted(() =>
-  vi.fn((proxy: string) => ({ proxy })),
-);
+const mockProxyAgent = vi.hoisted(() => vi.fn((proxy: string) => ({ proxy })));
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/gitUtils.js', () => ({
   isGitHubRepository: vi.fn(),
@@ -30,6 +29,10 @@ vi.mock('../utils/gitUtils.js', () => ({
 
 vi.mock('undici', () => ({
   ProxyAgent: mockProxyAgent,
+}));
+
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
 }));
 
 function okResponse(text: string): Response {
@@ -121,6 +124,9 @@ describe('setupGithub service', () => {
       fsp.access(path.join(scratchDir, '.github')),
     ).rejects.toBeDefined();
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('offline'),
+    );
   });
 
   it('does not write when workflow download fails', async () => {
@@ -140,6 +146,33 @@ describe('setupGithub service', () => {
     await expect(
       fsp.access(path.join(scratchDir, '.github')),
     ).rejects.toBeDefined();
+  });
+
+  it('aborts sibling workflow downloads after the first download failure', async () => {
+    const abortedEndpoints: string[] = [];
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const endpoint = String(input);
+        if (endpoint.includes('qwen-invoke.yml')) {
+          return new Response('missing', {
+            status: 404,
+            statusText: 'Not Found',
+          });
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            abortedEndpoints.push(endpoint);
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      },
+    ) as unknown as typeof fetch;
+
+    await expect(
+      setupGithub({ cwd: scratchDir, workspaceRoot: scratchDir, fetchImpl }),
+    ).rejects.toThrow(/qwen-invoke\.yml/);
+
+    expect(abortedEndpoints.length).toBeGreaterThan(0);
   });
 
   it('reports partial workflow write failure without updating gitignore', async () => {

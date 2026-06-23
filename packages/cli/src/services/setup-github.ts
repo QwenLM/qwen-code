@@ -15,6 +15,7 @@ import {
   isGitHubRepository,
 } from '../utils/gitUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('SETUP_GITHUB');
 
@@ -186,6 +187,11 @@ export async function setupGithub(
   try {
     releaseTag = await getLatestGitHubRelease(options.proxy);
   } catch (error) {
+    writeStderrLine(
+      `qwen setup-github: failed to determine latest qwen-code-action release: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     debugLogger.debug(
       'Failed to determine latest qwen-code-action release:',
       error,
@@ -324,6 +330,7 @@ async function downloadWorkflows(options: {
   abortSignal?: AbortSignal;
   fetchImpl: typeof fetch;
 }): Promise<Array<{ sourcePath: string; content: string }>> {
+  const internalAbort = new AbortController();
   try {
     const dispatcher = options.proxy
       ? new ProxyAgent(options.proxy)
@@ -336,6 +343,7 @@ async function downloadWorkflows(options: {
           dispatcher,
           signal: AbortSignal.any([
             AbortSignal.timeout(30_000),
+            internalAbort.signal,
             ...(options.abortSignal ? [options.abortSignal] : []),
           ]),
         } as RequestInit);
@@ -349,10 +357,12 @@ async function downloadWorkflows(options: {
       }),
     );
   } catch (error) {
+    internalAbort.abort();
+    const message = error instanceof Error ? error.message : String(error);
     debugLogger.debug('Failed to download qwen-code-action workflows:', error);
     throw new SetupGithubError(
       'github_workflow_download_failed',
-      'Unable to download qwen-code-action workflows from GitHub.',
+      `Unable to download qwen-code-action workflows from GitHub. ${message}`,
       502,
     );
   }

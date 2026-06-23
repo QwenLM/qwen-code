@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
+  assertVoiceBaseUrlNetworkAllowed,
   isStreamingVoiceModel,
   isKeytermEcho,
   resolveVoiceStreamConfig,
@@ -420,6 +421,15 @@ describe('voice-transcriber', () => {
           fetchFn: vi.fn(),
         },
       ),
+    ).rejects.toThrow(/private-network address/);
+  });
+
+  it('rejects private-network IP literal voice URLs during network checks', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://169.254.169.254/v1',
+      }),
     ).rejects.toThrow(/private-network address/);
   });
 

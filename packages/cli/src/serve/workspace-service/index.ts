@@ -88,6 +88,12 @@ const PERMISSION_SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
   workspace: SettingScope.Workspace,
 };
 
+type SettingsWrite = {
+  scope: SettingScope;
+  key: string;
+  value: unknown;
+};
+
 function scopeToWire(scope: SettingScope): 'user' | 'workspace' {
   return scope === SettingScope.Workspace ? 'workspace' : 'user';
 }
@@ -400,11 +406,7 @@ export function createDaemonWorkspaceService(
       const settings = loadSettings(boundWorkspace);
       validateWorkspaceVoiceState(settings, request);
       const voiceSettingsScope = getVoiceSettingsScope(settings);
-      const writes: Array<{
-        scope: SettingScope;
-        key: string;
-        value: unknown;
-      }> = [];
+      const writes: SettingsWrite[] = [];
 
       if (request.voiceModel !== undefined) {
         writes.push({
@@ -435,20 +437,7 @@ export function createDaemonWorkspaceService(
         });
       }
 
-      if (persistSettings) {
-        await persistSettings(boundWorkspace, writes);
-      } else {
-        for (const write of writes) {
-          await persistSetting!(
-            boundWorkspace,
-            write.scope,
-            write.key,
-            write.value,
-          );
-        }
-      }
-
-      for (const write of writes) {
+      const publishWrite = (write: SettingsWrite) => {
         publishWorkspaceEvent({
           type: 'settings_changed',
           data: {
@@ -458,6 +447,34 @@ export function createDaemonWorkspaceService(
           },
           originatorClientId: ctx.originatorClientId,
         });
+      };
+
+      if (persistSettings) {
+        await persistSettings(boundWorkspace, writes);
+        for (const write of writes) {
+          publishWrite(write);
+        }
+      } else {
+        const committed: SettingsWrite[] = [];
+        for (const write of writes) {
+          try {
+            await persistSetting!(
+              boundWorkspace,
+              write.scope,
+              write.key,
+              write.value,
+            );
+          } catch (err) {
+            writeStderrLine(
+              `qwen serve: workspace voice partial persist error (workspace=${boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${scopeToWire(write.scope)}): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            throw err;
+          }
+          committed.push(write);
+          publishWrite(write);
+        }
       }
 
       return buildWorkspaceVoiceStatus(

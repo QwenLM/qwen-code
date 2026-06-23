@@ -34,6 +34,12 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
+type VoiceSettingsWrite = {
+  scope: SettingScope;
+  key: string;
+  value: unknown;
+};
+
 type WorkspaceVoiceTranscriber = (
   input: WorkspaceVoiceTranscriptionInput,
 ) => Promise<WorkspaceVoiceTranscriptionResult>;
@@ -88,13 +94,39 @@ function sendVoiceError(res: Response, err: unknown): boolean {
   return false;
 }
 
-function sanitizeTranscriptionErrorMessage(raw: string): string {
+function sanitizeErrorMessage(raw: string): string {
   const redacted = raw
+    .replace(
+      /Authorization:\s*(?:Bearer|ApiKey|Basic|Token)?\s*\S+/gi,
+      'Authorization: [REDACTED]',
+    )
     .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(?:api[-_ ]?key|token|secret)=\S+/gi, '[REDACTED]')
     .replace(/\bsk-[A-Za-z0-9._-]{4,}\b/g, '[REDACTED]');
   return redacted.length > MAX_TRANSCRIPTION_ERROR_LENGTH
     ? `${redacted.slice(0, MAX_TRANSCRIPTION_ERROR_LENGTH)}...`
     : redacted;
+}
+
+function broadcastVoiceWrite(
+  deps: WorkspaceVoiceRouteDeps,
+  write: VoiceSettingsWrite,
+  clientId: string | undefined,
+): void {
+  try {
+    deps.broadcastSettingsChanged(
+      write.key,
+      write.value,
+      scopeToWire(write.scope),
+      clientId,
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: POST /workspace/voice broadcast error (key=${write.key}, scope=${scopeToWire(write.scope)}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 function parseVoiceUpdate(
@@ -161,8 +193,7 @@ async function persistVoiceUpdate(
   if (!deps.persistSettings && !deps.persistSetting) {
     throw new Error('workspace voice settings persistence is not available');
   }
-  const writes: Array<{ scope: SettingScope; key: string; value: unknown }> =
-    [];
+  const writes: VoiceSettingsWrite[] = [];
   if (update.voiceModel !== undefined) {
     writes.push({
       scope: getPersistScopeForModelSelection(settings),
@@ -194,31 +225,29 @@ async function persistVoiceUpdate(
 
   if (deps.persistSettings) {
     await deps.persistSettings(deps.boundWorkspace, writes);
-  } else {
     for (const write of writes) {
-      await deps.persistSetting!(
-        deps.boundWorkspace,
-        write.scope,
-        write.key,
-        write.value,
-      );
+      broadcastVoiceWrite(deps, write, clientId);
     }
-  }
-
-  for (const write of writes) {
-    try {
-      deps.broadcastSettingsChanged(
-        write.key,
-        write.value,
-        scopeToWire(write.scope),
-        clientId,
-      );
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: POST /workspace/voice broadcast error (key=${write.key}, scope=${scopeToWire(write.scope)}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+  } else {
+    const committed: VoiceSettingsWrite[] = [];
+    for (const write of writes) {
+      try {
+        await deps.persistSetting!(
+          deps.boundWorkspace,
+          write.scope,
+          write.key,
+          write.value,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /workspace/voice partial persist error (workspace=${deps.boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${scopeToWire(write.scope)}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        throw err;
+      }
+      committed.push(write);
+      broadcastVoiceWrite(deps, write, clientId);
     }
   }
 }
@@ -402,15 +431,15 @@ export function registerWorkspaceVoiceRoutes(
         if (sendVoiceError(res, err)) return;
         const message =
           err instanceof Error
-            ? sanitizeTranscriptionErrorMessage(err.message)
-            : sanitizeTranscriptionErrorMessage(String(err));
+            ? sanitizeErrorMessage(err.message)
+            : sanitizeErrorMessage(String(err));
         writeStderrLine(
           `qwen serve: POST /workspace/voice/transcribe error (workspace=${deps.boundWorkspace}): ${
             message
           }`,
         );
         res.status(502).json({
-          error: err instanceof Error ? message : 'Voice transcription failed',
+          error: 'Voice transcription failed',
           code: 'voice_transcription_failed',
         });
       }
