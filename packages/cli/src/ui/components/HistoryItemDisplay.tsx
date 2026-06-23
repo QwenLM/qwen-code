@@ -57,7 +57,6 @@ import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
-import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useThinkingViewer } from '../contexts/ThinkingViewerContext.js';
@@ -214,7 +213,6 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
-  const { compactMode } = useCompactMode();
   const contextThoughtExpanded = useThoughtExpanded();
   const resolvedThoughtExpanded = thoughtExpanded ?? contextThoughtExpanded;
   const settings = useSettings();
