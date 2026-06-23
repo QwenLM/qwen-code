@@ -2717,12 +2717,153 @@ describe('createServeApp', () => {
           source: 'https://example.com/installed-ext',
           result: {
             status: 'installed',
+            source: 'https://example.com/installed-ext',
             name: 'installed-ext',
             version: '1.2.3',
             refreshed: 1,
             failed: 0,
           },
         });
+      } finally {
+        restore();
+      }
+    });
+
+    it('reports queued and running extension operation states', async () => {
+      let releaseInstall: (() => void) | undefined;
+      const installBlocker = new Promise<void>((resolve) => {
+        releaseInstall = resolve;
+      });
+      const restore = mockExtensionManagerMethods({
+        installExtension: async () => {
+          await installBlocker;
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const first = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/first-ext', consent: true });
+        expect(first.status).toBe(202);
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                first.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('running');
+        });
+
+        const second = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/second-ext', consent: true });
+        expect(second.status).toBe(202);
+
+        const queued = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              second.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(queued.status).toBe(200);
+        expect(queued.body).toMatchObject({
+          operationId: second.body.operationId,
+          operation: 'install',
+          status: 'queued',
+          source: 'https://example.com/second-ext',
+        });
+
+        releaseInstall!();
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.length).toBeGreaterThanOrEqual(2);
+        });
+      } finally {
+        releaseInstall?.();
+        restore();
+      }
+    });
+
+    it('evicts the oldest terminal extension operations', async () => {
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const operationIds: string[] = [];
+
+        for (let i = 0; i < 101; i += 1) {
+          const res = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source: `https://example.com/installed-ext-${i}`,
+              consent: true,
+            });
+          expect(res.status).toBe(202);
+          operationIds.push(res.body.operationId as string);
+          await vi.waitFor(async () => {
+            const poll = await request(app)
+              .get(
+                `/workspace/extensions/operations/${encodeURIComponent(
+                  res.body.operationId as string,
+                )}`,
+              )
+              .set('Host', `127.0.0.1:${tokenOpts.port}`)
+              .set('Authorization', 'Bearer secret');
+            expect(poll.body.status).toBe('succeeded');
+          });
+        }
+
+        const evicted = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              operationIds[0]!,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(evicted.status).toBe(404);
+
+        const retained = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              operationIds.at(-1)!,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(retained.status).toBe(200);
+        expect(retained.body.status).toBe('succeeded');
       } finally {
         restore();
       }

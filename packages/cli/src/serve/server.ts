@@ -1452,14 +1452,28 @@ export function createServeApp(
   };
   const extensionOperations = new Map<string, ExtensionOperationStatus>();
   const MAX_EXTENSION_OPERATION_HISTORY = 100;
+  const isTerminalExtensionOperation = (
+    operation: ExtensionOperationStatus,
+  ): boolean => operation.status !== 'queued' && operation.status !== 'running';
+  const redactExtensionOperationResult = (
+    event: ExtensionMutationEvent,
+  ): ExtensionMutationEvent => ({
+    ...event,
+    ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
+  });
   const rememberExtensionOperation = (
     operation: ExtensionOperationStatus,
   ): void => {
     extensionOperations.set(operation.operationId, operation);
     while (extensionOperations.size > MAX_EXTENSION_OPERATION_HISTORY) {
-      const oldest = extensionOperations.keys().next().value;
-      if (typeof oldest !== 'string') break;
-      extensionOperations.delete(oldest);
+      let evicted = false;
+      for (const [id, storedOperation] of extensionOperations) {
+        if (!isTerminalExtensionOperation(storedOperation)) continue;
+        extensionOperations.delete(id);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
     }
   };
   const updateExtensionOperation = (
@@ -1517,7 +1531,7 @@ export function createServeApp(
           updateExtensionOperation(operationId, {
             status: 'succeeded',
             result: {
-              ...event,
+              ...redactExtensionOperationResult(event),
               refreshed: result.refreshed,
               failed: result.failed,
             },
@@ -1534,7 +1548,7 @@ export function createServeApp(
           updateExtensionOperation(operationId, {
             status: 'succeeded_with_refresh_error',
             result: {
-              ...event,
+              ...redactExtensionOperationResult(event),
               refreshed: 0,
               failed: 1,
               error: message.slice(0, 500),
@@ -1597,11 +1611,16 @@ export function createServeApp(
         }
       }
     }).catch((err) => {
+      const message = redactUrlCredentials(
+        err instanceof Error ? err.message : String(err),
+      );
+      updateExtensionOperation(operationId, {
+        status: 'failed',
+        error: message.slice(0, 500),
+      });
       try {
         writeStderrLine(
-          `qwen serve: extensions ${operation}: queued task failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `qwen serve: extensions ${operation}: queued task failed: ${message}`,
         );
       } catch {
         // Last-resort guard for detached async work.
