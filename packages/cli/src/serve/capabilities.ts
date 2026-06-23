@@ -230,6 +230,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
+  // the Chrome extension) can host an MCP server that the daemon's agent
+  // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
+  // reusing the SDK-MCP-server control-plane pattern. Inbound WS frame types:
+  // `mcp_register` { server }, `mcp_message` { id, server, payload }
+  // (bidirectional, request/response correlated by `id`), `mcp_unregister`
+  // { server }. Advertised CONDITIONALLY — only when the operator opts in
+  // (the public contract is still settling per #5626), so clients pre-flight
+  // this tag before attempting to register a client-hosted server.
+  client_mcp_over_ws: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -249,6 +259,12 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
+  /**
+   * Whether the daemon will accept client-hosted MCP servers over the WS
+   * (`client_mcp_over_ws`, issue #5626). Opt-in: the contract is still
+   * settling, so the tag is advertised only when explicitly enabled.
+   */
+  clientMcpOverWsEnabled?: boolean;
 }
 
 /**
@@ -310,6 +326,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  [
+    'client_mcp_over_ws',
+    (toggles) => toggles.clientMcpOverWsEnabled === true,
+  ],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

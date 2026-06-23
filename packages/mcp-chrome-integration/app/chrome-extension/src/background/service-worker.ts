@@ -8,6 +8,35 @@
 
 import './native-messaging';
 import { isUiRequest, routeUiRequest } from './ui-request-router';
+import { startBrowserToolsServer } from './browser-tools-server';
+import { getDaemonConfig } from '../daemon/config.js';
+import { checkDaemonHealth } from '../daemon/discovery.js';
+
+/**
+ * Start the daemon WS browser-tools MCP server once a local `qwen serve` daemon
+ * is reachable (Phase 2 reverse tool channel, issue #5626). This runs ALONGSIDE
+ * the kept native-messaging transport; it does not replace it.
+ *
+ * We probe `/health` first to avoid spamming reconnects when no daemon is up;
+ * the WS client owns its own reconnect loop once started.
+ */
+async function maybeStartBrowserToolsServer(): Promise<void> {
+  try {
+    const config = await getDaemonConfig();
+    const health = await checkDaemonHealth(config);
+    if (health.reachable) {
+      console.log('[ServiceWorker] Daemon reachable; starting browser-tools server');
+      startBrowserToolsServer();
+    } else {
+      console.log(
+        '[ServiceWorker] Daemon not reachable; browser-tools server idle:',
+        health.error,
+      );
+    }
+  } catch (error) {
+    console.warn('[ServiceWorker] Browser-tools server probe failed:', error);
+  }
+}
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (!isUiRequest(request)) {
@@ -42,3 +71,6 @@ chrome.runtime.onInstalled.addListener(() => {
 console.log('[ServiceWorker] Initializing Native Messaging...');
 self.NativeMessaging?.init?.();
 console.log('[ServiceWorker] Initialized with Native Messaging support');
+
+// Also start the daemon WS browser-tools MCP server when a daemon is reachable.
+void maybeStartBrowserToolsServer();

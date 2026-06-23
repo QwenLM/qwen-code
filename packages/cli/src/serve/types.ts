@@ -203,6 +203,16 @@ export interface ServeOptions {
   rateLimitRead?: number;
   /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
   rateLimitWindowMs?: number;
+  /**
+   * Opt-in: accept client-hosted MCP servers over the daemon WS (issue #5626,
+   * Phase 2 "reverse tool channel"). When enabled, a connected WS client may
+   * send `mcp_register` / `mcp_message` / `mcp_unregister` frames so the
+   * daemon's agent can call tools that execute in the client (e.g. the Chrome
+   * extension's browser tools). Off by default — the public contract is still
+   * settling, so the `client_mcp_over_ws` capability tag and the WS frame
+   * handling stay gated behind explicit operator opt-in.
+   */
+  clientMcpOverWs?: boolean;
 }
 
 /**

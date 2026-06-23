@@ -23,6 +23,10 @@ import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
 import { RPC, error as rpcError, isRequest, parseInbound } from './json-rpc.js';
+import {
+  ClientMcpWsConnection,
+  type ClientMcpServerProvider,
+} from './client-mcp-ws.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
@@ -79,6 +83,21 @@ export interface MountAcpHttpOptions {
   sessionShellCommandEnabled?: boolean;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
+  /**
+   * Opt-in: accept client-hosted MCP servers over the WS (issue #5626,
+   * Phase 2 "reverse tool channel"). When true, inbound `mcp_register` /
+   * `mcp_message` / `mcp_unregister` frames are handled per-connection. Off by
+   * default — the public contract is still settling.
+   */
+  clientMcpOverWs?: boolean;
+  /**
+   * Injection point for the deep wiring into the agent's live MCP stack. When
+   * supplied, an `mcp_register` frame registers a real SDK-type runtime MCP
+   * server whose discovery + tool calls round-trip over the WS. When omitted,
+   * `mcp_register` is rejected with a structured `not_wired` error (the WS
+   * framing + correlation still work, but no agent-visible server is created).
+   */
+  clientMcpProvider?: ClientMcpServerProvider;
 }
 
 export interface AcpHttpHandle {
@@ -539,6 +558,9 @@ export function mountAcpHttp(
         initTimer.unref?.();
         let connRef: AcpConnection | undefined;
         let messageQueue = Promise.resolve();
+        // Per-connection client-hosted MCP holder (issue #5626). Created
+        // lazily on the first client-MCP frame; disposed on WS close.
+        let clientMcp: ClientMcpWsConnection | undefined;
         const rawAddr =
           (socket as unknown as { remoteAddress?: string }).remoteAddress ??
           'ws-unknown';
@@ -550,6 +572,17 @@ export function mountAcpHttp(
           writeStderrLine(
             `qwen serve: /acp WS error: ${err instanceof Error ? err.message : String(err)}`,
           );
+        });
+
+        // Tear down client-hosted MCP servers when the socket goes away so a
+        // disconnected extension doesn't leave runtime servers + pending
+        // requests dangling. WsStream's onClose handles ACP teardown; this is
+        // the orthogonal client-MCP teardown.
+        ws.on('close', () => {
+          if (clientMcp) {
+            void clientMcp.dispose('WS closed').catch(() => {});
+            clientMcp = undefined;
+          }
         });
 
         ws.on('message', (rawData: Buffer | string) => {
@@ -590,6 +623,91 @@ export function mountAcpHttp(
                 error: 'Batch JSON-RPC not supported',
               }),
             );
+            return;
+          }
+
+          // ── Client-hosted MCP frames (issue #5626) ───────────────────
+          // These are NOT JSON-RPC envelopes — they carry a `type`
+          // discriminator (`mcp_register` / `mcp_message` / `mcp_unregister`)
+          // and ride the same WS as the ACP stream. Intercept before
+          // `parseInbound` (which would reject them as malformed JSON-RPC).
+          if (
+            opts.clientMcpOverWs === true &&
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            ClientMcpWsConnection.isClientMcpFrameType(
+              (parsed as { type?: unknown }).type,
+            )
+          ) {
+            // Client-MCP requires an initialized connection (the ACP handshake
+            // establishes the connection identity + stream first).
+            if (!initialized) {
+              ws.send(
+                JSON.stringify({
+                  type: 'mcp_error',
+                  code: 'not_initialized',
+                  message: 'initialize the ACP connection before mcp_register',
+                }),
+              );
+              return;
+            }
+            if (!clientMcp) {
+              clientMcp = new ClientMcpWsConnection(
+                (frame) => ws.send(JSON.stringify(frame)),
+                opts.clientMcpProvider,
+              );
+            }
+
+            const sendClientMcpAck = (
+              result: Awaited<ReturnType<ClientMcpWsConnection['handleFrame']>>,
+            ): void => {
+              // `message_resolved` correlates a client→daemon response — no
+              // ack frame (the awaiting agent request resolves directly).
+              // `ignored` is silent. Everything else gets a structured ack.
+              if (result.kind === 'registered') {
+                ws.send(
+                  JSON.stringify({
+                    type: 'mcp_registered',
+                    server: result.server,
+                    toolCount: result.toolCount,
+                  }),
+                );
+              } else if (result.kind === 'unregistered') {
+                ws.send(
+                  JSON.stringify({
+                    type: 'mcp_unregistered',
+                    server: result.server,
+                  }),
+                );
+              } else if (result.kind === 'error') {
+                ws.send(
+                  JSON.stringify({
+                    type: 'mcp_error',
+                    code: result.code,
+                    message: result.message,
+                  }),
+                );
+              }
+            };
+
+            const frameType = (parsed as { type?: unknown }).type;
+            // `mcp_register` / `mcp_unregister` await a provider round-trip
+            // that ITSELF needs `mcp_message` response frames delivered on
+            // THIS same serialized queue — awaiting it inline would deadlock
+            // (responses queued behind the still-in-flight register). Mirror
+            // the `session/prompt` fire-and-forget pattern: dispatch off the
+            // queue and ack when it resolves. `mcp_message` is a synchronous
+            // correlation resolve, so it stays inline (keeps ordering).
+            const handleP = clientMcp
+              .handleFrame(parsed as Record<string, unknown>)
+              .then(sendClientMcpAck, (err: unknown) => {
+                writeStderrLine(
+                  `qwen serve: /acp client-mcp frame error: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              });
+            if (frameType === 'mcp_message') {
+              await handleP;
+            }
             return;
           }
 

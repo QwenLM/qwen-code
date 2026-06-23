@@ -1879,6 +1879,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
+      clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 
@@ -4704,6 +4705,7 @@ export function createServeApp(
     token: opts.token,
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
+    clientMcpOverWs: opts.clientMcpOverWs === true,
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
