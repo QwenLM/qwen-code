@@ -50,7 +50,9 @@ describe('acpModelUtils', () => {
     ['not-a-url', 'not-a-url'],
     ['https://api.example/v1', 'https://api.example/v1'],
     ['https://api.example/v1/@scope', 'https://api.example/v1/@scope'],
+    ['https://host:99999/path@domain', 'https://host:99999/path@domain'],
     ['https://user@api.example/v1', 'https://api.example/v1'],
+    ['https://user@host:99999', 'https://host:99999'],
     ['https://user:secret@api.example/v1', 'https://api.example/v1'],
     [
       'https://user:secret@api.example/v1/@scope',

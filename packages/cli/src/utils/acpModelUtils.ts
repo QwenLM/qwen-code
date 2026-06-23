@@ -44,17 +44,36 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
     }
     return baseUrl;
   } catch {
-    const at = baseUrl.lastIndexOf('@');
-    if (at < authorityStart) {
-      return baseUrl;
+    if (authorityAtIndex >= authorityStart) {
+      return stripAt(authorityAtIndex);
     }
 
-    const possibleUserInfo = baseUrl.slice(authorityStart, at);
-    if (!possibleUserInfo.includes(':')) {
-      return baseUrl;
-    }
-    return stripAt(at);
+    const fallbackAt = findUnescapedUserInfoFallbackAt(
+      baseUrl,
+      authorityStart,
+      authorityEnd,
+    );
+    return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
   }
+}
+
+function findUnescapedUserInfoFallbackAt(
+  baseUrl: string,
+  authorityStart: number,
+  authorityEnd: number,
+): number {
+  const at = baseUrl.lastIndexOf('@');
+  if (at < authorityStart || authorityEnd >= at) {
+    return -1;
+  }
+
+  const colon = baseUrl.indexOf(':', authorityStart);
+  if (colon === -1 || colon > authorityEnd) {
+    return -1;
+  }
+
+  const portCandidate = baseUrl.slice(colon + 1, authorityEnd);
+  return /^\d+$/.test(portCandidate) ? -1 : at;
 }
 
 function findAuthorityEnd(baseUrl: string, authorityStart: number): number {

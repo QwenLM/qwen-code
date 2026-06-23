@@ -117,12 +117,7 @@ function buildWorkspaceProvidersStatus(
       const isCurrent =
         currentAuth === model.authType &&
         hasCurrentModel &&
-        matchesCurrentModel(
-          currentModelId,
-          currentAcpModelId,
-          effectiveModelId,
-          modelId,
-        ) &&
+        matchesCurrentModel(currentModelId, effectiveModelId, modelId) &&
         matchesCurrentBaseUrl(
           currentBaseUrl,
           model.baseUrl,
@@ -199,15 +194,10 @@ function buildWorkspaceProvidersStatus(
 
 function matchesCurrentModel(
   currentModelId: string,
-  currentAcpModelId: string | undefined,
   baseModelId: string,
   acpModelId: string,
 ): boolean {
-  return (
-    currentModelId === baseModelId ||
-    currentModelId === acpModelId ||
-    currentAcpModelId === acpModelId
-  );
+  return currentModelId === baseModelId || currentModelId === acpModelId;
 }
 
 function matchesCurrentBaseUrl(
