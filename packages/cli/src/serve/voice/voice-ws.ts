@@ -352,9 +352,8 @@ export function createVoiceWsConnectionHandler(
         } else {
           bufferedBytes += data.byteLength;
           if (bufferedBytes > MAX_BATCH_AUDIO_BYTES) {
-            throw new Error(
-              'Recording is too long for transcription (max ~5 minutes).',
-            );
+            fail('Recording is too long for transcription (max ~5 minutes).');
+            return;
           }
           pcmChunks.push(data);
         }
@@ -416,7 +415,7 @@ export function createVoiceWsConnectionHandler(
         })
         .catch((error: unknown) => {
           debugLogger.debug(`[voice-ws] ${errMessage(error)}`);
-          fail(errMessage(error));
+          fail(GENERIC_TRANSCRIPTION_ERROR);
           releaseSlotWhenIdle();
         });
     });

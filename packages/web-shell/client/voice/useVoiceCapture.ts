@@ -425,7 +425,7 @@ export function useVoiceCapture(
         }
       }, TRANSCRIPTION_TIMEOUT_MS);
     } catch {
-      fail('Failed to finalize voice transcription.');
+      fail('Failed to finalize voice transcription.', generation);
     }
   }, [cleanup, teardownAudio, fail, applyStatus]);
 

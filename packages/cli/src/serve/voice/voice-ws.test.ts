@@ -193,6 +193,33 @@ describe('createVoiceWsConnectionHandler', () => {
     expect(ws.closeCode).toBe(1011);
   });
 
+  it('reports a generic error frame when streaming finalization fails', async () => {
+    const session: VoiceStreamSession = {
+      pushAudio: vi.fn(),
+      finish: vi.fn(async () => {
+        throw new Error('upstream private endpoint failed');
+      }),
+      abort: vi.fn(),
+    };
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => session,
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await tick();
+    ws.text({ type: 'stop' });
+    await tick();
+
+    expect(ws.frames().at(-1)).toMatchObject({
+      type: 'error',
+      message: 'Voice transcription failed. Please try again.',
+    });
+    expect(ws.closeCode).toBe(1011);
+  });
+
   it('aborts the upstream session on abort', async () => {
     const session: VoiceStreamSession = {
       pushAudio: vi.fn(),
