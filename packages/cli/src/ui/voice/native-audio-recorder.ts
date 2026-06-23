@@ -72,7 +72,11 @@ class NativeAudioRecorder implements VoiceRecorder {
     this.starting = true;
     let backend: NativeAudioCaptureBackend;
     try {
-      backend = await this.loadBackend();
+      try {
+        backend = await this.loadBackend();
+      } catch (loadError) {
+        throw explainMissingNativePackage(loadError);
+      }
       const silenceDetection = options.silenceDetection === true;
       backend.startRecording({
         sampleRate: 16000,
@@ -136,6 +140,11 @@ function explainMissingNativePackage(error: unknown): unknown {
     return error;
   }
 
+  debugLogger.warn(
+    '[voice] native package missing:',
+    error.message,
+    (error as NodeJS.ErrnoException).code,
+  );
   return new Error(
     `Native voice capture package '${AUDIO_CAPTURE_PACKAGE}' is missing. ` +
       'If Qwen Code was installed from a mirror or private registry, the ' +

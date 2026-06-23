@@ -391,11 +391,6 @@ jobs:
             echo "Dry run enabled. Skipping push."
           fi
 
-      - name: 'Build Bundle and Prepare Package'
-        run: |-
-          npm run bundle
-          npm run prepare:package
-
       - name: 'Download audio capture prebuilds'
         if: |-
           ${{ github.repository == 'QwenLM/qwen-code' }}
@@ -403,6 +398,11 @@ jobs:
         with:
           name: 'audio-capture-prebuilds'
           path: 'packages/audio-capture/prebuilds'
+
+      - name: 'Build Bundle and Prepare Package'
+        run: |-
+          npm run bundle
+          npm run prepare:package
 
       - name: 'Build Standalone Archives'
         env:

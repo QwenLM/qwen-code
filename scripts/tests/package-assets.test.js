@@ -99,6 +99,19 @@ describe('package asset scripts', () => {
     ).toBe(true);
     expect(
       existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+          'dist',
+          'index.test.js',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
       ),
     ).toBe(true);

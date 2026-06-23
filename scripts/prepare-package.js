@@ -160,24 +160,40 @@ function copyNativeAudioCapturePackage(rootDir, distDir) {
     }
   }
 
-  fs.rmSync(addonDest, { recursive: true, force: true });
-  fs.mkdirSync(addonDest, { recursive: true });
-
   const addonPkg = JSON.parse(
     fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
   );
+  const dependencySources = [];
+  for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
+    try {
+      dependencySources.push([
+        dependencyName,
+        path.dirname(nodeRequire.resolve(`${dependencyName}/package.json`)),
+      ]);
+    } catch {
+      console.warn(
+        `Warning: audio capture dependency not resolvable: ${dependencyName}`,
+      );
+      return false;
+    }
+  }
+
   delete addonPkg.scripts;
   delete addonPkg.devDependencies;
-  fs.writeFileSync(
-    path.join(addonDest, 'package.json'),
-    JSON.stringify(addonPkg, null, 2) + '\n',
-  );
 
   const copyOpts = {
     recursive: true,
     dereference: true,
     verbatimSymlinks: false,
   };
+
+  fs.rmSync(addonDest, { recursive: true, force: true });
+  fs.mkdirSync(addonDest, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(addonDest, 'package.json'),
+    JSON.stringify(addonPkg, null, 2) + '\n',
+  );
   fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
     ...copyOpts,
     filter: (src) => !/\.test\.(d\.)?[mc]?[jt]s(\.map)?$/.test(src),
@@ -188,14 +204,13 @@ function copyNativeAudioCapturePackage(rootDir, distDir) {
     copyOpts,
   );
 
-  const nodeGypBuildSrc = path.dirname(
-    nodeRequire.resolve('node-gyp-build/package.json'),
-  );
-  fs.cpSync(
-    nodeGypBuildSrc,
-    path.join(addonDest, 'node_modules', 'node-gyp-build'),
-    copyOpts,
-  );
+  for (const [dependencyName, dependencySrc] of dependencySources) {
+    fs.cpSync(
+      dependencySrc,
+      path.join(addonDest, 'node_modules', dependencyName),
+      copyOpts,
+    );
+  }
 
   console.log('Copied native audio capture package');
   return true;
