@@ -361,27 +361,22 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {/*
         `tool_use_summary` as a standalone inline item.
 
-        In full mode (`compactMode=false`), the label arrives via the fast-model
-        call AFTER the tool_group has been committed to Ink's append-only
-        <Static>, so we cannot update the tool_group's header retroactively.
-        Rendering a standalone `● <label>` line appends cleanly.
+        The label is normally absorbed into the sibling tool_group's header
+        (via `compactLabel` prop to CompactToolGroupDisplay), and
+        `summaryAbsorbed=true` suppresses this block. This applies in both
+        compact mode and unified mode (completed groups always render via
+        CompactToolGroupDisplay).
 
-        In compact mode, the label is normally absorbed into the merged
-        tool_group's header (via `compactLabel` prop to CompactToolGroupDisplay),
-        and `summaryAbsorbed=true` is set so this block does nothing. But when
-        the sibling tool_group is force-expanded (errors, confirmations,
+        When the sibling tool_group is force-expanded (errors, confirmations,
         user-initiated, focused shell), the full-expand path ignores
         `compactLabel`, and `MainContent` leaves `summaryAbsorbed=false` —
-        the standalone line below is then the label's only route to the UI,
-        which is exactly the case where a summary is most diagnostically
-        useful ("Fixed NPE in UserService" on an errored batch).
+        the standalone line below is then the label's only route to the UI.
       */}
-      {itemForDisplay.type === 'tool_use_summary' &&
-        (!compactMode || !summaryAbsorbed) && (
-          <Box paddingLeft={1}>
-            <Text dimColor>● {itemForDisplay.summary}</Text>
-          </Box>
-        )}
+      {itemForDisplay.type === 'tool_use_summary' && !summaryAbsorbed && (
+        <Box paddingLeft={1}>
+          <Text dimColor>● {itemForDisplay.summary}</Text>
+        </Box>
+      )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}

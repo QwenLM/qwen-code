@@ -23,7 +23,7 @@ Instead of showing raw tool names and counts (`ReadFile x 3`), generate human-re
 | ------------------ | --------------------------------------------- |
 | Single tool        | `Read package.json` / `Ran npm test`          |
 | Multiple same-type | `Read 3 files`                                |
-| Mixed types        | `Read 3 files, edited 2 files, ran 1 command` |
+| Mixed types        | `Ran 1 command, read 3 files, edited 2 files` |
 | Active (executing) | `Reading package.json` (present progressive)  |
 | Completed          | `Read package.json` (past tense)              |
 | Error/Canceled     | `Read package.json` (past tense)              |
@@ -43,19 +43,23 @@ Instead of showing raw tool names and counts (`ReadFile x 3`), generate human-re
 
 ### Rendering Rules
 
-1. **Completed tool groups** always render via `CompactToolGroupDisplay` regardless of compact mode setting
-2. **Individual completed tools** collapse their result output (`shouldCollapse = isCompleted && !forceShowResult`)
-3. **Completed tool names** render dimmed (`isDim = status === Success`)
-4. **Force-expand conditions** remain: errors, confirmations, focused shell, user-initiated, terminal subagents
-5. **`compactLabel`** (LLM-generated) takes precedence over `buildToolSummary()` when available
+1. **Completed tool groups** (`allComplete`: every tool is Success, Error, or Canceled) always render via `CompactToolGroupDisplay` regardless of compact mode setting
+2. **Memory-only groups** have a dedicated rendering path that takes priority over `showCompact`
+3. **Individual completed tools** collapse their result output (`shouldCollapse = isCompleted && !forceShowResult`)
+4. **Completed tool names** render dimmed (`isDim = status === Success`)
+5. **Force-expand conditions** remain: errors, confirmations, focused shell, user-initiated, terminal subagents
+6. **`compactLabel`** (LLM-generated) takes precedence over `buildToolSummary()` when available
+7. **Summary absorption**: `tool_use_summary` items are suppressed when their sibling `tool_group` renders via `CompactToolGroupDisplay` (prevents duplicate display)
 
 ### Key Changes
 
-| File                          | Change                                                                                   |
-| ----------------------------- | ---------------------------------------------------------------------------------------- |
-| `CompactToolGroupDisplay.tsx` | Added `buildToolSummary()`, removed border styles, removed "Press Ctrl+O" hint           |
-| `ToolMessage.tsx`             | Removed `compactMode` gate from `shouldCollapse` and `isDim`                             |
-| `ToolGroupMessage.tsx`        | `showCompact` now triggers for all-completed groups via `(compactMode \|\| allComplete)` |
+| File                          | Change                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------ |
+| `CompactToolGroupDisplay.tsx` | Added `buildToolSummary()`, removed border styles, removed "Press Ctrl+O" hint             |
+| `ToolMessage.tsx`             | Removed `compactMode` gate from `shouldCollapse` and `isDim`                               |
+| `ToolGroupMessage.tsx`        | `showCompact` now triggers for all-completed groups via `(compactMode \|\| allComplete)`   |
+| `MainContent.tsx`             | `absorbedCallIds` now tracks completed groups in non-compact mode                          |
+| `HistoryItemDisplay.tsx`      | `tool_use_summary` rendering gated only on `summaryAbsorbed` (removed `compactMode` guard) |
 
 ## Alternatives Considered
 

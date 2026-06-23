@@ -201,7 +201,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       toolCalls.every(
         (t) =>
           t.status === ToolCallStatus.Success ||
-          t.status === ToolCallStatus.Error,
+          t.status === ToolCallStatus.Error ||
+          t.status === ToolCallStatus.Canceled,
       ),
     [toolCalls],
   );
@@ -305,6 +306,34 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     return null;
   }
 
+  // Memory-only groups get their own compact rendering with read/write
+  // counts. Check BEFORE showCompact so they aren't swallowed by the
+  // generic CompactToolGroupDisplay path.
+  if (isMemoryOnlyGroup && allComplete) {
+    const readCount = memoryReadCount ?? 0;
+    const writeCount = memoryWriteCount ?? 0;
+    return (
+      <Box flexDirection="column" width={contentWidth}>
+        {readCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {'● '}
+              Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
+            </Text>
+          </Box>
+        )}
+        {writeCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {'● '}
+              Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
+            </Text>
+          </Box>
+        )}
+      </Box>
+    );
+  }
+
   // Compact mode: entire group → single line summary
   // Force-expand when: user must interact (Confirming or subagent pending
   // confirmation), tool errored, shell is focused, or user-initiated.
@@ -363,32 +392,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         1,
       )
     : undefined;
-
-  // For completed memory-only groups, show a compact summary instead of individual tool calls
-  if (isMemoryOnlyGroup && allComplete) {
-    const readCount = memoryReadCount ?? 0;
-    const writeCount = memoryWriteCount ?? 0;
-    return (
-      <Box flexDirection="column" width={contentWidth}>
-        {readCount > 0 && (
-          <Box paddingLeft={1}>
-            <Text dimColor>
-              {'● '}
-              Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
-            </Text>
-          </Box>
-        )}
-        {writeCount > 0 && (
-          <Box paddingLeft={1}>
-            <Text dimColor>
-              {'● '}
-              Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
-            </Text>
-          </Box>
-        )}
-      </Box>
-    );
-  }
 
   return (
     <Box flexDirection="column" width={contentWidth} gap={0}>

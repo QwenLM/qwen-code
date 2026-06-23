@@ -852,8 +852,9 @@ describe('SessionPicker', () => {
       await act(async () => {
         await loadSessionPromise;
       });
-      // Tool group renders with raw function name fallback (no registry).
-      expect(lastFrame() ?? '').toContain('BashTool');
+      // Completed tool group renders via CompactToolGroupDisplay semantic summary.
+      // Without a tool registry, 'BashTool' maps to 'other' → "Used 1 tool".
+      expect(lastFrame() ?? '').toContain('Used 1 tool');
     });
 
     it('Enter inside preview fires onSelect with previewed sessionId', async () => {
