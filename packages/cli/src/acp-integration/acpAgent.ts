@@ -2882,19 +2882,23 @@ class QwenAgent implements Agent {
       });
     });
 
-    const sessions: SessionInfo[] = result.items.map((item) => ({
-      _meta: {
-        createdAt: item.startTime,
-        startTime: item.startTime,
-        preview: item.prompt,
-        ...(item.gitBranch ? { gitBranch: item.gitBranch } : {}),
-        ...(item.titleSource ? { titleSource: item.titleSource } : {}),
-      },
-      cwd: item.cwd,
-      sessionId: item.sessionId,
-      title: item.customTitle || item.prompt || '(session)',
-      updatedAt: new Date(item.mtime).toISOString(),
-    }));
+    const sessions: SessionInfo[] = result.items.flatMap((item) => {
+      const title = item.customTitle || item.prompt;
+      if (!title) return [];
+      return [{
+        _meta: {
+          createdAt: item.startTime,
+          startTime: item.startTime,
+          preview: item.prompt,
+          ...(item.gitBranch ? { gitBranch: item.gitBranch } : {}),
+          ...(item.titleSource ? { titleSource: item.titleSource } : {}),
+        },
+        cwd: item.cwd,
+        sessionId: item.sessionId,
+        title,
+        updatedAt: new Date(item.mtime).toISOString(),
+      }];
+    });
 
     return {
       sessions,

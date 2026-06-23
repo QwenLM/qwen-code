@@ -4812,6 +4812,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
       method: string,
       params: Record<string, unknown>,
     ) => Promise<Record<string, unknown>>;
+    unstable_listSessions: (
+      params: Record<string, unknown>,
+    ) => Promise<{ sessions: Array<{ sessionId: string; title: string }> }>;
   };
 
   let capturedAgentFactory:
@@ -4933,6 +4936,59 @@ describe('QwenAgent extMethod renameSession routing', () => {
     }) as AgentLike;
     return { agent, agentPromise };
   }
+
+  it('omits provider sessions with no title or prompt from ACP listSessions', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions: vi.fn().mockResolvedValue({
+            items: [
+              {
+                cwd: '/tmp/project',
+                customTitle: undefined,
+                mtime: 1,
+                prompt: undefined,
+                sessionId: 'empty-native',
+                startTime: '2026-01-01T00:00:00.000Z',
+              },
+              {
+                cwd: '/tmp/project',
+                customTitle: 'Named session',
+                mtime: 2,
+                prompt: undefined,
+                sessionId: 'named',
+                startTime: '2026-01-01T00:00:01.000Z',
+              },
+              {
+                cwd: '/tmp/project',
+                customTitle: undefined,
+                mtime: 3,
+                prompt: 'Prompt title',
+                sessionId: 'prompted',
+                startTime: '2026-01-01T00:00:02.000Z',
+              },
+            ],
+          }),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    const result = await agent.unstable_listSessions({ cwd: '/tmp/project' });
+
+    expect(result.sessions.map((session) => session.sessionId)).toEqual([
+      'named',
+      'prompted',
+    ]);
+    expect(result.sessions.map((session) => session.title)).toEqual([
+      'Named session',
+      'Prompt title',
+    ]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('routes through ChatRecordingService.recordCustomTitle when the target session is live', async () => {
     const recording = makeRecordingService();
