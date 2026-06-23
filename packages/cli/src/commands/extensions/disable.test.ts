@@ -13,11 +13,15 @@ const mockDisableExtension = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
-vi.mock('./utils.js', () => ({
-  getExtensionManager: vi.fn().mockResolvedValue({
-    disableExtension: mockDisableExtension,
-  }),
-}));
+vi.mock('./utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./utils.js')>();
+  return {
+    ...actual,
+    getExtensionManager: vi.fn().mockResolvedValue({
+      disableExtension: mockDisableExtension,
+    }),
+  };
+});
 
 vi.mock('../../utils/errors.js', () => ({
   getErrorMessage: vi.fn((error: Error) => error.message),
@@ -30,31 +34,37 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 describe('extensions disable command', () => {
+  const parseDisableCommand = (command: string) =>
+    yargs([]).command(disableCommand).fail(false).locale('en').parse(command);
+
   it('should fail if no name is provided', () => {
-    const validationParser = yargs([])
-      .command(disableCommand)
-      .fail(false)
-      .locale('en');
-    expect(() => validationParser.parse('disable')).toThrow(
+    expect(() => parseDisableCommand('disable')).toThrow(
       'Not enough non-option arguments: got 0, need at least 1',
     );
   });
 
   it('should fail if invalid scope is provided', () => {
-    const validationParser = yargs([])
-      .command(disableCommand)
-      .fail(false)
-      .locale('en');
     expect(() =>
-      validationParser.parse('disable test-extension --scope=invalid'),
+      parseDisableCommand('disable test-extension --scope=invalid'),
     ).toThrow(/Invalid scope: invalid/);
   });
 
+  it('should fail if unsupported system scopes are provided', () => {
+    expect(() =>
+      parseDisableCommand('disable test-extension --scope=system'),
+    ).toThrow(/Invalid scope: system/);
+    expect(() =>
+      parseDisableCommand('disable test-extension --scope=systemdefaults'),
+    ).toThrow(/Invalid scope: systemdefaults/);
+  });
+
   it('should accept valid scope values', () => {
-    const parser = yargs([]).command(disableCommand).fail(false).locale('en');
     // Just check that the scope option is recognized, actual execution needs name first
     expect(() =>
-      parser.parse('disable my-extension --scope=user'),
+      parseDisableCommand('disable my-extension --scope=user'),
+    ).not.toThrow();
+    expect(() =>
+      parseDisableCommand('disable my-extension --scope=workspace'),
     ).not.toThrow();
   });
 });
@@ -123,14 +133,31 @@ describe('handleDisable', () => {
     processExitSpy.mockRestore();
   });
 
+  it('should reject unsupported system scopes without disabling at user scope', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    await handleDisable({
+      name: 'test-extension',
+      scope: 'system',
+    });
+
+    expect(mockDisableExtension).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringMatching(/Invalid scope: system/),
+    );
+    expect(processExitSpy).toHaveBeenCalledWith(1);
+
+    processExitSpy.mockRestore();
+  });
+
   it('should handle errors and exit with code 1', async () => {
     const processExitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined as never);
 
-    mockDisableExtension.mockImplementationOnce(() => {
-      throw new Error('Disable failed');
-    });
+    mockDisableExtension.mockRejectedValueOnce(new Error('Disable failed'));
 
     await handleDisable({
       name: 'test-extension',
