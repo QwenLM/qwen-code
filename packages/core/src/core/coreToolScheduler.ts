@@ -1101,6 +1101,12 @@ export class CoreToolScheduler {
   // it twice corrupts paths containing escaped metacharacters). Cleared
   // on terminal state via finalizeToolSpan.
   private readonly bouncedAwaitingApproval = new Set<string>();
+  // Original tool_use_id captured when a tool is bounced by a PreToolUse
+  // 'ask', keyed by callId. The first (bounced) attempt fires PreToolUse
+  // with this id; the post-approval re-execution skips PreToolUse but fires
+  // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
+  // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
+  private readonly bouncedToolUseId = new Map<string, string>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -1382,11 +1388,12 @@ export class CoreToolScheduler {
    * `setToolSpan{Failure,Cancelled,Ok}` before this call (#4321 review).
    */
   private finalizeToolSpan(callId: string): void {
-    // Terminal-state cleanup: drop any PreToolUse 'ask' bounce marker so it
-    // never leaks past the tool call's lifetime. Done unconditionally
+    // Terminal-state cleanup: drop any PreToolUse 'ask' bounce markers so
+    // they never leak past the tool call's lifetime. Done unconditionally
     // (before the span guard) so a bounced call is cleared even on the
     // defensive no-span path.
     this.bouncedAwaitingApproval.delete(callId);
+    this.bouncedToolUseId.delete(callId);
     const span = this.toolSpans.get(callId);
     if (!span) return;
     this.toolSpans.delete(callId);
@@ -2664,15 +2671,21 @@ export class CoreToolScheduler {
 
         // Normalize shell-escaped paths so the editor receives actual
         // filesystem paths (request.args may still hold escaped values
-        // since buildInvocation normalizes a structuredClone).
+        // since buildInvocation normalizes a structuredClone) — UNLESS this
+        // tool was bounced by a PreToolUse 'ask', in which case
+        // _executeToolCallBody already unescaped request.args in place
+        // before the hook fired. Unescaping again here would double-strip
+        // and corrupt paths containing escaped metacharacters.
         const normalizedArgs = {
           ...waitingToolCall.request.args,
         } as typeof waitingToolCall.request.args;
-        for (const key of PATH_ARG_KEYS) {
-          if (typeof normalizedArgs[key] === 'string') {
-            (normalizedArgs as Record<string, unknown>)[key] = unescapePath(
-              String(normalizedArgs[key]).trim(),
-            );
+        if (!this.bouncedAwaitingApproval.has(callId)) {
+          for (const key of PATH_ARG_KEYS) {
+            if (typeof normalizedArgs[key] === 'string') {
+              (normalizedArgs as Record<string, unknown>)[key] = unescapePath(
+                String(normalizedArgs[key]).trim(),
+              );
+            }
           }
         }
         const { updatedParams, updatedDiff } = await modifyWithEditor<
@@ -2867,18 +2880,34 @@ export class CoreToolScheduler {
   private async attemptExecutionOfScheduledCalls(
     signal: AbortSignal,
   ): Promise<void> {
-    const allCallsFinalOrScheduled = this.toolCalls.every(
-      (call) =>
-        call.status === 'scheduled' ||
-        call.status === 'cancelled' ||
-        call.status === 'success' ||
-        call.status === 'error',
-    );
+    // Loop rather than execute once: a tool bounced to awaiting_approval by a
+    // PreToolUse 'ask' can be approved (→ 'scheduled') while a sibling in the
+    // same batch is still executing. The guard below fails on that pass, and
+    // nothing else retriggers execution once the sibling finishes — so after
+    // each batch drains, re-check for a newly-scheduled bounce-approved tool.
+    // Each iteration either drains ≥1 'scheduled' call or returns, so this
+    // cannot spin: a re-bounce lands back in awaiting_approval (guard fails →
+    // return), and a clean run leaves nothing 'scheduled' (length 0 → return).
+    while (true) {
+      const allCallsFinalOrScheduled = this.toolCalls.every(
+        (call) =>
+          call.status === 'scheduled' ||
+          call.status === 'cancelled' ||
+          call.status === 'success' ||
+          call.status === 'error',
+      );
+      if (!allCallsFinalOrScheduled) {
+        // Something is still executing or awaiting approval; its own
+        // completion path (or handleConfirmationResponse) re-enters here.
+        return;
+      }
 
-    if (allCallsFinalOrScheduled) {
       const callsToExecute = this.toolCalls.filter(
         (call): call is ScheduledToolCall => call.status === 'scheduled',
       );
+      if (callsToExecute.length === 0) {
+        return;
+      }
 
       // Partition tool calls into consecutive batches by concurrency safety.
       // Consecutive safe tools are grouped into parallel batches; unsafe
@@ -3136,8 +3165,14 @@ export class CoreToolScheduler {
       );
     }
 
-    // Generate unique tool_use_id for hook tracking
-    const toolUseId = generateToolUseId();
+    // Generate unique tool_use_id for hook tracking. On a post-'ask'
+    // re-execution, reuse the id from the first (bounced) attempt so the
+    // PreToolUse event fired then pairs with the PostToolUse event fired now
+    // — a fresh id would leave both events orphaned for consumers that
+    // correlate Pre/Post by tool_use_id (audit trails, metrics).
+    const toolUseId = isPostAskReexecution
+      ? (this.bouncedToolUseId.get(callId) ?? generateToolUseId())
+      : generateToolUseId();
 
     // Get MessageBus for hook execution
     const messageBus = this.config.getMessageBus() as MessageBus | undefined;
@@ -3188,7 +3223,17 @@ export class CoreToolScheduler {
         // instead of denying it. 'denied'/'stop' (and 'ask' in a
         // non-interactive/background context where we cannot prompt) keep
         // the original deny-as-error behavior.
-        if (preHookResult.blockType === 'ask' && this.canPromptForAskBounce()) {
+        if (
+          preHookResult.blockType === 'ask' &&
+          !signal.aborted &&
+          this.canPromptForAskBounce()
+        ) {
+          // Mirror the confirmation-phase abort re-check: never open a
+          // transient awaiting_approval (flashing a confirmation nobody can
+          // answer) on an already-aborted signal — fall through to deny.
+          // Preserve the tool_use_id so the post-approval re-execution
+          // reuses it (see the toolUseId comment above).
+          this.bouncedToolUseId.set(callId, toolUseId);
           this.bounceToAwaitingApprovalForAsk(
             scheduledCall,
             preHookResult.blockReason,

@@ -5801,37 +5801,44 @@ describe('CoreToolScheduler telemetry spans', () => {
 
   function buildScheduler(options: {
     execute?: () => Promise<ToolResult>;
+    tools?: MockTool[];
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
     isInteractive?: boolean;
     inputFormat?: InputFormat;
     shouldAvoidPermissionPrompts?: boolean;
+    experimentalZedIntegration?: boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
     onToolCallsUpdate: ReturnType<typeof vi.fn>;
   } {
-    const mockTool = new MockTool({
-      name: 'mockTool',
-      execute:
-        options.execute ??
-        vi.fn().mockResolvedValue({
-          llmContent: 'ok',
-          returnDisplay: 'ok',
-        }),
-    });
+    const tools = options.tools ?? [
+      new MockTool({
+        name: 'mockTool',
+        execute:
+          options.execute ??
+          vi.fn().mockResolvedValue({
+            llmContent: 'ok',
+            returnDisplay: 'ok',
+          }),
+      }),
+    ];
+    const toolsByName = new Map(tools.map((t) => [t.name, t]));
+    const lookup = (name?: string) =>
+      (name ? toolsByName.get(name) : undefined) ?? tools[0];
     const mockToolRegistry = {
-      getTool: () => mockTool,
-      ensureTool: async () => mockTool,
+      getTool: (n?: string) => lookup(n),
+      ensureTool: async (n?: string) => lookup(n),
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
       registerTool: () => {},
-      getToolByName: () => mockTool,
-      getToolByDisplayName: () => mockTool,
-      getTools: () => [],
+      getToolByName: (n?: string) => lookup(n),
+      getToolByDisplayName: (n?: string) => lookup(n),
+      getTools: () => tools,
       discoverTools: async () => {},
-      getAllTools: () => [],
+      getAllTools: () => tools,
       getToolsByServer: () => [],
     } as unknown as ToolRegistry;
 
@@ -5863,7 +5870,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       // canPromptForAskBounce when a PreToolUse hook returns 'ask'.
       isInteractive: () => options.isInteractive ?? true,
       getInputFormat: () => options.inputFormat ?? InputFormat.TEXT,
-      getExperimentalZedIntegration: () => false,
+      getExperimentalZedIntegration: () =>
+        options.experimentalZedIntegration ?? false,
       getShouldAvoidPermissionPrompts: () =>
         options.shouldAvoidPermissionPrompts ?? false,
     } as unknown as Config;
@@ -6537,6 +6545,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     isInteractive?: boolean;
     inputFormat?: InputFormat;
     shouldAvoidPermissionPrompts?: boolean;
+    experimentalZedIntegration?: boolean;
     args?: Record<string, unknown>;
     abortController?: AbortController;
   }): Promise<{
@@ -6731,6 +6740,11 @@ describe('CoreToolScheduler telemetry spans', () => {
     )?.[0] as ToolCall[];
     expect(completed[0].status).toBe('cancelled');
     expect(execute).not.toHaveBeenCalled();
+    // The drainSpansForBatch safety net must also END both spans (not just
+    // leave the tool stuck) — guards against accidental removal of the
+    // terminal setStatusInternal added to drainSpansForBatch.
+    expect(getBlockedSpans()[0]?.ended).toBe(true);
+    expect(getToolSpans()[0]?.ended).toBe(true);
   });
 
   it('does not double-unescape path args across an ask bounce', async () => {
@@ -6769,6 +6783,134 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(
       (completed[0].request.args as Record<string, unknown>)['file_path'],
     ).toBe(unescapePath(rawPath));
+  });
+
+  it('approving a bounced ask runs the tool even while a sibling is still executing', async () => {
+    toolSpanRecords.length = 0;
+    // toolA bounces (PreToolUse 'ask'); toolB's execute stays pending so it
+    // is still 'executing' when the user approves A. The
+    // attemptExecutionOfScheduledCalls guard fails on that pass — without a
+    // re-check after toolB drains, toolA would hang in 'scheduled' forever.
+    let resolveB!: (r: ToolResult) => void;
+    const bDone = new Promise<ToolResult>((res) => {
+      resolveB = res;
+    });
+    const aExecute = vi.fn().mockResolvedValue({
+      llmContent: 'A ok',
+      returnDisplay: 'A ok',
+    });
+    const bExecute = vi.fn().mockReturnValue(bDone);
+    const tools = [
+      new MockTool({ name: 'toolA', execute: aExecute }),
+      new MockTool({ name: 'toolB', execute: bExecute }),
+    ];
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (req: {
+            eventName?: string;
+            input?: { tool_name?: string };
+          }) => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: 'pre-hook',
+            success: true,
+            output:
+              req.eventName === 'PreToolUse' && req.input?.tool_name === 'toolA'
+                ? { decision: 'ask', reason: 'confirm A' }
+                : {},
+          }),
+        ),
+    };
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildScheduler({ tools, messageBus, disableHooks: false });
+
+    // Not awaited: schedule stays pending while toolB executes.
+    const schedulePromise = scheduler.schedule(
+      [
+        {
+          callId: 'a',
+          name: 'toolA',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'b',
+          name: 'toolB',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    // Approve A while toolB's execute is still pending.
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    // Let toolB finish — toolA must now run rather than stay stuck.
+    resolveB({ llmContent: 'B ok', returnDisplay: 'B ok' });
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    await schedulePromise;
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(aExecute).toHaveBeenCalledTimes(1);
+    expect(completed.find((c) => c.request.callId === 'a')?.status).toBe(
+      'success',
+    );
+    expect(completed.find((c) => c.request.callId === 'b')?.status).toBe(
+      'success',
+    );
+  });
+
+  it('bounces a non-interactive STREAM_JSON ask (client can answer control requests)', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = askMessageBus();
+    const { onToolCallsUpdate } = await scheduleWithAsk({
+      messageBus,
+      execute,
+      isInteractive: false,
+      inputFormat: InputFormat.STREAM_JSON,
+    });
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails.type).toBe('info');
+    expect(getBlockedSpans()).toHaveLength(1);
+  });
+
+  it('bounces a non-interactive ask under the Zed integration', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = askMessageBus();
+    const { onToolCallsUpdate } = await scheduleWithAsk({
+      messageBus,
+      execute,
+      isInteractive: false,
+      experimentalZedIntegration: true,
+    });
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails.type).toBe('info');
+    expect(getBlockedSpans()).toHaveLength(1);
   });
 
   it('blocked_on_user span ends with cancel when the user rejects (#3731 Phase 2)', async () => {
