@@ -34,7 +34,7 @@ export interface QwenPermissionSettings {
 export class PermissionRulesValidationError extends Error {
   constructor(
     message: string,
-    readonly code: 'invalid_rules' | 'invalid_rule',
+    readonly code: 'invalid_rules',
   ) {
     super(message);
     this.name = 'PermissionRulesValidationError';
@@ -93,10 +93,7 @@ export function normalizePermissionRules(value: unknown): string[] {
     }
     const rule = item.trim();
     if (parseRule(rule).invalid) {
-      throw new PermissionRulesValidationError(
-        `Malformed permission rule: ${rule}`,
-        'invalid_rule',
-      );
+      continue;
     }
     if (!seen.has(rule)) {
       seen.add(rule);

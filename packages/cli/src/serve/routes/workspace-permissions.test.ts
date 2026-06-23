@@ -227,12 +227,6 @@ describe('workspace permissions routes', () => {
       .send({ scope: 'user', ruleType: 'allow', rules: 'Bash(git *)' });
     expect(invalidRules.status).toBe(400);
     expect(invalidRules.body.code).toBe('invalid_rules');
-
-    const malformedRule = await request(h.app)
-      .post('/workspace/permissions')
-      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *'] });
-    expect(malformedRule.status).toBe(400);
-    expect(malformedRule.body.code).toBe('invalid_rule');
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 

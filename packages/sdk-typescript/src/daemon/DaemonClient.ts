@@ -1783,6 +1783,14 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Convenience helper that appends a single rule to the specified scope/type
+   * list. Performs a non-atomic read-modify-write: GETs the current rules,
+   * appends the new rule locally, then POSTs the full replacement list.
+   *
+   * @remarks Not safe for concurrent use — a concurrent modification between
+   * the GET and POST will be silently overwritten (lost-update / TOCTOU).
+   */
   async addWorkspacePermissionRule(
     scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,
@@ -1801,6 +1809,14 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Convenience helper that removes a single rule from the specified scope/type
+   * list. Performs a non-atomic read-modify-write: GETs the current rules,
+   * removes the rule locally, then POSTs the full replacement list.
+   *
+   * @remarks Not safe for concurrent use — a concurrent modification between
+   * the GET and POST will be silently overwritten (lost-update / TOCTOU).
+   */
   async removeWorkspacePermissionRule(
     scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,

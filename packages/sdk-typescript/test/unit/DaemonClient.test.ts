@@ -2739,6 +2739,80 @@ describe('DaemonClient', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0]?.method).toBe('GET');
     });
+
+    it('addWorkspacePermissionRule POSTs when rule is absent', async () => {
+      const updatedStatus = {
+        ...permissionsStatus,
+        user: {
+          ...permissionsStatus.user,
+          rules: {
+            ...permissionsStatus.user.rules,
+            allow: ['ShellTool(git status)', 'ShellTool(npm run build)'],
+          },
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, updatedStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'user',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).resolves.toEqual(updatedStatus);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['ShellTool(git status)', 'ShellTool(npm run build)'],
+      });
+    });
+
+    it('removeWorkspacePermissionRule POSTs when rule exists', async () => {
+      const updatedStatus = {
+        ...permissionsStatus,
+        workspace: {
+          ...permissionsStatus.workspace,
+          rules: {
+            ...permissionsStatus.workspace.rules,
+            deny: [],
+          },
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, updatedStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).resolves.toEqual(updatedStatus);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: [],
+      });
+    });
   });
 
   describe('workspace memory + agents helpers (issue #4175 PR 16)', () => {
