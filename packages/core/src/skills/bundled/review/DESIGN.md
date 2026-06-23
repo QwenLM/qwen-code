@@ -224,6 +224,29 @@ Key implementation detail: Step 9 must use the owner/repo extracted from the URL
 
 **Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, Step 3 is simply skipped and LLM agents still review the diff.
 
+## Why Suggestion-level findings go to an updatable issue comment instead of inline comments
+
+**Considered:**
+
+- **All findings inline (original behavior):** both Critical and Suggestion high-confidence findings became per-line inline review comments. Strong per-line signal for both severities.
+- **Critical inline, Suggestion in the review `body`:** splits by severity, but the review body is a frozen artifact of one review submission — every new /review run appends a new review with its own body, so Suggestion lists still accumulate across runs (one body per review) and never converge.
+- **Critical inline, Suggestion in one updatable issue comment (chosen):** Critical stays per-line (real blockers pinned to code). Suggestion findings go to a single PR issue comment that is located by author + an embedded marker and PATCHed in place on every /review run, so the Suggestion list is one living view that refreshes rather than grows.
+
+**Decision:** Updatable issue comment. The root cause of "issues never converge" is not that Critical and Suggestion shared a severity bucket — it's that every /review run _re-emitted_ a new batch of inline comments with no concept of "this suggestion was already posted and is still open." Inline comments create a persistent conversation thread per line that the PR author (especially an agentic author iterating on the PR) feels obligated to resolve one-by-one, so the "Files changed" view grows noisier every round.
+
+Routing Suggestion findings to one comment that is updated in place attacks both halves of that: (1) there is exactly one Suggestion list per PR at any time, refreshed rather than appended; (2) the deterministic locate-and-PATCH lives in a `qwen review post-suggestions` subcommand, so the LLM never re-posts a duplicate — the second run finds the marker and overwrites the first run's body.
+
+Critical stays inline because blockers must be pinned to the exact code line and carry the strongest possible "fix this before merge" signal — convergence is not the priority there, correctness is.
+
+**Trade-off:**
+
+- ✅ Exactly one Suggestion list per PR, refreshed on each /review. No growing pile of threads.
+- ✅ Agentic authors are no longer forced to walk a queue of Suggestion threads — they read one list, address what they accept, push, and the next run overwrites it.
+- ✅ Reuses the same "locate-by-author-and-update" pattern already used for triage comments, and the same `gh` wrapper the other subcommands use — no new platform primitive.
+- ❌ Suggestion findings are less visually prominent than inline comments: they appear in the PR conversation thread rather than pinned next to the code in "Files changed." Mitigated by keeping a `file:line` column in the summary table so each row stays directly actionable.
+- ❌ If an author fully addresses all suggestions and pushes, the stale list lingers until the next /review run overwrites it (no auto-clear on merge). This mirrors the existing inline-comment staleness model and is bounded — the next run always refreshes it.
+- ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) flatten into table rows — the aggregation is visible in the terminal output, which retains the full structured form, but the PR summary lists representative instances.
+
 ## Rejected alternatives
 
 | Idea                                                         | Why rejected                                                                                                              |
