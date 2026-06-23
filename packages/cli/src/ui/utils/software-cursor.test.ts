@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   getSoftwareCursorBackground,
   renderSoftwareCursor,
 } from './software-cursor.js';
+import { themeManager } from '../themes/theme-manager.js';
 
 describe('renderSoftwareCursor', () => {
   it('uses a dark cursor background on light themes', () => {
@@ -43,5 +44,46 @@ describe('renderSoftwareCursor', () => {
 
   it('renders an empty cursor cell as a space', () => {
     expect(renderSoftwareCursor('')).toContain(' ');
+  });
+});
+
+describe('getSoftwareCursorBackground theme-derived default', () => {
+  function setDetectedTerminal(value: 'dark' | 'light') {
+    (
+      themeManager as unknown as { cachedAutoDetection: 'dark' | 'light' }
+    ).cachedAutoDetection = value;
+  }
+
+  beforeEach(() => {
+    (
+      themeManager as unknown as {
+        cachedAutoDetection: unknown;
+        terminalBackground: unknown;
+      }
+    ).cachedAutoDetection = undefined;
+    (
+      themeManager as unknown as { terminalBackground: unknown }
+    ).terminalBackground = undefined;
+  });
+
+  it('contrasts against the theme background when it matches the terminal', () => {
+    themeManager.setActiveTheme('Qwen Dark');
+    setDetectedTerminal('dark');
+    expect(getSoftwareCursorBackground()).toBe('#D4D4D4');
+  });
+
+  it('stays visible (light cursor) for a light theme forced onto a dark terminal', () => {
+    themeManager.setActiveTheme('Qwen Light');
+    setDetectedTerminal('dark');
+    // Without the terminal-aware default this would contrast against the light
+    // theme background and render a dark, near-invisible cursor on the dark
+    // terminal.
+    expect(getSoftwareCursorBackground()).toBe('#D4D4D4');
+  });
+
+  it('stays visible (dark cursor) for a dark theme forced onto a light terminal', () => {
+    themeManager.setActiveTheme('Qwen Dark');
+    setDetectedTerminal('light');
+    expect(getSoftwareCursorBackground()).toBe('#3A3A3A');
   });
 });

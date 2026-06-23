@@ -266,6 +266,20 @@ class FakeBridge {
   async getSessionTasksStatus(sessionId: string) {
     return { sessionId, tasks: [] };
   }
+  async getSessionLspStatus(sessionId: string) {
+    return {
+      v: 1,
+      sessionId,
+      workspaceCwd: '/ws',
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 1,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+    };
+  }
   async getWorkspaceToolsStatus() {
     return { v: 1, tools: [] };
   }
@@ -582,6 +596,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     };
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
+    );
+  });
+
+  it('initialize advertises _qwen/session/lsp', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/lsp',
     );
   });
 
@@ -2150,6 +2176,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', tasks: [] },
+      });
+    });
+
+    it('_qwen/session/lsp returns status', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 57,
+        method: '_qwen/session/lsp',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          enabled: true,
+          configuredServers: 1,
+          readyServers: 1,
+        },
       });
     });
 

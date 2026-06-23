@@ -160,13 +160,10 @@ function getInstalledOwnedModelIds(
   if (!protocol) return [];
   const mergedSettings = settings.merged as Record<string, unknown>;
   const modelProviders = mergedSettings['modelProviders'] as
-    | Record<string, ProviderModelConfig[] | { models: ProviderModelConfig[] }>
+    | Record<string, ProviderModelConfig[]>
     | undefined;
   if (!modelProviders) return [];
-  const entry = modelProviders[protocol];
-  const allModels: ProviderModelConfig[] = Array.isArray(entry)
-    ? entry
-    : (entry?.models ?? []);
+  const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
   if (!ownsFn) return allModels.map((m) => m.id);
   return allModels.filter(ownsFn).map((m) => m.id);

@@ -289,6 +289,28 @@ describe('createAcpSessionBridge', () => {
                 tasks: [],
               };
             }
+            if (method === 'qwen/status/session/lsp') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                workspaceCwd: WS_A,
+                enabled: true,
+                configuredServers: 1,
+                readyServers: 1,
+                failedServers: 0,
+                inProgressServers: 0,
+                notStartedServers: 0,
+                servers: [
+                  {
+                    name: 'typescript',
+                    status: 'READY',
+                    languages: ['typescript'],
+                    transport: 'stdio',
+                    command: 'typescript-language-server',
+                  },
+                ],
+              };
+            }
             return {
               v: 1,
               sessionId: params['sessionId'],
@@ -322,10 +344,24 @@ describe('createAcpSessionBridge', () => {
       sessionId: session.sessionId,
       tasks: [],
     });
+    await expect(
+      bridge.getSessionLspStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      enabled: true,
+      configuredServers: 1,
+      servers: [
+        {
+          name: 'typescript',
+          status: 'READY',
+        },
+      ],
+    });
     expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/lsp',
     ]);
 
     await bridge.shutdown();
@@ -511,6 +547,9 @@ describe('createAcpSessionBridge', () => {
     await expect(
       bridge.getSessionTasksStatus('missing'),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(bridge.getSessionLspStatus('missing')).rejects.toBeInstanceOf(
+      SessionNotFoundError,
+    );
   });
 
   it('reuses an echoed daemon-issued client id on attach', async () => {
