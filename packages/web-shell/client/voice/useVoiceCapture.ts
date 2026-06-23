@@ -207,8 +207,14 @@ export function useVoiceCapture(
   }, [teardownAudio]);
 
   const fail = useCallback(
-    (message: string) => {
-      if (!mountedRef.current) return;
+    (message: string, generation?: number) => {
+      if (
+        !mountedRef.current ||
+        (generation !== undefined &&
+          captureGenerationRef.current !== generation)
+      ) {
+        return;
+      }
       cleanup();
       applyStatus('error');
       setInterimText('');
@@ -220,7 +226,13 @@ export function useVoiceCapture(
   );
 
   const finishWith = useCallback(
-    (text: string) => {
+    (text: string, generation?: number) => {
+      if (
+        generation !== undefined &&
+        captureGenerationRef.current !== generation
+      ) {
+        return;
+      }
       cleanup();
       if (!mountedRef.current) return;
       applyStatus('idle');
@@ -354,9 +366,12 @@ export function useVoiceCapture(
           if (msg.type === 'interim') {
             if (mountedRef.current) setInterimText(msg.text ?? '');
           } else if (msg.type === 'final') {
-            finishWith(msg.text ?? '');
+            finishWith(msg.text ?? '', generation);
           } else if (msg.type === 'error') {
-            fail(msg.message ?? msg.text ?? 'Voice transcription failed.');
+            fail(
+              msg.message ?? msg.text ?? 'Voice transcription failed.',
+              generation,
+            );
           }
         };
 
@@ -374,11 +389,17 @@ export function useVoiceCapture(
           ) {
             const code = event.code || 1006;
             const reason = event.reason || 'none';
-            fail(`Voice connection closed (code=${code}, reason=${reason}).`);
+            fail(
+              `Voice connection closed (code=${code}, reason=${reason}).`,
+              generation,
+            );
           }
         };
       } catch (error) {
-        fail(error instanceof Error ? error.message : String(error));
+        fail(
+          error instanceof Error ? error.message : String(error),
+          generation,
+        );
       }
     })();
   }, [baseUrl, token, fail, finishWith, applyStatus]);
@@ -395,11 +416,12 @@ export function useVoiceCapture(
     teardownAudio();
     setAudioLevel(0);
     applyStatus('transcribing');
+    const generation = captureGenerationRef.current;
     try {
       ws.send(JSON.stringify({ type: 'stop' }));
       resourcesRef.current.transcribeTimeout = setTimeout(() => {
         if (statusRef.current === 'transcribing') {
-          fail('Transcription timed out.');
+          fail('Transcription timed out.', generation);
         }
       }, TRANSCRIPTION_TIMEOUT_MS);
     } catch {

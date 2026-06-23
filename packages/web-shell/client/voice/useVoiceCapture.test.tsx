@@ -231,4 +231,40 @@ describe('useVoiceCapture', () => {
     );
     expect(capture?.status).toBe('error');
   });
+
+  it('ignores stale socket callbacks after a new capture starts', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const firstWs = MockWebSocket.latest;
+    if (!firstWs?.onmessage) throw new Error('first WebSocket was not ready');
+    const staleMessage = firstWs.onmessage;
+
+    await act(async () => {
+      staleMessage({
+        data: JSON.stringify({ type: 'error', message: 'first failed' }),
+      } as MessageEvent);
+    });
+    expect(capture?.status).toBe('error');
+
+    await act(async () => {
+      capture?.start();
+    });
+    const secondWs = MockWebSocket.latest;
+    if (!secondWs || secondWs === firstWs) {
+      throw new Error('second WebSocket was not created');
+    }
+
+    await act(async () => {
+      staleMessage({
+        data: JSON.stringify({ type: 'final', text: 'stale transcript' }),
+      } as MessageEvent);
+    });
+
+    expect(capture?.status).toBe('connecting');
+    expect(secondWs.readyState).toBe(MockWebSocket.OPEN);
+    expect(onFinal).not.toHaveBeenCalled();
+  });
 });
