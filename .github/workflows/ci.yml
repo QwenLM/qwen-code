@@ -236,7 +236,7 @@ jobs:
         run: 'npm run test:ci'
 
       - name: 'Run no-AK integration smoke tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
         run: 'npm run test:integration:no-ak:sandbox:none'
 
       - name: 'Publish Test Report (for non-forks)'
