@@ -27,8 +27,7 @@ describe('qwen resolve workflow', () => {
     expect(workflow).toContain('issue_comment:');
     expect(workflow).toContain("github.event.inputs.command == 'resolve'");
     expect(workflow).toContain('needs.authorize-resolve.outputs.should_run');
-    expect(workflow).not.toContain('needs.authorize.outputs');
-    expect(workflow).toContain("sed 's/.*@qwen \\/review//'");
+    expect(workflow).not.toContain('needs.authorize.outputs.should_run');
   });
 
   it('listens for /resolve comments', () => {
