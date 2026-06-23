@@ -2636,7 +2636,6 @@ describe('DaemonClient', () => {
     const permissionsStatus = {
       v: 1 as const,
       user: {
-        path: '/home/test/.qwen/settings.json',
         rules: {
           allow: ['ShellTool(git status)'],
           ask: [],
@@ -2644,7 +2643,6 @@ describe('DaemonClient', () => {
         },
       },
       workspace: {
-        path: '/work/.qwen/settings.json',
         rules: {
           allow: ['ShellTool(npm test)'],
           ask: [],

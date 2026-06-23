@@ -14,6 +14,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
+  MAX_PERMISSION_RULE_LENGTH,
+  MAX_PERMISSION_RULES_COUNT,
+  normalizePermissionRules,
+} from '../../config/permission-settings.js';
+import {
   type LoadedSettings,
   loadSettings,
   resetHomeEnvBootstrapForTesting,
@@ -203,7 +208,6 @@ describe('workspace permissions routes', () => {
     expect(res.body).toMatchObject({
       v: 1,
       user: {
-        path: path.join(h.home, 'settings.json'),
         rules: {
           allow: ['Bash(git *)'],
           ask: [],
@@ -211,7 +215,6 @@ describe('workspace permissions routes', () => {
         },
       },
       workspace: {
-        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
         rules: {
           allow: ['Edit(src/**)'],
           ask: ['Bash(npm *)'],
@@ -225,6 +228,8 @@ describe('workspace permissions routes', () => {
       },
       isTrusted: true,
     });
+    expect(res.body.user).not.toHaveProperty('path');
+    expect(res.body.workspace).not.toHaveProperty('path');
   });
 
   it('GET returns 500 when loading permission settings fails', async () => {
@@ -277,6 +282,36 @@ describe('workspace permissions routes', () => {
       .send({ scope: 'workspace', ruleType: 'allow', rules: ['Bash(git *'] });
     expect(malformedRule.status).toBe(400);
     expect(malformedRule.body.code).toBe('invalid_rules');
+
+    const tooManyRules = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: Array.from(
+          { length: MAX_PERMISSION_RULES_COUNT + 1 },
+          (_, index) => `Bash(echo ${index})`,
+        ),
+      });
+    expect(tooManyRules.status).toBe(400);
+    expect(tooManyRules.body).toMatchObject({
+      code: 'invalid_rules',
+      error: `rules array exceeds ${MAX_PERMISSION_RULES_COUNT} entries`,
+    });
+
+    const tooLongRule = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: [`Bash(${'x'.repeat(MAX_PERMISSION_RULE_LENGTH + 1)})`],
+      });
+    expect(tooLongRule.status).toBe(400);
+    expect(tooLongRule.body).toMatchObject({
+      code: 'invalid_rules',
+      error: `rule exceeds ${MAX_PERMISSION_RULE_LENGTH}-character limit`,
+    });
+
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
@@ -358,20 +393,17 @@ describe('workspace permissions routes', () => {
   });
 
   it('POST replaces one workspace rule list through a live ACP child and publishes settings_changed', async () => {
-    const acpResponse = {
-      v: 1,
-      user: {
-        path: path.join(h.home, 'settings.json'),
-        rules: { allow: [], ask: [], deny: [] },
+    const live = vi.fn(
+      async (_method: string, params: Record<string, unknown>) => {
+        const settings = loadSettings(h.workspace);
+        settings.setValue(
+          SettingScope.Workspace,
+          'permissions.allow',
+          normalizePermissionRules(params['rules']),
+        );
+        return {};
       },
-      workspace: {
-        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
-        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
-      },
-      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
-      isTrusted: true,
-    };
-    const live = vi.fn(async () => acpResponse);
+    );
     await teardown(h);
     h = await makeHarness({ invokeWorkspaceCommand: live });
 
@@ -385,11 +417,21 @@ describe('workspace permissions routes', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual(acpResponse);
+    expect(res.body).toEqual({
+      v: 1,
+      user: {
+        rules: { allow: [], ask: [], deny: [] },
+      },
+      workspace: {
+        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      },
+      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      isTrusted: true,
+    });
     expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
       scope: 'workspace',
       ruleType: 'allow',
-      rules: ['Bash(git status)'],
+      rules: ['Bash(git status)', 'Bash(git status)'],
     });
     expect(h.persistSetting).not.toHaveBeenCalled();
     expect(h.events).toEqual([
@@ -403,20 +445,17 @@ describe('workspace permissions routes', () => {
   });
 
   it('POST still succeeds when live ACP broadcast throws', async () => {
-    const acpResponse = {
-      v: 1,
-      user: {
-        path: path.join(h.home, 'settings.json'),
-        rules: { allow: [], ask: [], deny: [] },
+    const live = vi.fn(
+      async (_method: string, params: Record<string, unknown>) => {
+        const settings = loadSettings(h.workspace);
+        settings.setValue(
+          SettingScope.Workspace,
+          'permissions.allow',
+          normalizePermissionRules(params['rules']),
+        );
+        return {};
       },
-      workspace: {
-        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
-        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
-      },
-      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
-      isTrusted: true,
-    };
-    const live = vi.fn(async () => acpResponse);
+    );
     const broadcastSettingsChanged = vi.fn(() => {
       throw new Error('broadcast failed');
     });
@@ -435,13 +474,48 @@ describe('workspace permissions routes', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual(acpResponse);
+    expect(res.body).toEqual({
+      v: 1,
+      user: {
+        rules: { allow: [], ask: [], deny: [] },
+      },
+      workspace: {
+        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      },
+      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      isTrusted: true,
+    });
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
       'permissions.allow',
       ['Bash(git status)'],
       'workspace',
       undefined,
     );
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('POST maps live ACP invalid params to invalid_rules', async () => {
+    const err = new Error('Malformed permission rule: Bash(git *');
+    Object.assign(err, { code: -32602 });
+    const live = vi.fn(async () => {
+      throw err;
+    });
+    await teardown(h);
+    h = await makeHarness({ invokeWorkspaceCommand: live });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git *'],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: 'invalid_rules',
+      error: 'Malformed permission rule: Bash(git *',
+    });
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 

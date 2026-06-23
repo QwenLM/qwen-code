@@ -8,10 +8,11 @@ import type { Application, Request, Response } from 'express';
 import {
   buildPermissionSettings,
   isPermissionRuleType,
+  normalizePermissionRuleInputs,
   normalizePermissionRules,
+  type PermissionRuleSet,
   PermissionRulesValidationError,
   readPermissionRuleSet,
-  type QwenPermissionSettings,
 } from '../../config/permission-settings.js';
 import {
   loadSettings as defaultLoadSettings,
@@ -20,6 +21,35 @@ import {
 } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
+
+function getInvalidParamsMessage(err: unknown): string | undefined {
+  if (err && typeof err === 'object' && 'code' in err) {
+    const code = (err as { code?: unknown }).code;
+    if (code === -32602 && err instanceof Error) return err.message;
+  }
+  return undefined;
+}
+
+interface WorkspacePermissionsRestResponse {
+  v: 1;
+  user: { rules: PermissionRuleSet };
+  workspace: { rules: PermissionRuleSet };
+  merged: PermissionRuleSet;
+  isTrusted: boolean;
+}
+
+function buildRestPermissionSettings(
+  settings: LoadedSettings,
+): WorkspacePermissionsRestResponse {
+  const full = buildPermissionSettings(settings);
+  return {
+    v: full.v,
+    user: { rules: full.user.rules },
+    workspace: { rules: full.workspace.rules },
+    merged: full.merged,
+    isTrusted: full.isTrusted,
+  };
+}
 
 export interface WorkspacePermissionsRouteDeps {
   boundWorkspace: string;
@@ -67,7 +97,7 @@ export function registerWorkspacePermissionsRoutes(
     try {
       res
         .status(200)
-        .json(buildPermissionSettings(loadSettings(boundWorkspace)));
+        .json(buildRestPermissionSettings(loadSettings(boundWorkspace)));
     } catch (err) {
       writeStderrLine(
         `qwen serve: GET /workspace/permissions error: ${
@@ -108,12 +138,7 @@ export function registerWorkspacePermissionsRoutes(
 
       let rules: string[];
       try {
-        const settings = loadSettings(boundWorkspace);
-        rules = normalizePermissionRules(body['rules'], {
-          existingRules: readPermissionRuleSet(settings.workspace.settings)[
-            ruleType
-          ],
-        });
+        rules = normalizePermissionRuleInputs(body['rules']);
       } catch (err) {
         if (err instanceof PermissionRulesValidationError) {
           res.status(400).json({
@@ -138,20 +163,24 @@ export function registerWorkspacePermissionsRoutes(
       if (clientId === null) return;
 
       const key = `permissions.${ruleType}`;
-      let liveResponse: unknown;
       let updatedThroughLiveChild = false;
       try {
-        liveResponse = await invokeWorkspaceCommand(
-          'qwen/permissions/setRules',
-          {
-            scope: permissionScope,
-            ruleType,
-            rules,
-          },
-        );
+        await invokeWorkspaceCommand('qwen/permissions/setRules', {
+          scope: permissionScope,
+          ruleType,
+          rules,
+        });
         updatedThroughLiveChild = true;
       } catch (err) {
         if (!(err instanceof SessionNotFoundError)) {
+          const invalidParamsMessage = getInvalidParamsMessage(err);
+          if (invalidParamsMessage) {
+            res.status(400).json({
+              error: invalidParamsMessage,
+              code: 'invalid_rules',
+            });
+            return;
+          }
           writeStderrLine(
             `qwen serve: POST /workspace/permissions ACP error (key=${key}, scope=${permissionScope}, workspace=${boundWorkspace}): ${
               err instanceof Error ? err.message : String(err)
@@ -166,8 +195,29 @@ export function registerWorkspacePermissionsRoutes(
       }
 
       if (updatedThroughLiveChild) {
+        let response;
         try {
-          broadcastSettingsChanged(key, rules, permissionScope, clientId);
+          response = buildRestPermissionSettings(loadSettings(boundWorkspace));
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: POST /workspace/permissions response error: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          res.status(500).json({
+            error: 'Permission rules updated but response could not be loaded',
+            code: 'response_build_error',
+          });
+          return;
+        }
+        const updatedRules = response.workspace.rules[ruleType];
+        try {
+          broadcastSettingsChanged(
+            key,
+            updatedRules,
+            permissionScope,
+            clientId,
+          );
         } catch (err) {
           writeStderrLine(
             `qwen serve: POST /workspace/permissions broadcast error (key=${key}, scope=${permissionScope}): ${
@@ -175,7 +225,34 @@ export function registerWorkspacePermissionsRoutes(
             }`,
           );
         }
-        res.status(200).json(liveResponse as QwenPermissionSettings);
+        res.status(200).json(response);
+        return;
+      }
+
+      try {
+        const settings = loadSettings(boundWorkspace);
+        rules = normalizePermissionRules(rules, {
+          existingRules: readPermissionRuleSet(settings.workspace.settings)[
+            ruleType
+          ],
+        });
+      } catch (err) {
+        if (err instanceof PermissionRulesValidationError) {
+          res.status(400).json({
+            error: err.message,
+            code: err.code,
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: POST /workspace/permissions load error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to load permission rules',
+          code: 'internal_error',
+        });
         return;
       }
 
@@ -200,6 +277,24 @@ export function registerWorkspacePermissionsRoutes(
         return;
       }
 
+      let response;
+      try {
+        response = buildRestPermissionSettings(
+          updatedSettings ?? loadSettings(boundWorkspace),
+        );
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /workspace/permissions response error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Permission rules updated but response could not be loaded',
+          code: 'response_build_error',
+        });
+        return;
+      }
+
       try {
         broadcastSettingsChanged(key, rules, permissionScope, clientId);
       } catch (err) {
@@ -209,26 +304,7 @@ export function registerWorkspacePermissionsRoutes(
           }`,
         );
       }
-
-      try {
-        res
-          .status(200)
-          .json(
-            buildPermissionSettings(
-              updatedSettings ?? loadSettings(boundWorkspace),
-            ),
-          );
-      } catch (err) {
-        writeStderrLine(
-          `qwen serve: POST /workspace/permissions response error: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        res.status(500).json({
-          error: 'Failed to load permission rules',
-          code: 'internal_error',
-        });
-      }
+      res.status(200).json(response);
     },
   );
 }

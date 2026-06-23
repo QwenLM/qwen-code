@@ -550,6 +550,10 @@ import {
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings, SettingScope } from '../config/settings.js';
+import {
+  MAX_PERMISSION_RULE_LENGTH,
+  MAX_PERMISSION_RULES_COUNT,
+} from '../config/permission-settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
@@ -3406,6 +3410,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rules: ['ShellTool(git status'],
       }),
     ).rejects.toThrowError(/Malformed permission rule/);
+    expect(settings.setValue).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules rejects oversized permission rule lists', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: Array.from(
+          { length: MAX_PERMISSION_RULES_COUNT + 1 },
+          (_, index) => `ShellTool(echo ${index})`,
+        ),
+      }),
+    ).rejects.toThrowError(
+      `rules array exceeds ${MAX_PERMISSION_RULES_COUNT} entries`,
+    );
+    expect(settings.setValue).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules rejects oversized permission rule strings', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: [`ShellTool(${'x'.repeat(MAX_PERMISSION_RULE_LENGTH + 1)})`],
+      }),
+    ).rejects.toThrowError(
+      `rule exceeds ${MAX_PERMISSION_RULE_LENGTH}-character limit`,
+    );
     expect(settings.setValue).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();

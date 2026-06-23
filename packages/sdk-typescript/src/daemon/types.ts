@@ -1087,7 +1087,6 @@ export interface DaemonPermissionRuleSet {
 }
 
 export interface DaemonWorkspacePermissionScopeState {
-  path: string;
   rules: DaemonPermissionRuleSet;
 }
 
