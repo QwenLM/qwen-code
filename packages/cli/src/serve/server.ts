@@ -1364,14 +1364,14 @@ export function createServeApp(
         },
       );
     });
-  const createExtensionManager = () =>
-    new ExtensionManager({
+  const createExtensionManager = () => {
+    const trustState = getWorkspaceTrustStatus(
+      loadSettings(boundWorkspace).merged,
+      boundWorkspace,
+    ).effective.state;
+    return new ExtensionManager({
       workspaceDir: boundWorkspace,
-      isWorkspaceTrusted:
-        getWorkspaceTrustStatus(
-          loadSettings(boundWorkspace).merged,
-          boundWorkspace,
-        ).effective.state === 'trusted',
+      isWorkspaceTrusted: trustState === 'trusted' || trustState === 'unknown',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -1384,6 +1384,7 @@ export function createServeApp(
         );
       },
     });
+  };
   const validateExtensionMutationClient = (
     req: Request,
     res: Response,

@@ -1941,6 +1941,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.objectContaining({
         cwd: '/ws',
         workspaceRoot: '/ws',
+        abortSignal: expect.any(AbortSignal),
         fileOps: expect.any(Object),
       }),
     );

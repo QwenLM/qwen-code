@@ -3701,7 +3701,7 @@ describe('Settings Loading and Merging', () => {
       cwdSpy.mockRestore();
     });
 
-    it('does not load project .env files when workspace trust is unknown', () => {
+    it('loads project .env files when workspace trust is unknown', () => {
       delete process.env['PROJECT_ENV_VAR'];
       const cwdSpy = vi
         .spyOn(process, 'cwd')
@@ -3738,7 +3738,7 @@ describe('Settings Loading and Merging', () => {
       try {
         loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
-        expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+        expect(process.env['PROJECT_ENV_VAR']).toEqual('from_project');
       } finally {
         cwdSpy.mockRestore();
       }

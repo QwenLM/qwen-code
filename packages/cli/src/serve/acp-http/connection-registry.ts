@@ -119,6 +119,8 @@ export class AcpConnection {
   readonly connectionId: string;
   /** Connection-scoped SSE stream (the client's `GET /acp` with only the conn header). */
   connStream?: TransportStream;
+  private readonly abortController = new AbortController();
+  readonly abortSignal = this.abortController.signal;
   /** Frames emitted before the connection stream attached, flushed on attach. */
   private readonly connBuffer: unknown[] = [];
   readonly sessions = new Map<string, SessionBinding>();
@@ -341,6 +343,7 @@ export class AcpConnection {
 
   destroy(): void {
     this.destroyed = true;
+    this.abortController.abort();
     this.clearGraceTimer();
     for (const binding of this.sessions.values()) {
       try {

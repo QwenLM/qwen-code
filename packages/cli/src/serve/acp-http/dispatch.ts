@@ -1512,6 +1512,7 @@ export class AcpDispatcher {
               cwd: this.boundWorkspace,
               workspaceRoot: this.boundWorkspace,
               proxy: resolveSetupGithubProxy(this.boundWorkspace),
+              abortSignal: conn.abortSignal,
               fileOps: createSetupGithubFileOps(
                 this.fsFactory,
                 `ACP ${method}`,
