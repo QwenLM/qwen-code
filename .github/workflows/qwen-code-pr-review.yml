@@ -1,4 +1,4 @@
-name: 'Qwen Pull Request Commands'
+name: '🧐 Qwen Pull Request Review'
 
 on:
   pull_request_target:

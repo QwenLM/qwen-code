@@ -23,7 +23,6 @@ describe('qwen resolve workflow', () => {
     expect(
       existsSync(path.join(repoRoot, '.github/workflows/qwen-fix-conflicts.yml')),
     ).toBe(false);
-    expect(workflow).toContain("name: 'Qwen Pull Request Commands'");
     expect(workflow).toContain('issue_comment:');
     expect(workflow).toContain("github.event.inputs.command == 'resolve'");
     expect(workflow).toContain('needs.authorize-resolve.outputs.should_run');
