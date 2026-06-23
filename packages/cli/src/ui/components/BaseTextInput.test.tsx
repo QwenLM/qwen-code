@@ -6,10 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
-import { BaseTextInput } from './BaseTextInput.js';
+import { BaseTextInput, defaultRenderLine } from './BaseTextInput.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -93,5 +94,43 @@ describe('BaseTextInput', () => {
     handler(typedKey);
 
     expect(buffer.handleInput).toHaveBeenCalledWith(typedKey);
+  });
+
+  it('renders the software cursor on the current character', () => {
+    const { lastFrame } = render(
+      <>
+        {defaultRenderLine({
+          lineText: 'hello',
+          isOnCursorLine: true,
+          cursorCol: 2,
+          showCursor: true,
+          visualLineIndex: 0,
+          absoluteVisualIndex: 0,
+          buffer: createBuffer(),
+          scrollVisualRow: 0,
+        })}
+      </>,
+    );
+
+    expect(lastFrame()).toContain(`he${renderSoftwareCursor('l')}lo`);
+  });
+
+  it('renders the software cursor as a trailing space', () => {
+    const { lastFrame } = render(
+      <>
+        {defaultRenderLine({
+          lineText: 'hello',
+          isOnCursorLine: true,
+          cursorCol: 5,
+          showCursor: true,
+          visualLineIndex: 0,
+          absoluteVisualIndex: 0,
+          buffer: createBuffer(),
+          scrollVisualRow: 0,
+        })}
+      </>,
+    );
+
+    expect(lastFrame()).toContain(`hello${renderSoftwareCursor(' ')}`);
   });
 });

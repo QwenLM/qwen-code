@@ -10,7 +10,7 @@ import { theme } from '../semantic-colors.js';
 import { TextInput } from './shared/TextInput.js';
 import { t } from '../../i18n/index.js';
 import { useKeypress, type Key } from '../hooks/useKeypress.js';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 
 type SettingInputPromptProps = {
   settingName: string;
@@ -69,7 +69,7 @@ const PasswordInput = ({
 
   const maskedValue = '*'.repeat(value.length);
   const displayValue = maskedValue || '';
-  const cursorChar = chalk.inverse(' ');
+  const cursorChar = renderSoftwareCursor(' ');
 
   return (
     <Box>
