@@ -107,12 +107,21 @@ jobs:
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
     runs-on: "${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]') }}"
     steps:
+      # github.ref is the merge ref (refs/pull/N/merge) on PRs, so the required
+      # checks validate the merge result, not just the PR tip. GitHub builds that
+      # ref asynchronously, so it can briefly 404 right after a push; retry once.
       - name: 'Checkout'
+        id: 'checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        continue-on-error: true
+        with:
+          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
+          fetch-depth: 0
+      - name: 'Checkout (retry on transient ref lag)'
+        if: "${{ steps.checkout.outcome == 'failure' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          # Fetch refs/pull/N/head by ref name (not the merge ref or a raw SHA) so
-          # base-branch churn and replica lag can't fail this required checkout.
-          ref: "${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.event.inputs.branch_ref || github.ref }}"
+          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
 
       # Self-hosted reuses the machine's Node (nodejs.org unreachable via proxy); linters are pre-installed on PATH so scripts/lint.js skips downloading them.
@@ -213,12 +222,19 @@ jobs:
             node-version: '22.x'
             upload-coverage: 'false'
     steps:
+      # See the Lint job's checkout: merge ref on PRs, retry once on transient lag.
       - name: 'Checkout'
+        id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        continue-on-error: true
         with:
-          # See the Lint job's checkout: fetch refs/pull/N/head by ref name.
-          ref: "${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.event.inputs.branch_ref || github.ref }}"
+          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
+      - name: 'Checkout (retry on transient ref lag)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.checkout.outcome == 'failure' }}"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js ${{ matrix.node-version }} (hosted)'
