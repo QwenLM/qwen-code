@@ -40,6 +40,9 @@ function injectCssModules(): Plugin {
 
 export default defineConfig({
   plugins: [react(), injectCssModules()],
+  esbuild: {
+    jsxDev: false,
+  },
   build: {
     emptyOutDir: false,
     lib: {
@@ -51,6 +54,7 @@ export default defineConfig({
       external: [
         'react',
         'react/jsx-runtime',
+        'react/jsx-dev-runtime',
         'react-dom',
         'react-dom/client',
         '@qwen-code/sdk',

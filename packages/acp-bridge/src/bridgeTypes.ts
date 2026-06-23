@@ -40,6 +40,7 @@ export interface RewindSnapshotInfo {
 
 export interface RewindRequest {
   promptId: string;
+  rewindFiles?: boolean;
 }
 
 export interface RewindResponse {

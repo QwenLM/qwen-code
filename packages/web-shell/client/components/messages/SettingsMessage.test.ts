@@ -1,10 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { nextSettingIdx, type FlatRow } from './SettingsMessage';
+import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
+
+function setting(key: string): DaemonSettingDescriptor {
+  return {
+    key,
+    type: 'boolean',
+    label: key,
+    category: 'test',
+    requiresRestart: false,
+    default: false,
+    values: { effective: false },
+  };
+}
 
 /** 'h' → category header row, 's' → setting row. */
 function rowsOf(spec: string): FlatRow[] {
   return [...spec].map((ch, i) =>
-    ch === 'h' ? { type: 'header', category: `cat-${i}` } : { type: 'setting' },
+    ch === 'h'
+      ? { type: 'header', category: `cat-${i}` }
+      : { type: 'setting', setting: setting(`setting-${i}`) },
   );
 }
 
