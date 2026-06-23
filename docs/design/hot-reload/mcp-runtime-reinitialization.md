@@ -63,13 +63,14 @@ across the CLI / Core packages, decoupled through `Config` methods and one UI ev
   be flipped to hot-reloadable, otherwise the watcher's restart-required suppression gate swallows
   MCP-only edits and the whole chain is inert (see the ⚠️ note at the start of "Design").
 
-| Part  | Responsibility                                                                          | Layer | Status          |
-| ----- | --------------------------------------------------------------------------------------- | ----- | --------------- |
-| **A** | `Config` runtime-updatable MCP config + incremental reconcile + pool-path approval gate | Core  | this MR         |
-| **B** | subscribe watcher, recompute gating, debounced gate, call Part A                        | CLI   | this MR         |
-| **C** | LSP reinitialize                                                                        | Core  | TODO (later MR) |
-| **D** | mid-session pending triggers the approval modal (and fixes missed prompt #6)            | CLI   | follow-up       |
-| **E** | `/mcp` shows the "skipped due to approval" reason                                       | CLI   | follow-up       |
+| Part  | Responsibility                                                                                                                                 | Layer      | Status          |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------------- |
+| **A** | `Config` runtime-updatable MCP config + incremental reconcile + pool-path approval gate                                                        | Core       | this MR         |
+| **B** | subscribe watcher, recompute gating, debounced gate, call Part A                                                                               | CLI        | this MR         |
+| **C** | LSP reinitialize                                                                                                                               | Core       | TODO (later MR) |
+| **D** | mid-session pending triggers the approval modal (and fixes missed prompt #6)                                                                   | CLI        | follow-up       |
+| **E** | `/mcp` shows the "skipped due to approval" reason                                                                                              | CLI        | follow-up       |
+| **F** | admission semantics: CLI allow-list is an upper bound, `mcp.allowed: []` = deny-all, and tool-not-found explains _why_ a server is unavailable | CLI + Core | follow-up       |
 
 "Design" below gives the step-by-step data flow from disk file to live connection, plus each
 part's implementation details.
@@ -237,27 +238,17 @@ export function registerMcpHotReload(
 }
 ```
 
-> **Admission stance decision (deliberate)**: hot-reload makes **current settings win**, and does
-> not let the startup CLI allowlist (`--allowed-mcp-server-names`) permanently override later
-> edits—the user's edits to `mcp.allowed` / `mcp.excluded` in `settings.json` take effect
-> immediately. _Trade-off_: a runtime edit **can** widen beyond the startup allowlist, which we
-> accept (consistent with the "hot-reload takes effect immediately" goal, and editing settings is
-> as trusted a local action as editing startup flags). **But the pending-approval gate (#4615) does
-> not yield**: a gated server must always be approved first (Part A item 4).
+> **Admission stance decision (deliberate)**: hot-reload makes **current settings win _within_ the
+> startup `--allowed-mcp-server-names` bound** — a runtime edit to `mcp.allowed` / `mcp.excluded` in
+> `settings.json` takes effect immediately, but **only narrows admission, never widens it beyond the
+> launch flag** (see Part F for the upper-bound rule and the `mcp.allowed: []` semantics). If no
+> `--allowed-mcp-server-names` flag was passed, settings fully drive admission. **The pending-approval
+> gate (#4615) never yields** regardless: a gated server must always be approved first (Part A item 4).
 >
-> _Boundary clarification (raised in adversarial review)_: `recomputeMcpGating` derives `allowed`
-> only from settings, so if launched with `--allowed-mcp-server-names` but settings has no
-> `mcp.allowed`, the **first settings change of any kind** (even a theme edit — the recomputed
-> `undefined` differs from the CLI-seeded boot value, so reconcile always fires) silently clears that
-> CLI name-filter. This is **intentional**: `--allowed-mcp-server-names` is a **name-based
-> convenience filter**, not an approval security boundary — it only filters by name, and bypassing it
-> does not bypass the #4615 approval gate (`pending` is always recomputed). The non-gated servers it
-> would re-admit (user-global `~/.qwen/settings.json`, `--mcp-config`, extensions — all `scope`
-> unset) **never required approval and could always connect anyway**, so dropping the allowlist
-> exposes nothing the approval boundary protected. If the startup allowlist must instead be an
-> **upper bound** that an unrelated mid-session edit cannot widen, fold it into `recomputeMcpGating`
-> (intersect / cap) rather than reading from settings alone — a deliberate product trade-off we
-> currently decline.
+> > _History_: an earlier revision let a runtime settings edit widen admission beyond the startup
+> > flag (treating the flag as a mere name-filter convenience). Adversarial review flagged that as a
+> > silent loosening of a launch-time boundary; Part F (item K) reverses it — the flag is now an
+> > immutable upper bound.
 
 Reuse existing helpers—**do not** reimplement the merge logic:
 
@@ -392,7 +383,7 @@ consistent behavior.
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/utils/events.ts`            | add `AppEvent.McpPendingApprovalChanged`                                                                                   |
 | `packages/cli/src/config/mcpApprovals.ts`     | add `getPromptableMcpServers()` (strict `=== 'pending'`, distinct from the rejected-inclusive `getPendingGatedMcpServers`) |
-| `packages/cli/src/config/hot-reload.ts`        | after reconcile, decide via `getPromptableMcpServers`; if non-empty, `appEvents.emit(McpPendingApprovalChanged)`           |
+| `packages/cli/src/config/hot-reload.ts`       | after reconcile, decide via `getPromptableMcpServers`; if non-empty, `appEvents.emit(McpPendingApprovalChanged)`           |
 | `packages/cli/src/ui/hooks/useMcpApproval.ts` | extract `computePending()`; compute once on mount + recompute on the event                                                 |
 
 #### Verification (Part D)
@@ -477,6 +468,83 @@ yellow), and exclude these non-error approval-skips from the footer "see error l
 - Manual: reject a workspace server → `/mcp` shows the reason (not a bare Disconnected) → edit its
   config to change the hash → the Part D modal reappears (the existing recovery path, unchanged here).
 
+### Part F — Follow-up: admission semantics (CLI upper bound, deny-all, unavailable reasons)
+
+> Added after a third adversarial-review pass on Parts A/B. Three related admission refinements,
+> grouped because they share the "which servers may connect, and how do we explain when one can't"
+> surface. Items labelled K / H / B after their review threads.
+
+#### K — the startup `--allowed-mcp-server-names` flag is an immutable upper bound
+
+Reverses the earlier "settings always win" stance (see the Part B note). At boot, `loadCliConfig`
+gives the flag precedence over `settings.mcp.allowed`; but the hot-reload recompute read `allowed`
+from settings only, so any settings change silently dropped a launch-time name restriction —
+loosening, in-session, a boundary an operator set precisely to constrain which local MCP commands
+may run.
+
+Fix: capture the **flag value alone** as an immutable bound on `Config`
+(`cliAllowedMcpServerNames` param → `getCliAllowedMcpServerNames()`; distinct from the mutable
+`allowedMcpServers` that hot-reload overwrites). `recomputeMcpGating` then caps the settings-derived
+allow-list to it:
+
+- flag passed + settings has `mcp.allowed` → **intersection** (settings may narrow within the bound);
+- flag passed + no settings `mcp.allowed` → the **flag in full**;
+- no flag → settings fully drive admission (unchanged).
+
+So a runtime edit can only ever narrow MCP admission below the launch flag, never widen past it.
+`mcp.excluded` still narrows further at discovery time, consistent with "only stricter, never looser".
+
+#### H — `mcp.allowed: []` is deny-all, consistently across boot and hot-reload
+
+Boot treats an empty allow-list as deny-all (`getMcpServers()` filters whenever `allowedMcpServers`
+is truthy, and `[]` is truthy). The hot-reload recompute used to collapse `[]` → `undefined`
+("allow all") — so editing `mcp.allowed` to `[]` expecting deny-all left every server reachable. Fix:
+`recomputeMcpGating` preserves `[]` (only an **absent** key yields `undefined`), and `mcpGatingEqual`
+distinguishes absent (allow-all) from `[]` (deny-all) for `allowed` — otherwise the change would
+compare equal and never reconcile. `excluded` / `pending` keep `undefined ≡ []` (both "no entries").
+
+#### B — tool-not-found explains _why_ a server is unavailable
+
+`getMcpToolUnavailableMessage` previously distinguished only "removed this session" vs "not
+configured". With admission gating it now classifies the owning server via a single core API,
+`Config.getMcpServerUnavailableReason(name)`, covering every gate:
+
+| reason             | meaning                                       | recovery the message suggests                     |
+| ------------------ | --------------------------------------------- | ------------------------------------------------- |
+| `removed`          | deleted from the merged config this session   | re-add it to settings                             |
+| `not_allowed`      | filtered out by `mcp.allowed` / the CLI bound | add it to `mcp.allowed`                           |
+| `excluded`         | listed in `mcp.excluded`                      | remove it from `mcp.excluded`                     |
+| `pending_approval` | gated server awaiting approval (#4615)        | approve it (run `/mcp`)                           |
+| _(none)_           | configured & admitted                         | genuine "tool not found" (disconnected / renamed) |
+
+Two supporting changes: a private `getMergedMcpServers()` (the merge **without** the allow-list
+filter) so "configured" can be told apart from "filtered out"; and removal tracking now diffs that
+**gating-independent merged map**, which means a server filtered by a narrowed allow-list is no
+longer mis-reported as `removed` (it's `not_allowed`). That also lets the
+`prevEffectiveServerNames` snapshot param added for the earlier allow-list-narrowing fix be dropped
+— the merged-map diff is unaffected by the gating setters the caller applies just before reconcile.
+
+#### Key files (Part F)
+
+| File                                                  | Change                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/config/config.ts` (`loadCliConfig`) | pass the `--allowed-mcp-server-names` flag value alone as `cliAllowedMcpServerNames`                                                                                                                                                                                                                                      |
+| `packages/core/src/config/config.ts`                  | `cliAllowedMcpServerNames` field + `getCliAllowedMcpServerNames()` (K); `getMergedMcpServers()` (unfiltered) + `getMcpServerNames()`; `McpServerUnavailableReason` + `getMcpServerUnavailableReason()` (B); removal tracking diffs the merged map and `reinitializeMcpServers` drops the `prevEffectiveServerNames` param |
+| `packages/cli/src/config/hot-reload.ts`               | `recomputeMcpGating` caps `allowed` to the boot bound (K) and preserves `[]` (H); `mcpGatingEqual` makes `allowed` absent ≠ `[]` (H)                                                                                                                                                                                      |
+| `packages/core/src/core/coreToolScheduler.ts`         | `getMcpToolUnavailableMessage` routes per `getMcpServerUnavailableReason` (B)                                                                                                                                                                                                                                             |
+
+#### Verification (Part F)
+
+- `hot-reload.test.ts`: **K** — with a startup flag and no settings allow-list, applies the flag in
+  full; a settings allow-list is capped to the flag (cannot widen) and may narrow within it; without
+  the flag, settings win unbounded. **H** — `mcp.allowed: []` is pushed through as deny-all;
+  `mcpGatingEqual` treats `allowed` absent vs `[]` as different (but `excluded` undefined ≡ `[]`).
+- `config.test.ts`: `getMcpServerUnavailableReason` returns `not_allowed` / `excluded` /
+  `pending_approval` / `removed` for each gate, and `undefined` for a configured-admitted or
+  never-configured server.
+- `coreToolScheduler.test.ts`: the tool-not-found message names the right server and recovery action
+  per reason.
+
 ---
 
 ## Out of scope (other sub-tasks)
@@ -494,7 +562,7 @@ yellow), and exclude these non-error approval-skips from the footer "see error l
 | `packages/core/src/config/config.ts`            | `setMcpServers()`, `setAllowedMcpServers()` + pending setter, `getMcpGating()` (returns `{ excluded, allowed, pending }`), `reinitializeMcpServers()` (with a reconcile-in-progress guard)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `packages/core/src/tools/mcp-client-manager.ts` | ① add `removePromptsByServer()` to `removeServer()` and `removeRuntimeMcpServer()`; ② in the shared-pool path `runDiscoverAllMcpToolsViaPool` (`:1461`), add the `isMcpServerPendingApproval` check before building `desiredIds` / before acquire (matching single-session admission); ③ **add fingerprint diff to the single-session path**: a new `connectionFingerprints` map; `discoverAllMcpToolsIncremental` also triggers disconnect+reconnect for a server that is "connected but its `connectionIdOf` fingerprint changed" (aligned with the pool path's `desiredIds`), clearing the map on every teardown path; ④ **clear old tools/prompts before reconnect**: when `discoverMcpToolsForServerInternal` replaces an existing client, `removeMcpToolsByServer` + `removePromptsByServer` before re-discovery—because `disconnect()` doesn't touch the registry and `discover()` only appends/overwrites by name, otherwise tools dropped/renamed by a config change would linger bound to a closed client (and linger on discovery failure too), matching the existing cleanup in `removeServer` / `addRuntimeMcpServer` |
 | `packages/cli/src/config/settingsSchema.ts`     | **prerequisite**: flip the three keys `mcpServers` (`:274`), `mcp.allowed`, `mcp.excluded` from `requiresRestart: true` to `false`, so the watcher no longer suppresses MCP-only edits; the parent `mcp` and `mcp.serverCommand` stay `true` (see the "Hard prerequisite" note above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `packages/cli/src/config/hot-reload.ts` _(new)_  | `registerMcpHotReload()`: rebuild via `assembleMcpServers(..., topTierMcpServers)`; recompute the gating lists from current settings (see "admission stance decision"); gate via `mcpServersEqual` + `mcpGatingEqual` (built on `fast-deep-equal`); debounce + coalesce-and-recheck                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `packages/cli/src/config/hot-reload.ts` _(new)_ | `registerMcpHotReload()`: rebuild via `assembleMcpServers(..., topTierMcpServers)`; recompute the gating lists from current settings (see "admission stance decision"); gate via `mcpServersEqual` + `mcpGatingEqual` (built on `fast-deep-equal`); debounce + coalesce-and-recheck                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `packages/cli/package.json`                     | promote `fast-deep-equal` from a transitive to a **direct** dependency                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `packages/cli/src/gemini.tsx`                   | call `registerMcpHotReload` after `:785`; register the disposer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Tests _(alongside the schema flip)_             | `settingsSchema.test.ts` pins the three MCP keys' `requiresRestart` values (incl. `mcp` / `mcp.serverCommand` staying `true`); `settingsWatcher.test.ts` adds two positive regressions ("edit only `mcpServers` / only `mcp.excluded` → still notify"); `settingsUtils.test.ts` uses its **own mock schema**, unrelated to the real flip, no change needed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -563,17 +631,18 @@ Fake a `SettingsWatcher`, covering every gate branch:
 
 ### D. Trust-boundary edge cases (cli + core)
 
-> Both are **high**-severity trust-boundary points. Item 11 verifies the design's "admission stance
-> decision" (hot-reload makes settings win); item 12 corresponds to Part A item 4 (pool-path pending
-> check).
+> Both are **high**-severity trust-boundary points. Item 11 verifies the admission bound (Part F
+> item K — settings narrow within, never widen beyond, the startup flag); item 12 corresponds to
+> Part A item 4 (pool-path pending check).
 
-11. **Hot-reload connection admission makes current settings win** (implements the "admission stance
-    decision"). Start with `--allowed-mcp-server-names=a`; then a settings change adds `b` to
-    `mcp.allowed`. **Assert**: the gating recomputed from current settings takes effect after
-    reconcile, `b` becomes visible/connectable—i.e. a runtime settings edit **can** widen beyond the
-    startup CLI allowlist (a deliberate product stance, not a defect).
-    _Guards_: Part B's `nextGating` is fully recomputed from current settings, not pinned by the
-    startup CLI allowlist.
+11. **Hot-reload admission narrows within — but never widens beyond — the startup flag** (the Part F
+    item K bound; supersedes the earlier "settings can widen" stance). Start with
+    `--allowed-mcp-server-names=a,b`; then a settings change sets `mcp.allowed` to `[a, b, c]`.
+    **Assert**: after reconcile `c` is **still excluded** (capped to the launch bound) while `a` is
+    admitted; a settings edit narrowing to `[a]` takes effect; with no startup flag, the settings
+    allow-list wins unbounded. (See Part F → Verification for the full matrix.)
+    _Guards_: `recomputeMcpGating` intersects the settings allow-list with
+    `getCliAllowedMcpServerNames()` and never widens past it.
 
 12. **The pending-approval gate is not bypassed in shared-pool mode** (high risk: connecting a gated
     server before approval). In daemon / shared-pool mode (`runDiscoverAllMcpToolsViaPool`), let a
