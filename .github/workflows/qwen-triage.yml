@@ -153,7 +153,10 @@ jobs:
              startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
            needs.authorize.outputs.should_run == 'true')
         }}
-    runs-on: 'ubuntu-latest'
+    # `/triage` comments queue behind CI on hosted runners at peak; route them to
+    # ECS instead. Safe: read-only, base-ref checkout (never PR-head). Same
+    # kill-switch as `authorize`, so a disabled pool falls back to hosted.
+    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event_name == 'issue_comment') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
