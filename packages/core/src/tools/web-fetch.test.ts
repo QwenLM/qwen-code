@@ -74,6 +74,18 @@ describe('WebFetchTool', () => {
       },
     );
 
+    it.each([
+      'https://user:secret@example.com/page',
+      'http://user@example.com/page',
+      'https://:secret@example.com/page',
+      'https://%75ser@example.com/page',
+    ])('should reject URLs containing credentials: %s', (url) => {
+      const tool = new WebFetchTool(mockConfig);
+      expect(() => tool.build({ url, prompt: 'summarize this' })).toThrow(
+        "The 'url' must not include credentials.",
+      );
+    });
+
     it('should return WEB_FETCH_FALLBACK_FAILED on fetch failure', async () => {
       vi.spyOn(fetchUtils, 'isPrivateIp').mockReturnValue(true);
       vi.spyOn(fetchUtils, 'fetchWithTimeout').mockRejectedValue(

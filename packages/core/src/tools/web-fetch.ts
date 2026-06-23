@@ -305,8 +305,17 @@ export class WebFetchTool extends BaseDeclarativeTool<
     if (!params.url || params.url.trim() === '') {
       return "The 'url' parameter cannot be empty.";
     }
+    // Regex rejects non-http(s) schemes and malformed authority that new URL() normalizes away.
     if (!/^https?:\/\//i.test(params.url)) {
       return "The 'url' must be a valid URL starting with http:// or https://.";
+    }
+    try {
+      const parsedUrl = new URL(params.url);
+      if (parsedUrl.username || parsedUrl.password) {
+        return "The 'url' must not include credentials.";
+      }
+    } catch {
+      return "The 'url' is malformed and could not be parsed.";
     }
     if (!params.prompt || params.prompt.trim() === '') {
       return "The 'prompt' parameter cannot be empty.";
