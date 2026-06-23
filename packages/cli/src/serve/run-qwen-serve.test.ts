@@ -598,22 +598,22 @@ describe('runQwenServe runtime startup failures', () => {
   });
 
   it('proxies bridge access only after the runtime bridge is ready', async () => {
-    let bridge: HttpAcpBridge | undefined;
-    const proxy = createLazyBridgeProxy(() => bridge);
+    const holder: { bridge?: HttpAcpBridge } = {};
+    const proxy = createLazyBridgeProxy(() => holder.bridge);
 
     expect(() => proxy.getDaemonStatusSnapshot()).toThrow(
       'Daemon bridge runtime is still starting.',
     );
 
     const getDaemonStatusSnapshot = vi.fn(function (this: HttpAcpBridge) {
-      return this === bridge
+      return this === holder.bridge
         ? BASE_BRIDGE_SNAPSHOT
         : {
             ...BASE_BRIDGE_SNAPSHOT,
             channelLive: false,
           };
     });
-    bridge = { getDaemonStatusSnapshot } as unknown as HttpAcpBridge;
+    holder.bridge = { getDaemonStatusSnapshot } as unknown as HttpAcpBridge;
 
     expect(proxy.getDaemonStatusSnapshot()).toBe(BASE_BRIDGE_SNAPSHOT);
     expect(getDaemonStatusSnapshot).toHaveBeenCalledTimes(1);
