@@ -112,6 +112,57 @@ describe('mcp-client', () => {
       vi.mocked(MCPOAuthTokenStorage).mockReset();
     });
 
+    function setupHttpOAuthRetry(connectError: Error) {
+      const connect = vi
+        .fn()
+        .mockRejectedValueOnce(connectError)
+        .mockResolvedValueOnce(undefined);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect,
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ clientId: 'client-id' });
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const authenticate = vi.fn().mockResolvedValue(undefined);
+      const getValidToken = vi.fn().mockResolvedValue('access-token');
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            authenticate,
+            getValidToken,
+          }) as unknown as MCPOAuthProvider,
+      );
+      const discoverOAuthConfig = vi
+        .spyOn(OAuthUtils, 'discoverOAuthConfig')
+        .mockResolvedValue({
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        });
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      return {
+        authenticate,
+        connect,
+        discoverOAuthConfig,
+        getValidToken,
+        workspaceContext,
+      };
+    }
+
     it('reports rejected stored OAuth tokens for SSE servers', async () => {
       vi.mocked(ClientLib.Client).mockReturnValue({
         connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
@@ -427,6 +478,81 @@ describe('mcp-client', () => {
         ),
       ).rejects.toThrow(oauthMessage);
       expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('retries HTTP connections after base-url OAuth discovery without www-authenticate', async () => {
+      const {
+        authenticate,
+        connect,
+        discoverOAuthConfig,
+        getValidToken,
+        workspaceContext,
+      } = setupHttpOAuthRetry(new Error('HTTP 401 Unauthorized'));
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(authenticate).toHaveBeenCalledWith(
+        'http-server',
+        {
+          enabled: true,
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        },
+        'http://test-server/mcp',
+      );
+      expect(getValidToken).toHaveBeenCalledWith('http-server', {
+        clientId: 'client-id',
+      });
+      expect(connect).toHaveBeenCalledTimes(2);
+      const oauthTransport = connect.mock.calls[1][0] as {
+        _requestInit?: { headers?: Record<string, string> };
+      };
+      expect(oauthTransport._requestInit?.headers).toMatchObject({
+        Authorization: 'Bearer access-token',
+      });
+    });
+
+    it('falls back to base-url OAuth discovery when www-authenticate lacks resource metadata', async () => {
+      const { authenticate, connect, discoverOAuthConfig, workspaceContext } =
+        setupHttpOAuthRetry(
+          new Error(
+            'HTTP 401 Unauthorized\nwww-authenticate: Bearer realm="example"',
+          ),
+        );
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(authenticate).toHaveBeenCalledWith(
+        'http-server',
+        {
+          enabled: true,
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        },
+        'http://test-server/mcp',
+      );
+      expect(connect).toHaveBeenCalledTimes(2);
     });
 
     it('wraps OAuth discovery errors with remediation guidance', async () => {

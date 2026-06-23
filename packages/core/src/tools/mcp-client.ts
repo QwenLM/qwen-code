@@ -1666,7 +1666,8 @@ export async function connectToMcpServer(
             `'${mcpServerName}' requires authentication but no OAuth configuration found`,
           );
           throw new Error(
-            `MCP server '${mcpServerName}' requires authentication. Please configure OAuth or check server settings.`,
+            `MCP server '${mcpServerName}' requires authentication. ` +
+              getMcpOAuthDialogInstruction('authenticate', mcpServerName),
           );
         }
       }

@@ -126,7 +126,7 @@ export function defaultRenderLine({
 
 // ─── Helpers ────────────────────────────────────────────────
 
-type PhysicalCursorState = {
+export type PhysicalCursorState = {
   hasMeasured: boolean;
   showCursor: boolean;
   cursorVisualRow: number;
