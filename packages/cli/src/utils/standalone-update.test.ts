@@ -332,20 +332,22 @@ describe('standalone-update', () => {
       try {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(zshrc, 'utf-8');
-        expect(content).toContain('# Added by Qwen Code standalone installer');
-        expect(content).toContain(`export PATH="${binDir}:$PATH"`);
+        expect(content).toContain('# Qwen Code PATH block begin');
+        expect(content).toContain('# Qwen Code PATH block end');
+        // Uses single-quoted paths matching install-qwen-standalone.sh shell_quote
+        expect(content).toContain(`export PATH='${binDir}':$PATH`);
       } finally {
         process.env['SHELL'] = origShell;
         process.env['HOME'] = origHome;
       }
     });
 
-    it('skips if marker already in rc file', () => {
+    it('skips if block markers already in rc file', () => {
       const binDir = path.join(tempDir, 'bin');
       const zshrc = path.join(tempDir, '.zshrc');
       fs.writeFileSync(
         zshrc,
-        `# Added by Qwen Code standalone installer\nexport PATH="${binDir}:$PATH"\n`,
+        `# Qwen Code PATH block begin\nexport PATH='${binDir}':$PATH\n# Qwen Code PATH block end\n`,
       );
 
       const origShell = process.env['SHELL'];
@@ -357,7 +359,7 @@ describe('standalone-update', () => {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(zshrc, 'utf-8');
         const matches = content.match(
-          /# Added by Qwen Code standalone installer/g,
+          /# Qwen Code PATH block begin/g,
         );
         expect(matches).toHaveLength(1);
       } finally {
@@ -366,7 +368,7 @@ describe('standalone-update', () => {
       }
     });
 
-    it('appends fish_add_path for fish shell', () => {
+    it('appends set -gx PATH for fish shell (matching install script)', () => {
       const binDir = path.join(tempDir, 'bin');
       const fishDir = path.join(tempDir, '.config', 'fish');
       const fishConfig = path.join(fishDir, 'config.fish');
@@ -379,7 +381,10 @@ describe('standalone-update', () => {
       try {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(fishConfig, 'utf-8');
-        expect(content).toContain('fish_add_path');
+        // Matches install-qwen-standalone.sh's maybe_update_shell_path fish branch
+        expect(content).toContain('set -gx PATH');
+        expect(content).toContain('# Qwen Code PATH block begin');
+        expect(content).toContain('# Qwen Code PATH block end');
         expect(content).toContain(binDir);
       } finally {
         process.env['SHELL'] = origShell;

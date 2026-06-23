@@ -557,7 +557,9 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
       assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
       if (!fs.existsSync(wrapperPath)) {
-        const content = `#!/bin/sh\nexec "${standaloneDir}/bin/qwen" "$@"\n`;
+        // Match install-qwen-standalone.sh's write_unix_wrapper:
+        // uses /usr/bin/env sh for portability, and single-quoted paths.
+        const content = `#!/usr/bin/env sh\nexec '${standaloneDir}/bin/qwen' "$@"\n`;
         fs.writeFileSync(wrapperPath, content, { mode: 0o755 });
       }
       ensurePathInShellRc(binDir);
@@ -600,15 +602,22 @@ export function ensurePathInShellRc(binDir: string): void {
     const content = fs.existsSync(rcFile)
       ? fs.readFileSync(rcFile, 'utf-8')
       : '';
-    // Use a marker to detect our managed PATH entry precisely,
-    // avoiding false positives from comments or $PATH-appended entries
-    const marker = '# Added by Qwen Code standalone installer';
-    if (content.includes(marker)) return;
+    // Use begin/end block markers matching install-qwen-standalone.sh's
+    // maybe_update_shell_path, so the update codepath is idempotent with the
+    // install script and does not produce duplicate PATH entries.
+    const beginMarker = '# Qwen Code PATH block begin';
+    const endMarker = '# Qwen Code PATH block end';
+    if (content.includes(beginMarker) && content.includes(endMarker)) return;
+
+    // shell_quote equivalent: wrap in single quotes, escape any embedded single quotes
+    const quotedBinDir = `'${binDir.replace(/'/g, "'\\''")}'`;
 
     const exportLine = shell.endsWith('/fish')
-      ? `\n${marker}\nfish_add_path "${binDir}"\n`
-      : `\n${marker}\nexport PATH="${binDir}:$PATH"\n`;
-    fs.appendFileSync(rcFile, exportLine);
+      ? `set -gx PATH ${quotedBinDir} $PATH`
+      : `export PATH=${quotedBinDir}:$PATH`;
+
+    const block = `\n${beginMarker}\n${exportLine}\n${endMarker}\n`;
+    fs.appendFileSync(rcFile, block);
     debugLogger.info(`Added ${binDir} to ${rcFile}`);
   } catch (err) {
     debugLogger.debug('Failed to update shell rc:', err);

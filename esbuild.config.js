@@ -106,6 +106,12 @@ const mainBuild = esbuild.build({
     ),
     // Resolve to userland punycode instead of deprecated node:punycode built-in
     punycode: require.resolve('punycode/'),
+    // ink 7.x strict exports don't include these subpaths, but the files exist
+    'ink/dom': path.resolve(__dirname, 'node_modules/ink/build/dom.js'),
+    'ink/components/CursorContext': path.resolve(
+      __dirname,
+      'node_modules/ink/build/components/CursorContext.js',
+    ),
   },
   define: {
     'process.env.CLI_VERSION': JSON.stringify(pkg.version),
