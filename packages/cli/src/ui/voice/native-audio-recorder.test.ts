@@ -195,6 +195,19 @@ describe('createNativeAudioRecorder', () => {
     },
   );
 
+  it('does not rewrite wrapped native addon load failures as missing packages', async () => {
+    const loadError = new Error(
+      "Native audio capture addon could not be loaded. Reinstall @qwen-code/audio-capture, or use the SoX fallback. (Cannot find module 'node-gyp-build')",
+    );
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => {
+        throw loadError;
+      },
+    });
+
+    await expect(recorder.start()).rejects.toBe(loadError);
+  });
+
   it('does not explain native start failures as missing packages', async () => {
     const startError = new Error(
       "Cannot find package '@qwen-code/audio-capture' while starting",

@@ -284,6 +284,42 @@ describe('package asset scripts', () => {
     ).toThrow(/Required audio capture dependency not resolvable/);
   });
 
+  it('omits bundledDependencies when audio-capture package JSON is invalid and not required', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'packages/audio-capture/package.json', '{ invalid json');
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.bundledDependencies).toBeUndefined();
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('fails packaging when required audio-capture package JSON is invalid', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'packages/audio-capture/package.json', '{ invalid json');
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: true }),
+    ).toThrow(/Required audio capture package\.json is not valid JSON/);
+  });
+
   function createFixtureRoot() {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-assets-'));
     tempDirs.push(rootDir);

@@ -196,9 +196,25 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
     }
   }
 
-  const addonPkg = JSON.parse(
-    fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
-  );
+  let addonPkg;
+  try {
+    addonPkg = JSON.parse(
+      fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
+    );
+  } catch {
+    const message = `audio capture package.json is not valid JSON at ${path.join(
+      addonSrc,
+      'package.json',
+    )}`;
+    if (required) {
+      throw new Error(
+        `Required ${message}. ` +
+          'Cannot publish package without native voice capture.',
+      );
+    }
+    console.warn(`Warning: ${message}`);
+    return false;
+  }
   const dependencySources = [];
   for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
     try {

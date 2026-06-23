@@ -156,12 +156,15 @@ function explainMissingNativePackage(error: unknown): unknown {
 }
 
 function isMissingNativePackageError(error: Error): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
+    return error.message.includes(AUDIO_CAPTURE_PACKAGE);
+  }
+
   return (
     error.message.includes(AUDIO_CAPTURE_PACKAGE) &&
-    (error.message.includes('Cannot find package') ||
-      error.message.includes('Cannot find module') ||
-      (error as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND' ||
-      (error as NodeJS.ErrnoException).code === 'MODULE_NOT_FOUND')
+    (error.message.startsWith('Cannot find package') ||
+      error.message.startsWith('Cannot find module'))
   );
 }
 
