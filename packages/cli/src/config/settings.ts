@@ -59,6 +59,7 @@ export {
   loadEnvironment,
   preResolveHomeEnvOverrides,
   reloadEnvironment,
+  resetEnvironmentTrackingForTesting,
   resetHomeEnvBootstrapForTesting,
   setUpCloudShellEnvironment,
   SETTINGS_DIRECTORY_NAME,

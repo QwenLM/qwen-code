@@ -2589,6 +2589,11 @@ const SETTINGS_SCHEMA = {
     // This is an advanced safety valve for runaway hook loops, not a common
     // interactive preference.
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'integer',
+      minimum: 1,
+      default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    },
   },
 
   hooks: {
