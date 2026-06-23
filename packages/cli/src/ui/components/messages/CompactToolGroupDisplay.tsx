@@ -238,7 +238,7 @@ export const CompactToolGroupDisplay: React.FC<
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
-          <Text wrap="truncate-end" dimColor={!isActive}>
+          <Text wrap="truncate-end" bold>
             {buildToolSummary(toolCalls, isActive)}
             {isActive && <Text key="ellipsis">…</Text>}
           </Text>
