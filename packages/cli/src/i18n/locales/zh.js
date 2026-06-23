@@ -2288,4 +2288,14 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+  // Update command
+  'Check for Qwen Code updates and install if available': '检查 Qwen Code 更新并安装（如果可用）',
+  'Auto-update is disabled. Enable it in settings to use this command.': '自动更新已禁用。请在设置中启用以使用此命令。',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Update successful! The new version will be used on your next run.': '更新成功！新版本将在下次运行时生效。',
+  'Update downloaded. It will be applied after you exit this session.': '更新已下载。将在退出当前会话后应用。',
+  'Update failed: {{error}}': '更新失败：{{error}}',
+  'Run the following to update:': '运行以下命令进行更新：',
+  'Unable to auto-update this standalone installation. Please reinstall from:': '无法自动更新此独立安装。请从以下地址重新安装：',
+  'Manual update required. Please reinstall Qwen Code.': '需要手动更新。请重新安装 Qwen Code。',
 };

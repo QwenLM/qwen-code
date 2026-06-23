@@ -2098,4 +2098,14 @@ export default {
   in: 'ent.',
   out: 'sort.',
   'In/Out': 'Ent/Sort',
+  // Update command
+  'Check for Qwen Code updates and install if available': 'Vérifier les mises à jour de Qwen Code et installer si disponible',
+  'Auto-update is disabled. Enable it in settings to use this command.': 'La mise à jour automatique est désactivée. Activez-la dans les paramètres pour utiliser cette commande.',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} est à jour !',
+  'Update successful! The new version will be used on your next run.': 'Mise à jour réussie ! La nouvelle version sera utilisée lors de la prochaine exécution.',
+  'Update downloaded. It will be applied after you exit this session.': 'Mise à jour téléchargée. Elle sera appliquée après avoir quitté cette session.',
+  'Update failed: {{error}}': 'Échec de la mise à jour : {{error}}',
+  'Run the following to update:': 'Exécutez la commande suivante pour mettre à jour :',
+  'Unable to auto-update this standalone installation. Please reinstall from:': 'Impossible de mettre à jour automatiquement cette installation autonome. Veuillez réinstaller depuis :',
+  'Manual update required. Please reinstall Qwen Code.': 'Mise à jour manuelle requise. Veuillez réinstaller Qwen Code.',
 };
