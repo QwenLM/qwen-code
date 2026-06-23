@@ -9,11 +9,19 @@
  */
 
 import ReactDOM from 'react-dom/client';
-import { App } from './App.js';
+import { SidePanelRoot } from './SidePanelRoot.js';
 import { ChromePlatformProvider } from './platform/ChromePlatformProvider.js';
 import '@qwen-code/webui/styles.css';
 import './styles/tailwind.css';
 import './styles/styles.css';
+
+// Extension base URL stashed on window for any consumer that needs to resolve
+// packaged asset URLs without a chrome.* call.
+declare global {
+  interface Window {
+    __EXTENSION_URI__?: string;
+  }
+}
 
 function injectExtensionUri(): void {
   try {
@@ -31,7 +39,7 @@ if (container) {
   const root = ReactDOM.createRoot(container);
   root.render(
     <ChromePlatformProvider>
-      <App />
+      <SidePanelRoot />
     </ChromePlatformProvider>,
   );
 }
