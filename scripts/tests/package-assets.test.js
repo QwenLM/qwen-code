@@ -188,6 +188,39 @@ describe('package asset scripts', () => {
     ).toThrow(/Required audio capture package artifact not found at/);
   });
 
+  it('omits bundledDependencies when audio-capture dependencies are missing and not required', () => {
+    const rootDir = createFixtureRoot();
+    const audioPackagePath = path.join(
+      rootDir,
+      'packages',
+      'audio-capture',
+      'package.json',
+    );
+    const audioPackageJson = JSON.parse(readFileSync(audioPackagePath, 'utf8'));
+    audioPackageJson.dependencies['missing-audio-runtime'] = '1.0.0';
+    writeFileSync(audioPackagePath, JSON.stringify(audioPackageJson, null, 2));
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.bundledDependencies).toBeUndefined();
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+        ),
+      ),
+    ).toBe(false);
+  });
+
   function createFixtureRoot() {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-assets-'));
     tempDirs.push(rootDir);

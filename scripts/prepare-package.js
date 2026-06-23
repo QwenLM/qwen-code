@@ -181,10 +181,15 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
         path.dirname(nodeRequire.resolve(`${dependencyName}/package.json`)),
       ]);
     } catch {
-      throw new Error(
-        `Required audio capture dependency not resolvable: ${dependencyName}. ` +
-          'Cannot publish package without native voice capture.',
-      );
+      const message = `audio capture dependency not resolvable: ${dependencyName}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return false;
     }
   }
 
