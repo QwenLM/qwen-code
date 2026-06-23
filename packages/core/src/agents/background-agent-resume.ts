@@ -115,6 +115,7 @@ interface ResumeOperation {
 interface RestorePausedEntryOptions {
   error?: string;
   resumeBlockedReason?: string;
+  suppressRegisterCallback?: boolean;
 }
 
 function approvalModeToPermissionMode(mode?: string): PermissionMode {
@@ -487,6 +488,119 @@ export class BackgroundAgentResumeService {
     return operation.promise;
   }
 
+  /**
+   * Revive a *completed* background sub-agent so the model can keep iterating
+   * on it via `send_message`. The resume engine only accepts `paused` entries,
+   * so flip the finished entry back to a resumable `paused` state (this clears
+   * its result/stats and resets `notified` so the revived run emits its own
+   * terminal notification) and hand it to `resumeBackgroundAgent`.
+   *
+   * Returns `undefined` (and logs why) when the agent can't be revived: not an
+   * in-registry, finished background agent with a persisted transcript, or the
+   * background-agent concurrency cap is full. Cross-session / evicted completed
+   * agents are out of scope (see QwenLM/qwen-code#5540).
+   */
+  async reviveCompletedBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<AgentTask | undefined> {
+    // A resume/revive already in flight for this id owns the lifecycle — fold
+    // into it. (The status flip below is await-free, so this guards a genuinely
+    // concurrent in-flight operation, not a same-tick re-entry.)
+    if (this.resumeOperations.has(agentId)) {
+      return this.resumeBackgroundAgent(agentId, initialMessage);
+    }
+    const registry = this.config.getBackgroundTaskRegistry();
+    const entry = registry.get(agentId);
+    if (
+      !entry ||
+      !entry.isBackgrounded ||
+      entry.status !== 'completed' ||
+      !entry.metaPath ||
+      !entry.outputFile
+    ) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": not a completed ` +
+          `background agent with a persisted transcript (present=${!!entry}, ` +
+          `backgrounded=${entry?.isBackgrounded ?? false}, ` +
+          `status=${entry?.status ?? 'none'}, ` +
+          `meta=${!!entry?.metaPath}, output=${!!entry?.outputFile}).`,
+      );
+      return undefined;
+    }
+    // Honor the background-agent concurrency cap before flipping the finished
+    // entry back to paused, so an at-capacity revive fails cleanly instead of
+    // stranding the entry as paused.
+    try {
+      registry.assertCanStartBackgroundAgent();
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+    if (!readAgentMeta(entry.metaPath)) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
+      );
+      return undefined;
+    }
+    if (!jsonl.exists(entry.outputFile)) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": transcript is missing or empty.`,
+      );
+      return undefined;
+    }
+    try {
+      const records = await jsonl.read<ChatRecord>(entry.outputFile, {
+        throwOnNonEnoentError: true,
+      });
+      if (records.length === 0) {
+        debugLogger.warn(
+          `[BackgroundAgentResume] Cannot revive "${agentId}": transcript is empty or unreadable.`,
+        );
+        return undefined;
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": transcript could not be read: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+    try {
+      const now = new Date();
+      await fs.utimes(path.dirname(entry.metaPath), now, now);
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Revive could not refresh session directory mtime for "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      registry.assertCanStartBackgroundAgent();
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+    const completedEntry = {
+      ...entry,
+      pendingMessages: [...(entry.pendingMessages ?? [])],
+      recentActivities: [...(entry.recentActivities ?? [])],
+      pendingApprovals: [...(entry.pendingApprovals ?? [])],
+    };
+    this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
+    const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
+    if (!revived) {
+      this.restoreCompletedEntry(completedEntry);
+    }
+    return revived;
+  }
+
   private async resumeBackgroundAgentInternal(
     agentId: string,
     operation: ResumeOperation,
@@ -724,7 +838,9 @@ export class BackgroundAgentResumeService {
         recentActivities: [],
         pendingMessages,
       };
-      const entry = registry.register(registration);
+      const entry = registry.register(registration, {
+        suppressRegisterCallback: true,
+      });
       const lateContinuationMessages = operation.continuationMessages.slice(
         promptMessages.length,
       );
@@ -1003,7 +1119,34 @@ export class BackgroundAgentResumeService {
       recentActivities: [],
       pendingMessages: [...(latest.pendingMessages ?? [])],
     };
-    return registry.register(registration);
+    return registry.register(registration, {
+      suppressRegisterCallback: options.suppressRegisterCallback,
+    });
+  }
+
+  private restoreCompletedEntry(entry: AgentTask): AgentTask {
+    const registry = this.config.getBackgroundTaskRegistry();
+    const restored = registry.register(
+      {
+        ...entry,
+        isBackgrounded: true,
+        status: 'completed',
+        pendingMessages: [...(entry.pendingMessages ?? [])],
+        recentActivities: [...(entry.recentActivities ?? [])],
+        pendingApprovals: [...(entry.pendingApprovals ?? [])],
+      },
+      {
+        suppressRegisterCallback: true,
+        preserveNotificationState: true,
+      },
+    );
+    if (entry.metaPath) {
+      patchAgentMeta(entry.metaPath, {
+        lastError: undefined,
+        status: 'completed',
+      });
+    }
+    return restored;
   }
 
   private async createResumedForkSubagent(

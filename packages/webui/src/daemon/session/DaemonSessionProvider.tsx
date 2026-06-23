@@ -284,6 +284,12 @@ export function DaemonSessionProvider({
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      // Set when the user explicitly deletes the session (server
+      // publishes session_closed with reason 'client_close').
+      // Reconnecting would auto-create a new session, undoing the
+      // user's delete. Other session_closed reasons (idle_timeout,
+      // last_client_detached) fall through to normal reconnect.
+      let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
         try {
@@ -768,6 +774,23 @@ export function DaemonSessionProvider({
                   }
                   setConnection((c) => ({ ...c, catchingUp: undefined }));
                 }
+
+                // session_closed with client_close during epoch replay
+                if (
+                  event.type === 'session_closed' &&
+                  (event.data as Record<string, unknown> | undefined)
+                    ?.reason === 'client_close'
+                ) {
+                  userDeletedSession = true;
+                  const closedSessionId = activeSession.sessionId;
+                  const active = activePromptsRef.current.get(closedSessionId);
+                  active?.controller.abort();
+                  activePromptsRef.current.delete(closedSessionId);
+                  session = undefined;
+                  sessionRef.current = undefined;
+                  break;
+                }
+
                 continue;
               }
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
@@ -890,6 +913,27 @@ export function DaemonSessionProvider({
                   break;
                 }
               }
+              // session_closed with reason 'client_close' means the
+              // user explicitly deleted the session. Stop the
+              // reconnect loop — without this, the next iteration
+              // would call createOrAttach and auto-create a new
+              // session, undoing the user's delete action.
+              // Other reasons (idle_timeout, last_client_detached)
+              // fall through to the normal reconnect path.
+              if (
+                event.type === 'session_closed' &&
+                (event.data as Record<string, unknown> | undefined)?.reason ===
+                  'client_close'
+              ) {
+                userDeletedSession = true;
+                const closedSessionId = activeSession.sessionId;
+                const active = activePromptsRef.current.get(closedSessionId);
+                active?.controller.abort();
+                activePromptsRef.current.delete(closedSessionId);
+                session = undefined;
+                sessionRef.current = undefined;
+                break;
+              }
             } catch (error) {
               const message =
                 error instanceof Error ? error.message : String(error);
@@ -907,6 +951,24 @@ export function DaemonSessionProvider({
                 error,
               );
             }
+          }
+          if (userDeletedSession) {
+            // Session was explicitly closed (user deleted it). Do NOT
+            // reconnect — doing so would auto-create a new session.
+            // Note: we intentionally do NOT call setRestoreSessionId(undefined)
+            // here because restoreSessionId is in the useEffect dependency
+            // array — changing it would trigger an effect re-run that could
+            // create a new session via createOrAttach.
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+            setPromptStatus('idle');
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              sessionId: undefined,
+              error: undefined,
+            }));
+            return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
             // Keep the session handle after a normal SSE close so the next

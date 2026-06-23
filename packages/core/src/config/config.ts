@@ -72,6 +72,10 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type {
+  ArtifactHostConfig,
+  ArtifactOssConfig,
+} from '../tools/artifact/publisher.js';
 import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
 
@@ -543,7 +547,7 @@ export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release' | 'npm';
+  type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
   registryUrl?: string; // Only present for npm installs.
@@ -827,6 +831,11 @@ export interface ConfigParameters {
   cronEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
+  artifactEnabled?: boolean;
+  artifactAutoOpen?: boolean;
+  artifactPublisher?: 'local' | 'host' | 'oss';
+  artifactHost?: ArtifactHostConfig;
+  artifactOss?: ArtifactOssConfig;
   /**
    * P5 T7: suppress the one-time `Workflow` tool usage-warning banner.
    * When `true`, the registry-side warning latch is bypassed and the
@@ -1274,6 +1283,11 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = true;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly artifactEnabled: boolean = false;
+  private readonly artifactAutoOpen: boolean = true;
+  private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
+  private readonly artifactHost?: ArtifactHostConfig;
+  private readonly artifactOss?: ArtifactOssConfig;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -1478,6 +1492,11 @@ export class Config {
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? true;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.artifactEnabled = params.artifactEnabled ?? false;
+    this.artifactAutoOpen = params.artifactAutoOpen ?? true;
+    this.artifactPublisher = params.artifactPublisher ?? 'local';
+    this.artifactHost = params.artifactHost;
+    this.artifactOss = params.artifactOss;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -3659,7 +3678,10 @@ export class Config {
     return this.planGateState;
   }
 
-  setApprovalMode(mode: ApprovalMode): void {
+  setApprovalMode(
+    mode: ApprovalMode,
+    options?: { enteredByModel?: boolean },
+  ): void {
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -3672,8 +3694,14 @@ export class Config {
     // Track the mode before entering plan mode so it can be restored later
     if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
       this.prePlanMode = this.approvalMode;
-      // Begin a fresh Plan Mode Entry for the Plan Approval Gate.
-      this.planGateState = createPlanGateState(++this.planGateEntryCounter);
+      // Begin a fresh Plan Mode Entry for the Plan Approval Gate. Only the
+      // model's enter_plan_mode tool marks the entry as model-initiated; every
+      // user-driven entry (Shift+Tab, /plan, dialog) defaults to false so the
+      // user always gets the confirmation dialog on exit (issue #5574).
+      this.planGateState = createPlanGateState(
+        ++this.planGateEntryCounter,
+        options?.enteredByModel ?? false,
+      );
     } else if (
       mode !== ApprovalMode.PLAN &&
       this.approvalMode === ApprovalMode.PLAN
@@ -3985,6 +4013,35 @@ export class Config {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
+  }
+
+  isArtifactEnabled(): boolean {
+    // Artifacts are experimental and opt-in. Publishing writes outside the
+    // project and opens a browser, so it is limited to interactive, non-SDK
+    // sessions. QWEN_CODE_DISABLE_ARTIFACT hard-disables;
+    // QWEN_CODE_ENABLE_ARTIFACT force-enables (still subject to the
+    // interactive/SDK gate).
+    if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
+    if (this.sdkMode || !this.interactive) return false;
+    if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
+    return this.artifactEnabled;
+  }
+
+  getArtifactPublisherKind(): 'local' | 'host' | 'oss' {
+    return this.artifactPublisher;
+  }
+
+  getArtifactHostConfig(): ArtifactHostConfig | undefined {
+    return this.artifactHost;
+  }
+
+  getArtifactOssConfig(): ArtifactOssConfig | undefined {
+    return this.artifactOss;
+  }
+
+  shouldAutoOpenArtifact(): boolean {
+    if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] === '1') return false;
+    return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
   }
 
   isWorkflowsEnabled(): boolean {
@@ -4616,6 +4673,16 @@ export class Config {
     );
   }
 
+  async reviveCompletedBackgroundAgent(
+    agentId: string,
+    initialMessage?: string,
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
+    return this.getBackgroundAgentResumeService().reviveCompletedBackgroundAgent(
+      agentId,
+      initialMessage,
+    );
+  }
+
   abandonBackgroundAgent(agentId: string): boolean {
     return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
       agentId,
@@ -4984,6 +5051,14 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    if (this.isArtifactEnabled()) {
+      await registerLazy(ToolNames.ARTIFACT, async () => {
+        const { ArtifactTool } = await import(
+          '../tools/artifact/artifact-tool.js'
+        );
+        return new ArtifactTool(this);
+      });
+    }
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');

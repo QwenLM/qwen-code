@@ -14,6 +14,7 @@ export { MigrationScheduler } from './scheduler.js';
 export { v1ToV2Migration, V1ToV2Migration } from './versions/v1-to-v2.js';
 export { v2ToV3Migration, V2ToV3Migration } from './versions/v2-to-v3.js';
 export { v3ToV4Migration, V3ToV4Migration } from './versions/v3-to-v4.js';
+export { v4ToV5Migration, V4ToV5Migration } from './versions/v4-to-v5.js';
 
 // Import settings version from single source of truth
 import { SETTINGS_VERSION } from '../settings.js';
@@ -24,6 +25,7 @@ import { SETTINGS_VERSION } from '../settings.js';
 import { v1ToV2Migration } from './versions/v1-to-v2.js';
 import { v2ToV3Migration } from './versions/v2-to-v3.js';
 import { v3ToV4Migration } from './versions/v3-to-v4.js';
+import { v4ToV5Migration } from './versions/v4-to-v5.js';
 import { MigrationScheduler } from './scheduler.js';
 import type { MigrationResult } from './types.js';
 
@@ -41,6 +43,7 @@ export const ALL_MIGRATIONS = [
   v1ToV2Migration,
   v2ToV3Migration,
   v3ToV4Migration,
+  v4ToV5Migration,
 ] as const;
 
 /**

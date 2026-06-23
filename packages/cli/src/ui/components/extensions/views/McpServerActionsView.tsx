@@ -25,17 +25,26 @@ import { getErrorMessage } from '../../../../utils/errors.js';
 import { ServerDetailStep } from '../../mcp/steps/ServerDetailStep.js';
 import { ToolListStep } from '../../mcp/steps/ToolListStep.js';
 import { ToolDetailStep } from '../../mcp/steps/ToolDetailStep.js';
+import { ResourceListStep } from '../../mcp/steps/ResourceListStep.js';
+import { ResourceDetailStep } from '../../mcp/steps/ResourceDetailStep.js';
 import { AuthenticateStep } from '../../mcp/steps/AuthenticateStep.js';
 import { isToolValid, getToolInvalidReasons } from '../../mcp/utils.js';
 import type {
   MCPServerDisplayInfo,
   MCPToolDisplayInfo,
+  MCPResourceDisplayInfo,
 } from '../../mcp/types.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
 const debugLogger = createDebugLogger('EXT_MCP_DETAIL');
 
-type SubView = 'detail' | 'tools' | 'tool-detail' | 'authenticate';
+type SubView =
+  | 'detail'
+  | 'tools'
+  | 'tool-detail'
+  | 'resources'
+  | 'resource-detail'
+  | 'authenticate';
 
 interface McpServerActionsViewProps {
   config: Config;
@@ -69,6 +78,8 @@ export const McpServerActionsView = ({
   const [selectedTool, setSelectedTool] = useState<MCPToolDisplayInfo | null>(
     null,
   );
+  const [selectedResource, setSelectedResource] =
+    useState<MCPResourceDisplayInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
   const buildServer =
@@ -236,6 +247,22 @@ export const McpServerActionsView = ({
     return out;
   }, [config, serverName]);
 
+  const getServerResources = useCallback((): MCPResourceDisplayInfo[] => {
+    const resourceRegistry = config.getResourceRegistry();
+    if (!resourceRegistry) return [];
+    return resourceRegistry
+      .getResourcesByServer(serverName)
+      .map((resource) => ({
+        uri: resource.uri,
+        name: resource.name,
+        title: resource.title,
+        description: resource.description,
+        mimeType: resource.mimeType,
+        size: resource.size,
+        serverName: resource.serverName,
+      }));
+  }, [config, serverName]);
+
   const handleReconnect = useCallback(async () => {
     try {
       await config.getToolRegistry()?.discoverToolsForServer(serverName);
@@ -366,11 +393,37 @@ export const McpServerActionsView = ({
     );
   }
 
+  if (sub === 'resource-detail') {
+    return (
+      <ResourceDetailStep
+        resource={selectedResource}
+        isActive={isActive}
+        onBack={() => setSub('resources')}
+      />
+    );
+  }
+
+  if (sub === 'resources') {
+    return (
+      <ResourceListStep
+        resources={getServerResources()}
+        serverName={serverName}
+        isActive={isActive}
+        onSelect={(resource) => {
+          setSelectedResource(resource);
+          setSub('resource-detail');
+        }}
+        onBack={() => setSub('detail')}
+      />
+    );
+  }
+
   return (
     <ServerDetailStep
       server={server}
       isActive={isActive}
       onViewTools={() => setSub('tools')}
+      onViewResources={() => setSub('resources')}
       onReconnect={() => void handleReconnect()}
       onDisable={() => void handleToggleDisable()}
       onAuthenticate={() => setSub('authenticate')}

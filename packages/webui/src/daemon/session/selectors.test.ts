@@ -221,6 +221,16 @@ describe('daemon selectors', () => {
         block({ kind: 'tool', status: 'in_progress' }),
       ]),
     ).toBe('responding');
+    expect(
+      selectDaemonTranscriptStreamingState([
+        block({ kind: 'tool', status: 'failed' }),
+      ]),
+    ).toBe('idle');
+    expect(
+      selectDaemonTranscriptStreamingState([
+        block({ kind: 'tool', status: 'completed' }),
+      ]),
+    ).toBe('idle');
   });
 
   it('falls back to prompt status when transcript is idle', () => {

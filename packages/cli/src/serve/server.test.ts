@@ -19,8 +19,11 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
-import { runQwenServe, type RunHandle } from './runQwenServe.js';
-import { resolveWebShellDir, isDocumentNavigation } from './webShellStatic.js';
+import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
+import {
+  resolveWebShellDir,
+  isDocumentNavigation,
+} from './web-shell-static.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
@@ -62,6 +65,7 @@ import {
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -76,8 +80,8 @@ import {
   type BridgeSpawnRequest,
   type AcpSessionBridge,
   type SessionMetadataUpdate,
-} from './acpSessionBridge.js';
-import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+} from './acp-session-bridge.js';
+import type { BridgeEvent, SubscribeOptions } from './event-bus.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
@@ -95,7 +99,7 @@ import type {
   ServeWorkspaceToolsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
-import type { DaemonLogger } from './daemonLogger.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 
 const baseOpts: ServeOptions = {
@@ -382,6 +386,11 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  launchSessionForkAgentImpl?: (
+    sessionId: string,
+    directive: string,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ sessionId: string; description: string; launched: boolean }>;
   setToolEnabledImpl?: (
     toolName: string,
     enabled: boolean,
@@ -550,6 +559,11 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  forkCalls: Array<{
+    sessionId: string;
+    directive: string;
     context?: BridgeClientRequestContext;
   }>;
   setToolEnabledCalls: Array<{
@@ -841,6 +855,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const forkCalls: FakeBridge['forkCalls'] = [];
+  const launchSessionForkAgentImpl =
+    opts.launchSessionForkAgentImpl ??
+    (async (sessionId: string, directive: string) => ({
+      sessionId,
+      description: directive.slice(0, 60),
+      launched: true,
+    }));
   const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
   const setToolEnabledImpl =
     opts.setToolEnabledImpl ??
@@ -963,6 +985,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    forkCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1188,6 +1211,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async generateSessionBtw(sessionId, _question, _signal, _context) {
       return { sessionId, answer: 'mock btw answer' };
     },
+    async launchSessionForkAgent(sessionId, directive, context) {
+      forkCalls.push({
+        sessionId,
+        directive,
+        ...(context ? { context } : {}),
+      });
+      return launchSessionForkAgentImpl(sessionId, directive, context);
+    },
     enqueueMidTurnMessage(sessionId, message, context) {
       enqueueMidTurnCalls.push({
         sessionId,
@@ -1273,8 +1304,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     publishWorkspaceEvent(_event) {
       // Issue #4175 PR 16 — fakeBridge default is a no-op. Tests that
       // assert on workspace fan-out override this through the dedicated
-      // route-level test files (workspaceMemory.test.ts /
-      // workspaceAgents.test.ts) where the real fan-out behavior is
+      // route-level test files (workspace-memory.test.ts /
+      // workspace-agents.test.ts) where the real fan-out behavior is
       // exercised against a live bridge.
     },
     knownClientIds() {
@@ -1935,7 +1966,7 @@ describe('createServeApp', () => {
     });
 
     it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
-      // Mirrors the env-var kill switch path: `runQwenServe.ts` infers
+      // Mirrors the env-var kill switch path: `run-qwen-serve.ts` infers
       // `mcpPoolActive: false` when the parent process has
       // `QWEN_SERVE_NO_MCP_POOL=1`. Verify the capability envelope
       // tracks the toggle so SDK clients pre-flighting on the tags
@@ -6090,6 +6121,94 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/fork', () => {
+    it('202 with directive and client identity on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        description: 'review the current code',
+        launched: true,
+      });
+      expect(bridge.forkCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          directive: 'review the current code',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('400 when directive is missing or empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const missing = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('missing_directive');
+
+      const empty = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: '   ' });
+      expect(empty.status).toBe(400);
+      expect(empty.body.code).toBe('missing_directive');
+      expect(bridge.forkCalls).toEqual([]);
+    });
+
+    it('404 when bridge throws SessionNotFoundError', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/missing/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('409 when bridge reports the session is busy', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionBusyError(
+            sessionId,
+            'Cannot fork while a response or tool call is in progress',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_busy',
+        sessionId: 'session-A',
+      });
+      expect(res.headers['retry-after']).toBe('5');
     });
   });
 
@@ -10436,7 +10555,7 @@ describe('auth device-flow routes', () => {
   // whose `poll` is scripted per-test. Lives at the top of the suite so
   // every `it()` can compose it with the registry.
   function makeFakeProvider(): {
-    provider: import('./auth/deviceFlow.js').DeviceFlowProvider;
+    provider: import('./auth/device-flow.js').DeviceFlowProvider;
     startCount: () => number;
   } {
     let starts = 0;
@@ -10449,10 +10568,10 @@ describe('auth device-flow routes', () => {
             deviceCode:
               // Use the brandSecret helper so the secret follows the same
               // redaction shape the production provider produces.
-              (await import('./auth/deviceFlow.js')).brandSecret(
+              (await import('./auth/device-flow.js')).brandSecret(
                 `device-${starts}`,
               ),
-            pkceVerifier: (await import('./auth/deviceFlow.js')).brandSecret(
+            pkceVerifier: (await import('./auth/device-flow.js')).brandSecret(
               `pkce-${starts}`,
             ),
             userCode: `USER-${starts}`,
@@ -10935,16 +11054,17 @@ describe('auth device-flow routes', () => {
     // must surface as 502 with code:'upstream_error' instead of falling
     // through `sendBridgeError`'s generic 500 path. Build a fake
     // provider whose start always throws.
-    const { UpstreamDeviceFlowError } = await import('./auth/deviceFlow.js');
-    const failingProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
-      providerId: 'qwen-oauth',
-      async start() {
-        throw new UpstreamDeviceFlowError('mocked upstream outage');
-      },
-      async poll() {
-        return { kind: 'pending' as const };
-      },
-    };
+    const { UpstreamDeviceFlowError } = await import('./auth/device-flow.js');
+    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider =
+      {
+        providerId: 'qwen-oauth',
+        async start() {
+          throw new UpstreamDeviceFlowError('mocked upstream outage');
+        },
+        async poll() {
+          return { kind: 'pending' as const };
+        },
+      };
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
       bridge,
@@ -10964,9 +11084,9 @@ describe('auth device-flow routes', () => {
     // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
     // injected registry with a controlled clock + manual sweeper trigger.
     const { DeviceFlowRegistry, brandSecret } = await import(
-      './auth/deviceFlow.js'
+      './auth/device-flow.js'
     );
-    const fakeProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+    const fakeProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
       providerId: 'qwen-oauth',
       async start() {
         return {
@@ -11067,7 +11187,7 @@ describe('auth device-flow routes', () => {
   it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
     // Inject a fake registry whose `start` always throws the cap error.
     const { TooManyActiveDeviceFlowsError } = await import(
-      './auth/deviceFlow.js'
+      './auth/device-flow.js'
     );
     const fakeRegistry = {
       start: async () => {
@@ -11077,7 +11197,7 @@ describe('auth device-flow routes', () => {
       cancel: () => undefined,
       listPending: () => [],
       dispose: () => {},
-    } as unknown as import('./auth/deviceFlow.js').DeviceFlowRegistry;
+    } as unknown as import('./auth/device-flow.js').DeviceFlowRegistry;
 
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
@@ -12112,7 +12232,7 @@ describe('sendBridgeError daemonLog routing', () => {
   it('routes 5xx errors through daemonLog when provided', async () => {
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'daemon-log-'));
     const stderrLines: string[] = [];
-    const { initDaemonLogger } = await import('./daemonLogger.js');
+    const { initDaemonLogger } = await import('./daemon-logger.js');
     const daemonLog = initDaemonLogger({
       boundWorkspace: '/w',
       pid: 1,

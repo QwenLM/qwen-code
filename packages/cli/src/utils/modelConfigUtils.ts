@@ -102,7 +102,7 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
 
   if (
     process.env['OPENAI_API_KEY'] &&
-    process.env['OPENAI_MODEL'] &&
+    (process.env['OPENAI_MODEL'] || process.env['QWEN_MODEL']) &&
     process.env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;
@@ -184,8 +184,9 @@ export function resolveCliGenerationConfig(
   let modelProvider: ProviderModelConfig | undefined;
   let disambiguationWarning: string | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
-    const providers = settings.modelProviders[authType];
-    if (providers && Array.isArray(providers)) {
+    const providerConfig = settings.modelProviders[authType];
+    if (providerConfig && providerConfig.models) {
+      const providers = providerConfig.models;
       // When multiple providers share the same id, disambiguate by the
       // persisted settings.model.baseUrl (written by the model picker). This
       // only applies when the model itself came from settings.model.name.

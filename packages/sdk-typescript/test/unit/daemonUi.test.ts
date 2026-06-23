@@ -1164,6 +1164,117 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect((malformed[0] as { text: string }).text).not.toContain('secret');
   });
 
+  it('normalizes session branch events as structured sidechannel events', () => {
+    const events = normalizeDaemonEvent({
+      id: 59,
+      v: 1,
+      type: 'session_branched',
+      data: {
+        sourceSessionId: '9976ed52-1bd3-48cd-b8dc-0f045009ad7d',
+        newSessionId: '7497af5d-b62f-42f4-82d7-6f2a81daf439',
+        displayName: 'support-branch-new3 (Branch 2)',
+      },
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.branched',
+        sourceSessionId: '9976ed52-1bd3-48cd-b8dc-0f045009ad7d',
+        newSessionId: '7497af5d-b62f-42f4-82d7-6f2a81daf439',
+        displayName: 'support-branch-new3 (Branch 2)',
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+    expect(state.blocks).toEqual([
+      expect.objectContaining({
+        kind: 'status',
+        source: 'session_branched',
+        data: {
+          sourceSessionId: '9976ed52-1bd3-48cd-b8dc-0f045009ad7d',
+          newSessionId: '7497af5d-b62f-42f4-82d7-6f2a81daf439',
+          displayName: 'support-branch-new3 (Branch 2)',
+        },
+      }),
+    ]);
+  });
+
+  it('rewinds to the last user turn when targetTurnIndex is out of range', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'first', { now: 2 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer one' }],
+      { now: 3 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'second', { now: 4 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer two' }],
+      { now: 5 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'session.rewound',
+          promptId: 'prompt-2',
+          targetTurnIndex: 99,
+        },
+      ],
+      { now: 6 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: 'first' },
+      { kind: 'assistant', text: 'answer one' },
+    ]);
+  });
+
+  it('rewinds to an exact user turn index', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'first', { now: 2 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer one' }],
+      { now: 3 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'second', { now: 4 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer two' }],
+      { now: 5 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'third', { now: 6 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer three' }],
+      { now: 7 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'session.rewound',
+          promptId: 'prompt-2',
+          targetTurnIndex: 1,
+        },
+      ],
+      { now: 8 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: 'first' },
+      { kind: 'assistant', text: 'answer one' },
+    ]);
+  });
+
   it('normalizes plan session updates as visible tool blocks', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),

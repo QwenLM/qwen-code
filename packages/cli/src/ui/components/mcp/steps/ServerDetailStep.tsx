@@ -23,6 +23,7 @@ const LABEL_WIDTH = 15;
 
 type ServerAction =
   | 'view-tools'
+  | 'view-resources'
   | 'reconnect'
   | 'toggle-disable'
   | 'authenticate'
@@ -31,6 +32,7 @@ type ServerAction =
 export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   server,
   onViewTools,
+  onViewResources,
   onReconnect,
   onDisable,
   onAuthenticate,
@@ -72,6 +74,22 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       });
     }
 
+    // 只在调用方接入了 onViewResources 回调、且服务器未禁用并有资源时显示
+    // "查看资源"。onViewResources 是可选 prop：像扩展管理器（McpServerActionsView）
+    // 这类同样复用 ServerDetailStep 的调用方，若未接入资源子视图就不应出现一个
+    // 点了没反应的死操作。
+    if (
+      onViewResources &&
+      !server.isDisabled &&
+      (server.resourceCount ?? 0) > 0
+    ) {
+      result.push({
+        key: 'view-resources',
+        label: t('View resources'),
+        value: 'view-resources',
+      });
+    }
+
     // 只在服务器未禁用且已断开连接时显示"重新连接"选项
     if (!server.isDisabled && server.status === 'disconnected') {
       result.push({
@@ -107,7 +125,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
     }
 
     return result;
-  }, [server]);
+  }, [server, onViewResources]);
 
   useKeypress(
     (key) => {
@@ -263,6 +281,9 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
             switch (value) {
               case 'view-tools':
                 onViewTools();
+                break;
+              case 'view-resources':
+                onViewResources?.();
                 break;
               case 'reconnect':
                 onReconnect?.();

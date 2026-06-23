@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import { stat } from 'node:fs/promises';
-import { parseGitHubRepoForReleases } from './github.js';
+import { isSupportedArchiveUrl, parseGitHubRepoForReleases } from './github.js';
 import { isScopedNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
@@ -383,6 +383,12 @@ export async function parseInstallSource(
 
     // Try to read marketplace config from local path
     marketplaceConfig = await readLocalMarketplaceConfig(repo);
+  } else if (isSupportedArchiveUrl(repo)) {
+    installMetadata = {
+      source: repoSource,
+      type: 'archive-url',
+      pluginName,
+    };
   } else if (isGitUrl(repo)) {
     // Priority 2: Git URL (http://, https://, git@, sso://)
     installMetadata = {

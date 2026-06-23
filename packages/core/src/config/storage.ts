@@ -351,6 +351,47 @@ export class Storage {
   }
 
   /**
+   * Project-level saved-workflow scripts directory: `<targetDir>/.qwen/workflows`.
+   * Saved workflow scripts (`<name>.js`) here are surfaced as slash commands
+   * and resolvable by `workflow('<name>')` from inside a running workflow.
+   */
+  getProjectWorkflowsDir(): string {
+    return path.join(this.getQwenDir(), 'workflows');
+  }
+
+  /**
+   * User-level saved-workflow scripts directory: `~/.qwen/workflows`. User
+   * scope is lower-precedence than project scope when the same `<name>.js`
+   * exists in both.
+   */
+  static getUserWorkflowsDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'workflows');
+  }
+
+  /**
+   * Per-run workflow artifact directory: `<projectDir>/workflows`. Holds
+   * completed-run snapshot JSON files (`<runId>.json`) for the `/workflows`
+   * recent list, and per-run resume journals (`<runId>/journal.jsonl`).
+   */
+  getWorkflowRunsDir(): string {
+    return path.join(this.getProjectDir(), 'workflows');
+  }
+
+  /**
+   * Path to the persisted snapshot of a completed workflow run.
+   */
+  getWorkflowRunSnapshotPath(runId: string): string {
+    return path.join(this.getWorkflowRunsDir(), `${runId}.json`);
+  }
+
+  /**
+   * Path to the resume journal for an in-progress / resumable workflow run.
+   */
+  getWorkflowRunJournalPath(runId: string): string {
+    return path.join(this.getWorkflowRunsDir(), runId, 'journal.jsonl');
+  }
+
+  /**
    * Path to the runtime-status sidecar JSON for this session.
    *
    * Co-located with the per-session chat log under

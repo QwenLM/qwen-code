@@ -3,9 +3,8 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
-import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { renderWithProviders } from '../../test-utils/render.js';
 import { SessionPreview } from './SessionPreview.js';
 
 beforeEach(() => {
@@ -83,32 +82,28 @@ function fakeResumedData(
 describe('SessionPreview', () => {
   it('shows loading state before data arrives', () => {
     const svc = mockService(new Promise(() => {})); // never resolves
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <SessionPreview
-          sessionService={svc}
-          sessionId="s1"
-          sessionTitle="My session"
-          onExit={vi.fn()}
-          onResume={vi.fn()}
-        />
-      </KeypressProvider>,
+    const { lastFrame } = renderWithProviders(
+      <SessionPreview
+        sessionService={svc}
+        sessionId="s1"
+        sessionTitle="My session"
+        onExit={vi.fn()}
+        onResume={vi.fn()}
+      />,
     );
     expect(lastFrame()).toContain('Loading session preview');
   });
 
   it('renders all messages after load', async () => {
     const svc = mockService(fakeResumedData());
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <SessionPreview
-          sessionService={svc}
-          sessionId="s1"
-          sessionTitle="My session"
-          onExit={vi.fn()}
-          onResume={vi.fn()}
-        />
-      </KeypressProvider>,
+    const { lastFrame } = renderWithProviders(
+      <SessionPreview
+        sessionService={svc}
+        sessionId="s1"
+        sessionTitle="My session"
+        onExit={vi.fn()}
+        onResume={vi.fn()}
+      />,
     );
     await wait(100);
     const frame = lastFrame() ?? '';
@@ -127,16 +122,14 @@ describe('SessionPreview', () => {
         { text: 'FINAL-ANSWER-MARKER' },
       ]),
     );
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <SessionPreview
-          sessionService={svc}
-          sessionId="s1"
-          sessionTitle="My session"
-          onExit={vi.fn()}
-          onResume={vi.fn()}
-        />
-      </KeypressProvider>,
+    const { lastFrame } = renderWithProviders(
+      <SessionPreview
+        sessionService={svc}
+        sessionId="s1"
+        sessionTitle="My session"
+        onExit={vi.fn()}
+        onResume={vi.fn()}
+      />,
     );
     await wait(100);
     const frame = lastFrame() ?? '';
@@ -151,19 +144,17 @@ describe('SessionPreview', () => {
 
   it('renders footer metadata (messageCount · time · branch)', async () => {
     const svc = mockService(fakeResumedData());
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <SessionPreview
-          sessionService={svc}
-          sessionId="s1"
-          sessionTitle="My session"
-          messageCount={42}
-          mtime={Date.now() - 60_000}
-          gitBranch="feat/preview"
-          onExit={vi.fn()}
-          onResume={vi.fn()}
-        />
-      </KeypressProvider>,
+    const { lastFrame } = renderWithProviders(
+      <SessionPreview
+        sessionService={svc}
+        sessionId="s1"
+        sessionTitle="My session"
+        messageCount={42}
+        mtime={Date.now() - 60_000}
+        gitBranch="feat/preview"
+        onExit={vi.fn()}
+        onResume={vi.fn()}
+      />,
     );
     await wait(100);
     const frame = lastFrame() ?? '';
@@ -176,16 +167,14 @@ describe('SessionPreview', () => {
     // through to SessionPreview. The footer must still show a count, derived
     // from the loaded ResumedSessionData using unique user/assistant UUIDs.
     const svc = mockService(fakeResumedData());
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <SessionPreview
-          sessionService={svc}
-          sessionId="s1"
-          sessionTitle="My session"
-          onExit={vi.fn()}
-          onResume={vi.fn()}
-        />
-      </KeypressProvider>,
+    const { lastFrame } = renderWithProviders(
+      <SessionPreview
+        sessionService={svc}
+        sessionId="s1"
+        sessionTitle="My session"
+        onExit={vi.fn()}
+        onResume={vi.fn()}
+      />,
     );
     await wait(100);
     const frame = lastFrame() ?? '';
@@ -196,16 +185,14 @@ describe('SessionPreview', () => {
   it('calls onExit when Escape is pressed', async () => {
     const onExit = vi.fn();
     const svc = mockService(fakeResumedData());
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <SessionPreview
-          sessionService={svc}
-          sessionId="s1"
-          sessionTitle="My session"
-          onExit={onExit}
-          onResume={vi.fn()}
-        />
-      </KeypressProvider>,
+    const { stdin } = renderWithProviders(
+      <SessionPreview
+        sessionService={svc}
+        sessionId="s1"
+        sessionTitle="My session"
+        onExit={onExit}
+        onResume={vi.fn()}
+      />,
     );
     await wait(100);
     stdin.write('\u001B'); // ESC
@@ -216,16 +203,14 @@ describe('SessionPreview', () => {
   it('calls onResume(sessionId) when Enter is pressed', async () => {
     const onResume = vi.fn();
     const svc = mockService(fakeResumedData());
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <SessionPreview
-          sessionService={svc}
-          sessionId="s1"
-          sessionTitle="My session"
-          onExit={vi.fn()}
-          onResume={onResume}
-        />
-      </KeypressProvider>,
+    const { stdin } = renderWithProviders(
+      <SessionPreview
+        sessionService={svc}
+        sessionId="s1"
+        sessionTitle="My session"
+        onExit={vi.fn()}
+        onResume={onResume}
+      />,
     );
     await wait(100);
     stdin.write('\r'); // Enter

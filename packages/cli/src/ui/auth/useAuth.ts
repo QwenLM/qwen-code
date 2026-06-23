@@ -237,7 +237,7 @@ export const useAuthCommand = (
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
     ];
-    if (val && !valid.includes(val as AuthType)) {
+    if (val && !(valid as string[]).includes(val)) {
       onAuthError(
         t(
           'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}',

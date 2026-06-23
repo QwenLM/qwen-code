@@ -101,6 +101,15 @@ interface MockClient {
   getWorkspaceAgent: () => Promise<unknown>;
   createWorkspaceAgent: () => Promise<unknown>;
   deleteWorkspaceAgent: () => Promise<void>;
+  branchSession: (
+    sessionId: string,
+    req: { name?: string },
+    clientId?: string,
+  ) => Promise<{
+    sessionId: string;
+    displayName: string;
+    clientId?: string;
+  }>;
 }
 
 const sdkMocks = vi.hoisted(() => {
@@ -123,6 +132,7 @@ const sdkMocks = vi.hoisted(() => {
   const getWorkspaceAgent = vi.fn();
   const createWorkspaceAgent = vi.fn();
   const deleteWorkspaceAgent = vi.fn();
+  const branchSession = vi.fn();
 
   class MockDaemonClient {
     constructor(_opts: unknown) {}
@@ -145,6 +155,7 @@ const sdkMocks = vi.hoisted(() => {
     getWorkspaceAgent = getWorkspaceAgent;
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
+    branchSession = branchSession;
     dispose = vi.fn();
   }
 
@@ -176,6 +187,7 @@ const sdkMocks = vi.hoisted(() => {
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
+    branchSession,
     reset() {
       sessions.length = 0;
       capabilities.mockReset();
@@ -251,6 +263,12 @@ const sdkMocks = vi.hoisted(() => {
       createWorkspaceAgent.mockResolvedValue({ ok: true });
       deleteWorkspaceAgent.mockReset();
       deleteWorkspaceAgent.mockResolvedValue(undefined);
+      branchSession.mockReset();
+      branchSession.mockResolvedValue({
+        sessionId: 'branch-session',
+        displayName: 'Branch Session',
+        clientId: 'branch-client',
+      });
       MockDaemonSessionClient.createOrAttach.mockReset();
       MockDaemonSessionClient.createOrAttach.mockImplementation(
         async (client: unknown, _req: unknown): Promise<MockSession> =>
@@ -2626,6 +2644,54 @@ describe('DaemonSessionProvider', () => {
     expect(loadCalls[1]?.[3]).toBe('client-a');
   });
 
+  it('reuses the branched session client when switching after branch', async () => {
+    window.sessionStorage.clear();
+    const sourceSession = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+    });
+    const branchedSession = createMockSession({
+      sessionId: 'session-b',
+      clientId: 'client-b',
+    });
+    sdkMocks.branchSession.mockResolvedValue({
+      sessionId: 'session-b',
+      displayName: 'Branch 1',
+      clientId: 'client-b',
+    });
+    sdkMocks.sessions.push(sourceSession, branchedSession);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const branch = requireActions(actions).branchSession('Branch 1');
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+    await expect(branch).resolves.toEqual({
+      sessionId: 'session-b',
+      displayName: 'Branch 1',
+    });
+
+    expect(sdkMocks.branchSession).toHaveBeenCalledWith(
+      'session-a',
+      { name: 'Branch 1' },
+      'client-a',
+    );
+    const loadCalls = sdkMocks.MockDaemonSessionClient.load.mock.calls;
+    expect(loadCalls[0]?.[1]).toBe('session-b');
+    expect(loadCalls[0]?.[3]).toBe('client-b');
+  });
+
   it('exposes daemon capabilities on the connection state', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,
@@ -4337,6 +4403,309 @@ describe('DaemonSessionProvider', () => {
         code: 'daemon.session_died',
       },
     ]);
+  });
+
+  it('stops reconnect loop on session_closed (user deleted session) even when autoReconnect is true', async () => {
+    // When the user deletes a running session, the server publishes
+    // session_closed on SSE. The provider must NOT auto-reconnect and
+    // create a new session — that would undo the user's delete action.
+    const session = createMockSession({
+      events: async function* sessionClosedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_closed',
+          data: { reason: 'client_close' },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    await act(async () => {
+      await flushPromises();
+    });
+    // Give any potential reconnect timer a window to fire and
+    // React state updates to flush.
+    await act(async () => {
+      await wait(100);
+      await flushPromises();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // createOrAttach called exactly once (initial), never again.
+    // This proves the reconnect loop stopped and no new session was
+    // auto-created after the user deleted the running one.
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    // Connection should be disconnected with no sessionId.
+    expect(connection?.status).toBe('disconnected');
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
+  it('aborts in-flight prompt when session_closed arrives mid-stream', async () => {
+    // Exercises the most complex new code path: session_closed with
+    // reason 'client_close' arriving while a prompt is actively streaming.
+    // Verifies the abort path fires, the prompt rejects, and no
+    // auto-recreate happens.
+    const promptBlocked = createDeferred<void>();
+    const session = createMockSession({
+      prompt: vi.fn(
+        (_req: unknown, signal?: AbortSignal) =>
+          new Promise<PromptResult>((_resolve, reject) => {
+            signal?.addEventListener(
+              'abort',
+              () => reject(createAbortError()),
+              {
+                once: true,
+              },
+            );
+            promptBlocked.resolve();
+          }),
+      ),
+      events: async function* midStreamCloseEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        // Wait for the prompt to start, then yield session_closed
+        await promptBlocked.promise;
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_closed',
+          data: { reason: 'client_close' },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let actions: DaemonUiSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    let promptStatus: string | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    const providerActions = requireActions(actions);
+
+    // Fire a prompt — it will block until abort
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('long task');
+      await flushPromises();
+    });
+
+    // Wait for the session_closed event to arrive and be processed
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await wait(100);
+      await flushPromises();
+    });
+
+    // The prompt should have been aborted
+    await expect(promptResult).resolves.toEqual({ stopReason: 'cancelled' });
+    // createOrAttach called exactly once — no auto-recreate
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    expect(connection?.status).toBe('disconnected');
+    expect(connection?.sessionId).toBeUndefined();
+    // Teardown set promptStatus to 'idle' — without the explicit
+    // setPromptStatus('idle') in the userDeletedSession block, this
+    // would remain 'waiting' (sendPrompt's own handler is blocked
+    // because sessionRef.current was cleared before the catch runs).
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('stops reconnect on session_closed during epoch replay', async () => {
+    // Verifies the epoch replay path also handles session_closed
+    // with client_close correctly. If the user deletes a session
+    // while epoch replay is in progress, the provider must still
+    // exit the reconnect loop instead of auto-recreating.
+    const epochResetDelivered = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* epochReplayThenClose(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        // Trigger epoch reset
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'epoch_reset',
+            lastDeliveredId: 50,
+            earliestAvailableId: 1,
+          },
+        };
+        epochResetDelivered.resolve();
+        // During replay, send session_closed with client_close
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_closed',
+          data: { reason: 'client_close' },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    await act(async () => {
+      await epochResetDelivered.promise;
+      await flushPromises();
+    });
+
+    // Give any potential reconnect timer a window to fire
+    await act(async () => {
+      await wait(100);
+      await flushPromises();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // createOrAttach called exactly once — no auto-recreate
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    expect(connection?.status).toBe('disconnected');
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
+  it.each(['idle_timeout', 'last_client_detached'] as const)(
+    'does NOT stop reconnect on session_closed with reason "%s"',
+    async (reason) => {
+      // session_closed with idle_timeout or last_client_detached should
+      // NOT prevent reconnection — these are server-initiated closes,
+      // not user deletions. The provider should preserve the session
+      // handle and attempt to resume on the next iteration.
+      const session = createMockSession({
+        events: async function* nonClientCloseEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_closed',
+            data: { reason },
+          };
+          if (opts.signal?.aborted) return;
+        },
+      });
+      sdkMocks.sessions.push(session);
+
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+
+      await act(async () => {
+        await flushPromises();
+      });
+      await act(async () => {
+        await wait(50);
+        await flushPromises();
+      });
+
+      // Connection should still have the original sessionId — the
+      // provider did NOT exit the loop, it preserved the session
+      // for delta resume.
+      expect(connection?.sessionId).toBe('session-1');
+    },
+  );
+
+  it('does NOT stop reconnect on session_closed without reason field', async () => {
+    // Defensive: if the server sends session_closed without a reason
+    // field (older daemon versions), treat it as non-client_close and
+    // let the normal reconnect path handle it.
+    const session = createMockSession({
+      events: async function* noReasonEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_closed',
+          data: {},
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    // Session preserved — not treated as user deletion.
+    expect(connection?.sessionId).toBe('session-1');
   });
 
   it('routes stream_error to notices with connection category', async () => {

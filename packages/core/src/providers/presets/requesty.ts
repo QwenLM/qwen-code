@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const REQUESTY_ENV_KEY = 'REQUESTY_API_KEY';
@@ -15,7 +15,7 @@ export const requestyProvider: ProviderConfig = {
   label: 'Requesty',
   description:
     'Connect with a Requesty API key (get one from app.requesty.ai/api-keys)',
-  protocol: AuthType.USE_OPENAI,
+  protocol: Protocol.OPENAI,
   baseUrl: REQUESTY_BASE_URL,
   envKey: REQUESTY_ENV_KEY,
   models: [
@@ -25,10 +25,6 @@ export const requestyProvider: ProviderConfig = {
   modelsEditable: true,
   modelNamePrefix: 'Requesty',
   ownsModel: (model) => {
-    // A user who manually added a Requesty-routed model under a custom
-    // envKey (e.g. their own gateway) shouldn't have their entry silently
-    // removed on re-install — require BOTH the hostname *and* our envKey to
-    // claim ownership.
     if (model.envKey !== REQUESTY_ENV_KEY) return false;
     try {
       const host = new URL(model.baseUrl ?? '').hostname;
@@ -36,6 +32,10 @@ export const requestyProvider: ProviderConfig = {
     } catch {
       return false;
     }
+  },
+  customHeaders: {
+    'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+    'X-Title': 'Qwen Code',
   },
   documentationUrl: 'https://docs.requesty.ai',
   uiGroup: 'third-party',

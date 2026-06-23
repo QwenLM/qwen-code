@@ -9,17 +9,26 @@ import { useState, useCallback } from 'react';
 interface UseModelCommandReturn {
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
-  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  isVoiceModelMode: boolean;
+  openModelDialog: (options?: {
+    fastModelMode?: boolean;
+    voiceModelMode?: boolean;
+  }) => void;
   closeModelDialog: () => void;
 }
 
 export const useModelCommand = (): UseModelCommandReturn => {
   const [isModelDialogOpen, setIsModelDialogOpen] = useState(false);
   const [isFastModelMode, setIsFastModelMode] = useState(false);
+  const [isVoiceModelMode, setIsVoiceModelMode] = useState(false);
 
   const openModelDialog = useCallback(
-    (options?: { fastModelMode?: boolean }) => {
-      setIsFastModelMode(options?.fastModelMode ?? false);
+    (options?: { fastModelMode?: boolean; voiceModelMode?: boolean }) => {
+      const voiceModelMode = options?.voiceModelMode ?? false;
+      setIsFastModelMode(
+        voiceModelMode ? false : (options?.fastModelMode ?? false),
+      );
+      setIsVoiceModelMode(voiceModelMode);
       setIsModelDialogOpen(true);
     },
     [],
@@ -28,11 +37,13 @@ export const useModelCommand = (): UseModelCommandReturn => {
   const closeModelDialog = useCallback(() => {
     setIsModelDialogOpen(false);
     setIsFastModelMode(false);
+    setIsVoiceModelMode(false);
   }, []);
 
   return {
     isModelDialogOpen,
     isFastModelMode,
+    isVoiceModelMode,
     openModelDialog,
     closeModelDialog,
   };

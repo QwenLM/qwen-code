@@ -179,6 +179,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'voice-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'skills_manage'
@@ -279,9 +280,9 @@ export type CommandSource =
   | 'bundled-skill' // BundledSkillLoader
   | 'skill-dir-command' // FileCommandLoader (user/project, no extensionName)
   | 'plugin-command' // FileCommandLoader (extension, extensionName set)
-  | 'mcp-prompt'; // McpPromptLoader
+  | 'mcp-prompt' // McpPromptLoader
+  | 'workflow-command'; // SavedWorkflowLoader (.qwen/workflows/<name>.js)
 // Reserved for future loaders (not implemented in Phase 1):
-// | 'workflow-command'
 // | 'plugin-skill'
 // | 'dynamic-skill'
 

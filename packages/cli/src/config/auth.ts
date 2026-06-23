@@ -41,8 +41,13 @@ function findModelConfig(
     return undefined;
   }
 
-  const models = modelProviders[authType];
-  if (!Array.isArray(models)) {
+  const entry = modelProviders[authType];
+  const models = Array.isArray(entry)
+    ? entry
+    : typeof entry === 'object' && entry !== null && Array.isArray(entry.models)
+      ? entry.models
+      : undefined;
+  if (!models) {
     return undefined;
   }
 

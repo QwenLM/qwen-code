@@ -242,7 +242,7 @@ describe('useQwenAuth', () => {
         useQwenAuth(pendingAuthType, isAuthenticating),
       {
         initialProps: {
-          pendingAuthType: AuthType.QWEN_OAUTH,
+          pendingAuthType: AuthType.QWEN_OAUTH as AuthType,
           isAuthenticating: true,
         },
       },
@@ -313,7 +313,7 @@ describe('useQwenAuth', () => {
         useQwenAuth(pendingAuthType, isAuthenticating),
       {
         initialProps: {
-          pendingAuthType: AuthType.QWEN_OAUTH,
+          pendingAuthType: AuthType.QWEN_OAUTH as AuthType,
           isAuthenticating: true,
         },
       },

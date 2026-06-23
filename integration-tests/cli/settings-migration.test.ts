@@ -27,18 +27,16 @@ const {
   v3GitCoAuthorBooleanSettings,
 } = workspacesSettings;
 
+const CURRENT_SETTINGS_VERSION = 5;
+
 /**
- * Integration tests for settings migration chain (V1 -> V2 -> V3 -> V4)
+ * Integration tests for settings migration chain.
  *
  * These tests verify that:
- * 1. V1 settings are automatically migrated to V4 on CLI startup
- * 2. V2 settings are automatically migrated to V4 on CLI startup
- * 3. V3 settings are automatically migrated to V4 on CLI startup
+ * 1. V1 settings are automatically migrated to current settings on CLI startup
+ * 2. V2 settings are automatically migrated to current settings on CLI startup
+ * 3. V3 settings are automatically migrated to current settings on CLI startup
  * 4. Migration is idempotent (running multiple times produces same result)
- *
- * The numeric assertions use the literal `4` to match
- * `SETTINGS_VERSION`; bump that constant and the literal together
- * when adding a future migration.
  */
 describe('settings-migration', () => {
   let rig: TestRig;
@@ -99,8 +97,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Verify migration to V4 (current SETTINGS_VERSION)
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(migratedSettings['ui']).toEqual({
         theme: 'dark',
         hideTips: false,
@@ -142,7 +139,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(migratedSettings['tools']).toEqual({ autoAccept: false });
       expect(migratedSettings['context']).toEqual({ includeDirectories: [] });
       expect(migratedSettings['model']).toEqual({ name: ['gemini', 'claude'] });
@@ -166,8 +163,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Should be migrated to V4
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       // Legacy string values for ui/general should be preserved as-is (user data)
       expect(migratedSettings['ui']).toBe('legacy-ui-string');
       expect(migratedSettings['general']).toBe('legacy-general-string');
@@ -194,7 +190,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(migratedSettings['model']).toEqual({ name: 'qwen-plus' });
       expect(migratedSettings['ui']).toEqual({
         hideWindowTitle: true,
@@ -230,8 +226,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Verify migration to V4 (current SETTINGS_VERSION)
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
 
       // Verify disable* -> enable* conversion with inversion
       expect(
@@ -307,8 +302,7 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Should be updated to V4 version
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       // Other settings should remain unchanged
       expect(migratedSettings['ui']).toEqual({ theme: 'dark' });
       expect(migratedSettings['model']).toEqual({ name: 'gemini' });
@@ -335,7 +329,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Version metadata should still be normalized to current version
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       // Existing user content should be preserved
       expect(migratedSettings['customOnlyKey']).toBe('value');
     });
@@ -377,7 +371,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Coercible strings are migrated; invalid disable* values are removed.
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(migratedSettings['general']).toEqual({
         enableAutoUpdate: false,
       });
@@ -442,7 +436,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(4);
+      expect(migratedSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       // Migration converts disable* to enable* by inverting the value
       // disableAutoUpdate: false -> enableAutoUpdate: true (inverted)
       // But disableUpdateNag: true may affect the consolidation
@@ -509,7 +503,7 @@ describe('settings-migration', () => {
       // V3 → V4 migration bumps the version; V3→V4 only touches
       // general.gitCoAuthor, so unrelated legacy disable* keys remain as-is
       // (V2→V3 ran on original V3 load, not re-applied here).
-      expect(finalSettings['$version']).toBe(4);
+      expect(finalSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(
         (finalSettings['general'] as Record<string, unknown>)?.[
           'disableAutoUpdate'
@@ -563,7 +557,7 @@ describe('settings-migration', () => {
 
       const finalSettings = readSettingsFile(rig);
 
-      expect(finalSettings['$version']).toBe(4);
+      expect(finalSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(
         (finalSettings['general'] as Record<string, unknown>)?.['gitCoAuthor'],
       ).toEqual({ commit: false, pr: false });
