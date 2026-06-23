@@ -11,7 +11,7 @@
  * Implements browser automation tools for the MCP protocol
  */
 
-import type { BrowserToolArgs } from './native-messaging-types';
+import type { BrowserToolArgs } from './browser-tool-types';
 
 /* global chrome */
 

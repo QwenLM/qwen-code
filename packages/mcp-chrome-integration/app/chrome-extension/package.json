@@ -13,7 +13,6 @@
     "qwen",
     "cli",
     "bridge",
-    "native-messaging",
     "mcp",
     "ai"
   ],
@@ -22,7 +21,6 @@
   "type": "module",
   "files": [
     "public/",
-    "native-host/",
     "README.md"
   ],
   "scripts": {
@@ -34,14 +32,9 @@
     "build:ui": "EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js",
     "build:ui:watch": "EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js --watch",
     "build": "EXTENSION_OUT_DIR=dist/extension npm run clean && EXTENSION_OUT_DIR=dist/extension node scripts/sync-extension.js && EXTENSION_OUT_DIR=dist/extension node config/esbuild.background.config.js --production && EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js --production",
-    "install:extension": "./scripts/first-install.sh",
-    "install:host": "cd native-host && ./scripts/smart-install.sh",
-    "install:all": "./scripts/first-install.sh",
-    "update:host": "cd native-host && ./scripts/update-host-config.sh",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",
     "package": "npm run build && cd dist && zip -r ../chrome-extension.zip extension/",
-    "clean": "./scripts/clean.sh",
-    "logs": "tail -f $HOME/.qwen/chrome-bridge/qwen-bridge-host.log"
+    "clean": "./scripts/clean.sh"
   },
   "engines": {
     "node": ">=22.0.0"

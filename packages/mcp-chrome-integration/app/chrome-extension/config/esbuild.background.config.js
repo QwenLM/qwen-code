@@ -29,7 +29,6 @@ function resolveEntry(relativePathWithoutExt) {
 
 const entryPoints = [
   resolveEntry('src/background/service-worker'),
-  resolveEntry('src/background/native-messaging'),
   resolveEntry('src/content/content-script'),
 ];
 

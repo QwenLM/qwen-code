@@ -23,7 +23,7 @@ import type {
   RawNetworkRequest,
   WebSocketSession,
   NetworkCaptureState,
-} from './native-messaging-types';
+} from './browser-tool-types';
 
 /* global chrome, console, setTimeout */
 

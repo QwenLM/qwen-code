@@ -58,7 +58,6 @@ async function main() {
     ]),
     startProcess('node', ['config/esbuild.background.config.js', '--watch']),
     startProcess('node', ['config/esbuild.config.js', '--watch']),
-    startProcess('npm', ['--prefix', 'native-host', 'run', 'dev']),
   ];
 
   // 优雅退出
