@@ -89,8 +89,8 @@ jobs:
       - name: 'Verify runner environment'
         run: |-
           $ErrorActionPreference = 'Stop'
-          whoami
-          whoami /priv
+          & "$env:SystemRoot\System32\whoami.exe"
+          & "$env:SystemRoot\System32\whoami.exe" /priv
 
           if ($env:QWEN_CODE_LANG -ne 'en') {
             throw "Expected QWEN_CODE_LANG=en, got '$env:QWEN_CODE_LANG'"
@@ -158,8 +158,8 @@ jobs:
       - name: 'Verify runner environment'
         run: |-
           $ErrorActionPreference = 'Stop'
-          whoami
-          whoami /priv
+          & "$env:SystemRoot\System32\whoami.exe"
+          & "$env:SystemRoot\System32\whoami.exe" /priv
 
           if ($env:QWEN_CODE_LANG -ne 'en') {
             throw "Expected QWEN_CODE_LANG=en, got '$env:QWEN_CODE_LANG'"
