@@ -96,7 +96,7 @@ jobs:
     runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
     defaults:
       run:
-        shell: 'C:\Program Files\Git\bin\bash.exe --noprofile --norc -e -o pipefail {0}'
+        shell: 'powershell'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -106,22 +106,20 @@ jobs:
 
       - name: 'Verify runner tools'
         run: |-
-          set -euo pipefail
-          echo "RUNNER_NAME=${RUNNER_NAME}"
-          echo "RUNNER_OS=${RUNNER_OS}"
-          echo "RUNNER_ARCH=${RUNNER_ARCH}"
-          echo "RUNNER_TEMP=${RUNNER_TEMP}"
-          echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE}"
+          $ErrorActionPreference = 'Stop'
+          Write-Host "RUNNER_NAME=$env:RUNNER_NAME"
+          Write-Host "RUNNER_OS=$env:RUNNER_OS"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          Write-Host "RUNNER_TEMP=$env:RUNNER_TEMP"
+          Write-Host "RUNNER_WORKSPACE=$env:RUNNER_WORKSPACE"
 
-          command -v bash
-          bash --version | head -1
-          command -v git
+          where.exe git
           git --version
-          command -v node
+          where.exe node
           node --version
-          command -v npm
+          where.exe npm
           npm --version
-          command -v qwen
+          where.exe qwen
           qwen --version
 
       - name: 'Configure npm for rate limiting'
