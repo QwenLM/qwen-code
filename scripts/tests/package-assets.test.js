@@ -201,6 +201,37 @@ describe('package asset scripts', () => {
     ).toThrow(/Required audio capture package artifact not found at/);
   });
 
+  it('fails packaging when required audio-capture runtime output is empty', () => {
+    const rootDir = createFixtureRoot();
+    rmSync(path.join(rootDir, 'packages', 'audio-capture', 'dist', 'index.js'));
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: true }),
+    ).toThrow(/Required audio capture package artifact has no runtime JS/);
+  });
+
+  it('fails packaging when required audio-capture prebuilds are empty', () => {
+    const rootDir = createFixtureRoot();
+    rmSync(
+      path.join(
+        rootDir,
+        'packages',
+        'audio-capture',
+        'prebuilds',
+        'darwin-arm64',
+        '@qwen-code+audio-capture.node',
+      ),
+    );
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: true }),
+    ).toThrow(/Required audio capture package artifact has no native prebuild/);
+  });
+
   it('omits bundledDependencies when audio-capture dependencies are missing and not required', () => {
     const rootDir = createFixtureRoot();
     const audioPackagePath = path.join(

@@ -169,6 +169,32 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
       return false;
     }
   }
+  for (const [artifactPath, description, predicate] of [
+    [
+      path.join(addonSrc, 'dist'),
+      'runtime JS',
+      (filePath) =>
+        /\.[cm]?js$/.test(filePath) &&
+        !/\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/.test(filePath),
+    ],
+    [
+      path.join(addonSrc, 'prebuilds'),
+      'native prebuild',
+      (filePath) => filePath.endsWith('.node'),
+    ],
+  ]) {
+    if (!hasFileMatching(artifactPath, predicate)) {
+      const message = `audio capture package artifact has no ${description}: ${artifactPath}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return false;
+    }
+  }
 
   const addonPkg = JSON.parse(
     fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
@@ -229,6 +255,18 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
 
   console.log('Copied native audio capture package');
   return true;
+}
+
+function hasFileMatching(dir, predicate) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (hasFileMatching(entryPath, predicate)) return true;
+    } else if (entry.isFile() && predicate(entryPath)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function writeDistPackageJson(
