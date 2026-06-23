@@ -1,8 +1,8 @@
-# Fix Conflicts Command Design
+# Resolve Command Design
 
 ## Goal
 
-Add a maintainer-triggered `@qwen-code /fix_conflicts` command for pull requests that are blocked by merge conflicts with the default branch.
+Add a maintainer-triggered `@qwen-code /resolve` command for pull requests that are blocked by merge conflicts with the default branch.
 
 ## Scope
 

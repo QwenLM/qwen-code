@@ -1,4 +1,4 @@
-name: 'Qwen Fix Conflicts'
+name: 'Qwen Resolve'
 
 on:
   issue_comment:
@@ -29,9 +29,9 @@ jobs:
         (github.event_name == 'issue_comment' &&
          github.event.issue.pull_request &&
          github.event.issue.state == 'open' &&
-         (github.event.comment.body == '@qwen-code /fix_conflicts' ||
-          startsWith(github.event.comment.body, '@qwen-code /fix_conflicts ') ||
-          startsWith(github.event.comment.body, format('@qwen-code /fix_conflicts{0}', '\n'))))
+         (github.event.comment.body == '@qwen-code /resolve' ||
+          startsWith(github.event.comment.body, '@qwen-code /resolve ') ||
+          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', '\n'))))
       )
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
@@ -201,7 +201,7 @@ jobs:
           git fetch origin "+refs/heads/${head_ref}:refs/remotes/origin/${head_ref}" "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
           actual_sha="$(git rev-parse "origin/${head_ref}")"
           if [ "$actual_sha" != "$head_sha" ]; then
-            finish_without_agent failed "PR #${PR_NUMBER} moved while preparing (expected ${head_sha}, got ${actual_sha}). Re-run /fix_conflicts."
+            finish_without_agent failed "PR #${PR_NUMBER} moved while preparing (expected ${head_sha}, got ${actual_sha}). Re-run /resolve."
           fi
 
           git checkout -B "qwen-fix-conflicts/pr-${PR_NUMBER}" "origin/${head_ref}"
