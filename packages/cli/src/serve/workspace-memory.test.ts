@@ -23,7 +23,7 @@ import { createMutationGate } from './auth.js';
 import {
   InvalidClientIdError,
   type AcpSessionBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import type { BridgeEvent } from './event-bus.js';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
 

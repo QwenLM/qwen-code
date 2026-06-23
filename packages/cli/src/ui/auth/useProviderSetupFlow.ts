@@ -6,13 +6,14 @@
 
 import { useState, useCallback } from 'react';
 import {
-  AuthType,
+  Protocol,
   shouldShowStep,
   resolveBaseUrl,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
 } from '@qwen-code/qwen-code-core';
 import type {
+  AuthType,
   InputModalities,
   ProviderConfig,
   ProviderSetupInputs,
@@ -59,7 +60,7 @@ export interface ProviderSetupState {
   totalSteps: number;
 
   // Protocol (for custom provider)
-  protocol: AuthType;
+  protocol: Protocol;
 
   // BaseUrl
   baseUrl: string;
@@ -103,7 +104,7 @@ export function useProviderSetupFlow(
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
   const [stepIndex, setStepIndex] = useState(0);
 
-  const [protocol, setProtocol] = useState<AuthType>(AuthType.USE_OPENAI);
+  const [protocol, setProtocol] = useState<Protocol>(Protocol.OPENAI);
   const [baseUrl, setBaseUrl] = useState('');
   const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
   const [baseUrlOptionIndex, setBaseUrlOptionIndex] = useState(0);
@@ -128,7 +129,7 @@ export function useProviderSetupFlow(
   const start = useCallback(
     (
       config: ProviderConfig,
-      initialProtocol?: AuthType,
+      initialProtocol?: Protocol,
       existingEnv?: Record<string, string>,
     ) => {
       setProvider(config);
@@ -197,11 +198,12 @@ export function useProviderSetupFlow(
 
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
-      setProtocol(selectedProtocol);
+      const proto = selectedProtocol as Protocol;
+      setProtocol(proto);
       // Clear baseUrl so the user types fresh; show the protocol's default
       // endpoint as a placeholder (used if they submit blank).
       setBaseUrl('');
-      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
+      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(proto));
       setApiKey('');
       setApiKeyError(null);
       goNext();

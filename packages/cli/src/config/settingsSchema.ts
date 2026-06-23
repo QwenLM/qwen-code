@@ -298,7 +298,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {} as ModelProvidersConfig,
     description:
-      'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
+      'Model providers configuration grouped by authType. Each authType maps to a ProviderConfig object with protocol and models fields.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },
@@ -746,6 +746,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description: 'Hide the window title bar',
         showInDialog: false,
+      },
+      disableWorkflowKeywordTrigger: {
+        type: 'boolean',
+        label: 'Disable Workflow Keyword Trigger',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+        showInDialog: true,
       },
       showStatusInTitle: {
         type: 'boolean',

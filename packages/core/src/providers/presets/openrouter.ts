@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
@@ -15,7 +15,7 @@ export const openRouterProvider: ProviderConfig = {
   label: 'OpenRouter',
   description:
     'Connect with an OpenRouter API key (get one from openrouter.ai/keys)',
-  protocol: AuthType.USE_OPENAI,
+  protocol: Protocol.OPENAI,
   baseUrl: OPENROUTER_BASE_URL,
   envKey: OPENROUTER_ENV_KEY,
   models: [

@@ -5,13 +5,13 @@
  */
 
 import type { ServeProtocolVersions } from './capabilities.js';
-import type { AcpHttpHandle } from './acpHttp/index.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
-import type { DaemonLogger } from './daemonLogger.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';

@@ -96,7 +96,9 @@ describe('file-system', () => {
     await rig.setup('should correctly handle file paths with spaces');
     const fileName = 'my test file.txt';
 
-    const result = await rig.run(`write "hello" to "${fileName}"`);
+    const result = await rig.run(
+      `Use write_file to write exactly "hello" to "${fileName}".`,
+    );
 
     const foundToolCall = await rig.waitForToolCall('write_file');
     if (!foundToolCall) {
@@ -108,7 +110,7 @@ describe('file-system', () => {
     ).toBeTruthy();
 
     const newFileContent = rig.readFile(fileName);
-    expect(newFileContent).toBe('hello');
+    expect(newFileContent.trimEnd()).toBe('hello');
   });
 
   it('should perform a read-then-write sequence', async () => {

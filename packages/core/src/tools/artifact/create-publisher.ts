@@ -11,9 +11,9 @@ import { HostPublisher } from './host-publisher.js';
 import { OssPublisher } from './oss-publisher.js';
 
 /**
- * Selects the artifact publisher from config: `oss` (option C, native Aliyun
- * OSS), `host` (option C, upload via a user command), or `local` (option B,
- * file:// on disk; the default). A misconfigured `host`/`oss` selection still
+ * Selects the artifact publisher from config: `oss` (native Aliyun OSS),
+ * `host` (upload via a user command), or `local` (file:// on disk, the
+ * default). A misconfigured `host`/`oss` selection still
  * returns the publisher, which throws an actionable error at publish time
  * rather than silently falling back.
  */

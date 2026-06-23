@@ -4911,6 +4911,45 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('arrow Down focuses the background-tasks pill when only the pill is shown (workflow-only session)', async () => {
+      // Branch 3 of descendFromComposer: no Arena roster (agents empty) and no
+      // live bg-agent panel, but a workflow run keeps the background-tasks pill
+      // on screen. ↓ from the empty composer must focus the pill so the run's
+      // detail/save dialog stays reachable — without this branch a
+      // workflow-only session could never open it.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+
+      const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+      await wait();
+
+      stdin.write('[B'); // Down arrow at the bottom edge
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('Down at the bottom of the live agent panel descends to the agent tab bar', async () => {
       // Restores tab-bar reachability after the priority swap: from the panel's
       // last row, Down hands focus to the tab bar (the surface below it).

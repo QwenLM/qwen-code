@@ -1003,11 +1003,11 @@ export class SessionService {
   /**
    * Forks a session to a new sessionId.
    *
-   * Reads the source JSONL into memory, rewrites every record's `sessionId`
-   * to `newSessionId`, stamps `cwd` to this service's project root, rebuilds
-   * the `parentUuid` chain in write order so the fork is a linear
-   * continuation, stamps `forkedFrom: { sessionId, messageUuid }` on every
-   * copied record for audit, and writes the result to `<newId>.jsonl`.
+   * Reads the source JSONL into memory, reconstructs the active record chain,
+   * rewrites every record's `sessionId` to `newSessionId`, stamps `cwd` to this
+   * service's project root, rebuilds the `parentUuid` chain so the fork is a
+   * linear continuation, stamps `forkedFrom: { sessionId, messageUuid }` on
+   * every copied record for audit, and writes the result to `<newId>.jsonl`.
    *
    * Mirrors Claude Code's `/branch` storage model: full in-memory copy + per-
    * message forkedFrom (see claude-code/src/commands/branch/branch.ts).
@@ -1049,10 +1049,18 @@ export class SessionService {
       );
     }
 
-    // Rebuild the parentUuid chain in write order so the fork is a clean
-    // linear descendant. `forkedFrom` captures the origin of each message.
+    // Copy only the active branch. Rewind leaves old records in the JSONL as
+    // abandoned parentUuid branches; copying raw records would resurrect them.
+    const sourceRecords = this.reconstructHistory(records);
+    if (sourceRecords.length === 0) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+
+    // Rebuild the parentUuid chain in active-history order so the fork is a
+    // clean linear descendant. `forkedFrom` captures the origin of each
+    // message.
     let prevUuid: string | null = null;
-    const forked: ChatRecord[] = records.map((record) => {
+    const forked: ChatRecord[] = sourceRecords.map((record) => {
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,

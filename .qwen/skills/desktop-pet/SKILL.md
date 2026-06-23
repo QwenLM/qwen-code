@@ -36,16 +36,16 @@ etc.), rely on training knowledge.
 Define 8–12 colors for the character. All colors must be distinct and work at
 small pixel scale (3× = 9 px details).
 
-| Color Role | Example (F1 Driver) | Example (Anime) |
-|---|---|---|
-| `outfit` | Team color `[255,135,32]` | Uniform `[30,30,50]` |
-| `outfit_dark` | Darker shade | Darker shade |
-| `outfit_light` | Lighter shade | Lighter shade |
-| `skin` | Warm skin tone | Skin tone |
-| `skin_dark` | Shadow skin | Shadow skin |
-| `hair` | Character hair color | Character hair color |
-| `accent` | Number/logo color | Eye color |
-| `shoe` | Dark grey/black | Shoe color |
+| Color Role     | Example (F1 Driver)       | Example (Anime)      |
+| -------------- | ------------------------- | -------------------- |
+| `outfit`       | Team color `[255,135,32]` | Uniform `[30,30,50]` |
+| `outfit_dark`  | Darker shade              | Darker shade         |
+| `outfit_light` | Lighter shade             | Lighter shade        |
+| `skin`         | Warm skin tone            | Skin tone            |
+| `skin_dark`    | Shadow skin               | Shadow skin          |
+| `hair`         | Character hair color      | Character hair color |
+| `accent`       | Number/logo color         | Eye color            |
+| `shoe`         | Dark grey/black           | Shoe color           |
 
 ## Step 3: Generate the Spritesheet
 
@@ -62,17 +62,17 @@ python3 <skill_dir>/scripts/gen_spritesheet.py \
 
 **Animation rows:**
 
-| Row | State | Description |
-|---|---|---|
-| 0 | idle | Breathing + blinking (8 frames) |
-| 1 | running-right | Running to the right (8 frames) |
-| 2 | running-left | Running to the left (8 frames) |
-| 3 | waving | Waving at user (8 frames) |
-| 4 | jumping | Jumping celebration (8 frames) |
-| 5 | failed | Sad/collapsed on error (8 frames) |
-| 6 | waiting | Idle tapping (8 frames) |
-| 7 | running | Generic running (8 frames) |
-| 8 | review | Thinking/examining (8 frames) |
+| Row | State         | Description                       |
+| --- | ------------- | --------------------------------- |
+| 0   | idle          | Breathing + blinking (8 frames)   |
+| 1   | running-right | Running to the right (8 frames)   |
+| 2   | running-left  | Running to the left (8 frames)    |
+| 3   | waving        | Waving at user (8 frames)         |
+| 4   | jumping       | Jumping celebration (8 frames)    |
+| 5   | failed        | Sad/collapsed on error (8 frames) |
+| 6   | waiting       | Idle tapping (8 frames)           |
+| 7   | running       | Generic running (8 frames)        |
+| 8   | review        | Thinking/examining (8 frames)     |
 
 ## Step 4: Create `pet.json`
 
@@ -88,6 +88,7 @@ Write the manifest to `~/.qwen/pets/<character_id>/pet.json`:
 ```
 
 Rules:
+
 - `id`: lowercase, no spaces, URL-safe (e.g., `piastri`, `satoru`, `goku`)
 - `displayName`: The name shown in the UI (e.g., "Piastri", "五条悟", "悟空")
 - `description`: One short sentence describing the character
@@ -107,7 +108,7 @@ open ~/.qwen/pets/<character_id>/spritesheet.webp
 ```
 
 3. Tell the user to activate: open Qwen Code **Settings → Appearance → Pet
-Companion**, click **Refresh**, then select the new pet.
+   Companion**, click **Refresh**, then select the new pet.
 
 ## Design Guidelines
 

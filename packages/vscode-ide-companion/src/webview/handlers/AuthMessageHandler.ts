@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import type { Protocol } from '@qwen-code/qwen-code-core';
 import {
   ALL_PROVIDERS,
   ALIBABA_PROVIDERS,
@@ -240,7 +241,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       provider.uiLabels?.flowTitle ?? `Qwen Code: ${provider.label}`;
 
     // Step 0: Protocol (only for providers offering multiple, e.g. custom)
-    let protocol: AuthType | undefined;
+    let protocol: Protocol | undefined;
     if (
       shouldShowStep(provider, 'protocol') &&
       provider.protocolOptions &&
@@ -262,7 +263,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         'Select API protocol',
       );
       if (!selected) return;
-      protocol = selected as AuthType;
+      protocol = selected as Protocol;
     }
 
     // Step 1: Base URL (if needed)

@@ -14,7 +14,7 @@
       "additionalProperties": true
     },
     "modelProviders": {
-      "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
+      "description": "Model providers configuration grouped by authType. Each authType maps to a ProviderConfig object with protocol and models fields.",
       "type": "object",
       "additionalProperties": true
     },
@@ -235,6 +235,11 @@
         },
         "hideWindowTitle": {
           "description": "Hide the window title bar",
+          "type": "boolean",
+          "default": false
+        },
+        "disableWorkflowKeywordTrigger": {
+          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
           "type": "boolean",
           "default": false
         },
@@ -2767,7 +2772,7 @@
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",
-      "default": 4
+      "default": 5
     }
   },
   "additionalProperties": true

@@ -20,7 +20,7 @@ import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   type AcpSessionBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -43,15 +43,17 @@ import {
   getDefaultModelIds,
   resolveTelemetrySettings,
   shutdownTelemetry,
-  type AuthType,
-  type ProviderSetupInputs,
-  type TelemetryRuntimeConfig,
-  type TelemetrySettings,
+} from '@qwen-code/qwen-code-core';
+import type {
+  Protocol,
+  ProviderSetupInputs,
+  TelemetryRuntimeConfig,
+  TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { isLoopbackBind } from './loopback-binds.js';
-import { resolveWebShellDir } from './webShellStatic.js';
+import { resolveWebShellDir } from './web-shell-static.js';
 import { parseAllowOriginPatterns } from './auth.js';
 import {
   createPermissionAuditPublisher,
@@ -62,7 +64,7 @@ import {
   getActiveSseCount,
   resolveBridgeFsFactory,
 } from './server.js';
-import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
+import { initDaemonLogger, type DaemonLogger } from './daemon-logger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
@@ -75,7 +77,7 @@ import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
-import type { AcpHttpHandle } from './acpHttp/index.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
@@ -386,7 +388,7 @@ function buildProviderSetupInputs(
   req: ServeAuthProviderInstallRequest,
   provider: NonNullable<ReturnType<typeof findProviderById>>,
 ): ProviderSetupInputs {
-  const protocol = (req.protocol ?? provider.protocol) as AuthType;
+  const protocol = (req.protocol ?? provider.protocol) as Protocol;
   const baseUrl = resolveBaseUrl(provider, req.baseUrl);
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
