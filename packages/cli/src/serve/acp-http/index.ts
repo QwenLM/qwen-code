@@ -79,6 +79,22 @@ export interface MountAcpHttpOptions {
   sessionShellCommandEnabled?: boolean;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
+  /**
+   * Additional non-ACP WebSocket routes (e.g. `/voice/stream`) that reuse this
+   * upgrade listener's security checks. Matched paths skip the ACP init flow.
+   */
+  extraWsRoutes?: readonly ExtraWsRoute[];
+}
+
+/**
+ * A non-ACP WebSocket route that shares the daemon's single upgrade listener
+ * (and therefore its loopback / host-allowlist / CSRF / bearer-token checks)
+ * instead of attaching a second `'upgrade'` listener — the ACP listener
+ * `socket.destroy()`s unknown paths, so a competing listener can't coexist.
+ */
+export interface ExtraWsRoute {
+  path: string;
+  onConnection: (ws: WebSocket, req: IncomingMessage) => void;
 }
 
 export interface AcpHttpHandle {
@@ -444,7 +460,10 @@ export function mountAcpHttp(
         socket.destroy();
         return;
       }
-      if (url.pathname !== path) {
+      const extraRoute = opts.extraWsRoutes?.find(
+        (route) => route.path === url.pathname,
+      );
+      if (url.pathname !== path && !extraRoute) {
         socket.destroy();
         return;
       }
@@ -527,6 +546,12 @@ export function mountAcpHttp(
       }
 
       wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+        // Non-ACP routes (e.g. voice) own their own protocol — hand the
+        // upgraded socket off and skip the ACP initialize handshake.
+        if (extraRoute) {
+          extraRoute.onConnection(ws, req);
+          return;
+        }
         let initialized = false;
         const initTimer = setTimeout(() => {
           if (!initialized) {

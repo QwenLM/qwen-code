@@ -223,6 +223,9 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
+  // Baseline (always advertised) — presence means the `/voice/stream`
+  // endpoint exists; the WS errors if no voice model is configured.
+  'voice_transcribe',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -256,7 +259,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
-      f !== 'session_branch',
+      f !== 'session_branch' &&
+      f !== 'voice_transcribe',
   ),
   'workspace_settings',
   'workspace_init',
@@ -281,6 +285,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'voice_transcribe',
 ] as const;
 
 interface FakeBridgeOpts {

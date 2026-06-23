@@ -70,6 +70,7 @@ import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
+import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
   buildDaemonStatusResponse,
   parseDaemonStatusDetail,
@@ -4725,6 +4726,15 @@ export function createServeApp(
     token: opts.token,
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
+    // Browser captures audio and streams raw PCM here; the daemon transcribes
+    // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
+    // listener's loopback/CSRF/bearer checks.
+    extraWsRoutes: [
+      {
+        path: '/voice/stream',
+        onConnection: createVoiceWsConnectionHandler(boundWorkspace),
+      },
+    ],
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;

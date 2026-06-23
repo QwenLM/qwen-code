@@ -6,12 +6,20 @@ import styles from './ModelMessage.module.css';
 
 export const MODEL_ACTIVE_EVENT = 'web-shell:model-panel-active';
 
-export type ModelInlineMode = 'main' | 'fast';
+export type ModelInlineMode = 'main' | 'fast' | 'voice';
 
 interface ModelMessageProps {
   mode?: ModelInlineMode;
   onSelect: (modelId: string) => void;
   onClose: () => void;
+  /**
+   * Explicit model list (voice mode). Voice models are hidden from the session
+   * model list, so the picker is fed them from `/workspace/providers`. When
+   * omitted, the live session models are used (main/fast).
+   */
+  models?: ModelMessageModel[];
+  /** Current selection highlight when not driven by the live session model. */
+  currentModelId?: string;
 }
 
 interface ModelMessageModel {
@@ -95,12 +103,14 @@ export function ModelMessage({
   mode = 'main',
   onSelect,
   onClose,
+  models,
+  currentModelId,
 }: ModelMessageProps) {
   const connection = useConnection();
-  const currentModel = connection.currentModel ?? '';
+  const currentModel = currentModelId ?? connection.currentModel ?? '';
   const availableModels = useMemo(
-    () => (connection.models ?? []) as ModelMessageModel[],
-    [connection.models],
+    () => models ?? ((connection.models ?? []) as ModelMessageModel[]),
+    [models, connection.models],
   );
   const { t } = useI18n();
   const panelIdRef = useRef(`model-${Math.random().toString(36).slice(2)}`);
@@ -111,6 +121,12 @@ export function ModelMessage({
     onCloseRef.current = onClose;
   }, [onClose]);
   const isFastMode = mode === 'fast';
+  const titleText =
+    mode === 'fast'
+      ? t('model.setFast')
+      : mode === 'voice'
+        ? t('model.setVoice')
+        : t('model.select');
   const [selectedIdx, setSelectedIdx] = useState(() => {
     const idx = availableModels.findIndex((m) => m.id === currentModel);
     return idx >= 0 ? idx : 0;
@@ -218,16 +234,14 @@ export function ModelMessage({
   return (
     <div ref={panelRef} className={styles.panel}>
       <div className={styles.header}>
-        <span className={styles.title}>
-          {isFastMode ? t('model.setFast') : t('model.select')}
-        </span>
+        <span className={styles.title}>{titleText}</span>
       </div>
 
       <div
         className={styles.list}
         ref={listRef}
         role="listbox"
-        aria-label={isFastMode ? t('model.setFast') : t('model.select')}
+        aria-label={titleText}
       >
         {availableModels.length === 0 ? (
           <div className={styles.empty}>{t('model.none')}</div>

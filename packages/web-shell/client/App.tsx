@@ -31,6 +31,8 @@ import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
+import { VoiceButton } from './voice/VoiceButton';
+import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
@@ -1003,6 +1005,7 @@ export function App({
 
   const [modelInlineMode, setModelInlineMode] =
     useState<ModelInlineMode | null>(null);
+  const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [approvalModeInlineOpen, setApprovalModeInlineOpen] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -1518,6 +1521,12 @@ export function App({
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
+  const currentVoiceModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'voiceModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
@@ -2149,6 +2158,26 @@ export function App({
               if (promptBlocked) return enqueuePrompt(text, images);
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --fast'),
+              );
+              return true;
+            }
+            if (modelArg === '--voice') {
+              store.appendLocalUserMessage(text);
+              workspaceActions
+                .loadProviders()
+                .then((status) => {
+                  setVoiceModels(extractVoiceModels(status));
+                  setModelInlineMode('voice');
+                })
+                .catch((error: unknown) =>
+                  reportError(error, t('model.setVoice')),
+                );
+              return true;
+            }
+            if (modelArg.startsWith('--voice ')) {
+              if (promptBlocked) return enqueuePrompt(text, images);
+              sendPrompt(text, images).catch((error: unknown) =>
+                reportError(error, 'Failed to send /model --voice'),
               );
               return true;
             }
@@ -2978,6 +3007,20 @@ export function App({
     [sendPrompt, streamingState, reportError],
   );
 
+  // Persist via the prompt channel (like `/model --fast`): the daemon's command
+  // processor writes `voiceModel` to settings. The `/workspace/settings` route
+  // is token-gated, but browser voice runs on loopback-no-token — so this is
+  // the path that actually works there. The daemon's /voice/stream reads it back.
+  const handleVoiceModelSelect = useCallback(
+    (modelId: string) => {
+      if (streamingState !== 'idle') return;
+      sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
+        reportError(error, t('model.setVoice'));
+      });
+    },
+    [sendPrompt, streamingState, reportError, t],
+  );
+
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
     return mergeCommands(connection.commands ?? [], getLocalCommands(t))
@@ -3177,9 +3220,17 @@ export function App({
                               onSelect={
                                 modelInlineMode === 'fast'
                                   ? handleFastModelSelect
-                                  : handleModelSelect
+                                  : modelInlineMode === 'voice'
+                                    ? handleVoiceModelSelect
+                                    : handleModelSelect
                               }
                               onClose={() => setModelInlineMode(null)}
+                              {...(modelInlineMode === 'voice'
+                                ? {
+                                    models: voiceModels,
+                                    currentModelId: currentVoiceModel,
+                                  }
+                                : {})}
                             />
                           )}
                           {agentsInlineMode && (
@@ -3280,7 +3331,7 @@ export function App({
               </div>
             )}
             {!shouldHideComposer && (
-              <div className={styles.composer}>
+              <div className={styles.composer} style={{ position: 'relative' }}>
                 <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
                 <Editor
                   ref={setEditorHandle}
@@ -3311,6 +3362,26 @@ export function App({
                         : t('editor.placeholder')
                   }
                 />
+                <div
+                  style={{
+                    position: 'absolute',
+                    right: 10,
+                    bottom: 10,
+                    zIndex: 5,
+                  }}
+                >
+                  <VoiceButton
+                    disabled={isDisabled}
+                    onInsert={(text) => {
+                      const handle = editorRef.current;
+                      if (!handle) return;
+                      const existing = handle.getText();
+                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+                      handle.insertText(`${sep}${text} `);
+                      handle.focus();
+                    }}
+                  />
+                </div>
               </div>
             )}
             {tasksPanelMessage && (

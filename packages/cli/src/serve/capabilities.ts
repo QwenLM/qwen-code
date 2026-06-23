@@ -230,6 +230,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
+  // streams raw PCM, the daemon transcribes server-side via the configured
+  // `voiceModel` (credentials never reach the client). Advertised
+  // UNCONDITIONALLY (like `auth_device_flow`): presence means the endpoint
+  // exists, not that a voice model is configured. The WS returns an `error`
+  // frame when no transcribable `voiceModel` is set, so clients probe by
+  // connecting rather than reading ambient settings into `/capabilities` (which
+  // would make the envelope depend on the user's home config). `modes`
+  // enumerates the two transcription paths (realtime vs. on-stop batch).
+  voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
