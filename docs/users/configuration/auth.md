@@ -1,6 +1,6 @@
 # Authentication
 
-Qwen Code supports four authentication methods. Pick the one that matches how you want to run the CLI:
+Qwen Code supports three authentication methods. Pick the one that matches how you want to run the CLI:
 
 - **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. **Free tier discontinued on 2026-04-15** — switch to another method.
 - **Alibaba Cloud Coding Plan**: use an API key from Alibaba Cloud. Paid subscription with diverse model options and higher quotas.

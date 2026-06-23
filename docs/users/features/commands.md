@@ -90,7 +90,7 @@ Commands for managing AI tools and models.
 | → `explore`      | Open extensions page in browser               | `/extensions explore`                         |
 | → `install`      | Install an extension from a git repo or path  | `/extensions install <repo-or-path>`          |
 | `/import-config` | Import MCP servers from Claude configs        | `/import-config`                              |
-| `/workflows`     | List active and completed workflow runs       | `/workflows`                                  |
+| `/workflows`     | List active and completed workflow runs       | `/workflows`, `/workflows <runId>`            |
 | `/memory`        | Open the Memory Manager dialog                | `/memory`                                     |
 | `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
 | `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |

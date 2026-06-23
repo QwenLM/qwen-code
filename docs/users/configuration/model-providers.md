@@ -218,7 +218,8 @@ Vertex AI uses the Google GenAI SDK with Vertex-specific environment variables. 
 ```json
 {
   "env": {
-    "GOOGLE_API_KEY": "your-vertex-api-key"
+    "GOOGLE_API_KEY": "your-vertex-api-key",
+    "GOOGLE_MODEL": "gemini-2.5-pro"
   },
   "modelProviders": {
     "vertex-ai": [
