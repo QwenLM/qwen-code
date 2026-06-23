@@ -772,6 +772,14 @@ export interface ServeAppDeps {
     key: string,
     value: unknown,
   ) => Promise<void>;
+  persistSettings?: (
+    workspace: string,
+    writes: Array<{
+      scope: import('../config/settings.js').SettingScope;
+      key: string;
+      value: unknown;
+    }>,
+  ) => Promise<void>;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
@@ -2588,9 +2596,9 @@ export function createServeApp(
     mutate,
     safeBody,
     persistSetting: deps.persistSetting,
+    persistSettings: deps.persistSettings,
     transcribe: deps.voiceTranscriber,
     broadcastSettingsChanged,
-    parseClientId: parseClientIdHeader,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, bridge),
   });

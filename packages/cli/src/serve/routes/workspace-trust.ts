@@ -7,9 +7,8 @@
 import type { Application, Request, Response } from 'express';
 import { FatalConfigError } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-
-const MAX_TRUST_REASON_LENGTH = 1024;
 
 export interface WorkspaceTrustRouteDeps {
   boundWorkspace: string;

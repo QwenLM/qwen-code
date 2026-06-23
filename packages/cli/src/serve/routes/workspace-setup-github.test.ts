@@ -219,6 +219,52 @@ describe('POST /workspace/setup-github', () => {
     ).rejects.toBeDefined();
   });
 
+  it('rejects a directory that becomes a symlink before mkdir completes', async () => {
+    const realMkdir = fsp.mkdir;
+    const target = path.join(h.scratch, 'symlink-target');
+    const githubDir = path.join(h.workspace, '.github');
+    const mkdirSpy = vi
+      .spyOn(fsp, 'mkdir')
+      .mockImplementation(
+        async (
+          input: Parameters<typeof fsp.mkdir>[0],
+          options?: Parameters<typeof fsp.mkdir>[1],
+        ) => {
+          if (String(input) === githubDir) {
+            await realMkdir(target, { recursive: true });
+            await fsp.symlink(target, githubDir);
+            throw Object.assign(new Error('already exists'), {
+              code: 'EEXIST',
+            });
+          }
+          return realMkdir(input, options);
+        },
+      );
+    setupGithubMocks.setupGithub.mockImplementationOnce(
+      async (opts: {
+        fileOps: {
+          ensureWorkflowDirectory(gitRepoRoot: string): Promise<void>;
+        };
+      }) => {
+        await opts.fileOps.ensureWorkflowDirectory(h.workspace);
+        return setupResult();
+      },
+    );
+
+    try {
+      const res = await request(h.app)
+        .post('/workspace/setup-github')
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ consent: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('github_setup_invalid_workspace');
+    } finally {
+      mkdirSpy.mockRestore();
+    }
+  });
+
   it('maps release lookup failure to 502', async () => {
     setupGithubMocks.setupGithub.mockRejectedValueOnce(
       new setupGithubMocks.SetupGithubError(

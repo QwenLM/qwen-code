@@ -222,6 +222,7 @@ describe('workspace voice routes', () => {
   it('POST broadcasts settings_changed for persisted voice settings', async () => {
     await writeVoiceModelSettings(h);
     const broadcastSettingsChanged = vi.fn();
+    const persistSettings = vi.fn(async () => {});
     const app = express();
     app.use(express.json({ limit: '10mb' }));
     registerWorkspaceVoiceRoutes(app, {
@@ -230,8 +231,8 @@ describe('workspace voice routes', () => {
         next(),
       safeBody: (req) => req.body as Record<string, unknown>,
       persistSetting: h.persistSetting,
+      persistSettings,
       broadcastSettingsChanged,
-      parseClientId: vi.fn(),
       parseAndValidateClientId: vi.fn(() => 'client-1'),
       transcribe: h.transcribe,
     });
@@ -244,6 +245,29 @@ describe('workspace voice routes', () => {
     });
 
     expect(res.status).toBe(200);
+    expect(h.persistSetting).not.toHaveBeenCalled();
+    expect(persistSettings).toHaveBeenCalledWith(h.workspace, [
+      {
+        scope: SettingScope.User,
+        key: 'voiceModel',
+        value: 'qwen3-asr-flash',
+      },
+      {
+        scope: SettingScope.User,
+        key: 'general.voice.mode',
+        value: 'hold',
+      },
+      {
+        scope: SettingScope.User,
+        key: 'general.voice.language',
+        value: 'english',
+      },
+      {
+        scope: SettingScope.User,
+        key: 'general.voice.enabled',
+        value: true,
+      },
+    ]);
     expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
       1,
       'voiceModel',
@@ -463,7 +487,6 @@ describe('workspace voice routes', () => {
       safeBody: () => ({}),
       persistSetting: h.persistSetting,
       broadcastSettingsChanged: vi.fn(),
-      parseClientId: vi.fn(),
       parseAndValidateClientId: vi.fn(),
       transcribe: h.transcribe,
     });
@@ -472,14 +495,13 @@ describe('workspace voice routes', () => {
     expect(mutate).toHaveBeenNthCalledWith(2);
   });
 
-  it('POST /workspace/voice/transcribe does not require a registered client id', async () => {
+  it('POST /workspace/voice/transcribe accepts omitted client id', async () => {
     await writeVoiceModelSettings(h);
 
     const res = await request(h.app)
       .post('/workspace/voice/transcribe')
       .set('Host', hostHeader)
       .set('Authorization', 'Bearer secret')
-      .set('X-Qwen-Client-Id', 'detached-client')
       .set('Content-Type', 'application/octet-stream')
       .send(Buffer.from([9]));
 
@@ -490,6 +512,22 @@ describe('workspace voice routes', () => {
         mimeType: 'application/octet-stream',
       }),
     );
+  });
+
+  it('POST /workspace/voice/transcribe rejects unknown client id', async () => {
+    await writeVoiceModelSettings(h);
+
+    const res = await request(h.app)
+      .post('/workspace/voice/transcribe')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .set('X-Qwen-Client-Id', 'detached-client')
+      .set('Content-Type', 'application/octet-stream')
+      .send(Buffer.from([9]));
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_client_id');
+    expect(h.transcribe).not.toHaveBeenCalled();
   });
 
   it('POST /workspace/voice/transcribe rejects duplicate voiceModel query parameters', async () => {

@@ -41,6 +41,10 @@ import {
   PermissionRulesValidationError,
 } from '../../config/permission-settings.js';
 import { WorkspaceVoiceError } from '../../services/voice-service.js';
+import {
+  MAX_TRUST_REASON_LENGTH,
+  MAX_VOICE_LANGUAGE_LENGTH,
+} from '../validation-limits.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
@@ -170,8 +174,6 @@ const CONN_ROUTED_METHODS = new Set<string>([
 // shared module to avoid churning the 2987-line server.ts near merge; a
 // follow-up may lift all three to a `serve/limits.ts`.)
 const MAX_NAME_LENGTH = 256;
-const MAX_TRUST_REASON_LENGTH = 1024;
-const MAX_VOICE_LANGUAGE_LENGTH = 1024;
 const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
 const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 const MAX_FILE_LINE_LIMIT = 2000;

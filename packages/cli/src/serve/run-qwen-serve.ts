@@ -870,7 +870,7 @@ export async function runQwenServe(
     (bootSettings
       ? getWorkspaceTrustStatus(bootSettings.merged, boundWorkspace).effective
           .state === 'trusted'
-      : false);
+      : true);
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,
     injected: deps.fsFactory,
@@ -909,6 +909,26 @@ export async function runQwenServe(
         'tools.disabled',
         [...next].sort(),
       );
+    });
+  const persistSettingFn = (
+    workspace: string,
+    scope: SettingScope,
+    key: string,
+    value: unknown,
+  ): Promise<void> =>
+    withSettingsLock(workspace, async () => {
+      const fresh = loadSettings(workspace);
+      fresh.setValue(scope, key, value);
+    });
+  const persistSettingsFn = (
+    workspace: string,
+    writes: Array<{ scope: SettingScope; key: string; value: unknown }>,
+  ): Promise<void> =>
+    withSettingsLock(workspace, async () => {
+      const fresh = loadSettings(workspace);
+      for (const write of writes) {
+        fresh.setValue(write.scope, write.key, write.value);
+      }
     });
 
   // Create the status provider once — shared between bridge and workspace
@@ -1002,11 +1022,8 @@ export async function runQwenServe(
     // sessions during the cold-spawn window).
     isChannelLive: () => bridge.isChannelLive(),
     persistDisabledTools: persistDisabledToolsFn,
-    persistSetting: (workspace, scope, key, value) =>
-      withSettingsLock(workspace, async () => {
-        const fresh = loadSettings(workspace);
-        fresh.setValue(scope, key, value);
-      }),
+    persistSetting: persistSettingFn,
+    persistSettings: persistSettingsFn,
     reloadDaemonEnv: (workspace) =>
       withSettingsLock(workspace, async () => {
         const fresh = loadSettings(workspace, { skipLoadEnvironment: true });
@@ -1091,11 +1108,8 @@ export async function runQwenServe(
     daemonLog,
     workspace: workspaceService,
     persistDisabledTools: persistDisabledToolsFn,
-    persistSetting: (workspace, scope, key, value) =>
-      withSettingsLock(workspace, async () => {
-        const fresh = loadSettings(workspace);
-        fresh.setValue(scope, key, value);
-      }),
+    persistSetting: persistSettingFn,
+    persistSettings: persistSettingsFn,
     installAuthProvider: (req) =>
       withSettingsLock(
         boundWorkspace,

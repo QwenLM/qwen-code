@@ -1866,6 +1866,11 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Convenience read-modify-write helper. Concurrent callers that update the
+   * same scope/ruleType can race; use setWorkspacePermissionRules with a fresh
+   * rules snapshot when coordinating multiple writers.
+   */
   async addWorkspacePermissionRule(
     scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,
@@ -1884,6 +1889,11 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Convenience read-modify-write helper. Concurrent callers that update the
+   * same scope/ruleType can race; use setWorkspacePermissionRules with a fresh
+   * rules snapshot when coordinating multiple writers.
+   */
   async removeWorkspacePermissionRule(
     scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,

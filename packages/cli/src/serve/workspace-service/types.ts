@@ -30,7 +30,7 @@ import type {
   PermissionSettingsScope,
   QwenPermissionSettings,
 } from '../../config/permission-settings.js';
-import type { SettingScope , EnvReloadResult } from '../../config/settings.js';
+import type { SettingScope, EnvReloadResult } from '../../config/settings.js';
 import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 
@@ -300,6 +300,11 @@ export interface DaemonWorkspaceServiceDeps {
     scope: SettingScope,
     key: string,
     value: unknown,
+  ) => Promise<void>;
+
+  persistSettings?: (
+    workspace: string,
+    writes: Array<{ scope: SettingScope; key: string; value: unknown }>,
   ) => Promise<void>;
 
   /** Reload daemon-side process.env from .env / settings.env. */

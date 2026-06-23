@@ -52,15 +52,10 @@ import {
 } from '../../config/permission-settings.js';
 import {
   buildWorkspaceVoiceStatus,
-  validateWorkspaceVoiceConfig,
-  validateWorkspaceVoiceModel,
+  validateWorkspaceVoiceState,
   WorkspaceVoiceError,
 } from '../../services/voice-service.js';
-import {
-  getVoiceSettingsScope,
-  isVoiceEnabled,
-  readVoiceModel,
-} from '../../services/voice-settings.js';
+import { getVoiceSettingsScope } from '../../services/voice-settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 import type {
@@ -92,26 +87,6 @@ const PERMISSION_SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
   user: SettingScope.User,
   workspace: SettingScope.Workspace,
 };
-
-function validateResultingVoiceState(
-  settings: ReturnType<typeof loadSettings>,
-  update: WorkspaceVoiceSettingsUpdate,
-): void {
-  const nextEnabled = update.enabled ?? isVoiceEnabled(settings);
-  const nextVoiceModel = update.voiceModel ?? readVoiceModel(settings);
-  if (update.voiceModel) {
-    validateWorkspaceVoiceModel(settings, update.voiceModel);
-  }
-  if (!nextEnabled) return;
-  if (!nextVoiceModel) {
-    throw new WorkspaceVoiceError(
-      400,
-      'voice_model_required',
-      'A valid voiceModel is required before enabling voice.',
-    );
-  }
-  validateWorkspaceVoiceConfig(settings, nextVoiceModel);
-}
 
 function scopeToWire(scope: SettingScope): 'user' | 'workspace' {
   return scope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -193,6 +168,7 @@ export function createDaemonWorkspaceService(
     isChannelLive,
     persistDisabledTools,
     persistSetting,
+    persistSettings,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
     refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
@@ -413,7 +389,7 @@ export function createDaemonWorkspaceService(
       ctx: WorkspaceRequestContext,
       request: WorkspaceVoiceSettingsUpdate,
     ) {
-      if (!persistSetting) {
+      if (!persistSettings && !persistSetting) {
         throw new WorkspaceVoiceError(
           501,
           'not_implemented',
@@ -422,7 +398,7 @@ export function createDaemonWorkspaceService(
       }
 
       const settings = loadSettings(boundWorkspace);
-      validateResultingVoiceState(settings, request);
+      validateWorkspaceVoiceState(settings, request);
       const voiceSettingsScope = getVoiceSettingsScope(settings);
       const writes: Array<{
         scope: SettingScope;
@@ -459,13 +435,20 @@ export function createDaemonWorkspaceService(
         });
       }
 
+      if (persistSettings) {
+        await persistSettings(boundWorkspace, writes);
+      } else {
+        for (const write of writes) {
+          await persistSetting!(
+            boundWorkspace,
+            write.scope,
+            write.key,
+            write.value,
+          );
+        }
+      }
+
       for (const write of writes) {
-        await persistSetting(
-          boundWorkspace,
-          write.scope,
-          write.key,
-          write.value,
-        );
         publishWorkspaceEvent({
           type: 'settings_changed',
           data: {

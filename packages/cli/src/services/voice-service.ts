@@ -19,6 +19,7 @@ import {
   readVoiceMode,
   readVoiceModel,
   isVoiceEnabled,
+  type VoiceMode,
 } from './voice-settings.js';
 import {
   resolveVoiceStreamConfig,
@@ -55,6 +56,13 @@ export interface WorkspaceVoiceTranscriptionResult {
   transport: Exclude<VoiceTransport, 'unsupported'>;
 }
 
+export interface WorkspaceVoiceStateUpdate {
+  enabled?: boolean;
+  mode?: VoiceMode;
+  language?: string;
+  voiceModel?: string;
+}
+
 export class WorkspaceVoiceError extends Error {
   readonly status: number;
   readonly code: string;
@@ -89,13 +97,14 @@ export function listAvailableVoiceModels(
   return models
     .filter((model) => (idCounts.get(model.id) ?? 0) === 1)
     .filter(isSelectableVoiceModel)
-    .map((model) => {
-      const transport = resolveVoiceTransport(model.id);
-      if (transport === 'unsupported') {
-        throw new Error('unreachable voice transport');
-      }
-      return { id: model.id, transport };
-    });
+    .map((model) => ({
+      id: model.id,
+      transport: resolveVoiceTransport(model.id),
+    }))
+    .filter(
+      (model): model is WorkspaceVoiceModelDescriptor =>
+        model.transport !== 'unsupported',
+    );
 }
 
 export function buildWorkspaceVoiceStatus(
@@ -174,6 +183,28 @@ export function validateWorkspaceVoiceConfig(
     );
   }
   return descriptor;
+}
+
+export function validateWorkspaceVoiceState(
+  settings: LoadedSettings,
+  update: WorkspaceVoiceStateUpdate,
+): void {
+  const nextEnabled = update.enabled ?? isVoiceEnabled(settings);
+  const nextVoiceModel = update.voiceModel ?? readVoiceModel(settings);
+  if (update.voiceModel) {
+    validateWorkspaceVoiceModel(settings, update.voiceModel);
+  }
+  if (!nextEnabled) {
+    return;
+  }
+  if (!nextVoiceModel) {
+    throw new WorkspaceVoiceError(
+      400,
+      'voice_model_required',
+      'A valid voiceModel is required before enabling voice.',
+    );
+  }
+  validateWorkspaceVoiceConfig(settings, nextVoiceModel);
 }
 
 export async function transcribeWorkspaceVoiceAudio(

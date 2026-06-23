@@ -16,6 +16,7 @@ import {
   isTranscribableVoiceModel,
   resolveVoiceTransport,
 } from './voice-model.js';
+import { readVoiceLanguage } from './voice-settings.js';
 
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
@@ -71,17 +72,6 @@ interface TranscribeVoiceAudioArgs extends ResolveVoiceTranscriptionConfigArgs {
 type VoiceHostLookup = (
   hostname: string,
 ) => Promise<{ address: string } | Array<{ address: string }>>;
-
-function readVoiceLanguage(settings: LoadedSettings): string | undefined {
-  const language = (
-    settings.merged.general as { voice?: { language?: unknown } } | undefined
-  )?.voice?.language;
-  if (typeof language !== 'string') {
-    return undefined;
-  }
-  const trimmed = language.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
 
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');

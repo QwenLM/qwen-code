@@ -199,7 +199,28 @@ async function ensureDirectoryWithoutSymlink(
     } catch (error) {
       if (error instanceof SetupGithubError) throw error;
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      await fsp.mkdir(current, { mode: 0o755 });
+      try {
+        await fsp.mkdir(current, { mode: 0o755 });
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw mkdirError;
+        }
+      }
+      const postStat = await fsp.lstat(current);
+      if (postStat.isSymbolicLink()) {
+        throw new SetupGithubError(
+          'github_setup_invalid_workspace',
+          `${current} must not be a symlink.`,
+          400,
+        );
+      }
+      if (!postStat.isDirectory()) {
+        throw new SetupGithubError(
+          'github_setup_invalid_workspace',
+          `${current} must be a directory.`,
+          400,
+        );
+      }
     }
   }
 }

@@ -18,22 +18,20 @@ import {
 import {
   buildWorkspaceVoiceStatus,
   transcribeWorkspaceVoiceAudio,
-  validateWorkspaceVoiceConfig,
-  validateWorkspaceVoiceModel,
+  validateWorkspaceVoiceState,
   WorkspaceVoiceError,
   type WorkspaceVoiceTranscriptionInput,
   type WorkspaceVoiceTranscriptionResult,
 } from '../../services/voice-service.js';
 import {
   getVoiceSettingsScope,
-  isVoiceEnabled,
   isVoiceMode,
   readVoiceModel,
   type VoiceMode,
 } from '../../services/voice-settings.js';
+import { MAX_VOICE_LANGUAGE_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
-const MAX_LANGUAGE_LENGTH = 1024;
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
 type WorkspaceVoiceTranscriber = (
@@ -47,11 +45,17 @@ type PersistSetting = (
   value: unknown,
 ) => Promise<void>;
 
+type PersistSettings = (
+  workspace: string,
+  writes: Array<{ scope: SettingScope; key: string; value: unknown }>,
+) => Promise<void>;
+
 export interface WorkspaceVoiceRouteDeps {
   boundWorkspace: string;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   persistSetting?: PersistSetting;
+  persistSettings?: PersistSettings;
   broadcastSettingsChanged: (
     key: string,
     value: unknown,
@@ -62,7 +66,6 @@ export interface WorkspaceVoiceRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
-  parseClientId: (req: Request, res: Response) => string | undefined | null;
   transcribe?: WorkspaceVoiceTranscriber;
 }
 
@@ -121,9 +124,9 @@ function parseVoiceUpdate(
       };
     }
     const language = body['language'].trim();
-    if (language.length > MAX_LANGUAGE_LENGTH) {
+    if (language.length > MAX_VOICE_LANGUAGE_LENGTH) {
       return {
-        error: `\`language\` exceeds the ${MAX_LANGUAGE_LENGTH}-character limit`,
+        error: `\`language\` exceeds the ${MAX_VOICE_LANGUAGE_LENGTH}-character limit`,
         code: 'invalid_voice_language',
       };
     }
@@ -148,28 +151,6 @@ function parseVoiceUpdate(
   return parsed;
 }
 
-function validateResultingVoiceState(
-  settings: LoadedSettings,
-  update: ParsedVoiceUpdate,
-): void {
-  const nextEnabled = update.enabled ?? isVoiceEnabled(settings);
-  const nextVoiceModel = update.voiceModel ?? readVoiceModel(settings);
-  if (update.voiceModel) {
-    validateWorkspaceVoiceModel(settings, update.voiceModel);
-  }
-  if (!nextEnabled) {
-    return;
-  }
-  if (!nextVoiceModel) {
-    throw new WorkspaceVoiceError(
-      400,
-      'voice_model_required',
-      'A valid voiceModel is required before enabling voice.',
-    );
-  }
-  validateWorkspaceVoiceConfig(settings, nextVoiceModel);
-}
-
 async function persistVoiceUpdate(
   deps: WorkspaceVoiceRouteDeps,
   settings: LoadedSettings,
@@ -177,8 +158,7 @@ async function persistVoiceUpdate(
   clientId: string | undefined,
 ): Promise<void> {
   const voiceSettingsScope = getVoiceSettingsScope(settings);
-  const persistSetting = deps.persistSetting;
-  if (!persistSetting) {
+  if (!deps.persistSettings && !deps.persistSetting) {
     throw new Error('workspace voice settings persistence is not available');
   }
   const writes: Array<{ scope: SettingScope; key: string; value: unknown }> =
@@ -212,13 +192,20 @@ async function persistVoiceUpdate(
     });
   }
 
+  if (deps.persistSettings) {
+    await deps.persistSettings(deps.boundWorkspace, writes);
+  } else {
+    for (const write of writes) {
+      await deps.persistSetting!(
+        deps.boundWorkspace,
+        write.scope,
+        write.key,
+        write.value,
+      );
+    }
+  }
+
   for (const write of writes) {
-    await persistSetting(
-      deps.boundWorkspace,
-      write.scope,
-      write.key,
-      write.value,
-    );
     try {
       deps.broadcastSettingsChanged(
         write.key,
@@ -294,7 +281,7 @@ export function registerWorkspaceVoiceRoutes(
     '/workspace/voice',
     deps.mutate({ strict: true }),
     async (req: Request, res: Response) => {
-      if (!deps.persistSetting) {
+      if (!deps.persistSettings && !deps.persistSetting) {
         res.status(501).json({
           error: 'Workspace voice settings persistence is not available',
           code: 'not_implemented',
@@ -310,7 +297,7 @@ export function registerWorkspaceVoiceRoutes(
 
       const settings = loadSettings(deps.boundWorkspace);
       try {
-        validateResultingVoiceState(settings, parsed);
+        validateWorkspaceVoiceState(settings, parsed);
       } catch (err) {
         if (sendVoiceError(res, err)) return;
         throw err;
@@ -367,7 +354,7 @@ export function registerWorkspaceVoiceRoutes(
       }
       const audioContentType = contentType;
 
-      const clientId = deps.parseClientId(req, res);
+      const clientId = deps.parseAndValidateClientId(req, res);
       if (clientId === null) return;
 
       const data = readBinaryBody(req);
