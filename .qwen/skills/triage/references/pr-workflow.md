@@ -41,29 +41,22 @@ Never create duplicates.
 
 ### Gate Philosophy
 
-The gate's job is to **say no**. A gate that approves everything is not a gate — it is a rubber stamp. The default posture is skepticism, not welcome. Every PR must earn its way in; the burden of proof is on the author, not the reviewer.
-
-This is especially critical for AI-bot-generated PRs. An AI bot can produce 20 plausible-sounding PRs in a day, each with perfect grammar and tests. Volume does not equal value. "Theoretically possible input" does not equal "real bug." The gate must distinguish **observed failures** from **theoretical hardening**, and treat them very differently.
-
-If the gate feels uncomfortable — if it feels like you are being "too strict" — that is the gate working correctly. Being a pushover is not kindness; it is negligence.
+Default posture: **skepticism**. Burden of proof is on the author. Distinguish **observed failures** (linked issue, reproduction, before/after) from **theoretical hardening** ("could theoretically send X" with no evidence it ever has). Volume ≠ value — an AI bot can produce 20 plausible PRs in a day. If being "too strict" feels uncomfortable, that is the gate working correctly.
 
 ### Stage 0: Batch Pattern Detection (run before Stage 1)
 
 Before evaluating any PR individually, check for batch patterns:
 
 ```bash
-gh pr list --repo "$REPO" --author "<author>" --state all --limit 20 \
-  --json number,title,createdAt --jq '.[] | select(.createdAt > "7 days ago")'
+gh pr list --repo "$REPO" --author "<author>" --state open --limit 20 \
+  --json number,title,createdAt --jq '[.[] | select((.createdAt | fromdateiso8601) > (now - 604800))]'
 ```
 
-If the same author has **3+ open PRs in 7 days** with similar patterns (e.g., multiple "add validation" / "reject X" / "require Y" PRs):
+If the same author has **3+ open PRs in 7 days** with similar patterns:
 
-- **Stop individual review.** Evaluate the batch as a group.
-- Ask: is this one consolidated change split into N PRs to inflate contribution metrics?
-- If the batch is mostly noise (validation hygiene, schema alignment, theoretical hardening): close the entire batch with a single explanation, not N individual reviews.
-- If a few PRs in the batch have genuine value: extract those, close the rest.
-
-**Why this matters:** reviewing each PR individually makes every single one look "fine" — small change, has tests, follows template. The problem only appears at batch scale. The gate must zoom out before zooming in.
+- **Stop individual review.** Evaluate the batch as a group first.
+- Mostly noise → close the batch with a single explanation.
+- A few have value → extract those, close the rest.
 
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
@@ -85,22 +78,15 @@ PR body missing required headings from `.github/pull_request_template.md` (read 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
 ```
 
-**1b. Problem existence check (MANDATORY — this is where most noise PRs get caught):**
+**1b. Problem existence check (MANDATORY):**
 
-Before asking "is the direction right?", ask **"does this problem actually exist?"**
+Before "is the direction right?", ask **"does this problem actually exist?"**
 
-- **Observed bug**: Is there a linked issue, user report, error log, or reproduction case? Does the PR show a before/after demonstrating the failure? → Legitimate fix, proceed.
-- **Theoretical hardening**: "The model could theoretically send `maxConnections: 1.5`" or "this env var could contain a non-integer" — with no evidence it ever has? → **Default to close.** Ask: "What scenario triggers this? Show me the before/after." If the author cannot answer, the PR is solving a non-problem.
-- **No reproduction = no fix.** A `fix:` PR without a reproduction case is not a fix — it is a hypothesis. Hypotheses belong in issues, not PRs.
+- **Observed bug** (linked issue, reproduction, before/after) → proceed.
+- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction. If the author cannot provide one, close.
+- **No reproduction = no fix.** A `fix:` PR without reproduction is a hypothesis — belongs in issues, not PRs.
 
-The key distinction: **"direction is correct" ≠ "problem exists."** "Rejecting fractional values for integer parameters" sounds reasonable as a direction. But if no one has ever passed a fractional value, and the runtime coerces it correctly anyway, there is no bug to fix — only code hygiene to perform. Code hygiene does not warrant a standalone PR, let alone 20 in a single day.
-
-Red flag phrases in PR descriptions that signal "no real problem":
-
-- "The runtime validators already require/enforce..." → the problem is already handled
-- "This aligns the schema with..." → documentation hygiene, not a behavioral fix
-- "Fractional values like 1.5 were accepted" → who sent 1.5? Why? What broke?
-- "Values such as 0 or -1 were accepted and quietly coerced" → coercion is often correct behavior
+**"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. Code hygiene does not warrant a PR.
 
 **1c. Product direction:**
 
@@ -173,8 +159,11 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 — _Qwen Code · qwen3.7-max_
 ```
 
-Save this comment's ID. If direction is escalated → stop here. Template
-failures already stopped in Stage 1a.
+Save this comment's ID. Terminal exits — stop here if any applies:
+
+- Template failure → stopped in 1a.
+- Problem does not exist → request changes in 1b, do not proceed to Stage 2.
+- Direction escalated → stop here.
 
 ### Stage 2: Review + Test
 
@@ -281,7 +270,7 @@ Step back and look at the whole picture — the motivation, the implementation, 
 - If I had to maintain this in six months, would I curse the author or thank them?
 - Am I approving this because it's genuinely good, or because I ran out of reasons to say no?
 - **Did I verify the problem actually exists?** Or did I accept the PR's framing ("this value could be passed") without asking "has this ever happened?" If the PR has no before/after reproduction, I should not be this far in the pipeline.
-- **Is this part of a batch?** If the same author has 10+ similar PRs, am I evaluating each one on merit, or am I being worn down by volume? Step back: would I have accepted this as a single consolidated PR? If not, the batch is noise.
+- **Is this part of a batch?** If this PR met the Stage 0 batch threshold (3+ similar PRs from the same author), am I evaluating each one on merit, or being worn down by volume?
 - **Am I being a pushover?** If I feel "this is probably fine but I'm not sure it's needed" — that feeling IS the signal. The gate's job is to say no to things that are not clearly needed.
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
