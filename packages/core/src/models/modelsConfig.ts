@@ -345,6 +345,10 @@ export class ModelsConfig {
         kind: 'programmatic',
         detail: metadata?.reason || 'setModel',
       };
+      // Refresh model-derived defaults (modalities, context window) for the new
+      // model — otherwise the previous model's modalities linger and the vision
+      // bridge gate misreads whether the current model accepts images.
+      this.applyRawModelDerivedDefaults(newModel);
 
       // Notify Config to update contentGeneratorConfig
       if (this.onModelChange) {

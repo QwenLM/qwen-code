@@ -112,6 +112,7 @@ export interface SlashCommandProcessorActions {
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
+    visionModelMode?: boolean;
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
@@ -797,6 +798,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'voice-model':
                       actions.openModelDialog({ voiceModelMode: true });
+                      return { type: 'handled' };
+                    case 'vision-model':
+                      actions.openModelDialog({ visionModelMode: true });
                       return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();

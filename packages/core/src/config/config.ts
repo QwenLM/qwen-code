@@ -947,6 +947,13 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
+   * Explicit vision model for the vision bridge. When a text-only primary model
+   * receives an image, the bridge transcribes it through this model instead of
+   * auto-picking a same-provider one. Corresponds to the `visionModel` setting
+   * (configurable via `/model --vision`).
+   */
+  visionModel?: string;
+  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -1350,6 +1357,7 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableAutoSkill: boolean;
   private fastModel?: string;
+  private visionModel?: string;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1610,6 +1618,7 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.fastModel = params.fastModel || undefined;
+    this.visionModel = params.visionModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -2664,15 +2673,58 @@ export class Config {
   }
 
   /**
-   * Pick an image-capable model from the registered models to use as the
-   * vision bridge model. This lets the bridge work out-of-the-box when the user
-   * already has a vision model on the SAME provider as their text-only primary
-   * (see {@link selectVisionBridgeModel} — it never reaches across providers).
-   * `runSideQuery` resolves the chosen model's credentials by id.
+   * Update the vision bridge model at runtime (e.g. `/model --vision <model>`).
+   * Pass undefined or an empty string to clear the override and fall back to
+   * same-provider auto-select.
+   */
+  setVisionModel(model: string | undefined): void {
+    this.visionModel = model || undefined;
+  }
+
+  /**
+   * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
+   * bridge selection. The id is passed through verbatim so `runSideQuery` can
+   * resolve an `authType:modelId` selector; the endpoint is looked up for the
+   * egress notice. Returns `undefined` (so the caller falls back to
+   * same-provider auto-select) when no explicit model is set, the selector can't
+   * be parsed, or the pinned model isn't actually configured — that last guard
+   * keeps a stale/typo'd pin from firing the bridge at an unreachable model.
+   */
+  private resolveVisionModelSelection():
+    | VisionBridgeModelSelection
+    | undefined {
+    if (!this.visionModel) return undefined;
+    let selector;
+    try {
+      selector = resolveModelId(this.visionModel);
+    } catch {
+      return undefined;
+    }
+    if (!selector) return undefined;
+    const match = this.getAllConfiguredModels().find(
+      (m) =>
+        m.id === selector.modelId &&
+        (!selector.authType || m.authType === selector.authType),
+    );
+    if (!match) return undefined;
+    return {
+      id: this.visionModel,
+      ...(match.baseUrl && { baseUrl: match.baseUrl }),
+    };
+  }
+
+  /**
+   * The vision bridge model: the explicit `visionModel` (`/model --vision`) when
+   * set, otherwise an auto-picked image-capable model on the SAME provider as
+   * the text-only primary (see {@link selectVisionBridgeModel} — auto-select
+   * never reaches across providers; an explicit override may). `runSideQuery`
+   * resolves the chosen model's credentials by id.
    *
-   * @returns A same-provider image-capable model, or `undefined`.
+   * @returns The bridge model selection, or `undefined`.
    */
   getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
+    const explicit = this.resolveVisionModelSelection();
+    if (explicit) return explicit;
     const contentGeneratorConfig = this.getContentGeneratorConfig();
     return selectVisionBridgeModel(
       this.getModel(),
@@ -2744,9 +2796,17 @@ export class Config {
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
+      // Modalities are model-derived: a hot switch between oauth models with
+      // different image support must update them, or the vision-bridge gate and
+      // image-stripping read the previous model's modalities.
+      this.contentGeneratorConfig.modalities = config.modalities;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
+      }
+      if ('modalities' in sources) {
+        this.contentGeneratorConfigSources['modalities'] =
+          sources['modalities'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =

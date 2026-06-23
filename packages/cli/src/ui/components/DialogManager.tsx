@@ -269,6 +269,7 @@ export const DialogManager = ({
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
+        isVisionModelMode={uiState.isVisionModelMode}
       />
     );
   }
@@ -288,6 +289,10 @@ export const DialogManager = ({
             }
             if (settingName === 'fastModel') {
               uiActions.openModelDialog({ fastModelMode: true });
+              return;
+            }
+            if (settingName === 'visionModel') {
+              uiActions.openModelDialog({ visionModelMode: true });
               return;
             }
             uiActions.closeSettingsDialog();

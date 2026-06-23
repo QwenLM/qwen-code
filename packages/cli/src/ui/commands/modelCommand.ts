@@ -32,6 +32,9 @@ const MAIN_MODEL_CONFIGURATION_HINT =
 const FAST_MODEL_CONFIGURATION_HINT =
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.';
 
+const VISION_MODEL_CONFIGURATION_HINT =
+  'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
+
 function persistSetting(
   settings: LoadedSettings,
   path: string,
@@ -75,7 +78,7 @@ async function switchMainModel(
 }
 
 function formatUnavailableModelMessage(
-  kind: 'Model' | 'Fast model',
+  kind: 'Model' | 'Fast model' | 'Vision model',
   modelName: string,
   authType: AuthType,
   availableModels: AvailableModel[],
@@ -88,12 +91,17 @@ function formatUnavailableModelMessage(
       ? `No models are configured for auth type '${authType}'.`
       : `Available models for '${authType}': ${availableModelIds.join(', ')}.`;
 
+  const hint =
+    kind === 'Fast model'
+      ? FAST_MODEL_CONFIGURATION_HINT
+      : kind === 'Vision model'
+        ? VISION_MODEL_CONFIGURATION_HINT
+        : MAIN_MODEL_CONFIGURATION_HINT;
+
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
     `${availableModelsLine}\n` +
-    (kind === 'Fast model'
-      ? FAST_MODEL_CONFIGURATION_HINT
-      : MAIN_MODEL_CONFIGURATION_HINT)
+    hint
   );
 }
 
@@ -113,6 +121,25 @@ function formatUnavailableFastModelMessage(
     `Fast model '${modelName}' is not configured for any auth type.\n` +
     `${availableModelsLine}\n` +
     FAST_MODEL_CONFIGURATION_HINT
+  );
+}
+
+function formatUnavailableVisionModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  const availableModelIds = Array.from(
+    new Set(availableModels.map((model) => model.id)),
+  );
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+
+  return (
+    `Vision model '${modelName}' is not configured for any auth type.\n` +
+    `${availableModelsLine}\n` +
+    VISION_MODEL_CONFIGURATION_HINT
   );
 }
 
@@ -143,7 +170,7 @@ function formatUnavailableVoiceModelMessage(
 // Get an array of the available model IDs as strings, filtered by mode
 function getAvailableModelIds(
   context: CommandContext,
-  mode: 'main' | 'fast' | 'voice' = 'main',
+  mode: 'main' | 'fast' | 'voice' | 'vision' = 'main',
 ) {
   const { services } = context;
   const { config } = services;
@@ -153,6 +180,7 @@ function getAvailableModelIds(
   const availableModels = config.getAvailableModels().filter((m) => {
     if (mode === 'fast') return !m.voiceOnly;
     if (mode === 'voice') return !m.fastOnly;
+    // 'vision' and 'main' both exclude fast/voice-only models.
     return !m.fastOnly && !m.voiceOnly;
   });
   return availableModels.map((model) => model.id);
@@ -163,10 +191,10 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
     );
   },
-  argumentHint: '[--fast|--voice] [<model-id>]',
+  argumentHint: '[--fast|--voice|--vision] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -182,13 +210,19 @@ export const modelCommand: SlashCommand = {
           value: '--voice',
           description: t('Set the model for voice transcription'),
         },
+        {
+          value: '--vision',
+          description: t(
+            'Set the image-capable model used to transcribe images for a text-only main model',
+          ),
+        },
       ].filter((item) => item.value.startsWith(partialArg));
       if (flagCompletions.length > 0) {
         return flagCompletions;
       }
       const trimmed = partialArg.trim();
       if (trimmed) {
-        let mode: 'main' | 'fast' | 'voice' = 'main';
+        let mode: 'main' | 'fast' | 'voice' | 'vision' = 'main';
         let modelPrefix = trimmed;
         if (trimmed.startsWith('--fast ')) {
           mode = 'fast';
@@ -196,6 +230,9 @@ export const modelCommand: SlashCommand = {
         } else if (trimmed.startsWith('--voice ')) {
           mode = 'voice';
           modelPrefix = trimmed.slice('--voice '.length);
+        } else if (trimmed.startsWith('--vision ')) {
+          mode = 'vision';
+          modelPrefix = trimmed.slice('--vision '.length);
         }
         return getAvailableModelIds(context, mode).filter((id) =>
           id.startsWith(modelPrefix),
@@ -376,6 +413,80 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: t('Fast Model') + ': ' + modelName,
+      };
+    }
+
+    const isVisionModelCommand =
+      args === '--vision' || args.startsWith('--vision ');
+    if (isVisionModelCommand) {
+      const modelName = args.replace('--vision', '').trim();
+      if (!modelName) {
+        // Open the model picker in vision mode (interactive) or print the
+        // current vision model (non-interactive).
+        if (context.executionMode !== 'interactive') {
+          const visionModel =
+            context.services.settings?.merged?.visionModel?.trim() || 'not set';
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: `Current vision model: ${visionModel}\nUse "/model --vision <model-id>" to set the vision bridge model.`,
+          };
+        }
+        return {
+          type: 'dialog',
+          dialog: 'vision-model',
+        };
+      }
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
+      }
+
+      const selector = (() => {
+        try {
+          return resolveModelId(modelName);
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!selector) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableVisionModelMessage(modelName, []),
+        };
+      }
+
+      const availableModels = (
+        selector.authType
+          ? config.getAvailableModelsForAuthType(selector.authType)
+          : config.getAllConfiguredModels()
+      ).filter((m) => !m.voiceOnly);
+      if (!availableModels.some((model) => model.id === selector.modelId)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: selector.authType
+            ? formatUnavailableModelMessage(
+                'Vision model',
+                selector.modelId,
+                selector.authType,
+                availableModels,
+              )
+            : formatUnavailableVisionModelMessage(modelName, availableModels),
+        };
+      }
+
+      persistSetting(settings, 'visionModel', modelName);
+      // Sync runtime Config so the vision bridge picks it up without a restart.
+      config.setVisionModel(modelName);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Vision Model') + ': ' + modelName,
       };
     }
 

@@ -1199,6 +1199,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  visionModel: {
+    type: 'string',
+    label: 'Vision Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.',
+    showInDialog: true,
+  },
+
   voiceModel: {
     type: 'string',
     label: 'Voice Model',

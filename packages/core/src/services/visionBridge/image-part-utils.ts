@@ -99,6 +99,42 @@ export function splitImageParts(input: PartListUnion): SplitParts {
 }
 
 /**
+ * Replace inline image parts with a single text part, preserving order.
+ *
+ * The first image's slot becomes `{ text }`; any further image parts are
+ * dropped. Non-image parts keep their position. This keeps a transcribed
+ * description adjacent to the "Content from <file>:" prefix that preceded the
+ * image, so the primary model reads it as that file's content instead of seeing
+ * an empty header and re-reading the file with a tool. If there is no image
+ * part, the text is appended at the end.
+ *
+ * @param input The original part list (text + inline images).
+ * @param text The replacement text to drop into the first image's position.
+ * @returns A new flat array of parts with images collapsed into `text`.
+ */
+export function replaceImagesWithText(
+  input: PartListUnion,
+  text: string,
+): Part[] {
+  const result: Part[] = [];
+  let replaced = false;
+  for (const part of normalizeParts(input)) {
+    if (isImagePart(part)) {
+      if (!replaced) {
+        result.push({ text });
+        replaced = true;
+      }
+      continue; // drop additional images
+    }
+    result.push(part);
+  }
+  if (!replaced) {
+    result.push({ text });
+  }
+  return result;
+}
+
+/**
  * Report whether an image part is safe to send to the bridge model.
  *
  * Guards against empty/corrupt payloads and payloads that exceed the provider

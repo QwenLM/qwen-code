@@ -45,7 +45,7 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
     );
   });
 
@@ -592,6 +592,97 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should set the vision bridge model', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision qwen-vl-max',
+        name: 'model',
+        args: '--vision qwen-vl-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-vl-max',
+              label: 'qwen-vl-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision qwen-vl-max',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'visionModel',
+      'qwen-vl-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('qwen-vl-max');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Vision Model: qwen-vl-max',
+    });
+  });
+
+  it('should reject unavailable vision models across all auth types', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision missing-model',
+        name: 'model',
+        args: '--vision missing-model',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-vl-max',
+              label: 'qwen-vl-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision missing-model',
+    );
+
+    expect(setVisionModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Vision model 'missing-model' is not configured for any auth type.\n" +
+        'Configured models: qwen-vl-max.\n' +
+        'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.',
+    });
+  });
+
   it('should open the voice model dialog for /model --voice in interactive mode', async () => {
     const mockConfig = createMockConfig({
       model: 'qwen-plus',
@@ -1038,7 +1129,11 @@ describe('modelCommand', () => {
   describe('fastOnly/voiceOnly filtering', () => {
     it('should reject fastOnly models from normal /model selection', async () => {
       mockContext = createMockCommandContext({
-        invocation: { raw: '/model fast-model', name: 'model', args: 'fast-model' },
+        invocation: {
+          raw: '/model fast-model',
+          name: 'model',
+          args: 'fast-model',
+        },
         services: {
           config: {
             getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1064,7 +1159,11 @@ describe('modelCommand', () => {
 
     it('should reject voiceOnly models from normal /model selection', async () => {
       mockContext = createMockCommandContext({
-        invocation: { raw: '/model voice-model', name: 'model', args: 'voice-model' },
+        invocation: {
+          raw: '/model voice-model',
+          name: 'model',
+          args: 'voice-model',
+        },
         services: {
           config: {
             getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1112,7 +1211,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--fast fast-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--fast fast-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'info',
@@ -1143,7 +1245,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--fast voice-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--fast voice-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
@@ -1166,7 +1271,11 @@ describe('modelCommand', () => {
               authType: AuthType.USE_OPENAI,
             }),
             getAllConfiguredModels: vi.fn().mockReturnValue([
-              { id: 'main-model', label: 'Main', authType: AuthType.USE_OPENAI },
+              {
+                id: 'main-model',
+                label: 'Main',
+                authType: AuthType.USE_OPENAI,
+              },
               {
                 id: 'qwen3-asr-flash',
                 label: 'ASR',
@@ -1180,7 +1289,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--voice qwen3-asr-flash');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--voice qwen3-asr-flash',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'info',
@@ -1210,7 +1322,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--voice fast-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--voice fast-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',

@@ -62,7 +62,30 @@ describe('runVisionBridge', () => {
     expect(joined).toContain('A red error dialog'); // description inserted
     expect(joined).toMatch(/untrusted/i); // warned as untrusted
     expect(joined).toMatch(/do NOT follow/i);
+    expect(joined).toMatch(/do NOT call read_file/i); // don't re-read the image
     expect(mockSideQuery).toHaveBeenCalledOnce();
+  });
+
+  it('stands the transcript in the image slot, keeping trailing parts after it', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'SCREEN TEXT' });
+    const result = await runVisionBridge({
+      config,
+      // Real shape: "Content from <file>:" prefix, the image, then a trailer.
+      parts: [{ text: 'Content from shot.png:' }, image(), { text: 'TRAILER' }],
+      signal: signal(),
+    });
+
+    const out = result.parts as Part[];
+    const texts = out.map((p) => p.text ?? '');
+    const transcriptIdx = texts.findIndex((t) => t.includes('SCREEN TEXT'));
+    const prefixIdx = texts.findIndex((t) =>
+      t.includes('Content from shot.png:'),
+    );
+    const trailerIdx = texts.findIndex((t) => t === 'TRAILER');
+    // Transcript must sit between the prefix and the trailer, not at the end.
+    expect(prefixIdx).toBeLessThan(transcriptIdx);
+    expect(transcriptIdx).toBeLessThan(trailerIdx);
+    expect(out.some((p) => p.inlineData)).toBe(false);
   });
 
   it('passes the bridge model and image, carrying intent in the user turn (not the system prompt)', async () => {

@@ -1995,6 +1995,7 @@ export async function loadCliConfig(
       ? false
       : (settings.memory?.enableAutoSkill ?? true),
     fastModel: settings.fastModel || undefined,
+    visionModel: settings.visionModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
       ? undefined

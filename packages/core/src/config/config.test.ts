@@ -411,6 +411,70 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  describe('getDefaultVisionBridgeModel', () => {
+    // Primary is text-only and lives on the 'openai' provider.
+    const stubProvider = (config: Config, models: unknown[]) => {
+      vi.spyOn(config, 'getModel').mockReturnValue('text-primary');
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://primary.example.com',
+      } as ContentGeneratorConfig);
+      vi.spyOn(config, 'getAllConfiguredModels').mockReturnValue(
+        models as never,
+      );
+    };
+
+    it('honors an explicit visionModel even across providers', () => {
+      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+      stubProvider(config, [
+        {
+          id: 'vl-anthropic',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-anthropic',
+        baseUrl: 'https://api.anthropic.com',
+      });
+    });
+
+    it('falls back to same-provider auto-select when the explicit model is not configured', () => {
+      const config = new Config({ ...baseParams, visionModel: 'ghost-model' });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      // 'ghost-model' isn't configured, so the explicit pin is ignored and the
+      // same-provider candidate is auto-picked instead.
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('auto-selects a same-provider vision model when no explicit model is set', () => {
+      const config = new Config({ ...baseParams });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+  });
+
   it('wires file history snapshot updates to chat recording', async () => {
     const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
     const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));

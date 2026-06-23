@@ -180,6 +180,7 @@ export interface OpenDialogActionReturn {
     | 'model'
     | 'fast-model'
     | 'voice-model'
+    | 'vision-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'skills_manage'

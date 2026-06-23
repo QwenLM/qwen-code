@@ -565,6 +565,53 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('stores authType-qualified selectors in vision model mode without switching models', async () => {
+    const switchModel = vi.fn();
+    const setVisionModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVisionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+        getModel: vi.fn(() => 'claude-opus-4-7'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-vl-max',
+            label: 'qwen-vl-max',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4-7',
+            label: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+        })),
+        setVisionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen-vl-max`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'visionModel',
+      'openai:qwen-vl-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      expect.any(String),
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('stores the plain model id in voice model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setFastModel = vi.fn();
