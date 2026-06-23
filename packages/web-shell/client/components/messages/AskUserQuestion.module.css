@@ -6,6 +6,16 @@
   font-size: 13px;
 }
 
+.floating {
+  max-height: min(420px, 58vh);
+  margin: 0;
+  overflow: auto;
+  border-radius: 14px;
+  background: var(--command-panel-bg);
+  box-shadow: 0 18px 48px color-mix(in srgb, #000 18%, transparent);
+  font-family: var(--font-sans);
+}
+
 .titleLine {
   display: flex;
   align-items: center;
@@ -221,12 +231,4 @@
 .submitButton {
   background: var(--accent-color);
   color: #fff;
-}
-
-.footer {
-  margin-top: 14px;
-  padding-top: 8px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  opacity: 0.7;
 }

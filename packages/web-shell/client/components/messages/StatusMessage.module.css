@@ -1,13 +1,13 @@
 .panel {
   display: flex;
-  width: min(100%, 720px);
+  width: min(100%, var(--chat-regular-content-width, 1000px));
   flex-direction: column;
   gap: 2px;
   padding: 12px 16px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   color: var(--text-primary);
-  background: var(--bg-surface);
+  background: var(--command-panel-bg);
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.45;

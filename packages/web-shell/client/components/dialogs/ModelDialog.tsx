@@ -1,13 +1,13 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { dp } from './dialogStyles';
+import { useEffect, useMemo, useRef } from 'react';
 import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
+import styles from './ModelDialog.module.css';
+
+export type ModelDialogMode = 'main' | 'fast';
 
 interface ModelDialogProps {
-  mode?: 'main' | 'fast';
+  mode?: ModelDialogMode;
   onSelect: (modelId: string) => void;
-  onClose: () => void;
 }
 
 interface ModelDialogModel {
@@ -16,6 +16,14 @@ interface ModelDialogModel {
   label?: string;
   authType?: string;
   contextWindow?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  baseUrl?: string;
+  envKey?: string;
   isRuntime?: boolean;
 }
 
@@ -25,6 +33,20 @@ function formatContextWindow(size: number | undefined, t: T): string {
   return size
     ? `${size.toLocaleString()} ${t('contextUsage.tokens')}`
     : t('model.contextWindow.unknown');
+}
+
+function formatModalities(
+  modalities: ModelDialogModel['modalities'],
+  t: T,
+): string {
+  if (!modalities) return t('model.modality.textOnly');
+  const parts: string[] = [];
+  if (modalities.image) parts.push(t('model.modality.image'));
+  if (modalities.pdf) parts.push(t('model.modality.pdf'));
+  if (modalities.audio) parts.push(t('model.modality.audio'));
+  if (modalities.video) parts.push(t('model.modality.video'));
+  if (parts.length === 0) return t('model.modality.textOnly');
+  return `${t('model.modality.text')} · ${parts.join(' · ')}`;
 }
 
 function getAuthType(model: ModelDialogModel): string | undefined {
@@ -39,55 +61,45 @@ function getModelName(model: ModelDialogModel): string {
   return model.id.replace(/\([^()]+\)$/, '');
 }
 
-function DetailRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}): React.JSX.Element {
+function getModelKey(model: ModelDialogModel): string {
+  return [
+    model.authType ?? '',
+    model.id,
+    model.baseUrl ?? '',
+    model.envKey ?? '',
+  ].join('\0');
+}
+
+function getModelSelectId(
+  model: ModelDialogModel,
+  isFastMode: boolean,
+): string {
+  if (!isFastMode) return model.id;
+  return model.baseModelId ?? model.id.replace(/\([^()]+\)$/, '');
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className={dp('resume-picker-detail-row')}>
-      <span className={dp('resume-picker-detail-label')}>{label}:</span>
-      <span className={dp('resume-picker-detail-value')}>{value}</span>
+    <div className={styles.detailRow}>
+      <span className={styles.detailLabel}>{label}</span>
+      <span className={styles.detailValue}>{value}</span>
     </div>
   );
 }
 
-export function ModelDialog({
-  mode = 'main',
-  onSelect,
-  onClose,
-}: ModelDialogProps) {
+export function ModelDialog({ mode = 'main', onSelect }: ModelDialogProps) {
   const connection = useConnection();
   const currentModel = connection.currentModel ?? '';
-  const availableModels = (connection.models ?? []) as ModelDialogModel[];
+  const availableModels = useMemo(
+    () => (connection.models ?? []) as ModelDialogModel[],
+    [connection.models],
+  );
   const { t } = useI18n();
-  const isFastMode = mode === 'fast';
-  const [selectedIdx, setSelectedIdx] = useState(() => {
-    const idx = availableModels.findIndex((m) => m.id === currentModel);
-    return idx >= 0 ? idx : 0;
-  });
-  const [searchMode, setSearchMode] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
-
-  const filtered = searchQuery
-    ? availableModels.filter((m) => {
-        const q = searchQuery.toLowerCase();
-        return (
-          m.id.toLowerCase().includes(q) ||
-          (m.label || '').toLowerCase().includes(q)
-        );
-      })
-    : availableModels;
-  const selectedModel = filtered[selectedIdx];
-
-  useEffect(() => {
-    if (selectedIdx >= filtered.length && filtered.length > 0) {
-      setSelectedIdx(filtered.length - 1);
-    }
-  }, [filtered.length, selectedIdx]);
+  const isFastMode = mode === 'fast';
+  const selectedIdx = availableModels.findIndex((m) => m.id === currentModel);
+  const selectedModel =
+    selectedIdx >= 0 ? availableModels[selectedIdx] : availableModels[0];
 
   useEffect(() => {
     const el = listRef.current?.children[selectedIdx] as
@@ -96,209 +108,69 @@ export function ModelDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  const handleSelect = useCallback(() => {
-    const model = filtered[selectedIdx];
-    if (model) {
-      onSelect(model.id);
-      onClose();
-    }
-  }, [filtered, selectedIdx, onSelect, onClose]);
-
-  useDelayedGlobalKeyDown(
-    (e: KeyboardEvent) => {
-      if (searchMode) {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          if (searchQuery) {
-            setSearchQuery('');
-          } else {
-            setSearchMode(false);
-          }
-          return;
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          if (filtered.length > 0) {
-            setSearchMode(false);
-          }
-          return;
-        }
-        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-          e.preventDefault();
-          setSearchMode(false);
-          if (e.key === 'ArrowDown') {
-            setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
-          }
-          return;
-        }
-        return;
-      }
-
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        if (searchQuery) {
-          setSearchQuery('');
-          setSelectedIdx(0);
-        } else {
-          onClose();
-        }
-        return;
-      }
-      if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
-        return;
-      }
-      if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        if (selectedIdx === 0) {
-          setSearchMode(true);
-        } else {
-          setSelectedIdx((i) => Math.max(i - 1, 0));
-        }
-        return;
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleSelect();
-        return;
-      }
-      if (e.key === '/') {
-        e.preventDefault();
-        setSearchMode(true);
-        return;
-      }
-    },
-    [searchMode, searchQuery, filtered, selectedIdx, onClose, handleSelect],
-  );
-
   return (
-    <div className={dp('resume-picker')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>
-          {isFastMode ? t('model.setFast') : t('model.switch')}
-        </span>
-        <span className={dp('resume-picker-count')}>
-          {isFastMode
-            ? t('model.fastHint')
-            : t('model.current', {
-                model: currentModel || t('model.unknown'),
-              })}
-        </span>
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
-      <div className={dp('resume-picker-search')}>
-        {searchMode ? (
-          <>
-            <span className={dp('resume-picker-search-label')}>
-              {t('common.search')}:{' '}
-            </span>
-            <input
-              className={dp('resume-picker-search-input')}
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setSelectedIdx(0);
-              }}
-              autoFocus
-              placeholder=""
-            />
-          </>
-        ) : searchQuery ? (
-          <>
-            <span className={dp('resume-picker-search-label')}>
-              {t('resume.filter')}:{' '}
-            </span>
-            <span className={dp('resume-picker-search-value')}>
-              {searchQuery}
-            </span>
-          </>
-        ) : (
-          <span className={dp('resume-picker-search-hint')}>
-            {t('model.searchHint')}
-          </span>
-        )}
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-list')} ref={listRef}>
-        {filtered.length === 0 && (
-          <div className={dp('resume-picker-empty')}>
-            {searchQuery
-              ? t('model.noMatch', { query: searchQuery })
-              : t('model.none')}
-          </div>
-        )}
-        {filtered.map((m, i) => {
-          const authType = getAuthType(m);
+    <div className={styles.layout}>
+      <div
+        className={styles.list}
+        ref={listRef}
+        role="listbox"
+        aria-label={isFastMode ? t('model.setFast') : t('model.select')}
+      >
+        {availableModels.length === 0 ? (
+          <div className={styles.empty}>{t('model.none')}</div>
+        ) : null}
+        {availableModels.map((model, index) => {
+          const selected = model.id === currentModel;
+          const authType = getAuthType(model);
           return (
-            <div
-              key={m.id}
-              className={dp(
-                'resume-picker-item',
-                i === selectedIdx && !searchMode ? 'selected' : undefined,
-              )}
-              onClick={() => {
-                onSelect(m.id);
-                onClose();
-              }}
-              onMouseEnter={() => setSelectedIdx(i)}
+            <button
+              key={getModelKey(model)}
+              type="button"
+              role="option"
+              aria-selected={selected}
+              className={`${styles.row} ${selected ? styles.selected : ''}`}
+              onClick={() => onSelect(getModelSelectId(model, isFastMode))}
             >
-              <div className={dp('resume-picker-item-row')}>
-                <span className={dp('resume-picker-item-prefix')}>
-                  {i === selectedIdx && !searchMode ? '>' : ' '}
-                </span>
-                <span className={dp('resume-picker-item-number')}>
-                  {i + 1}.
-                </span>
-                {authType && (
-                  <span className={dp('resume-picker-item-provider')}>
-                    [{authType}]
-                  </span>
-                )}
-                <span className={dp('resume-picker-item-title')}>
-                  {getModelName(m)}
-                </span>
-                {m.isRuntime && (
-                  <span className={dp('resume-picker-item-badge')}>
-                    Runtime
-                  </span>
-                )}
-              </div>
-            </div>
+              <span className={styles.number}>{index + 1}.</span>
+              {authType ? (
+                <span className={styles.provider}>[{authType}]</span>
+              ) : null}
+              <span className={styles.label}>{getModelName(model)}</span>
+              {model.isRuntime ? (
+                <span className={styles.badge}>Runtime</span>
+              ) : null}
+            </button>
           );
         })}
       </div>
 
-      <div className={dp('resume-picker-sep')} />
-
-      {selectedModel && (
+      {selectedModel ? (
         <>
-          <div className={dp('resume-picker-detail-panel')}>
+          <div className={styles.divider} />
+          <div className={styles.detail}>
+            <DetailRow
+              label={t('model.modality')}
+              value={formatModalities(selectedModel.modalities, t)}
+            />
             <DetailRow
               label={t('model.contextWindow')}
               value={formatContextWindow(selectedModel.contextWindow, t)}
             />
+            {getAuthType(selectedModel) !== 'qwen-oauth' ? (
+              <>
+                <DetailRow
+                  label={t('model.baseUrl')}
+                  value={selectedModel.baseUrl ?? t('model.default')}
+                />
+                <DetailRow
+                  label={t('model.apiKey')}
+                  value={selectedModel.envKey ?? t('model.notSet')}
+                />
+              </>
+            ) : null}
           </div>
-          <div className={dp('resume-picker-sep')} />
         </>
-      )}
-
-      <div className={dp('resume-picker-footer')}>
-        {searchMode
-          ? t('dialog.footer.search')
-          : isFastMode
-            ? t('dialog.footer.modelFast')
-            : t('dialog.footer.navSelectCancel')}
-      </div>
+      ) : null}
     </div>
   );
 }

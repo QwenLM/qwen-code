@@ -46,7 +46,7 @@ interface StatusBarProps {
   onSelectModel: () => void;
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContext: () => void;
-  /** Open the inline settings panel so settings are reachable with the mouse. */
+  /** Open the settings dialog so settings are reachable with the mouse. */
   onOpenSettings: () => void;
   onOpenTasks?: () => void;
   onReturnToInput?: (text?: string) => void;
@@ -59,6 +59,8 @@ interface StatusBarProps {
   hideSettings?: boolean;
   /** Toggle the keyboard-shortcuts panel (same as typing `?` in the editor). */
   onToggleShortcuts?: () => void;
+  /** Hide secondary footer hints/details for the chat composer layout. */
+  compact?: boolean;
 }
 
 // Feather "settings" gear, stroke-based like PromptChevron so it inherits
@@ -168,6 +170,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       activeGoal,
       hideSettings,
       onToggleShortcuts,
+      compact = false,
     },
     ref,
   ) {
@@ -194,12 +197,19 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     }, [activeGoal]);
 
     const taskPillLabel = useMemo(() => getTaskPillLabel(tasks, t), [tasks, t]);
+    const hasLeftPrefix =
+      !!escapeHint || (!compact && (connected || !!modeIndicator));
     const goalElapsed = activeGoal
       ? formatGoalElapsed(Date.now() - activeGoal.setAt)
       : '';
     const goalLabel = activeGoal
       ? `◎ ${t('goal.statusActive')}${goalElapsed ? ` (${goalElapsed})` : ''}`
       : '';
+    const hasLeftContent = !!escapeHint || !!taskPillLabel || !compact;
+    const hasRightContent =
+      (!compact && !!currentModel) ||
+      (!compact && contextWindow > 0 && tokenCount > 0) ||
+      !!goalLabel;
 
     useImperativeHandle(
       ref,
@@ -212,6 +222,10 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       }),
       [taskPillLabel],
     );
+
+    if (!hasLeftContent && !hasRightContent) {
+      return null;
+    }
 
     const handleTaskPillKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
       if (
@@ -249,7 +263,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     return (
       <div className={styles.bar}>
         <div className={styles.left}>
-          {connected && !hideSettings && (
+          {connected && !hideSettings && !compact && (
             <button
               type="button"
               className={styles.settingsButton}
@@ -269,7 +283,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
             </span>
           ) : (
             <>
-              {modeIndicator && (
+              {modeIndicator && !compact && (
                 <button
                   type="button"
                   className={styles.modeButton}
@@ -284,31 +298,37 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
                   >
                     {modeIndicator.label}
                   </span>
-                  <span className={styles.modeHint}>
-                    {t('status.modeHint')}
-                  </span>
+                  {!compact && (
+                    <span className={styles.modeHint}>
+                      {t('status.modeHint')}
+                    </span>
+                  )}
                 </button>
               )}
-              {onToggleShortcuts ? (
-                <button
-                  type="button"
-                  className={styles.shortcutsButton}
-                  onClick={onToggleShortcuts}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onTouchStart={(e) => e.stopPropagation()}
-                  aria-haspopup="dialog"
-                  aria-label={t('status.shortcuts')}
-                >
-                  {t('status.shortcuts')}
-                </button>
-              ) : (
-                <span>{t('status.shortcuts')}</span>
+              {!compact && (
+                <>
+                  {onToggleShortcuts ? (
+                    <button
+                      type="button"
+                      className={styles.shortcutsButton}
+                      onClick={onToggleShortcuts}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onTouchStart={(e) => e.stopPropagation()}
+                      aria-haspopup="dialog"
+                      aria-label={t('status.shortcuts')}
+                    >
+                      {t('status.shortcuts')}
+                    </button>
+                  ) : (
+                    <span>{t('status.shortcuts')}</span>
+                  )}
+                </>
               )}
             </>
           )}
           {taskPillLabel && (
             <>
-              <span className={styles.separator}>·</span>
+              {hasLeftPrefix && <span className={styles.separator}>·</span>}
               <button
                 ref={taskPillRef}
                 type="button"
@@ -324,12 +344,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
         </div>
 
         <div className={styles.right}>
-          {!connected && (
-            <span className={styles.disconnected}>
-              {t('status.disconnected')}
-            </span>
-          )}
-          {currentModel && (
+          {!compact && currentModel && (
             <button
               type="button"
               className={styles.modelButton}
@@ -342,7 +357,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
               <span className={styles.model}>{currentModel}</span>
             </button>
           )}
-          {contextWindow > 0 && tokenCount > 0 && (
+          {!compact && contextWindow > 0 && tokenCount > 0 && (
             <button
               type="button"
               className={styles.contextButton}
