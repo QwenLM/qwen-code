@@ -437,6 +437,7 @@ export interface DaemonWorkspaceProvidersStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];

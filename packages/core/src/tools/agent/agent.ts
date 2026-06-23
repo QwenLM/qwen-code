@@ -2111,7 +2111,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ov.getCwd = () => wtPath;
         ov.getWorkingDir = () => wtPath;
         ov.getProjectRoot = () => wtPath;
-        const wtFileService = new FileDiscoveryService(wtPath);
+        const wtFileService = new FileDiscoveryService(
+          wtPath,
+          this.config.getFileFilteringOptions().customIgnoreFiles,
+        );
         ov.fileDiscoveryService = wtFileService;
         ov.getFileService = () => wtFileService;
         const wtWorkspace = new WorkspaceContext(wtPath);

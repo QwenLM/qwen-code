@@ -36,6 +36,7 @@ import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import * as transcript from '../../agents/agent-transcript.js';
 
 // Type for accessing protected methods in tests
@@ -159,6 +160,9 @@ describe('AgentTool', () => {
     };
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getTargetDir: vi.fn().mockReturnValue('/test/project'),
+      getCwd: vi.fn().mockReturnValue('/test/project'),
+      getWorkingDir: vi.fn().mockReturnValue('/test/project'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getCliVersion: vi.fn().mockReturnValue('test-version'),
       getSubagentManager: vi.fn(),
@@ -177,6 +181,13 @@ describe('AgentTool', () => {
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
+      isForkSubagentEnabled: vi.fn().mockReturnValue(false),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+        customIgnoreFiles: ['.agentignore', '.aiignore'],
+      }),
+      getWorktreeSymlinkDirectories: vi.fn().mockReturnValue([]),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
@@ -763,6 +774,66 @@ describe('AgentTool', () => {
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
     });
+
+    it('passes custom ignore files into worktree isolation file service', async () => {
+      vi.useRealTimers();
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-'));
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, '.cursorignore'), 'secret.txt\n');
+        fs.writeFileSync(path.join(repo, 'secret.txt'), 'secret\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+        vi.mocked(config.getFileFilteringOptions).mockReturnValue({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        });
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+          isolation: 'worktree',
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).not.toBe(repo);
+        expect(
+          agentConfig.getFileService().getQwenIgnoreFileNamesDisplay(),
+        ).toBe('.qwenignore, .cursorignore');
+        expect(
+          agentConfig.getFileService().shouldQwenIgnoreFile('secret.txt'),
+        ).toBe(true);
+        expect(
+          agentConfig
+            .getFileService()
+            .getQwenIgnoreFileDisplayForPath('secret.txt'),
+        ).toBe('.cursorignore');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
 
     it('should handle subagent not found error', async () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);

@@ -8,13 +8,10 @@ import type { Content } from '@google/genai';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 
-const { mockGetCacheSafeParams, mockRunForkedAgent, mockAddEvent } = vi.hoisted(
-  () => ({
-    mockGetCacheSafeParams: vi.fn(),
-    mockRunForkedAgent: vi.fn(),
-    mockAddEvent: vi.fn(),
-  }),
-);
+const { mockGetCacheSafeParams, mockRunForkedAgent } = vi.hoisted(() => ({
+  mockGetCacheSafeParams: vi.fn(),
+  mockRunForkedAgent: vi.fn(),
+}));
 
 vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
   const actual =
@@ -23,17 +20,6 @@ vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
     ...actual,
     getCacheSafeParams: mockGetCacheSafeParams,
     runForkedAgent: mockRunForkedAgent,
-  };
-});
-
-vi.mock('../telemetry/uiTelemetry.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../telemetry/uiTelemetry.js')>();
-  return {
-    ...actual,
-    uiTelemetryService: {
-      addEvent: mockAddEvent,
-    },
   };
 });
 
@@ -54,7 +40,6 @@ describe('generatePromptSuggestion', () => {
   beforeEach(() => {
     mockGetCacheSafeParams.mockReset();
     mockRunForkedAgent.mockReset();
-    mockAddEvent.mockReset();
   });
 
   it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {

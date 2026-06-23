@@ -19,6 +19,74 @@ export function formatAcpModelId(modelId: string, authType: AuthType): string {
   return `${modelId}(${authType})`;
 }
 
+export function sanitizeProviderBaseUrl(baseUrl: string): string {
+  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
+  if (!scheme) {
+    return baseUrl;
+  }
+
+  const authorityStart = scheme[0].length;
+  const stripAt = (at: number) =>
+    `${baseUrl.slice(0, authorityStart)}${baseUrl.slice(at + 1)}`;
+  const authorityEnd = findAuthorityEnd(baseUrl, authorityStart);
+  const authorityAt = baseUrl
+    .slice(authorityStart, authorityEnd)
+    .lastIndexOf('@');
+  const authorityAtIndex =
+    authorityAt === -1 ? -1 : authorityStart + authorityAt;
+
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.username || parsed.password) {
+      return authorityAtIndex >= authorityStart
+        ? stripAt(authorityAtIndex)
+        : baseUrl;
+    }
+    return baseUrl;
+  } catch {
+    if (authorityAtIndex >= authorityStart) {
+      return stripAt(authorityAtIndex);
+    }
+
+    const fallbackAt = findUnescapedUserInfoFallbackAt(
+      baseUrl,
+      authorityStart,
+      authorityEnd,
+    );
+    return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
+  }
+}
+
+function findUnescapedUserInfoFallbackAt(
+  baseUrl: string,
+  authorityStart: number,
+  authorityEnd: number,
+): number {
+  const at = baseUrl.lastIndexOf('@');
+  if (at < authorityStart || authorityEnd >= at) {
+    return -1;
+  }
+
+  const colon = baseUrl.indexOf(':', authorityStart);
+  if (colon === -1 || colon > authorityEnd) {
+    return -1;
+  }
+
+  const portCandidate = baseUrl.slice(colon + 1, authorityEnd);
+  return /^\d+$/.test(portCandidate) ? -1 : at;
+}
+
+function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
+  const slash = baseUrl.indexOf('/', authorityStart);
+  const query = baseUrl.indexOf('?', authorityStart);
+  const hash = baseUrl.indexOf('#', authorityStart);
+  let end = baseUrl.length;
+  if (slash !== -1) end = Math.min(end, slash);
+  if (query !== -1) end = Math.min(end, query);
+  if (hash !== -1) end = Math.min(end, hash);
+  return end;
+}
+
 /**
  * Extracts the base model id from an ACP model id string.
  *

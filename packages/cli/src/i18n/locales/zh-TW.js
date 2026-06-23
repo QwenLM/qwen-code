@@ -1193,6 +1193,7 @@ export default {
   'Size:': '大小：',
   '{{count}} bytes': '{{count}} 位元組',
   'Reference in chat': '在對話中引用',
+  'MCP resource server': 'MCP 資源伺服器',
   '{{count}} invalid tools': '{{count}} 個無效工具',
   invalid: '無效',
   'invalid: {{reason}}': '無效：{{reason}}',

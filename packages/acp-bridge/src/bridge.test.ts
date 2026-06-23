@@ -4165,6 +4165,22 @@ describe('createAcpSessionBridge', () => {
       expect(setModelCalls).toHaveLength(1);
       expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
       expect(setModelCalls[0]?.modelId).toBe('qwen3-coder');
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const switched = await it.next();
+      expect(switched.value?.type).toBe('model_switched');
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.originatorClientId).toBe(session.clientId);
+      expect(settingsChanged.value?.data).toEqual({
+        key: 'model.name',
+        value: 'qwen3-coder',
+      });
+      abort.abort();
       await bridge.shutdown();
     });
 
@@ -5246,6 +5262,12 @@ describe('createAcpSessionBridge', () => {
         sessionId: session.sessionId,
         modelId: 'qwen3-coder',
       });
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.data).toEqual({
+        key: 'model.name',
+        value: 'qwen3-coder',
+      });
       abort.abort();
       await bridge.shutdown();
     });
@@ -5268,6 +5290,9 @@ describe('createAcpSessionBridge', () => {
       const next = await it.next();
       expect(next.value?.type).toBe('model_switched');
       expect(next.value?.originatorClientId).toBe(session.clientId);
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.originatorClientId).toBe(session.clientId);
       abort.abort();
       await bridge.shutdown();
     });
@@ -9312,11 +9337,13 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
         undefined,
       );
 
-      const seen: Array<{ type: string; modelId?: string }> = [];
+      const seen: Array<{ type: string; modelId?: string; value?: string }> =
+        [];
       for await (const e of iter) {
         seen.push({
           type: e.type,
           modelId: (e.data as { modelId?: string })?.modelId,
+          value: (e.data as { value?: string })?.value,
         });
         if (seen.filter((s) => s.type === 'model_switched').length === 2) break;
       }
@@ -9324,6 +9351,17 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       // First the requested change, then the corrective one from reconcile.
       expect(switches[0]?.modelId).toBe('qwen-max');
       expect(switches[1]?.modelId).toBe('qwen-turbo');
+      const requestedSwitchIndex = seen.findIndex(
+        (s) => s.type === 'model_switched' && s.modelId === 'qwen-max',
+      );
+      const settingsChangedIndex = seen.findIndex(
+        (s) => s.type === 'settings_changed' && s.value === 'qwen-max',
+      );
+      const correctiveSwitchIndex = seen.findIndex(
+        (s) => s.type === 'model_switched' && s.modelId === 'qwen-turbo',
+      );
+      expect(settingsChangedIndex).toBeGreaterThan(requestedSwitchIndex);
+      expect(settingsChangedIndex).toBeLessThan(correctiveSwitchIndex);
       abort.abort();
       await bridge.shutdown();
     });

@@ -146,6 +146,7 @@ import { HistoryReplayer } from './session/HistoryReplayer.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
+  sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import {
   updateOutputLanguageFile,
@@ -243,25 +244,6 @@ function hasFailedDisplayStatus(
     (display as { status?: unknown }).status === 'failed'
   );
 }
-
-function sanitizeProviderBaseUrl(baseUrl: string): string {
-  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
-  if (!scheme) {
-    return baseUrl;
-  }
-
-  const authorityStart = scheme[0].length;
-  const rest = baseUrl.slice(authorityStart);
-  const authorityEnd = rest.search(/[/?#]/);
-  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
-  const at = authority.lastIndexOf('@');
-  if (at === -1) {
-    return baseUrl;
-  }
-
-  return `${baseUrl.slice(0, authorityStart)}${authority.slice(at + 1)}${rest.slice(authority.length)}`;
-}
-
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
  * a side-effect-free presence check. Mirrors `AUTH_ENV_MAPPINGS` from
@@ -2554,6 +2536,26 @@ function normalizeAcpSessionListSize(value: unknown): number | undefined {
   return Math.min(Math.max(value, 1), MAX_ACP_SESSION_PAGE_SIZE);
 }
 
+function parseAcpSessionListCursor(
+  value: string | null | undefined,
+): number | undefined {
+  if (value == null || value === '') return undefined;
+  const trimmed = value.trim();
+  const parsedCursor = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsedCursor) ||
+    parsedCursor < 0 ||
+    parsedCursor > Number.MAX_SAFE_INTEGER
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid cursor: "${value}" is not a valid numeric cursor`,
+    );
+  }
+  return parsedCursor;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
@@ -2913,17 +2915,7 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    let numericCursor: number | undefined;
-    if (params.cursor != null && params.cursor !== '') {
-      const parsedCursor = Number(params.cursor);
-      if (!Number.isFinite(parsedCursor)) {
-        throw RequestError.invalidParams(
-          undefined,
-          `Invalid cursor: "${params.cursor}" is not a valid numeric cursor`,
-        );
-      }
-      numericCursor = parsedCursor;
-    }
+    const numericCursor = parseAcpSessionListCursor(params.cursor);
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends

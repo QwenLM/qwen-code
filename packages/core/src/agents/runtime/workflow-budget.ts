@@ -36,6 +36,7 @@
  */
 
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import type { WorkflowBudget } from './workflow-sandbox.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_BUDGET');
@@ -74,8 +75,10 @@ export function resolveMaxTokensPerWorkflow(
   if (raw === undefined || raw.trim() === '') {
     return null;
   }
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 1) {
+  // Parse through the shared helper so only plain decimal integers are
+  // accepted; Number() alone would let "0x2BF20"/"1e6"/"5.0" slip through.
+  const parsed = parsePositiveIntegerEnv(raw, 0);
+  if (parsed < 1) {
     debugLogger.warn(
       `Invalid ${MAX_TOKENS_PER_WORKFLOW_ENV}=${JSON.stringify(raw)}, ` +
         `treating as unset (no cap)`,

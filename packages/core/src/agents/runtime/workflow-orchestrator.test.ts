@@ -756,7 +756,10 @@ describe('WorkflowOrchestrator', () => {
       ref: string | { scriptPath: string },
     ) => {
       expect(ref).toBe('child');
-      return { script: `return 'nested-' + (await agent('inner'));`, name: 'child' };
+      return {
+        script: `return 'nested-' + (await agent('inner'));`,
+        name: 'child',
+      };
     };
     const outcome = await orchestrator.run({
       script: `const r = await workflow('child'); return 'parent:' + r;`,
@@ -808,7 +811,8 @@ describe('WorkflowOrchestrator', () => {
       expect(dispatchCalls).toBe(2);
       expect(String(caught)).toMatch(/exceeded the maximum of 2 agent/);
     } finally {
-      if (prev === undefined) delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
       else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
     }
   });
@@ -1058,7 +1062,8 @@ describe('WorkflowOrchestrator', () => {
       });
       expect(outcome.result).toBe('ok'); // no cap error despite 3 > 2
     } finally {
-      if (prev === undefined) delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
       else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
     }
   });
@@ -1632,6 +1637,29 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       expect(
         resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '2.5' }),
       ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+    });
+
+    it('resolveMaxAgentsPerRun rejects hex / scientific / non-decimal-integer overrides', () => {
+      // Number('0x10')=16, Number('1e3')=1000, Number('1.0')=1 pass
+      // Number.isInteger; only plain decimal integers should override the cap.
+      for (const raw of ['0x10', '1e3', '1.0']) {
+        expect(
+          resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: raw }),
+        ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      }
+    });
+
+    it('resolveConcurrencyLimit treats hex / scientific overrides as invalid (cpu default)', () => {
+      // An invalid override falls back to the cpu-derived default in [1,16];
+      // 0x10/1e2 must be rejected too, not parsed as 16/100.
+      const cpuDefault = resolveConcurrencyLimit({
+        QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
+      });
+      for (const raw of ['0x10', '1e2']) {
+        expect(
+          resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: raw }),
+        ).toBe(cpuDefault);
+      }
     });
 
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must

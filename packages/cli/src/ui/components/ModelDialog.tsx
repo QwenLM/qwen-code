@@ -228,7 +228,9 @@ export function ModelDialog({
       (m) =>
         !m.isRuntimeModel &&
         (m.authType !== AuthType.QWEN_OAUTH ||
-          authType === AuthType.QWEN_OAUTH),
+          authType === AuthType.QWEN_OAUTH) &&
+        (isFastModelMode || !m.fastOnly) &&
+        (isVoiceModelMode || !m.voiceOnly),
     );
 
     // Group registry models by authType
@@ -293,7 +295,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [authType, config]);
+  }, [authType, config, isFastModelMode, isVoiceModelMode]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
