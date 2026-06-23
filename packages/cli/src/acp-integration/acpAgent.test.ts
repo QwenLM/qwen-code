@@ -5393,7 +5393,14 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
     const { agent, agentPromise } = await bootAgent();
 
     try {
-      for (const cursor of ['abc', 'Infinity', '-Infinity']) {
+      for (const cursor of [
+        'abc',
+        'Infinity',
+        '-Infinity',
+        '-1',
+        '9007199254740992',
+        '   ',
+      ]) {
         await expect(
           agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
         ).rejects.toThrow(
@@ -5523,7 +5530,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
     }
   });
 
-  it('passes a finite cursor through to SessionService', async () => {
+  it('passes a finite non-negative cursor through to SessionService', async () => {
     const listSessions = vi.fn().mockResolvedValue({
       items: [
         {
@@ -5548,7 +5555,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       await expect(
         agent.unstable_listSessions({
           cwd: '/tmp/project',
-          cursor: '1797860000000',
+          cursor: '1797860000000.5',
           _meta: { size: 2 },
         }),
       ).resolves.toEqual({
@@ -5569,7 +5576,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       });
       expect(SessionService).toHaveBeenCalledWith('/tmp/project');
       expect(listSessions).toHaveBeenCalledWith({
-        cursor: 1_797_860_000_000,
+        cursor: 1_797_860_000_000.5,
         size: 2,
       });
     } finally {

@@ -2536,6 +2536,26 @@ function normalizeAcpSessionListSize(value: unknown): number | undefined {
   return Math.min(Math.max(value, 1), MAX_ACP_SESSION_PAGE_SIZE);
 }
 
+function parseAcpSessionListCursor(
+  value: string | null | undefined,
+): number | undefined {
+  if (value == null || value === '') return undefined;
+  const trimmed = value.trim();
+  const parsedCursor = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsedCursor) ||
+    parsedCursor < 0 ||
+    parsedCursor > Number.MAX_SAFE_INTEGER
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid cursor: "${value}" is not a valid numeric cursor`,
+    );
+  }
+  return parsedCursor;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
@@ -2895,17 +2915,7 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    let numericCursor: number | undefined;
-    if (params.cursor != null && params.cursor !== '') {
-      const parsedCursor = Number(params.cursor);
-      if (!Number.isFinite(parsedCursor)) {
-        throw RequestError.invalidParams(
-          undefined,
-          `Invalid cursor: "${params.cursor}" is not a valid numeric cursor`,
-        );
-      }
-      numericCursor = parsedCursor;
-    }
+    const numericCursor = parseAcpSessionListCursor(params.cursor);
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends

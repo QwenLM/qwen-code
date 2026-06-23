@@ -242,6 +242,21 @@ export class InvalidCursorError extends Error {
   }
 }
 
+function parseSessionCursor(cursor: string): number | undefined {
+  if (cursor === '') return undefined;
+  const trimmed = cursor.trim();
+  const parsed = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    parsed > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new InvalidCursorError(cursor);
+  }
+  return parsed;
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -255,12 +270,8 @@ export async function listWorkspaceSessionsForResponse(
   const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
 
   let numericCursor: number | undefined;
-  if (options?.cursor) {
-    const parsed = Number(options.cursor);
-    if (!Number.isFinite(parsed)) {
-      throw new InvalidCursorError(options.cursor);
-    }
-    numericCursor = parsed;
+  if (options?.cursor != null) {
+    numericCursor = parseSessionCursor(options.cursor);
   }
   const isFirstPage = numericCursor === undefined;
 
