@@ -119,7 +119,7 @@ jobs:
       # On PRs github.ref is the merge ref (refs/pull/N/merge), so the required
       # checks validate the merge result, not just the PR tip. GitHub builds that
       # ref asynchronously and it can briefly 404 or lag right after a push, so
-      # we back off and retry the same ref once on checkout failure or stale HEAD.
+      # we retry checkout failures and refresh stale merge refs before testing.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -151,17 +151,22 @@ jobs:
       - name: 'Back off for stale merge ref to refresh'
         if: "${{ steps.verify_pr_checkout.outcome == 'failure' }}"
         run: 'sleep 10'
-      - name: 'Checkout (retry on stale merge ref)'
+      - name: 'Fetch current PR merge ref from GitHub'
         if: "${{ steps.verify_pr_checkout.outcome == 'failure' }}"
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
-          fetch-depth: 0
-      - name: 'Verify PR checkout includes head commit after retry'
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: '${{ github.token }}'
+        run: |-
+          merge_ref='refs/remotes/pull/${{ github.event.pull_request.number }}/merge'
+          github_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --no-recurse-submodules "${github_url}" "+${GITHUB_REF}:${merge_ref}"
+          git checkout --force "${merge_ref}"
+          git log --oneline --decorate -1
+      - name: 'Verify PR checkout includes head commit after refresh'
         if: "${{ steps.verify_pr_checkout.outcome == 'failure' }}"
         run: |-
           if ! git merge-base --is-ancestor '${{ github.event.pull_request.head.sha }}' HEAD; then
-            echo "::error::Checked out ref still does not contain PR head ${{ github.event.pull_request.head.sha }} after retry."
+            echo "::error::Checked out ref still does not contain PR head ${{ github.event.pull_request.head.sha }} after refresh."
             git log --oneline --decorate -5
             exit 1
           fi
@@ -258,6 +263,7 @@ jobs:
           echo "Settings schema is up-to-date"
 
       - name: 'Run tests and generate reports'
+        id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
@@ -269,7 +275,7 @@ jobs:
 
       - name: 'Publish Test Report (for non-forks)'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: 'dorny/test-reporter@dc3a92680fcc15842eef52e8c4606ea7ce6bd3f3' # ratchet:dorny/test-reporter@v2
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x)'

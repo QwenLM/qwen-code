@@ -62,7 +62,7 @@ describe('no-AK integration CI wiring', () => {
     expect(platformJob).not.toContain(NO_AK_SCRIPT);
   });
 
-  it('retries stale Ubuntu PR merge refs before running checks', () => {
+  it('fetches fresh Ubuntu PR merge refs before running checks', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
@@ -84,12 +84,18 @@ describe('no-AK integration CI wiring', () => {
     expect(ubuntuJob).toContain(
       "name: 'Back off for stale merge ref to refresh'",
     );
-    expect(ubuntuJob).toContain("name: 'Checkout (retry on stale merge ref)'");
+    expect(ubuntuJob).toContain(
+      "name: 'Fetch current PR merge ref from GitHub'",
+    );
+    expect(ubuntuJob).toContain('timeout-minutes: 2');
+    expect(ubuntuJob).toContain('https://x-access-token:${GITHUB_TOKEN}');
+    expect(ubuntuJob).toContain('git fetch --no-tags --no-recurse-submodules');
+    expect(ubuntuJob).toContain('git checkout --force "${merge_ref}"');
     expect(ubuntuJob).toContain(
       "steps.verify_pr_checkout.outcome == 'failure'",
     );
     expect(ubuntuJob).toContain(
-      "name: 'Verify PR checkout includes head commit after retry'",
+      "name: 'Verify PR checkout includes head commit after refresh'",
     );
   });
 });
