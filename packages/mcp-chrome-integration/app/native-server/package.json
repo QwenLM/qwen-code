@@ -38,6 +38,7 @@
   "dependencies": {
     "@fastify/cors": "^11.0.1",
     "@modelcontextprotocol/sdk": "^1.11.0",
+    "@qwen-code/sdk": "^0.1.8",
     "@types/node-fetch": "2",
     "chalk": "^5.4.1",
     "chrome-devtools-frontend": "^1.0.1299282",
