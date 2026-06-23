@@ -267,6 +267,22 @@ describe('MCPOAuthTokenStorage', () => {
         expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
         expect(stderrWriteSpy).toHaveBeenCalledTimes(1);
       });
+
+      it('should not fail token writes when stderr warning output fails', async () => {
+        vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
+        vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+        stderrWriteSpy.mockImplementationOnce(() => {
+          throw new Error('EPIPE');
+        });
+
+        await expect(
+          tokenStorage.saveToken('test-server', mockToken),
+        ).resolves.toBeUndefined();
+
+        expect(stderrWriteSpy).toHaveBeenCalledTimes(1);
+        expect(mockDebugLogger.error).not.toHaveBeenCalled();
+      });
     });
 
     describe('getCredentials', () => {

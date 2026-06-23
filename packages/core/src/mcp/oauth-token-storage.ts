@@ -34,7 +34,11 @@ function warnPlaintextTokenStorage(tokenFile: string): void {
     `MCP OAuth tokens are stored unencrypted at ${tokenFile}. ` +
     `Set ${FORCE_ENCRYPTED_FILE_ENV_VAR}=true to require encrypted file storage.`;
   debugLogger.warn(message);
-  process.stderr.write(`Warning: ${message}\n`);
+  try {
+    process.stderr.write(`Warning: ${message}\n`);
+  } catch {
+    // Stderr is best-effort; token persistence has already succeeded.
+  }
 }
 
 /**

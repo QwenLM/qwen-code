@@ -52,6 +52,7 @@ import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
 import { OAuthUtils } from '../mcp/oauth-utils.js';
+import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -1380,7 +1381,14 @@ export async function connectToMcpServer(
         // For SSE servers without explicit OAuth config, report whether
         // the 401 came after trying stored credentials or without any OAuth setup.
         const tokenStorage = new MCPOAuthTokenStorage();
-        const credentials = await tokenStorage.getCredentials(mcpServerName);
+        let credentials: OAuthCredentials | null = null;
+        try {
+          credentials = await tokenStorage.getCredentials(mcpServerName);
+        } catch (credentialError) {
+          debugLogger.error(
+            `Failed to re-read stored OAuth credentials for SSE server '${mcpServerName}' after 401: ${getErrorMessage(credentialError)}`,
+          );
+        }
         let tokenState: SseOAuth401TokenState =
           credentials || hadStoredSseOAuthCredentials ? 'unusable' : 'missing';
         if (credentials) {
@@ -1392,8 +1400,9 @@ export async function connectToMcpServer(
             ? 'accepted-token-rejected'
             : 'unusable';
         }
-        debugLogger.warn(getSseOAuth401Message(mcpServerName, tokenState));
-        throw new Error(getSseOAuth401Message(mcpServerName, tokenState));
+        const oauthMessage = getSseOAuth401Message(mcpServerName, tokenState);
+        debugLogger.warn(oauthMessage);
+        throw new Error(oauthMessage);
       }
 
       // Try to extract www-authenticate header from the error
