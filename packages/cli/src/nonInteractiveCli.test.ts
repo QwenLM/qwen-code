@@ -347,11 +347,12 @@ describe('runNonInteractive', () => {
   describe('continueInterrupted', () => {
     it('re-submits an orphaned trailing user prompt with Retry semantics', async () => {
       setupMetricsMock();
-      const stripSpy = vi.fn();
-      mockGeminiClient.stripOrphanedUserEntriesFromHistory = stripSpy;
+      // The orphan strip + restore is owned by the Retry send path in
+      // client.ts (covered by client.test.ts); here we only assert the
+      // continuation hands off to that path with Retry semantics.
       mockGeminiClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
-        getHistoryTail: vi
+        getHistory: vi
           .fn()
           .mockReturnValue([
             { role: 'user', parts: [{ text: 'do the thing' }] },
@@ -370,7 +371,6 @@ describe('runNonInteractive', () => {
         continueInterrupted: true,
       });
 
-      expect(stripSpy).toHaveBeenCalledTimes(1);
       expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
         [{ text: 'do the thing' }],
         expect.any(AbortSignal),
@@ -385,7 +385,7 @@ describe('runNonInteractive', () => {
       mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn();
       mockGeminiClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
-        getHistoryTail: vi
+        getHistory: vi
           .fn()
           .mockReturnValue([
             { role: 'user', parts: [{ text: 'do the thing' }] },
@@ -415,86 +415,11 @@ describe('runNonInteractive', () => {
       ]);
     });
 
-    it('restores an orphaned trailing user prompt when Retry exits before sending', async () => {
-      setupMetricsMock();
-      const orphanedPrompt = [{ text: 'do the thing' }];
-      const addHistorySpy = vi.fn();
-      mockGeminiClient.getChat = vi.fn(() => ({
-        addHistory: addHistorySpy,
-        getDebugResponses: mockGetDebugResponses,
-        getHistoryTail: vi
-          .fn()
-          .mockReturnValue([{ role: 'user', parts: orphanedPrompt }]),
-      }));
-      mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn(() => [
-        { role: 'user', parts: orphanedPrompt },
-      ]);
-      mockGeminiClient.sendMessageStream.mockReturnValue(
-        createStreamFromEvents([
-          {
-            type: GeminiEventType.SessionTokenLimitExceeded,
-            value: {
-              currentTokens: 101,
-              limit: 100,
-              message: 'Session token limit exceeded',
-            },
-          },
-        ]),
-      );
-
-      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-limit', {
-        continueInterrupted: true,
-      });
-
-      expect(addHistorySpy).toHaveBeenCalledWith({
-        role: 'user',
-        parts: orphanedPrompt,
-      });
-    });
-
-    it('restores an orphaned trailing user prompt when Retry stream throws before sending', async () => {
-      setupMetricsMock();
-      const orphanedPrompt = [{ text: 'do the thing' }];
-      const addHistorySpy = vi.fn();
-      mockGeminiClient.getChat = vi.fn(() => ({
-        addHistory: addHistorySpy,
-        getDebugResponses: mockGetDebugResponses,
-        getHistoryTail: vi
-          .fn()
-          .mockReturnValue([{ role: 'user', parts: orphanedPrompt }]),
-      }));
-      const stripSpy = vi.fn(() => [{ role: 'user', parts: orphanedPrompt }]);
-      mockGeminiClient.stripOrphanedUserEntriesFromHistory = stripSpy;
-      async function* throwingStream(): AsyncGenerator<ServerGeminiStreamEvent> {
-        yield* [] as ServerGeminiStreamEvent[];
-        throw new Error('stream failed before first event');
-      }
-      mockGeminiClient.sendMessageStream.mockReturnValue(throwingStream());
-
-      await expect(
-        runNonInteractive(
-          mockConfig,
-          mockSettings,
-          'ignored',
-          'prompt-c-throw',
-          {
-            continueInterrupted: true,
-          },
-        ),
-      ).rejects.toThrow('stream failed before first event');
-
-      expect(stripSpy).toHaveBeenCalledTimes(1);
-      expect(addHistorySpy).toHaveBeenCalledWith({
-        role: 'user',
-        parts: orphanedPrompt,
-      });
-    });
-
     it('closes dangling tool calls with synthesized ToolResult parts', async () => {
       setupMetricsMock();
       mockGeminiClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
-        getHistoryTail: vi.fn().mockReturnValue([
+        getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
             parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
@@ -535,7 +460,7 @@ describe('runNonInteractive', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockGeminiClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
-        getHistoryTail: vi.fn().mockReturnValue([
+        getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
             parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
@@ -582,7 +507,7 @@ describe('runNonInteractive', () => {
       setupMetricsMock();
       mockGeminiClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
-        getHistoryTail: vi
+        getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
       }));

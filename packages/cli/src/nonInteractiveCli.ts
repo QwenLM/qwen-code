@@ -28,7 +28,6 @@ import {
   SendMessageType,
   buildSyntheticToolResponseParts,
   detectTurnInterruption,
-  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   ORPHAN_TOOL_USE_REPAIR_REASON,
   restoreWorktreeContext,
   TeamEventType,
@@ -251,8 +250,12 @@ export async function runNonInteractive(
     const emitResult = (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
     ) => {
-      options.onResultEmitted?.();
+      // Fire the callback only after a successful emit. The continue caller
+      // (session.ts) uses it to mark the result as delivered and swallow any
+      // later error; if emitResult itself throws, the flag must stay unset so
+      // the error still surfaces instead of losing both result and error.
       adapter.emitResult(result);
+      options.onResultEmitted?.();
     };
 
     // Get readonly values once at the start
@@ -473,18 +476,6 @@ export async function runNonInteractive(
     // First-turn SendMessageType override for continuation turns; null means
     // the regular options.sendMessageType / UserQuery selection applies.
     let continueSendType: SendMessageType | null = null;
-    let strippedContinuationEntries: Content[] = [];
-    let continuationSendStarted = false;
-    const restoreStrippedContinuationEntries = () => {
-      if (continuationSendStarted || strippedContinuationEntries.length === 0) {
-        return;
-      }
-      const chat = geminiClient.getChat();
-      for (const entry of strippedContinuationEntries) {
-        chat.addHistory(entry);
-      }
-      strippedContinuationEntries = [];
-    };
 
     try {
       process.stdout.on('error', stdoutErrorHandler);
@@ -515,10 +506,12 @@ export async function runNonInteractive(
       );
 
       if (options.continueInterrupted) {
+        // Read the full history, not a bounded tail: the Retry send path in
+        // client.ts strips the ENTIRE trailing user run, so detection must
+        // re-submit exactly that run or the oldest orphans get dropped. This
+        // runs once per (rare) continue request, so the full clone is fine.
         const detection = detectTurnInterruption(
-          geminiClient
-            .getChat()
-            .getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
+          geminiClient.getChat().getHistory(),
         );
         debugLogger.info('[runNonInteractive] continueInterrupted detection', {
           kind: detection.kind,
@@ -542,12 +535,10 @@ export async function runNonInteractive(
           return 0;
         }
         if (detection.kind === 'interrupted_prompt') {
-          // The send below re-pushes this content; strip the orphaned
-          // original first so history doesn't carry it twice.
-          strippedContinuationEntries =
-            geminiClient.stripOrphanedUserEntriesFromHistory(
-              TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-            ) ?? [];
+          // Re-submit the orphaned user content under Retry semantics. The
+          // Retry send path strips the orphaned original from history and
+          // restores it if the send never starts, so history is neither
+          // duplicated nor lost — no separate strip/restore needed here.
           initialPartList = detection.parts;
           continueSendType = SendMessageType.Retry;
         } else {
@@ -1211,14 +1202,10 @@ export async function runNonInteractive(
         );
         isFirstTurn = false;
 
+        // Start assistant message for this turn
         adapter.startAssistantMessage();
 
         for await (const event of responseStream) {
-          if (event.type === GeminiEventType.SessionTokenLimitExceeded) {
-            restoreStrippedContinuationEntries();
-          } else {
-            continuationSendStarted = true;
-          }
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode
             // doesn't leave an unterminated message_start when a budget /
@@ -1834,8 +1821,6 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
-      restoreStrippedContinuationEntries();
-
       // Unsubscribe the leader message callback and approval
       // listener, but do NOT tear down the team itself — in
       // stream-json sessions the same Config is reused across

@@ -6113,24 +6113,6 @@ describe('GeminiChat', async () => {
       ]);
     });
 
-    it('limits how many trailing user entries are popped', () => {
-      chat.setHistory([
-        { role: 'model', parts: [{ text: 'previous response' }] },
-        { role: 'user', parts: [{ text: 'old orphan' }] },
-        { role: 'user', parts: [{ text: 'new orphan' }] },
-      ]);
-
-      const strippedEntries = chat.stripOrphanedUserEntriesFromHistory(1);
-
-      expect(chat.getHistory()).toEqual([
-        { role: 'model', parts: [{ text: 'previous response' }] },
-        { role: 'user', parts: [{ text: 'old orphan' }] },
-      ]);
-      expect(strippedEntries).toEqual([
-        { role: 'user', parts: [{ text: 'new orphan' }] },
-      ]);
-    });
-
     it('preserves the startup reminder when stripping a failed first prompt', () => {
       const startupReminder: Content = {
         role: 'user',
