@@ -348,7 +348,7 @@
   max-width: 700px !important;
   max-height: 400px !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
-  background: var(--bg-secondary, #161616) !important;
+  background: var(--bg-primary, #0d0d0d) !important;
   border: 1px solid var(--border-color, #2a2a2a) !important;
   border-radius: 6px !important;
   overflow: visible;
@@ -399,11 +399,26 @@
   overflow: hidden;
 }
 
+:global([data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:hover) {
+  background: var(--bg-tertiary, #1e1e1e) !important;
+  color: var(--text-primary, #e4e4e4) !important;
+}
+
 :global(
   [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li[aria-selected]
 ) {
   background: var(--bg-tertiary, #1e1e1e) !important;
-  color: var(--accent-color, #4a9eff) !important;
+  color: var(--text-primary, #e4e4e4) !important;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    ul
+    li:is(:hover, [aria-selected])
+    .cm-completionLabel
+) {
+  color: var(--accent-color, #4a9eff);
 }
 
 :global(
@@ -498,15 +513,9 @@
 }
 
 :global([data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo) {
-  z-index: 1;
-  width: min(
-    calc(100% - var(--web-shell-completion-detail-start)),
-    calc(100vw - 32px)
-  );
-  max-width: min(
-    calc(100% - var(--web-shell-completion-detail-start)),
-    calc(100vw - 32px)
-  ) !important;
+  z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
+  width: min(320px, calc(100vw - 32px));
+  max-width: min(320px, calc(100vw - 32px)) !important;
   max-height: min(280px, calc(100vh - 32px));
   padding: 8px 10px;
   overflow: auto;
@@ -522,6 +531,11 @@
   overflow-wrap: anywhere;
   scrollbar-width: thin;
   scrollbar-color: var(--border-color) transparent;
+}
+
+:global([data-web-shell-tooltip-portal] .cm-completionInfo-hover) {
+  pointer-events: auto;
+  z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
 }
 
 :global(

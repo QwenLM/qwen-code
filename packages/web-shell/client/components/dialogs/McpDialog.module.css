@@ -1,0 +1,330 @@
+.layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 10px;
+}
+
+.muted {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.notice {
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--warning-color);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 0 8px;
+}
+
+.groupTitle {
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 0 8px 2px;
+}
+
+.server {
+  display: flex;
+  flex-direction: column;
+}
+
+.serverCard {
+  display: flex;
+  flex-direction: column;
+  border-radius: 6px;
+}
+
+.serverCardExpanded {
+  background: var(--bg-tertiary);
+  padding-bottom: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.row:hover,
+.expandedRow {
+  background: var(--bg-tertiary);
+}
+
+.serverRow {
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.rowMain {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.rowIcon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.rowIcon::before,
+.rowIcon::after {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+}
+
+.rowIcon::before {
+  top: 4px;
+}
+
+.rowIcon::after {
+  top: 8px;
+}
+
+.chevronCell {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
+}
+
+.toolRow {
+  min-height: 28px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.chevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+  stroke-width: 1.8;
+  transition: transform 120ms ease;
+}
+
+.chevronExpanded {
+  transform: rotate(90deg);
+}
+
+.disabled {
+  opacity: 0.58;
+}
+
+.name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.serverName {
+  flex: 0 1 auto;
+}
+
+.status,
+.badge {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.status {
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  line-height: 18px;
+  padding: 0 6px;
+}
+
+.toolCount {
+  margin-left: 2px;
+  text-align: right;
+}
+
+.success {
+  color: var(--success-color);
+}
+
+.warning {
+  color: var(--warning-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.serverDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.serverDetailHeader {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.serverActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
+.label {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.button {
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 9px;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--accent-color);
+}
+
+.button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.message,
+.schema {
+  margin: 0;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+
+.tools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tool {
+  display: flex;
+  flex-direction: column;
+}
+
+.toolDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 4px 6px;
+}
+
+.sectionTitle {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.description {
+  color: var(--text-primary);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.parameter {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.empty,
+.emptyTools {
+  color: var(--text-secondary);
+  padding: 12px 8px;
+}
+
+.emptyTools {
+  padding: 2px 0;
+  font-size: 12px;
+}

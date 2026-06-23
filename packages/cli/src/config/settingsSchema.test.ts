@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
@@ -94,6 +95,22 @@ describe('SettingsSchema', () => {
         getSettingsSchema().context.properties.fileFiltering.properties
           ?.respectQwenIgnore,
       ).toBeDefined();
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles,
+      ).toBeDefined();
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.type,
+      ).toBe('array');
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.default,
+      ).toEqual([...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES]);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.showInDialog,
+      ).toBe(false);
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties
           ?.enableRecursiveFileSearch,

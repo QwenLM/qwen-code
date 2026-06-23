@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.18.5",
+  "version": "0.19.1",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -30,7 +30,6 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:qwen-code.chatView.sidebar",
-    "onView:qwen-code.chatView.secondary",
     "onCommand:qwen-code.openChat",
     "onCommand:qwen-code.focusChat",
     "onCommand:qwen-code.newConversation",
@@ -48,16 +47,7 @@
         {
           "id": "qwen-code-sidebar",
           "title": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "!qwen-code:supportsSecondarySidebar"
-        }
-      ],
-      "secondarySidebar": [
-        {
-          "id": "qwen-code-secondary",
-          "title": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "qwen-code:supportsSecondarySidebar"
+          "icon": "assets/sidebar-icon.svg"
         }
       ]
     },
@@ -67,17 +57,7 @@
           "type": "webview",
           "id": "qwen-code.chatView.sidebar",
           "name": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "!qwen-code:supportsSecondarySidebar"
-        }
-      ],
-      "qwen-code-secondary": [
-        {
-          "type": "webview",
-          "id": "qwen-code.chatView.secondary",
-          "name": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "qwen-code:supportsSecondarySidebar"
+          "icon": "assets/sidebar-icon.svg"
         }
       ]
     },

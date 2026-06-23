@@ -25,6 +25,7 @@ import {
   isForceExpandGroup,
   mergeCompactToolGroups,
 } from '../utils/mergeCompactToolGroups.js';
+import { buildThinkingFullTextMap } from '../utils/historyUtils.js';
 import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
@@ -487,6 +488,13 @@ export const MainContent = () => {
     return map;
   }, [historyItemsWithSourceCopyOffsets]);
 
+  const thinkingFullTextByItem = useMemo(
+    () => buildThinkingFullTextMap(mergedHistory),
+    [mergedHistory],
+  );
+  const thinkingFullTextByItemRef = useRef(thinkingFullTextByItem);
+  thinkingFullTextByItemRef.current = thinkingFullTextByItem;
+
   const pendingSourceCopyOffsetsByIndex = useMemo(
     () =>
       pendingHistoryItemsWithSourceCopyOffsets.map(
@@ -567,6 +575,7 @@ export const MainContent = () => {
           compactLabel={getCompactLabel(item)}
           summaryAbsorbed={isSummaryAbsorbed(item)}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          thinkingFullText={thinkingFullTextByItemRef.current.get(item)}
         />
       );
     },
@@ -641,6 +650,7 @@ export const MainContent = () => {
                 compactLabel={getCompactLabel(h)}
                 summaryAbsorbed={isSummaryAbsorbed(h)}
                 sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                thinkingFullText={thinkingFullTextByItem.get(h)}
               />
             ),
           ),

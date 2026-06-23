@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.18.5",
+  "version": "0.19.1",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -22,7 +22,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.18.5"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.1"
   },
   "scripts": {
     "start": "node scripts/start.js",

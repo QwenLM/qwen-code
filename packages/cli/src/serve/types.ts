@@ -213,6 +213,8 @@ export interface ServeOptions {
    * handling stay gated behind explicit operator opt-in.
    */
   clientMcpOverWs?: boolean;
+  /** Forward the experimental LSP opt-in to spawned ACP children. */
+  experimentalLsp?: boolean;
 }
 
 /**

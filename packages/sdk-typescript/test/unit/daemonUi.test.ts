@@ -64,6 +64,105 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('preserves assistant message metadata on transcript blocks', () => {
+    const events = normalizeDaemonEvent({
+      id: 10,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Background agent "x" completed.' },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: { taskId: 'task-1', status: 'completed' },
+          },
+        },
+      },
+    });
+
+    expect(events[0]).toMatchObject({
+      type: 'assistant.text.delta',
+      meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+        backgroundTask: { taskId: 'task-1', status: 'completed' },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+        backgroundTask: { taskId: 'task-1', status: 'completed' },
+      },
+    });
+  });
+
+  it('keeps discrete assistant messages separate from normal text blocks', () => {
+    const normalBefore = normalizeDaemonEvent({
+      id: 11,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '前面的正常回复。' },
+        },
+      },
+    });
+    const notification = normalizeDaemonEvent({
+      id: 12,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Background agent "x" completed.' },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: { taskId: 'task-1', status: 'completed' },
+          },
+        },
+      },
+    });
+    const normalAfter = normalizeDaemonEvent({
+      id: 13,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '后面的正常回复。' },
+        },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...normalBefore, ...notification, ...normalAfter],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'assistant', text: '前面的正常回复。' },
+      {
+        kind: 'assistant',
+        text: 'Background agent "x" completed.',
+        meta: { qwenDiscreteMessage: true },
+      },
+      { kind: 'assistant', text: '后面的正常回复。' },
+    ]);
+  });
+
   it('passes the agent-stamped plan stats snapshot through to rawOutput', () => {
     const events = normalizeDaemonEvent({
       id: 5,
@@ -2501,6 +2600,42 @@ describe('daemon UI time schema (PR-B)', () => {
       text: 'hello',
       eventId: 2,
       serverTimestamp: 1_780_910_319_876,
+    });
+  });
+
+  it('stamps assistant.done serverTimestamp onto the active assistant block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            _meta: { timestamp: 1_000 },
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'done' },
+          },
+        },
+      }),
+    );
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'assistant.done',
+        reason: 'end_turn',
+        eventId: 2,
+        serverTimestamp: 5_000,
+      },
+    ]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'done',
+      streaming: false,
+      eventId: 2,
+      serverTimestamp: 5_000,
     });
   });
 
@@ -5328,6 +5463,23 @@ describe('R5 review batch — coverage additions', () => {
     } as never);
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe('debug');
+  });
+
+  it('normalizes mid_turn_message_injected to structured status', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: { sessionId: 's1', messages: ['你好'] },
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: 'Inserted message: 你好',
+        source: 'mid_turn_message_injected',
+        data: { sessionId: 's1', messages: ['你好'] },
+      }),
+    ]);
   });
 
   it('store.clearAwaitingResync clears latch', async () => {

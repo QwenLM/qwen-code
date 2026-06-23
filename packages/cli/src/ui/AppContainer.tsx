@@ -134,6 +134,7 @@ import {
   useVimModeActions,
 } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
+import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -197,6 +198,11 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
+import {
+  ThinkingViewerProvider,
+  type ThinkingViewerData,
+} from './contexts/ThinkingViewerContext.js';
+import { ThinkingViewer } from './components/ThinkingViewer.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -472,6 +478,19 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
+
+  // Thinking viewer overlay state
+  const [thinkingViewerData, setThinkingViewerData] =
+    useState<ThinkingViewerData | null>(null);
+  const openThinkingViewer = useCallback((data: ThinkingViewerData) => {
+    setThinkingViewerData(data);
+  }, []);
+  const closeThinkingViewer = useCallback(() => {
+    setThinkingViewerData(null);
+  }, []);
+
+  // Alt+T inline expansion toggle for thinking blocks
+  const [thoughtExpanded, setThoughtExpanded] = useState(false);
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -3101,6 +3120,23 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
+      // ThinkingViewer owns all input while open.
+      // Ctrl+C / Ctrl+D close the viewer and fall through to quit/exit.
+      if (thinkingViewerData) {
+        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
+          closeThinkingViewer();
+        } else {
+          return;
+        }
+      }
+
+      // Alt+T: toggle inline expansion of thinking blocks.
+      if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
+        setThoughtExpanded((prev) => !prev);
+        refreshStatic();
+        return;
+      }
+
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -3361,6 +3397,9 @@ export const AppContainer = (props: AppContainerProps) => {
       handleDoubleEscRewind,
       vimEnabled,
       vimMode,
+      thinkingViewerData,
+      closeThinkingViewer,
+      setThoughtExpanded,
     ],
   );
 
@@ -3900,6 +3939,11 @@ export const AppContainer = (props: AppContainerProps) => {
     [renderMode, setRenderMode],
   );
 
+  const thinkingViewerValue = useMemo(
+    () => ({ openThinkingViewer }),
+    [openThinkingViewer],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -3911,13 +3955,25 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <RenderModeProvider value={renderModeValue}>
-                <TerminalOutputProvider value={writeRaw}>
-                  <ShellFocusContext.Provider value={isFocused}>
-                    <App />
-                  </ShellFocusContext.Provider>
-                </TerminalOutputProvider>
-              </RenderModeProvider>
+              <ThoughtExpandedProvider value={thoughtExpanded}>
+                <RenderModeProvider value={renderModeValue}>
+                  <TerminalOutputProvider value={writeRaw}>
+                    <ThinkingViewerProvider value={thinkingViewerValue}>
+                      <ShellFocusContext.Provider value={isFocused}>
+                        {thinkingViewerData ? (
+                          <ThinkingViewer
+                            data={thinkingViewerData}
+                            onClose={closeThinkingViewer}
+                            useAlternateScreen={!useTerminalBuffer}
+                          />
+                        ) : (
+                          <App />
+                        )}
+                      </ShellFocusContext.Provider>
+                    </ThinkingViewerProvider>
+                  </TerminalOutputProvider>
+                </RenderModeProvider>
+              </ThoughtExpandedProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

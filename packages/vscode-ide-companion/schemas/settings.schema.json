@@ -705,9 +705,20 @@
               "default": true
             },
             "respectQwenIgnore": {
-              "description": "Respect .qwenignore files when searching",
+              "description": "Respect .qwenignore and configured custom ignore files when searching",
               "type": "boolean",
               "default": true
+            },
+            "customIgnoreFiles": {
+              "description": "Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                ".agentignore",
+                ".aiignore"
+              ]
             },
             "enableRecursiveFileSearch": {
               "description": "Enable recursive file search functionality",

@@ -108,6 +108,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
+  sessionLspStatus: 'qwen/status/session/lsp',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -391,6 +392,7 @@ export interface ServeWorkspaceProvidersStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
@@ -462,6 +464,30 @@ export interface ServeSessionSupportedCommandsStatus {
   sessionId: string;
   availableCommands: AvailableCommand[];
   availableSkills: string[];
+}
+
+export interface ServeLspServerStatus {
+  name: string;
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+  languages: string[];
+  transport?: string;
+  command?: string;
+  error?: string;
+}
+
+export interface ServeSessionLspStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  enabled: boolean;
+  configuredServers: number;
+  readyServers: number;
+  failedServers: number;
+  inProgressServers: number;
+  notStartedServers: number;
+  statusUnavailable?: true;
+  initializationError?: string;
+  servers: ServeLspServerStatus[];
 }
 
 export type ServeSessionTaskLifecycleStatus =

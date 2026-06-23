@@ -1453,6 +1453,35 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getEffectiveInputModalities', () => {
+    type MutableConfigInternals = {
+      contentGeneratorConfig: ContentGeneratorConfig;
+    };
+
+    // Mirrors exactly what fileUtils uses to decide media support, so the file
+    // reader's strip decision and the vision-bridge gate can never disagree.
+    it('returns the resolved modalities from the content generator config', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-model',
+        modalities: { image: true },
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({ image: true });
+    });
+
+    it('treats a model with no resolved modalities as text-only', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-unknown-model',
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({});
+    });
+  });
+
   describe('model switching with different credentials (OpenAI)', () => {
     it('returns undefined for bare Qwen OAuth fast models under active OpenAI auth', async () => {
       const config = new Config({
@@ -2392,6 +2421,10 @@ describe('Server Config (config.ts)', () => {
   it('should set default file filtering settings when not provided', () => {
     const config = new Config(baseParams);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(true);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.agentignore',
+      '.aiignore',
+    ]);
   });
 
   it('should set custom file filtering settings when provided', () => {
@@ -2399,10 +2432,17 @@ describe('Server Config (config.ts)', () => {
       ...baseParams,
       fileFiltering: {
         respectGitIgnore: false,
+        customIgnoreFiles: ['.cursorignore'],
       },
     };
     const config = new Config(paramsWithFileFiltering);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore, .cursorignore',
+    );
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {

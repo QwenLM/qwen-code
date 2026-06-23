@@ -146,7 +146,41 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.skills).toEqual([]);
     });
 
-    it('getWorkspaceProvidersStatus delegates with correct method', async () => {
+    it('getWorkspaceProvidersStatus uses daemon-local provider when present', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, providers: [] });
+      const workspaceProvidersStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        acpChannelLive: false,
+        current: {
+          authType: 'USE_OPENAI',
+          modelId: 'fresh-model(USE_OPENAI)',
+        },
+        providers: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceProvidersStatusProvider,
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.getWorkspaceProvidersStatus(makeCtx());
+
+      expect(result.current?.modelId).toBe('fresh-model(USE_OPENAI)');
+      expect(result.acpChannelLive).toBe(false);
+      expect(workspaceProvidersStatusProvider).toHaveBeenCalledWith(
+        '/workspace',
+        false,
+      );
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+
+    it('getWorkspaceProvidersStatus keeps ACP fallback without daemon-local provider', async () => {
       const queryWorkspaceStatus = vi
         .fn()
         .mockResolvedValue({ v: 1, providers: [] });

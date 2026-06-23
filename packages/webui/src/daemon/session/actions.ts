@@ -9,9 +9,12 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonRewindResult,
   DaemonSessionRecapResult,
+  DaemonRewindSnapshotInfo,
   DaemonSessionTaskStatus,
   DaemonTranscriptStore,
   PermissionResponse,
@@ -53,6 +56,7 @@ export interface CreateDaemonSessionActionsArgs {
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
   passiveAssistantDoneTimerRef: TimerRef;
+  getCreateSessionRequest: () => CreateSessionRequest;
   addNotice: AddDaemonSessionNotice;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
@@ -71,6 +75,7 @@ export function createDaemonSessionActions({
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
   passiveAssistantDoneTimerRef,
+  getCreateSessionRequest,
   addNotice,
   setConnection,
   setPromptStatus,
@@ -401,6 +406,21 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'resume');
     },
 
+    async createSession() {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Create session failed',
+        'create_session',
+      );
+      const nextSession = await withActionTimeout(
+        session.client.createOrAttachSession(getCreateSessionRequest()),
+        'Create session timed out',
+      );
+      persistStableClientId(nextSession.clientId, nextSession.sessionId);
+      return nextSession;
+    },
+
     async newSession() {
       for (const [, active] of activePromptsRef.current) {
         active.controller.abort();
@@ -508,6 +528,8 @@ export function createDaemonSessionActions({
           context,
           currentMode:
             getModeFromSessionContext(context) ?? current.currentMode,
+          currentModel:
+            getModelFromSessionContext(context) ?? current.currentModel,
         }));
         return context;
       } catch (error) {
@@ -582,6 +604,55 @@ export function createDaemonSessionActions({
           'Recap session failed',
           error,
           'recap_session',
+        );
+      }
+    },
+
+    async getRewindSnapshots(): Promise<{
+      snapshots: DaemonRewindSnapshotInfo[];
+    }> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load rewind snapshots failed',
+        'rewind_snapshots',
+      );
+      try {
+        return await withActionTimeout(
+          session.getRewindSnapshots(),
+          'Load rewind snapshots timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load rewind snapshots failed',
+          error,
+          'rewind_snapshots',
+        );
+      }
+    },
+
+    async rewindSession(
+      promptId: string,
+      opts?: { rewindFiles?: boolean },
+    ): Promise<DaemonRewindResult> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Rewind session failed',
+        'rewind_session',
+      );
+      try {
+        return await withActionTimeout(
+          session.rewind(promptId, opts),
+          'Rewind session timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Rewind session failed',
+          error,
+          'rewind_session',
         );
       }
     },
@@ -931,6 +1002,17 @@ function getModeFromSessionContext(
       : undefined;
   const mode = modes?.['currentModeId'] ?? modes?.['currentMode'];
   return typeof mode === 'string' ? mode : undefined;
+}
+
+function getModelFromSessionContext(
+  context: DaemonSessionContextStatus,
+): string | undefined {
+  const models =
+    typeof context.state.models === 'object' && context.state.models !== null
+      ? (context.state.models as Record<string, unknown>)
+      : undefined;
+  const model = models?.['currentModelId'] ?? models?.['currentModel'];
+  return typeof model === 'string' ? model : undefined;
 }
 
 function requireSessionForAction(

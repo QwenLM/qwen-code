@@ -21,6 +21,7 @@ import {
 import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
+  DaemonSessionLspStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
@@ -538,6 +539,26 @@ describe('DaemonClient', () => {
         now: 1_700_000_000_000,
         tasks: [],
       };
+      const lsp: DaemonSessionLspStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        workspaceCwd: '/work/a',
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 1,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'READY',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+          },
+        ],
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/with%2Fslash/context')) {
           return jsonResponse(200, context);
@@ -547,6 +568,9 @@ describe('DaemonClient', () => {
         }
         if (req.url.endsWith('/session/with%2Fslash/tasks')) {
           return jsonResponse(200, tasks);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/lsp')) {
+          return jsonResponse(200, lsp);
         }
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       });
@@ -561,12 +585,17 @@ describe('DaemonClient', () => {
       await expect(
         client.sessionTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
+      await expect(
+        client.sessionLspStatus('with/slash', 'client-1'),
+      ).resolves.toEqual(lsp);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
         ['GET', 'http://daemon/session/with%2Fslash/tasks'],
+        ['GET', 'http://daemon/session/with%2Fslash/lsp'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',
@@ -2317,6 +2346,33 @@ describe('DaemonClient', () => {
       await expect(inflight).resolves.toMatchObject({
         serverName: 'docs',
         restarted: true,
+      });
+    });
+  });
+
+  describe('extension operations', () => {
+    it('GETs an extension operation status by id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          operationId: 'op/1',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.extensionOperationStatus('op/1');
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations/op%2F1',
+      );
+      expect(calls[0]?.method).toBe('GET');
+      expect(result).toMatchObject({
+        operationId: 'op/1',
+        status: 'succeeded',
       });
     });
   });

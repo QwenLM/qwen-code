@@ -60,6 +60,7 @@ import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { isServeDebugMode } from './debug-mode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
@@ -209,12 +210,16 @@ export function resolveBridgeFsFactory(input: {
   injected?: WorkspaceFileSystemFactory;
   trusted: boolean;
   emit?: (event: BridgeEvent) => void;
+  customIgnoreFiles?: string[];
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
     boundWorkspace: input.boundWorkspace,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
+    ...(input.customIgnoreFiles !== undefined
+      ? { customIgnoreFiles: input.customIgnoreFiles }
+      : {}),
   });
 }
 
@@ -238,6 +243,21 @@ export class InvalidCursorError extends Error {
   }
 }
 
+function parseSessionCursor(cursor: string): number | undefined {
+  if (cursor === '') return undefined;
+  const trimmed = cursor.trim();
+  const parsed = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    parsed > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new InvalidCursorError(cursor);
+  }
+  return parsed;
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -251,12 +271,8 @@ export async function listWorkspaceSessionsForResponse(
   const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
 
   let numericCursor: number | undefined;
-  if (options?.cursor) {
-    const parsed = Number(options.cursor);
-    if (!Number.isFinite(parsed)) {
-      throw new InvalidCursorError(options.cursor);
-    }
-    numericCursor = parsed;
+  if (options?.cursor != null) {
+    numericCursor = parseSessionCursor(options.cursor);
   }
   const isFirstPage = numericCursor === undefined;
 
@@ -1015,6 +1031,7 @@ function advertisedMaxPendingPromptsPerSession(
  *   - `GET  /session/:id/context`
  *   - `GET  /session/:id/supported-commands`
  *   - `GET  /session/:id/tasks`
+ *   - `GET  /session/:id/lsp`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/heartbeat`
@@ -1232,6 +1249,8 @@ export function createServeApp(
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider: createDaemonStatusProvider(),
+      workspaceProvidersStatusProvider:
+        createWorkspaceProvidersStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
@@ -1262,7 +1281,7 @@ export function createServeApp(
     extensionInstallQueue = next.catch(() => undefined);
     return next;
   };
-  const EXTENSION_MUTATION_TIMEOUT_MS = 120_000;
+  const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
   const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
   const isExtensionQueueFullError = (err: unknown): boolean =>
     err instanceof Error && err.message === 'Extension operation queue is full';
@@ -1436,6 +1455,65 @@ export function createServeApp(
     name?: string;
     version?: string;
   };
+  type ExtensionOperationStatus = {
+    v: 1;
+    operationId: string;
+    operation: string;
+    status:
+      | 'queued'
+      | 'running'
+      | 'succeeded'
+      | 'succeeded_with_refresh_error'
+      | 'failed';
+    createdAt: number;
+    updatedAt: number;
+    source?: string;
+    name?: string;
+    result?: ExtensionMutationEvent & {
+      refreshed?: number;
+      failed?: number;
+      error?: string;
+    };
+    error?: string;
+  };
+  const extensionOperations = new Map<string, ExtensionOperationStatus>();
+  const MAX_EXTENSION_OPERATION_HISTORY = 100;
+  const isTerminalExtensionOperation = (
+    operation: ExtensionOperationStatus,
+  ): boolean => operation.status !== 'queued' && operation.status !== 'running';
+  const redactExtensionOperationResult = (
+    event: ExtensionMutationEvent,
+  ): ExtensionMutationEvent => ({
+    ...event,
+    ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
+  });
+  const rememberExtensionOperation = (
+    operation: ExtensionOperationStatus,
+  ): void => {
+    extensionOperations.set(operation.operationId, operation);
+    while (extensionOperations.size > MAX_EXTENSION_OPERATION_HISTORY) {
+      let evicted = false;
+      for (const [id, storedOperation] of extensionOperations) {
+        if (!isTerminalExtensionOperation(storedOperation)) continue;
+        extensionOperations.delete(id);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
+    }
+  };
+  const updateExtensionOperation = (
+    operationId: string,
+    patch: Partial<Omit<ExtensionOperationStatus, 'operationId' | 'createdAt'>>,
+  ): void => {
+    const current = extensionOperations.get(operationId);
+    if (!current) return;
+    extensionOperations.set(operationId, {
+      ...current,
+      ...patch,
+      updatedAt: Date.now(),
+    });
+  };
   const runQueuedExtensionMutation = (
     operation: string,
     failureContext: { source?: string; name?: string },
@@ -1448,9 +1526,24 @@ export function createServeApp(
       sendExtensionQueueFull(res);
       return;
     }
-    res.status(202).json({ accepted: true });
+    const operationId = crypto.randomUUID();
+    const now = Date.now();
+    rememberExtensionOperation({
+      v: 1,
+      operationId,
+      operation,
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+      ...(failureContext.source
+        ? { source: redactUrlCredentials(failureContext.source) }
+        : {}),
+      ...(failureContext.name ? { name: failureContext.name } : {}),
+    });
+    res.status(202).json({ accepted: true, operationId });
     void enqueueExtensionInstall(async () => {
       try {
+        updateExtensionOperation(operationId, { status: 'running' });
         const extensionManager = createExtensionManager();
         await extensionManager.refreshCache();
         const event = await withExtensionTimeout(
@@ -1461,6 +1554,14 @@ export function createServeApp(
         extensionsStatusCache = undefined;
         try {
           const result = await bridge.refreshExtensionsForAllSessions(event);
+          updateExtensionOperation(operationId, {
+            status: 'succeeded',
+            result: {
+              ...redactExtensionOperationResult(event),
+              refreshed: result.refreshed,
+              failed: result.failed,
+            },
+          });
           writeStderrLine(
             `qwen serve: extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
           );
@@ -1470,6 +1571,15 @@ export function createServeApp(
               ? refreshErr.message
               : String(refreshErr),
           );
+          updateExtensionOperation(operationId, {
+            status: 'succeeded_with_refresh_error',
+            result: {
+              ...redactExtensionOperationResult(event),
+              refreshed: 0,
+              failed: 1,
+              error: message.slice(0, 500),
+            },
+          });
           try {
             bridge.broadcastExtensionsChanged({
               ...event,
@@ -1494,6 +1604,10 @@ export function createServeApp(
         const message = redactUrlCredentials(
           err instanceof Error ? err.message : String(err),
         );
+        updateExtensionOperation(operationId, {
+          status: 'failed',
+          error: message.slice(0, 500),
+        });
         try {
           bridge.broadcastExtensionsChanged({
             status: 'failed',
@@ -1523,11 +1637,16 @@ export function createServeApp(
         }
       }
     }).catch((err) => {
+      const message = redactUrlCredentials(
+        err instanceof Error ? err.message : String(err),
+      );
+      updateExtensionOperation(operationId, {
+        status: 'failed',
+        error: message.slice(0, 500),
+      });
       try {
         writeStderrLine(
-          `qwen serve: extensions ${operation}: queued task failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `qwen serve: extensions ${operation}: queued task failed: ${message}`,
         );
       } catch {
         // Last-resort guard for detached async work.
@@ -2104,6 +2223,33 @@ export function createServeApp(
     }
   });
 
+  app.get('/workspace/extensions/operations/:operationId', async (req, res) => {
+    try {
+      buildWorkspaceCtx(
+        req,
+        'GET /workspace/extensions/operations/:operationId',
+      );
+      const operationId = req.params['operationId'];
+      if (!operationId) {
+        res.status(400).json({ error: 'Missing extension operation id' });
+        return;
+      }
+      const operation = extensionOperations.get(operationId);
+      if (!operation) {
+        res.status(404).json({
+          error: `Extension operation "${operationId}" not found`,
+          code: 'extension_operation_not_found',
+        });
+        return;
+      }
+      res.status(200).json(operation);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /workspace/extensions/operations/:operationId',
+      });
+    }
+  });
+
   // POST /workspace/extensions/install — install an extension and refresh
   // all active sessions asynchronously.
   app.post(
@@ -2157,9 +2303,17 @@ export function createServeApp(
           res.status(400).json({ error: '`registry` must be a string' });
           return;
         }
+        const sourceValue = source;
+        const refValue = typeof ref === 'string' ? ref : undefined;
+        const autoUpdateValue =
+          typeof autoUpdate === 'boolean' ? autoUpdate : undefined;
+        const allowPreReleaseValue =
+          typeof allowPreRelease === 'boolean' ? allowPreRelease : undefined;
+        const registryValue =
+          typeof registry === 'string' ? registry : undefined;
         const registryUrl =
-          registry !== undefined
-            ? parseExtensionRegistryUrl(registry, res)
+          registryValue !== undefined
+            ? parseExtensionRegistryUrl(registryValue, res)
             : undefined;
         if (registryUrl === null) return;
         if (consent !== true) {
@@ -2168,16 +2322,16 @@ export function createServeApp(
           });
           return;
         }
-        if (!validateExtensionSourceHost(source, res)) {
+        if (!validateExtensionSourceHost(sourceValue, res)) {
           return;
         }
 
         runQueuedExtensionMutation(
           'install',
-          { source },
+          { source: sourceValue },
           res,
           async (extensionManager) => {
-            const installMetadata = await parseInstallSource(source);
+            const installMetadata = await parseInstallSource(sourceValue);
 
             if (
               installMetadata.type !== 'git' &&
@@ -2188,10 +2342,10 @@ export function createServeApp(
                 'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
               );
             }
-            if (installMetadata.type === 'npm' && ref) {
+            if (installMetadata.type === 'npm' && refValue) {
               throw new Error('--ref is not applicable for npm extensions.');
             }
-            if (installMetadata.type !== 'npm' && registry) {
+            if (installMetadata.type !== 'npm' && registryValue) {
               throw new Error(
                 '--registry is only applicable for npm extensions.',
               );
@@ -2203,12 +2357,17 @@ export function createServeApp(
               installMetadata.registryUrl = registryUrl;
             }
             const extension = await extensionManager.installExtension(
-              { ...installMetadata, ref, autoUpdate, allowPreRelease },
+              {
+                ...installMetadata,
+                ref: refValue,
+                autoUpdate: autoUpdateValue,
+                allowPreRelease: allowPreReleaseValue,
+              },
               () => Promise.resolve(),
             );
             return {
               status: 'installed',
-              source,
+              source: sourceValue,
               name: extension.name,
               version: extension.config.version,
             };
@@ -3128,6 +3287,19 @@ export function createServeApp(
     }
   });
 
+  app.get('/session/:id/lsp', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.getSessionLspStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/lsp',
+        sessionId,
+      });
+    }
+  });
+
   // GET /session/:id/hooks — read-only session-scoped hook status.
   app.get('/session/:id/hooks', async (req, res) => {
     const sessionId = requireSessionId(req, res);
@@ -3851,7 +4023,7 @@ export function createServeApp(
       try {
         const response = await bridge.rewindSession(
           sessionId,
-          { promptId },
+          { promptId, rewindFiles: body['rewindFiles'] !== false },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);

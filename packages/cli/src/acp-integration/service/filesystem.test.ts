@@ -127,4 +127,114 @@ describe('AcpFileSystemService', () => {
       expect(client.readTextFile).not.toHaveBeenCalled();
     });
   });
+
+  describe('writeTextFile', () => {
+    it('writes through ACP with the session id', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-4',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      const result = await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'hello',
+      });
+
+      expect(result).toEqual({ _meta: undefined });
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello',
+        sessionId: 'session-4',
+      });
+    });
+
+    it('preserves a UTF-8 BOM without duplicating an existing marker', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-5',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: '\uFEFFHello',
+        _meta: { bom: true },
+      });
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: '\uFEFFHello',
+        _meta: { bom: true },
+        sessionId: 'session-5',
+      });
+    });
+
+    it('adds a UTF-8 BOM marker when requested and missing', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-6',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'Hello',
+        _meta: { bom: true },
+      });
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: '\uFEFFHello',
+        _meta: { bom: true },
+        sessionId: 'session-6',
+      });
+    });
+
+    it('uses fallback when writeTextFile capability is disabled', async () => {
+      const client = {
+        writeTextFile: vi.fn(),
+      } as unknown as AgentSideConnection;
+      const fallback = createFallback();
+      (fallback.writeTextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
+        _meta: { bom: true },
+      });
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-7',
+        { readTextFile: true, writeTextFile: false },
+        fallback,
+      );
+
+      const result = await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: '\uFEFFHello',
+        _meta: { bom: true },
+      });
+
+      expect(result).toEqual({ _meta: { bom: true } });
+      expect(fallback.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: '\uFEFFHello',
+        _meta: { bom: true },
+      });
+      expect(client.writeTextFile).not.toHaveBeenCalled();
+    });
+  });
 });
