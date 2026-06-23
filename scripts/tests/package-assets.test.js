@@ -64,9 +64,39 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.bundledDependencies).toContain(
+      '@qwen-code/audio-capture',
+    );
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+          'dist',
+          'index.js',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+          'node_modules',
+          'node-gyp-build',
+          'package.json',
+        ),
+      ),
+    ).toBe(true);
     expect(
       existsSync(
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
@@ -106,6 +136,40 @@ describe('package asset scripts', () => {
       rootDir,
       'packages/cli/src/i18n/locales/en.json',
       '{"hello":"world"}\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/audio-capture/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/audio-capture',
+          version: '0.17.0',
+          type: 'module',
+          main: 'dist/index.js',
+          dependencies: {
+            'node-gyp-build': '^4.8.4',
+          },
+          scripts: {
+            install: 'node install.js',
+          },
+          devDependencies: {
+            typescript: '^5.3.3',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    writeFile(rootDir, 'packages/audio-capture/dist/index.js', '');
+    writeFile(
+      rootDir,
+      'packages/audio-capture/dist/index.test.js',
+      'throw new Error("should not copy tests");\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/audio-capture/prebuilds/darwin-arm64/@qwen-code+audio-capture.node',
+      'fake native addon\n',
     );
 
     for (const template of [

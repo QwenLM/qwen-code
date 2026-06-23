@@ -158,6 +158,21 @@ describe('createNativeAudioRecorder', () => {
     expect(backend.startRecording).toHaveBeenCalledTimes(1);
   });
 
+  it('explains mirror registry installs when the native package is missing', async () => {
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => {
+        throw new Error(
+          "Cannot find package '@qwen-code/audio-capture' imported from /qwen/dist/cli.js",
+        );
+      },
+    });
+
+    await expect(recorder.start()).rejects.toThrow(
+      /mirror or private registry/,
+    );
+    await expect(recorder.start()).rejects.toThrow(/@qwen-code\/audio-capture/);
+  });
+
   it('allows retry after native stop throws', async () => {
     const backend = {
       startRecording: vi.fn(),
