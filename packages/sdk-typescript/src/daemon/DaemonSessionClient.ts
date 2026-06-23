@@ -28,6 +28,7 @@ import type {
   DaemonShellCommandResult,
   DaemonSessionState,
   DaemonSession,
+  DaemonSessionLspStatus,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskStatus,
@@ -336,9 +337,15 @@ export class DaemonSessionClient {
     return await this.client.getRewindSnapshots(this.sessionId);
   }
 
-  async rewind(promptId: string): Promise<DaemonRewindResult> {
+  async rewind(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): Promise<DaemonRewindResult> {
     return await this.client.rewindSession(this.sessionId, promptId, {
       clientId: this.clientId,
+      ...(opts?.rewindFiles !== undefined
+        ? { rewindFiles: opts.rewindFiles }
+        : {}),
     });
   }
 
@@ -432,6 +439,10 @@ export class DaemonSessionClient {
 
   async tasks(): Promise<DaemonSessionTasksStatus> {
     return await this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  async lspStatus(): Promise<DaemonSessionLspStatus> {
+    return await this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
 
   async cancelTask(

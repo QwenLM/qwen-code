@@ -3,16 +3,8 @@
   display: flex;
   gap: 8px;
   align-items: baseline;
-}
-
-/*
- * Collapsed turn: tighten the gap below the prompt+toggle seam so the fold
- * summary sits snug against the final answer rather than carrying a full
- * inter-message gap. Scoped to the collapsed state — an expanded turn keeps the
- * normal 12px down to its first revealed step.
- */
-.message.collapsedHead {
-  margin-bottom: 2px;
+  padding: 5px 0;
+  background: var(--user-msg-bg);
 }
 
 .prefix {
@@ -29,54 +21,6 @@
   word-break: break-word;
 }
 
-/*
- * Per-turn fold seam: its own line below the prompt text, clear of the hover
- * timestamp pinned to the row's top-right. Only the chevron button toggles the
- * turn; the trailing summary is inert text. `fit-content` keeps the row hugging
- * its content rather than spanning the width.
- */
-.collapseRow {
-  display: flex;
-  align-items: baseline;
-  width: fit-content;
-  margin-top: 5px;
-  /* Outdents to align with .body start: compensates for PromptChevron width (0.6em) + .message gap (8px). */
-  margin-left: calc(-0.6em - 8px);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-/*
- * The expand/collapse control: the chevron plus the step count, together, so
- * the click target is comfortably sized (not a lone glyph). Only this toggles
- * the turn — the trailing metrics are inert.
- */
-.collapseToggle {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--text-dimmed);
-  font: inherit;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.collapseToggle:hover {
-  color: var(--text-secondary);
-}
-
-/*
- * Duration · tokens. Inert (no fold affordance) and identical collapsed vs
- * expanded, so toggling never reflows the row. Carries its own leading "·"
- * separator after the toggle.
- */
-.collapseMeta {
-  color: var(--text-dimmed);
-  white-space: nowrap;
-  cursor: default;
-}
-
 .images {
   display: flex;
   flex-wrap: wrap;
@@ -89,5 +33,83 @@
   max-height: 200px;
   border-radius: 8px;
   object-fit: contain;
-  border: 1px solid var(--border-color, #e5e7eb);
+  border: 1px solid var(--border-color);
+}
+
+/* ---- Chat mode: right-aligned bubble layout ---- */
+
+.chatMessageRow {
+  display: flex;
+  justify-content: flex-end;
+  margin: 30px 0;
+}
+
+.chatBubble {
+  display: inline-block;
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 16px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.chatContent {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chatContentCollapsed {
+  max-height: 400px;
+  overflow: hidden;
+}
+
+.toggleButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.toggleButton:hover,
+.toggleButton:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.toggleIcon {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.8;
+  transition: transform 120ms ease;
+}
+
+.toggleIconExpanded {
+  transform: rotate(180deg);
+}
+
+.chatImages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chatImageThumb {
+  max-width: 150px;
+  max-height: 150px;
+  border-radius: 8px;
+  object-fit: contain;
+  border: 1px solid var(--border-color);
 }

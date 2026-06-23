@@ -25,7 +25,7 @@ import {
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
-  Protocol,
+  AuthType,
   ProviderSetupInputs,
   TelemetryRuntimeConfig,
   TelemetrySettings,
@@ -410,7 +410,7 @@ function buildProviderSetupInputs(
     resolveBaseUrl: CoreRuntime['resolveBaseUrl'];
   },
 ): ProviderSetupInputs {
-  const protocol = (req.protocol ?? provider.protocol) as Protocol;
+  const protocol = (req.protocol ?? provider.protocol) as AuthType;
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
@@ -1498,6 +1498,9 @@ export async function runQwenServe(
     });
     const channelFactory = runtime.createSpawnChannelFactory({
       onDiagnosticLine: diagnosticSink,
+      ...(opts.experimentalLsp === true
+        ? { extraArgs: ['--experimental-lsp'] }
+        : {}),
     });
     const statusProvider = runtime.createDaemonStatusProvider();
     const workspaceProvidersStatusProvider =

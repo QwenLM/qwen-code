@@ -32,6 +32,7 @@ import type {
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionLspStatus,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
@@ -86,6 +87,7 @@ import type {
   ExtensionMutationResponse,
   ExtensionInstallRequest,
   ExtensionInstallResponse,
+  ExtensionOperationStatus,
   ExtensionScopeRequest,
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
@@ -707,6 +709,15 @@ export class DaemonClient {
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
       { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus> {
+    return await this.jsonRequest<ExtensionOperationStatus>(
+      `/workspace/extensions/operations/${encodeURIComponent(operationId)}`,
+      'GET /workspace/extensions/operations/:operationId',
     );
   }
 
@@ -1361,6 +1372,22 @@ export class DaemonClient {
     );
   }
 
+  async sessionLspStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionLspStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/lsp`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/lsp');
+        }
+        return (await res.json()) as DaemonSessionLspStatus;
+      },
+    );
+  }
+
   async sessionTaskCancel(
     sessionId: string,
     taskId: string,
@@ -1514,7 +1541,7 @@ export class DaemonClient {
   async rewindSession(
     sessionId: string,
     promptId: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
@@ -1524,7 +1551,12 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ promptId }),
+        body: JSON.stringify({
+          promptId,
+          ...(opts?.rewindFiles !== undefined
+            ? { rewindFiles: opts.rewindFiles }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {

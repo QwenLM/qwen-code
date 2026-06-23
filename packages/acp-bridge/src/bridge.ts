@@ -43,6 +43,7 @@ import {
   STATUS_SCHEMA_VERSION,
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
+  type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
 } from './status.js';
 import {
@@ -3778,6 +3779,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getSessionLspStatus(sessionId) {
+      return requestSessionStatus<ServeSessionLspStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      );
+    },
+
     async cancelSessionTask(sessionId, taskId, taskKind) {
       return requestSessionStatus<{ cancelled: boolean }>(
         sessionId,
@@ -4603,7 +4611,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
-              { sessionId, promptId: req.promptId, rewindFiles: true },
+              {
+                sessionId,
+                promptId: req.promptId,
+                rewindFiles: req.rewindFiles !== false,
+              },
             ),
             initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.sessionRewind,

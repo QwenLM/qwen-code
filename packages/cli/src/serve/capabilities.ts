@@ -81,6 +81,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
   session_stats: { since: 'v1' },
+  session_lsp: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process

@@ -1061,6 +1061,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
+        getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -1371,6 +1372,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: vi
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+        getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -1977,6 +1979,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           },
         ]),
       }),
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 1,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'READY',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+            args: ['--stdio'],
+            pid: 1234,
+            stderrTail: 'hidden',
+            rootUri: 'file:///tmp',
+            workspaceFolder: '/tmp',
+          },
+        ],
+      }),
     });
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValueOnce({
       availableCommands: [
@@ -2017,6 +2041,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
+    );
+    const lsp = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      {
+        sessionId,
+      },
     );
 
     expect(context).toMatchObject({
@@ -2106,9 +2136,226 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       formattedText: expect.stringContaining('## Context Usage'),
     });
+    expect(lsp).toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 1,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'typescript',
+          status: 'READY',
+          languages: ['typescript'],
+          transport: 'stdio',
+          command: 'typescript-language-server',
+        },
+      ],
+    });
+    expect(JSON.stringify(lsp)).not.toContain('--stdio');
+    expect(JSON.stringify(lsp)).not.toContain('hidden');
+    expect(JSON.stringify(lsp)).not.toContain('pid');
+    expect(JSON.stringify(lsp)).not.toContain('rootUri');
+    expect(JSON.stringify(lsp)).not.toContain('workspaceFolder');
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
     dateNowSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('status ext method returns disabled LSP status', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: false,
+        configuredServers: 0,
+        readyServers: 0,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [],
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionLspStatus, {
+        sessionId,
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: false,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+    });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionLspStatus, {}),
+    ).rejects.toThrow('Invalid or missing sessionId');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('status ext method returns unavailable LSP status', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: true,
+        configuredServers: 0,
+        readyServers: 0,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [],
+        statusUnavailable: true,
+        initializationError: 'client failed',
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionLspStatus, {
+        sessionId,
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: true,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      statusUnavailable: true,
+      initializationError: 'client failed',
+      servers: [],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('includes error field for FAILED server while stripping debug internals', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 0,
+        failedServers: 1,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'FAILED',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+            error: 'connection refused',
+            args: ['--stdio'],
+            pid: 5678,
+            stderrTail: 'ECONNREFUSED',
+            exitCode: 1,
+            rootUri: 'file:///tmp',
+            workspaceFolder: '/tmp',
+          },
+        ],
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const lsp = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      { sessionId },
+    );
+
+    expect(lsp).toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 0,
+      failedServers: 1,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'typescript',
+          status: 'FAILED',
+          languages: ['typescript'],
+          transport: 'stdio',
+          command: 'typescript-language-server',
+          error: 'connection refused',
+        },
+      ],
+    });
+    const lspStr = JSON.stringify(lsp);
+    expect(lspStr).not.toContain('--stdio');
+    expect(lspStr).not.toContain('5678');
+    expect(lspStr).not.toContain('ECONNREFUSED');
+    expect(lspStr).not.toContain('exitCode');
+    expect(lspStr).not.toContain('rootUri');
+    expect(lspStr).not.toContain('workspaceFolder');
+
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -4534,7 +4781,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       cwd: '/tmp',
     });
 
-    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1);
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
+      rewindFiles: true,
+    });
     expect(response).toEqual({
       success: true,
       historyBeforeRewind: [{ role: 'user', parts: [{ text: 'before' }] }],
@@ -4542,6 +4791,39 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       apiTruncateIndex: 2,
       filesChanged: [],
       filesFailed: [],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession extension method can skip file rewind', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      rewindFiles: false,
+      cwd: '/tmp',
+    });
+
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
+      rewindFiles: false,
     });
 
     mockConnectionState.resolve();

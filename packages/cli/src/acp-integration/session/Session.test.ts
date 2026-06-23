@@ -32,6 +32,7 @@ import type {
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
+import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 
@@ -506,6 +507,37 @@ describe('Session', () => {
       );
     });
 
+    it('can rewind the conversation without restoring file history', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      const result = session.rewindToTurn(1, { rewindFiles: false });
+
+      expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        undefined,
+      );
+    });
+
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
         {
@@ -526,6 +558,33 @@ describe('Session', () => {
 
       expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
+    });
+
+    it('counts only real user prompts as rewindable turns', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nstartup context\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nNew tools available: foo\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
     });
 
     it('does not count a mid-history MCP added-tool reminder as a user turn', () => {
@@ -4318,6 +4377,58 @@ describe('Session', () => {
 
         expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('keeps goal terminal observer after ACP /goal set', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Continue until the goal is met.' }],
+          outputHistoryItems: [
+            {
+              type: MessageType.GOAL_STATUS,
+              kind: 'set',
+              condition: 'check weather',
+              setAt: 1234,
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/goal check weather' }],
+        });
+
+        core.notifyGoalTerminal('test-session-id', {
+          kind: 'achieved',
+          condition: 'check weather',
+          iterations: 1,
+          durationMs: 5000,
+          lastReason: 'Weather checked.',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalTerminal: {
+                  kind: 'achieved',
+                  condition: 'check weather',
+                  iterations: 1,
+                  durationMs: 5000,
+                  lastReason: 'Weather checked.',
+                },
+              },
+            },
+          });
+        });
       });
     });
 

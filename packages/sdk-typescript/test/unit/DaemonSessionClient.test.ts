@@ -459,6 +459,20 @@ describe('DaemonSessionClient', () => {
           tasks: [],
         });
       }
+      if (req.url.endsWith('/session/s-1/lsp')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          enabled: false,
+          configuredServers: 0,
+          readyServers: 0,
+          failedServers: 0,
+          inProgressServers: 0,
+          notStartedServers: 0,
+          servers: [],
+        });
+      }
       if (req.url.endsWith('/session/s-1/cancel')) {
         return new Response(null, { status: 204 });
       }
@@ -524,6 +538,18 @@ describe('DaemonSessionClient', () => {
       now: 1_700_000_000_000,
       tasks: [],
     });
+    await expect(session.lspStatus()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      workspaceCwd: '/work/a',
+      enabled: false,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+    });
     await expect(session.cancel()).resolves.toBeUndefined();
     await expect(
       session.respondToPermission('req-1', {
@@ -546,6 +572,7 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/context',
       'http://daemon/session/s-1/supported-commands',
       'http://daemon/session/s-1/tasks',
+      'http://daemon/session/s-1/lsp',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
       'http://daemon/session/s-1/permission/req-2',
@@ -554,6 +581,7 @@ describe('DaemonSessionClient', () => {
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
       'client-1',
       'client-1',
       'client-1',
