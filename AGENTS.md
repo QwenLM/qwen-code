@@ -21,6 +21,21 @@ simplify.
 
 _Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
 
+### Core Infrastructure Is Maintainer-Only
+
+**We do not accept community PRs that refactor core infrastructure. Period.**
+
+Core modules — `packages/core/src/**`, auth, providers, models, config, tools,
+services — are the architectural backbone. A community contributor cannot
+understand the full blast radius of a core refactor. "The direction looks
+correct" is not enough; the design is likely wrong because the contributor
+lacks architectural context. A bad core refactor costs months of breakage; a
+wrongly rejected one costs a polite comment. **When in doubt, reject. Better
+to wrongly reject a valid PR than to wrongly accept a broken one.**
+
+Core refactors must be maintainer-initiated, with design discussion in an
+issue before any PR is opened.
+
 ## Common Commands
 
 ### Building
