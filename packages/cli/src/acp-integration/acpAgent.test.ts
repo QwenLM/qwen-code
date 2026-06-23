@@ -513,6 +513,7 @@ import {
   normalizeCoreSettingValue,
   extractFilesFromTarGz,
   fetchAllowedGitHub,
+  createWorkspaceMcpBudget,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -6711,5 +6712,42 @@ describe('sessionLanguage multi-session propagation', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+});
+
+describe('createWorkspaceMcpBudget — env parsing', () => {
+  const KEY = 'QWEN_SERVE_MCP_CLIENT_BUDGET';
+  const MODE = 'QWEN_SERVE_MCP_BUDGET_MODE';
+  const onEvent = vi.fn();
+
+  afterEach(() => {
+    delete process.env[KEY];
+    delete process.env[MODE];
+    vi.clearAllMocks();
+  });
+
+  it('accepts a plain positive decimal integer', () => {
+    process.env[KEY] = '100';
+    expect(createWorkspaceMcpBudget(onEvent)).toBeDefined();
+  });
+
+  it('accepts a trimmed decimal integer', () => {
+    process.env[KEY] = '  42  ';
+    expect(createWorkspaceMcpBudget(onEvent)).toBeDefined();
+  });
+
+  // Mirrors McpClientManager.readBudgetFromEnv: a loose Number() would coerce
+  // these (0x10=16, 1e2=100, 1.0=1) and silently set a budget. The strict
+  // /^\d+$/ + isSafeInteger parse must reject them.
+  it.each(['0x10', '1e2', '1.0', '0b101', '5 abc', 'abc', '-5', '0', ' '])(
+    'rejects non-decimal-integer value %j',
+    (raw) => {
+      process.env[KEY] = raw;
+      expect(createWorkspaceMcpBudget(onEvent)).toBeUndefined();
+    },
+  );
+
+  it('returns undefined when the budget env var is unset', () => {
+    expect(createWorkspaceMcpBudget(onEvent)).toBeUndefined();
   });
 });

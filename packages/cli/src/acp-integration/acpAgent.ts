@@ -2489,34 +2489,37 @@ function parsePoolDrainMs(envValue: string | undefined): number {
  * invokes `tryReserve`/`release`; this helper produces the controller
  * and wires the event callback.
  */
-function createWorkspaceMcpBudget(
+export function createWorkspaceMcpBudget(
   onEvent: (event: McpBudgetEvent) => void,
 ): WorkspaceMcpBudget | undefined {
   const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
-  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly.
-  // Use `Number(...)` + `Number.isInteger` so the pool and the manager
+  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly: only plain
+  // decimal digits set a budget. A loose `Number(...)` would silently accept
+  // `0x10`=16, `1e2`=100, and `1.0`=1 (all pass `isInteger`); the strict
+  // `/^\d+$/` + `isSafeInteger` check rejects them so the pool and the manager
   // honor the same env values.
-  const budget =
-    rawBudget !== undefined && rawBudget !== '' ? Number(rawBudget) : undefined;
+  let budget: number | undefined;
+  if (rawBudget !== undefined && rawBudget !== '') {
+    const trimmed = rawBudget.trim();
+    const parsed = Number(trimmed);
+    if (/^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) && parsed > 0) {
+      budget = parsed;
+    } else {
+      process.stderr.write(
+        `qwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=` +
+          `'${rawBudget}' (expected positive integer); ` +
+          `MCP budget enforcement disabled for this child.\n`,
+      );
+    }
+  }
   const mode: McpBudgetMode = (() => {
     if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
       return rawMode;
     }
-    return budget !== undefined &&
-      Number.isFinite(budget) &&
-      Number.isInteger(budget) &&
-      budget > 0
-      ? 'warn'
-      : 'off';
+    return budget !== undefined ? 'warn' : 'off';
   })();
-  if (
-    mode === 'off' ||
-    budget === undefined ||
-    !Number.isFinite(budget) ||
-    !Number.isInteger(budget) ||
-    budget <= 0
-  ) {
+  if (mode === 'off' || budget === undefined) {
     return undefined;
   }
   return new WorkspaceMcpBudget({
