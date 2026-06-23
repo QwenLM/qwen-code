@@ -541,11 +541,24 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       const merged = settings.merged as Record<string, unknown>;
 
-      expect(merged[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
-      expect(merged['modelProviders']).toEqual({
+      const expectedModelProviders = {
         openai: [{ id: 'gpt-4o', name: 'GPT-4o' }],
         'vertex-ai': [{ id: 'gemini-pro', name: 'Gemini Pro' }],
-      });
+      };
+
+      expect(merged[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect(merged['modelProviders']).toEqual(expectedModelProviders);
+
+      // The downgrade must also be persisted to disk (writeWithBackupSync
+      // writes to a .tmp file first), otherwise the file stays at $version: 5
+      // and the downgrade re-runs on every startup.
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      const persisted = JSON.parse(writeCall![1] as string);
+      expect(persisted[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect(persisted['modelProviders']).toEqual(expectedModelProviders);
     });
 
     it('should warn about ignored legacy keys in a v2 settings file', () => {

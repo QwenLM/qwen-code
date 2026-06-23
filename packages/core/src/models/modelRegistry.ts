@@ -106,6 +106,20 @@ export class ModelRegistry {
     authType: AuthType,
     models: ModelConfig[],
   ): void {
+    // Defensive: runtime data from settings.json can violate the static type —
+    // e.g. a hand-edited file, or one still in the reverted #5089 V5 shape
+    // ({ protocol, models }) that the CLI v5->v4 migration has not yet
+    // rewritten. Skip such entries with a clear warning instead of throwing an
+    // opaque "models is not iterable" from the loop below.
+    if (!Array.isArray(models)) {
+      debugLogger.warn(
+        `modelProviders for authType "${authType}" is not an array; skipping. ` +
+          `Expected ModelConfig[]; legacy { protocol, models } entries are ` +
+          `normally rewritten by the v5->v4 settings migration.`,
+      );
+      return;
+    }
+
     const modelMap = new Map<string, ResolvedModelConfig>();
 
     for (const config of models) {

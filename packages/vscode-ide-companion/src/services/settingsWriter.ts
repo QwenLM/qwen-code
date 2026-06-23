@@ -278,9 +278,21 @@ function findOpenaiModels(
     return [];
   }
   for (const key of [AuthType.USE_OPENAI, 'use_openai']) {
-    const arr = modelProviders[key];
-    if (Array.isArray(arr) && arr.length > 0) {
-      return arr as Array<Record<string, unknown>>;
+    const entry = modelProviders[key];
+    // V4 shape: the provider value is a ModelConfig[] array.
+    if (Array.isArray(entry) && entry.length > 0) {
+      return entry as Array<Record<string, unknown>>;
+    }
+    // Read-side tolerance for a settings file still in the reverted #5089 V5
+    // shape ({ protocol, models }) that the CLI v5->v4 migration has not yet
+    // rewritten — the extension reads/writes settings.json without running
+    // that migration. The extension still writes V4 arrays; this only needs to
+    // avoid dropping existing entries when reading a not-yet-downgraded file.
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      const models = (entry as Record<string, unknown>)['models'];
+      if (Array.isArray(models) && models.length > 0) {
+        return models as Array<Record<string, unknown>>;
+      }
     }
   }
   return [];

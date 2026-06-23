@@ -977,3 +977,19 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(models[0].voiceOnly).toBe(true);
   });
 });
+
+describe('malformed modelProviders tolerance', () => {
+  it('skips a non-array provider value instead of throwing (legacy V5 { protocol, models })', () => {
+    // A settings file still in the reverted #5089 V5 shape can deliver a
+    // { protocol, models } object here instead of a ModelConfig[].
+    const registry = new ModelRegistry({
+      openai: {
+        protocol: 'openai',
+        models: [{ id: 'gpt-4o' }],
+      },
+    } as unknown as ModelProvidersConfig);
+
+    // Must not throw "models is not iterable"; the malformed entry is skipped.
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+});

@@ -97,9 +97,11 @@ export function runMigrations(
  *
  * This function checks:
  * 1. If $version field exists and is a number:
- *    - Returns false if $version >= SETTINGS_VERSION
- *    - Returns true only when $version < SETTINGS_VERSION AND at least one
- *      migration can execute for the current settings shape
+ *    - Returns false only when $version === SETTINGS_VERSION (already current)
+ *    - Otherwise (a lower OR higher version) returns true only when at least
+ *      one migration can execute for the current settings shape. A version
+ *      above SETTINGS_VERSION deliberately falls through here rather than being
+ *      short-circuited, so downgrade migrations (e.g. v5 -> v4) can still apply.
  * 2. If $version field is missing or invalid:
  *    - Uses fallback logic by checking individual migrations
  *
