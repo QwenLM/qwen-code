@@ -884,8 +884,30 @@ function unsupportedModalityMessage(
 export async function processSingleFileContent(
   filePath: string,
   config: Config,
-  options: ProcessSingleFileContentOptions = {},
+  options?: ProcessSingleFileContentOptions,
+): Promise<ProcessedFileReadResult>;
+export async function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  offset?: number,
+  limit?: number,
+  pages?: string,
+): Promise<ProcessedFileReadResult>;
+export async function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  optionsOrOffset?: ProcessSingleFileContentOptions | number,
+  legacyLimit?: number,
+  legacyPages?: string,
 ): Promise<ProcessedFileReadResult> {
+  const options =
+    typeof optionsOrOffset === 'object' && optionsOrOffset !== null
+      ? optionsOrOffset
+      : {
+          offset: optionsOrOffset,
+          limit: legacyLimit,
+          pages: legacyPages,
+        };
   const { offset, limit, pages, preserveUnsupportedImage = false } = options;
   const rootDirectory = config.getTargetDir();
   try {

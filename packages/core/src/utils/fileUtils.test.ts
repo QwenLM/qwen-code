@@ -1370,6 +1370,22 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([6, 10]);
     });
 
+    it('should preserve legacy positional pagination arguments', async () => {
+      const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
+      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+        5,
+        5,
+      );
+
+      expect(result.llmContent).toBe(lines.slice(5, 10).join('\n'));
+      expect(result.returnDisplay).toBe('Read lines 6-10 of 20 from test.txt');
+      expect(result.linesShown).toEqual([6, 10]);
+    });
+
     it('should identify truncation when reading the end of a file', async () => {
       const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
       actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
