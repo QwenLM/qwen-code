@@ -25,6 +25,8 @@ describe('qwen resolve workflow', () => {
     ).toBe(false);
     expect(workflow).toContain('issue_comment:');
     expect(workflow).toContain("github.event.inputs.command == 'resolve'");
+    expect(workflow).toContain('github.event.issue.pull_request');
+    expect(workflow).toContain("github.event.issue.state == 'open'");
     expect(workflow).toContain("startsWith(github.event.comment.body, '@qwen-code /resolve')");
     expect(workflow).toContain('needs.authorize.outputs.should_review');
     expect(workflow).not.toContain('authorize-resolve:');
