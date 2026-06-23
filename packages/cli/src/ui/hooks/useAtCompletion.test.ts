@@ -959,4 +959,141 @@ describe('useAtCompletion', () => {
       expect(values).toContain('my-notes.txt');
     });
   });
+
+  describe('MCP resource discovery (bare @<partial>)', () => {
+    const twoServerRegistry = () => {
+      const all = [
+        {
+          uri: 'asight://skills/analyze_ppu_op',
+          name: 'analyze_ppu_op',
+          title: 'Analyze PPU operator performance',
+          serverName: 'asys-mcp-http',
+        },
+        {
+          uri: 'asight://skills/analyze_ppu_bubble',
+          name: 'analyze_ppu_bubble',
+          serverName: 'asys-mcp-http',
+        },
+        {
+          uri: 'db://users/schema',
+          name: 'user schema',
+          serverName: 'other',
+        },
+      ];
+      return {
+        getAllResources: () => all,
+        getResourcesByServer: (name: string) =>
+          all.filter((r) => r.serverName === name),
+      };
+    };
+
+    const discoveryConfig = (overrides = {}) =>
+      ({
+        ...mockConfig,
+        getMcpServers: () => ({ 'asys-mcp-http': {}, other: {} }),
+        getResourceRegistry: twoServerRegistry,
+        ...overrides,
+      }) as unknown as Config;
+
+    // NOTE: the config object is created ONCE per test and held in a stable
+    // `const` before renderHook. Building it inside the render thunk would make
+    // a new reference every render, re-firing the hook's `[config]` effect in a
+    // RESET → re-init → re-render loop that spins up FileSearch workers forever.
+    it('matches a resource by any substring of its URI, not just a prefix', async () => {
+      testRootDir = await createTmpDir({ 'unrelated.txt': '' });
+      // `analyze` appears mid-URI (after `asight://skills/`), and there is no
+      // server named `analyze` — the old prefix-only path returned nothing.
+      const config = discoveryConfig();
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'analyze', config, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).toContain('asys-mcp-http:asight://skills/analyze_ppu_op');
+      expect(values).toContain(
+        'asys-mcp-http:asight://skills/analyze_ppu_bubble',
+      );
+    });
+
+    it('matches resources across all servers (no server prefix needed)', async () => {
+      testRootDir = await createTmpDir({ 'unrelated.txt': '' });
+      // `://` is in every URI here; both servers' resources should surface.
+      const config = discoveryConfig();
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, '://', config, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).toContain('asys-mcp-http:asight://skills/analyze_ppu_op');
+      expect(values).toContain('other:db://users/schema');
+    });
+
+    it('matches a resource by a substring of its friendly name/title', async () => {
+      testRootDir = await createTmpDir({ 'unrelated.txt': '' });
+      // `schema` is only in the name, not the URI scheme path.
+      const config = discoveryConfig();
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'schema', config, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      expect(result.current.suggestions.map((s) => s.value)).toContain(
+        'other:db://users/schema',
+      );
+    });
+
+    it('surfaces resources ALONGSIDE files without hiding them', async () => {
+      testRootDir = await createTmpDir({ 'analyze_local.txt': '' });
+      const config = discoveryConfig();
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'analyze', config, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      // Both the MCP resource and the matching file are present.
+      expect(values).toContain('asys-mcp-http:asight://skills/analyze_ppu_op');
+      expect(values).toContain('analyze_local.txt');
+    });
+
+    it('does not surface resources for the empty @ trigger (files only)', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const config = discoveryConfig();
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, '', config, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).toContain('file.txt');
+      expect(values.some((v) => v.includes('asight://'))).toBe(false);
+    });
+
+    it('does not surface resources in an untrusted folder', async () => {
+      testRootDir = await createTmpDir({ 'analyze_local.txt': '' });
+      const config = discoveryConfig({ isTrustedFolder: () => false });
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'analyze', config, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values.some((v) => v.includes('asight://'))).toBe(false);
+      expect(values).toContain('analyze_local.txt');
+    });
+  });
 });

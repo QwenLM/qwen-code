@@ -132,6 +132,77 @@ function getMcpServerSuggestions(
     }));
 }
 
+/**
+ * `@<partial>` MCP resource discovery. BEFORE any `<server>:` has been typed,
+ * match the partial — case-INsensitively, as a SUBSTRING (any part of the
+ * reference, not just a prefix) — against every discovered resource's
+ * canonical `@server:uri` reference AND its friendly name/title, across ALL
+ * configured servers. This lets a user who remembers only a fragment of a
+ * resource URI (or its human-readable name) jump straight to it without first
+ * drilling into the owning server via `@server:`.
+ *
+ * Returns `[]` (never `null`): like {@link getMcpServerSuggestions}, these are
+ * PREPENDED to the filesystem results so resources surface ALONGSIDE files and
+ * never hide them. The bare `@` trigger (empty partial) stays files-only —
+ * every string `.includes('')`, so an empty partial would otherwise match
+ * every resource. A `<server>:` drill-in is skipped here because
+ * {@link getMcpResourceSuggestions} already owns that path (and short-circuits
+ * before this runs), so resources are never double-surfaced.
+ *
+ * Ranking, best first: reference prefix, then name/title prefix, then
+ * reference substring, then name/title substring; ties break alphabetically by
+ * reference for a stable order. Each suggestion's `value` is the canonical
+ * `@server:uri` reference, so accepting it injects a directly-readable ref.
+ */
+function getMcpResourceDiscoverySuggestions(
+  config: Config | undefined,
+  pattern: string,
+): Suggestion[] {
+  if (!config) return [];
+  if (config.isTrustedFolder?.() === false) return [];
+  if (pattern.length === 0) return [];
+  // A `<server>:` drill-in is handled by getMcpResourceSuggestions; don't
+  // double-surface those resources here.
+  const mcpServers = config.getMcpServers?.() || {};
+  if (matchMcpServerPrefix(pattern, Object.keys(mcpServers))) return [];
+  const registry = config.getResourceRegistry?.();
+  if (!registry) return [];
+  const query = pattern.toLowerCase();
+
+  // Lower rank = better match; `Infinity` means no match and is filtered out.
+  const rankOf = (ref: string, friendly: string): number => {
+    if (ref.startsWith(query)) return 0;
+    if (friendly.startsWith(query)) return 1;
+    if (ref.includes(query)) return 2;
+    if (friendly.includes(query)) return 3;
+    return Infinity;
+  };
+
+  return (registry.getAllResources?.() ?? [])
+    .map((resource) => {
+      const ref = buildMcpResourceRef(resource.serverName, resource.uri);
+      const friendly = resource.title || resource.name || '';
+      return {
+        resource,
+        ref,
+        friendly,
+        rank: rankOf(ref.toLowerCase(), friendly.toLowerCase()),
+      };
+    })
+    .filter((m) => m.rank !== Infinity)
+    .sort((a, b) => a.rank - b.rank || a.ref.localeCompare(b.ref))
+    .slice(0, MAX_SUGGESTIONS_TO_SHOW * 3)
+    .map((m) => ({
+      label: m.ref,
+      value: m.ref,
+      // Only surface the friendly name when it adds information beyond the URI
+      // (mirrors getMcpResourceSuggestions and the `/mcp` resource list).
+      description:
+        m.friendly && m.friendly !== m.resource.uri ? m.friendly : undefined,
+      isDirectory: false,
+    }));
+}
+
 export enum AtCompletionStatus {
   IDLE = 'idle',
   INITIALIZING = 'initializing',
@@ -344,20 +415,31 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         return;
       }
 
-      // No `<server>:` selected yet — offer matching MCP servers (that expose
-      // resources) ALONGSIDE the filesystem results so the user can discover a
-      // server without knowing a resource URI up front. Computed synchronously
-      // and prepended below; never hides files.
+      // No `<server>:` selected yet — offer MCP discovery ALONGSIDE the
+      // filesystem results so the user can find a server OR a resource without
+      // knowing the full URI up front. Two complementary sources, both computed
+      // synchronously and prepended below (never hides files):
+      //   1. matching server names (drill-in entries: `@server:`)
+      //   2. resources across ALL servers matched by any substring of their
+      //      `@server:uri` reference or friendly name.
       const serverSuggestions = getMcpServerSuggestions(config, state.pattern);
+      const resourceDiscoverySuggestions = getMcpResourceDiscoverySuggestions(
+        config,
+        state.pattern,
+      );
+      const discoverySuggestions = [
+        ...serverSuggestions,
+        ...resourceDiscoverySuggestions,
+      ];
 
       if (!fileSearch.current) {
-        // File index not ready yet; still surface any server matches so
+        // File index not ready yet; still surface any MCP matches so
         // discovery doesn't have to wait on the crawler.
-        if (serverSuggestions.length > 0) {
+        if (discoverySuggestions.length > 0) {
           if (slowSearchTimer.current) {
             clearTimeout(slowSearchTimer.current);
           }
-          dispatch({ type: 'SEARCH_SUCCESS', payload: serverSuggestions });
+          dispatch({ type: 'SEARCH_SUCCESS', payload: discoverySuggestions });
         }
         return;
       }
@@ -397,14 +479,14 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         }));
         dispatch({
           type: 'SEARCH_SUCCESS',
-          payload: [...serverSuggestions, ...fileSuggestions],
+          payload: [...discoverySuggestions, ...fileSuggestions],
         });
       } catch (error) {
         if (!(error instanceof Error && error.name === 'AbortError')) {
-          // A file-search failure shouldn't swallow server matches we already
+          // A file-search failure shouldn't swallow MCP matches we already
           // have; show those rather than dropping to an error state.
-          if (serverSuggestions.length > 0) {
-            dispatch({ type: 'SEARCH_SUCCESS', payload: serverSuggestions });
+          if (discoverySuggestions.length > 0) {
+            dispatch({ type: 'SEARCH_SUCCESS', payload: discoverySuggestions });
           } else {
             dispatch({ type: 'ERROR' });
           }
