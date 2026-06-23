@@ -153,10 +153,10 @@ function copyNativeAudioCapturePackage(rootDir, distDir) {
 
   for (const requiredPath of requiredPaths) {
     if (!fs.existsSync(requiredPath)) {
-      console.warn(
-        `Warning: audio capture package artifact not found at ${requiredPath}`,
+      throw new Error(
+        `Required audio capture artifact missing: ${requiredPath}. ` +
+          'Cannot publish package without native voice capture.',
       );
-      return false;
     }
   }
 
@@ -171,10 +171,10 @@ function copyNativeAudioCapturePackage(rootDir, distDir) {
         path.dirname(nodeRequire.resolve(`${dependencyName}/package.json`)),
       ]);
     } catch {
-      console.warn(
-        `Warning: audio capture dependency not resolvable: ${dependencyName}`,
+      throw new Error(
+        `Required audio capture dependency not resolvable: ${dependencyName}. ` +
+          'Cannot publish package without native voice capture.',
       );
-      return false;
     }
   }
 
