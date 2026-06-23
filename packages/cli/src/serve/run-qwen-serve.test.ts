@@ -7,6 +7,8 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   createLazyBridgeProxy,
@@ -44,6 +46,19 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
 );
+
+async function getFreeLoopbackPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+  return port;
+}
 
 vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
   const actual =
@@ -537,6 +552,33 @@ describe('runQwenServe runtime startup failures', () => {
         serveWebShell: false,
       }),
     ).rejects.toThrow('runtime boom');
+  });
+
+  it('closes the listener before rejecting when resolveOnListen is false and runtime startup fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-close-')),
+    );
+    const port = await getFreeLoopbackPort();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+      throw new Error('runtime boom');
+    });
+
+    await expect(
+      runQwenServe({
+        port,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      }),
+    ).rejects.toThrow('runtime boom');
+
+    await expect(
+      fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).rejects.toThrow();
   });
 
   it('bounds shutdown waiting when runtime startup never settles', async () => {
