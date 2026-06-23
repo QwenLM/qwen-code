@@ -234,7 +234,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     >
       {/* Render standard message types */}
       {itemForDisplay.type === 'user' && (
-        <UserMessage text={itemForDisplay.text} width={contentWidth} />
+        <UserMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'notification' && (
         <InfoMessage text={itemForDisplay.text} />

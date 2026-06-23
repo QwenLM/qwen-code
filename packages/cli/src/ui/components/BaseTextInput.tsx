@@ -32,7 +32,6 @@ import stringWidth from 'string-width';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
-import { getInputBackgroundFill } from '../utils/theme-background.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -371,11 +370,9 @@ export const BaseTextInput = ({
         borderColor={resolvedBorderColor}
       >
         {resolvedPrefix}
-        <Box
-          flexGrow={1}
-          flexDirection="column"
-          backgroundColor={getInputBackgroundFill()}
-        >
+        {/* No background fill: the input area blends into the terminal's own
+            background so it stays consistent across terminals and themes. */}
+        <Box flexGrow={1} flexDirection="column">
           {buffer.text.length === 0 && placeholder ? (
             showCursor ? (
               <Text>
