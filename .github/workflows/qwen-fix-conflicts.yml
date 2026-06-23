@@ -428,41 +428,8 @@ jobs:
           } > "${WORKDIR}/report.md"
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md"
 
-      - name: 'Report failure'
-        if: "always() && steps.prepare.outputs.decision == 'run' && steps.verify.outputs.outcome != 'fixed' && steps.verify.outputs.outcome != 'noop'"
-        env:
-          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
-        run: |-
-          set -euo pipefail
-
-          append_safe_file() {
-            cleaned="${WORKDIR}/safe-$(basename "$1")"
-            sed 's/<[^>]*>//g' "$1" > "$cleaned"
-            head -c 2000 "$cleaned"
-            echo
-          }
-
-          {
-            echo "<!-- qwen-fix-conflicts-result -->"
-            echo "Qwen Code attempted to resolve merge conflicts but the run did not complete successfully."
-            echo
-            for file in failure.md address-summary.md no-action.md; do
-              if [ -s "${WORKDIR}/${file}" ]; then
-                echo "### ${file}"
-                append_safe_file "${WORKDIR}/${file}"
-                echo
-              fi
-            done
-            echo "Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full logs."
-          } > "${WORKDIR}/report.md"
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md"
-
-      - name: 'Push and report'
-        if: |-
-          ${{ always() &&
-              steps.prepare.outputs.decision == 'run' &&
-              (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}
+      - name: 'Report result'
+        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           PUSH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -498,24 +465,42 @@ jobs:
 
           {
             echo "<!-- qwen-fix-conflicts-result -->"
-            if [ "$OUTCOME" = "fixed" ]; then
-              if [ "$push_failed" = "true" ]; then
-                echo "Qwen Code resolved the merge conflicts, but the branch update was not pushed because the head branch changed. Re-run /resolve."
-              elif [ "$DRY_RUN" = "true" ]; then
-                echo "Qwen Code resolved the merge conflicts in dry-run mode. No branch update was pushed."
-              else
-                echo "Qwen Code resolved the merge conflicts and pushed the branch update."
-              fi
-              echo
-              append_safe_file "${WORKDIR}/address-summary.md"
-            else
-              echo "Qwen Code checked this PR and did not push changes."
-              echo
-              append_safe_file "${WORKDIR}/no-action.md"
-            fi
+            case "$OUTCOME" in
+              fixed)
+                if [ "$push_failed" = "true" ]; then
+                  echo "Qwen Code resolved the merge conflicts, but the branch update was not pushed because the head branch changed. Re-run /resolve."
+                elif [ "$DRY_RUN" = "true" ]; then
+                  echo "Qwen Code resolved the merge conflicts in dry-run mode. No branch update was pushed."
+                else
+                  echo "Qwen Code resolved the merge conflicts and pushed the branch update."
+                fi
+                echo
+                append_safe_file "${WORKDIR}/address-summary.md"
+                ;;
+              noop)
+                echo "Qwen Code checked this PR and did not push changes."
+                echo
+                append_safe_file "${WORKDIR}/no-action.md"
+                ;;
+              *)
+                echo "Qwen Code attempted to resolve merge conflicts but the run did not complete successfully."
+                echo
+                for file in failure.md address-summary.md no-action.md; do
+                  if [ -s "${WORKDIR}/${file}" ]; then
+                    echo "### ${file}"
+                    append_safe_file "${WORKDIR}/${file}"
+                    echo
+                  fi
+                done
+                echo "Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full logs."
+                ;;
+            esac
           } > "${WORKDIR}/report.md"
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md"
 
           if [ "$push_failed" = "true" ]; then
+            exit 1
+          fi
+          if [ "$OUTCOME" != "fixed" ] && [ "$OUTCOME" != "noop" ]; then
             exit 1
           fi

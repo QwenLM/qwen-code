@@ -34,7 +34,10 @@ describe('qwen resolve workflow', () => {
     expect(workflow).toContain('if ! npm run build; then');
     expect(workflow).toContain('if ! npm run typecheck; then');
     expect(workflow).toContain('if ! npm run lint; then');
-    expect(workflow).toContain("- name: 'Report failure'");
+    expect(workflow).toContain("- name: 'Report result'");
+    expect(workflow).toContain(
+      'Qwen Code attempted to resolve merge conflicts but the run did not complete successfully.',
+    );
     expect(workflow).toContain('push_failed=false');
     expect(workflow).toContain('push_failed=true');
     expect(workflow).toContain('Check the [workflow run]');
