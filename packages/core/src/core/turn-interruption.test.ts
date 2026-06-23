@@ -10,7 +10,7 @@ import {
   buildSyntheticToolResponseParts,
   detectTurnInterruption,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-} from './turnInterruption.js';
+} from './turn-interruption.js';
 
 const reminder = (text: string) => ({
   text: `<system-reminder>\n${text}\n</system-reminder>`,
