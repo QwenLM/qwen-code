@@ -43,21 +43,6 @@ Never create duplicates.
 
 Default posture: **skepticism**. Burden of proof is on the author. Distinguish **observed failures** (linked issue, reproduction, before/after) from **theoretical hardening** ("could theoretically send X" with no evidence it ever has). Volume ≠ value — an AI bot can produce 20 plausible PRs in a day. If being "too strict" feels uncomfortable, that is the gate working correctly.
 
-### Stage 0: Batch Pattern Detection (run before Stage 1)
-
-Before evaluating any PR individually, check for batch patterns:
-
-```bash
-gh pr list --repo "$REPO" --author "<author>" --state open --limit 20 \
-  --json number,title,createdAt --jq '[.[] | select((.createdAt | fromdateiso8601) > (now - 604800))]'
-```
-
-If the same author has **3+ open PRs in 7 days** with similar patterns:
-
-- **Stop individual review.** Evaluate the batch as a group first.
-- Mostly noise → close the batch with a single explanation.
-- A few have value → extract those, close the rest.
-
 ### Stage 0b: Core Module Protection (two-tier check)
 
 Core infrastructure: `packages/core/src/**`, auth, providers, models, config, tools, services, cross-package changes.
