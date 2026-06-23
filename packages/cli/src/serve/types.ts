@@ -13,11 +13,7 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
-import type {
-  AuthType,
-  InputModalities,
-  Protocol,
-} from '@qwen-code/qwen-code-core';
+import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
@@ -314,8 +310,8 @@ export interface ServeAuthProviderDescriptor {
   label: string;
   description: string;
   uiGroup?: string;
-  protocol: Protocol;
-  protocolOptions?: Protocol[];
+  protocol: AuthType;
+  protocolOptions?: AuthType[];
   baseUrl?: string | ServeAuthProviderBaseUrlOption[];
   envKey?: string;
   models?: ServeAuthProviderModel[];

@@ -9,13 +9,6 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
-import type {
-  ApprovalMode,
-  Protocol,
-  Extension,
-  ExtensionInstallMetadata,
-  ExtensionSetting,
-} from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
   ALL_PROVIDERS,
@@ -37,6 +30,10 @@ import {
   recordDaemonHttpRequest,
   recordDaemonHttpResponse,
   withDaemonRequestSpan,
+  type ApprovalMode,
+  type Extension,
+  type ExtensionInstallMetadata,
+  type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { DaemonLogger } from './daemon-logger.js';
@@ -2742,7 +2739,7 @@ export function createServeApp(
           knownProvider.protocolOptions && knownProvider.protocolOptions.length
             ? knownProvider.protocolOptions
             : [knownProvider.protocol];
-        if (!allowedProtocols.includes(installRequest.protocol as Protocol)) {
+        if (!allowedProtocols.includes(installRequest.protocol)) {
           res.status(400).json({
             error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
             code: 'unsupported_protocol',

@@ -8,7 +8,6 @@ import type {
   AuthType,
   ContentGeneratorConfig,
   InputModalities,
-  Protocol,
 } from '../core/contentGenerator.js';
 import type { ConfigSources } from '../utils/configResolver.js';
 
@@ -68,24 +67,10 @@ export interface ModelConfig {
 }
 
 /**
- * Provider configuration for modelProviders
- */
-export interface ProviderConfig {
-  /** Protocol to use for this provider (required) */
-  protocol: Protocol;
-  /** Models available from this provider */
-  models: ModelConfig[];
-  /** Default base URL for this provider */
-  baseUrl?: string;
-  /** Environment variable name to read API key from */
-  envKey?: string;
-}
-
-/**
  * Model providers configuration grouped by authType
  */
 export type ModelProvidersConfig = {
-  [authType: string]: ProviderConfig;
+  [authType: string]: ModelConfig[];
 };
 
 /**

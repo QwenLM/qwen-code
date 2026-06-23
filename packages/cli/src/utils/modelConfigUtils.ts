@@ -185,9 +185,8 @@ export function resolveCliGenerationConfig(
   let modelProvider: ProviderModelConfig | undefined;
   let disambiguationWarning: string | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
-    const providerConfig = settings.modelProviders[authType];
-    if (providerConfig && providerConfig.models) {
-      const providers = providerConfig.models;
+    const providers = settings.modelProviders[authType];
+    if (providers && Array.isArray(providers)) {
       // When multiple providers share the same id, disambiguate by the
       // persisted settings.model.baseUrl (written by the model picker). This
       // only applies when the model itself came from settings.model.name.
