@@ -711,6 +711,14 @@ export function resetHomeEnvBootstrapForTesting(): void {
   homeEnvBootstrapped = false;
 }
 
+/** Test-only: reset environment reload provenance between tests. */
+export function resetEnvironmentTrackingForTesting(): void {
+  dotEnvSourcedKeys.clear();
+  settingsEnvSourcedKeys.clear();
+  lastReloadSnapshot.clear();
+  lastReloadSnapshotSeeded = false;
+}
+
 /**
  * Collects environment variables from user-level `.env` files and returns
  * them as a plain dictionary **without** mutating `process.env`.
@@ -798,18 +806,18 @@ function detectQwenHomeRedirectWithoutMigration(
 }
 
 /**
- * Finds the .env file to load, respecting workspace trust settings.
+ * Finds the .env files to load, respecting workspace trust settings.
  *
  * When workspace is untrusted, only allow user-level .env files at:
  * - ~/.qwen/.env
  * - ~/.env
  * - <QWEN_HOME>/.env (when set)
  */
-function findEnvFile(
+function findEnvFiles(
   settings: Settings,
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPaths(),
-): string | null {
+): string[] {
   const homeDir = homedir();
   const trustState = getWorkspaceTrustStatus(settings, startDir).effective
     .state;
@@ -818,27 +826,40 @@ function findEnvFile(
   const globalQwenDir = Storage.getGlobalQwenDir();
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
   const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
+  const found: string[] = [];
+  const seen = new Set<string>();
 
   const canUseEnvFile = (filePath: string): boolean =>
     isTrusted || userLevelPaths.has(path.normalize(filePath));
+
+  const pushCandidate = (filePath: string): boolean => {
+    const normalized = path.normalize(filePath);
+    if (
+      !seen.has(normalized) &&
+      fs.existsSync(filePath) &&
+      canUseEnvFile(filePath)
+    ) {
+      seen.add(normalized);
+      found.push(filePath);
+      return true;
+    }
+    return false;
+  };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
   // ~/.qwen/.env (only when QWEN_HOME redirects), then ~/.env.
   // Users who add `QWEN_HOME=` to an existing global env file shouldn't lose
   // credentials still in the legacy file; routing vars inside it are already
   // pinned by `preResolveHomeEnvOverrides` (no-override).
-  const findHomeCandidate = (): string | null => {
+  const pushHomeCandidates = (): void => {
     const candidates = [path.join(globalQwenDir, '.env')];
     if (hasCustomConfigDir) {
       candidates.push(path.join(legacyQwenDir, '.env'));
     }
     candidates.push(path.join(homeDir, '.env'));
     for (const candidate of candidates) {
-      if (fs.existsSync(candidate) && canUseEnvFile(candidate)) {
-        return candidate;
-      }
+      pushCandidate(candidate);
     }
-    return null;
   };
 
   let currentDir = path.resolve(startDir);
@@ -846,23 +867,28 @@ function findEnvFile(
   while (true) {
     if (currentDir === homeDir) {
       visitedHomeDir = true;
-      const found = findHomeCandidate();
-      if (found) return found;
+      pushHomeCandidates();
+      return found;
     } else {
       // Workspace step: prefer .qwen/.env, then plain .env.
       const geminiEnvPath = path.join(currentDir, QWEN_DIR, '.env');
-      if (fs.existsSync(geminiEnvPath) && canUseEnvFile(geminiEnvPath)) {
-        return geminiEnvPath;
+      if (pushCandidate(geminiEnvPath)) {
+        pushHomeCandidates();
+        return found;
       }
       const envPath = path.join(currentDir, '.env');
-      if (fs.existsSync(envPath) && canUseEnvFile(envPath)) {
-        return envPath;
+      if (pushCandidate(envPath)) {
+        pushHomeCandidates();
+        return found;
       }
     }
 
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir || !parentDir) {
-      return visitedHomeDir ? null : findHomeCandidate();
+      if (!visitedHomeDir) {
+        pushHomeCandidates();
+      }
+      return found;
     }
     currentDir = parentDir;
   }
@@ -889,6 +915,23 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
     process.env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
   }
 }
+
+function setUpCloudShellEnvironmentFromFiles(envFilePaths: string[]): void {
+  for (const envFilePath of envFilePaths) {
+    if (!fs.existsSync(envFilePath)) {
+      continue;
+    }
+    const envFileContent = fs.readFileSync(envFilePath);
+    const parsedEnv = dotenv.parse(envFileContent);
+    if (parsedEnv['GOOGLE_CLOUD_PROJECT']) {
+      process.env['GOOGLE_CLOUD_PROJECT'] = parsedEnv['GOOGLE_CLOUD_PROJECT'];
+      return;
+    }
+  }
+
+  process.env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
+}
+
 /**
  * Loads environment variables from .env files and settings.env.
  *
@@ -904,16 +947,16 @@ export function loadEnvironment(
   workspaceCwd: string = process.cwd(),
 ): void {
   const userLevelPaths = getUserLevelEnvPaths();
-  const envFilePath = findEnvFile(settings, workspaceCwd, userLevelPaths);
+  const envFilePaths = findEnvFiles(settings, workspaceCwd, userLevelPaths);
 
   // Cloud Shell environment variable handling
   if (process.env['CLOUD_SHELL'] === 'true') {
-    setUpCloudShellEnvironment(envFilePath);
+    setUpCloudShellEnvironmentFromFiles(envFilePaths);
   }
 
   // Step 1: Load from .env files (higher priority than settings.env)
   // Only set if not already present in process.env (no-override mode)
-  if (envFilePath) {
+  for (const envFilePath of envFilePaths) {
     try {
       const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
       const parsedEnv = dotenv.parse(envFileContent);
@@ -948,7 +991,7 @@ export function loadEnvironment(
           }
           // Seed snapshot with ALL parsed keys (not just written ones)
           // so child processes can detect deletions on first reload.
-          if (!lastReloadSnapshotSeeded) {
+          if (!lastReloadSnapshotSeeded && !lastReloadSnapshot.has(key)) {
             lastReloadSnapshot.set(key, parsedEnv[key]!);
           }
         }
@@ -997,10 +1040,10 @@ export function reloadEnvironment(
   workspaceCwd: string,
 ): EnvReloadResult {
   const userLevelPaths = getUserLevelEnvPaths();
-  const envFilePath = findEnvFile(settings, workspaceCwd, userLevelPaths);
+  const envFilePaths = findEnvFiles(settings, workspaceCwd, userLevelPaths);
 
   if (process.env['CLOUD_SHELL'] === 'true') {
-    setUpCloudShellEnvironment(envFilePath);
+    setUpCloudShellEnvironmentFromFiles(envFilePaths);
   }
 
   // Build the set of new keys from .env (higher priority) + settings.env
@@ -1008,7 +1051,7 @@ export function reloadEnvironment(
   const newDotEnvKeys = new Map<string, string>();
   const newSettingsEnvKeys = new Map<string, string>();
 
-  if (envFilePath) {
+  for (const envFilePath of envFilePaths) {
     try {
       const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
       const parsedEnv = dotenv.parse(envFileContent);
@@ -1030,7 +1073,9 @@ export function reloadEnvironment(
           continue;
         }
         if (!isQwenScopedEnvFile && excludedVars.includes(key)) continue;
-        newDotEnvKeys.set(key, parsedEnv[key]!);
+        if (!newDotEnvKeys.has(key)) {
+          newDotEnvKeys.set(key, parsedEnv[key]!);
+        }
       }
     } catch {
       dotEnvReadFailed = true;

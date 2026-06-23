@@ -175,6 +175,16 @@ describe('SettingsSchema', () => {
       expect(voiceModel.showInDialog).toBe(false);
     });
 
+    it('should define stopHookBlockingCap schema override as a positive integer', () => {
+      expect(
+        getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,
+      ).toEqual({
+        type: 'integer',
+        minimum: 1,
+        default: 8,
+      });
+    });
+
     it('should have voice dictation settings under general', () => {
       const voice =
         getSettingsSchema().general.properties.voice.properties ?? {};

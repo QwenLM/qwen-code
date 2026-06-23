@@ -1543,7 +1543,13 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: 5 as number,
             description:
-              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+              'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            jsonSchemaOverride: {
+              type: 'integer',
+              default: 5,
+              description:
+                'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            },
             showInDialog: false,
           },
           toolResultsTotalCharsThreshold: {
@@ -2589,6 +2595,11 @@ const SETTINGS_SCHEMA = {
     // This is an advanced safety valve for runaway hook loops, not a common
     // interactive preference.
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'integer',
+      minimum: 1,
+      default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    },
   },
 
   hooks: {
