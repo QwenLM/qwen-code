@@ -54,6 +54,10 @@ jobs:
     name: 'Windows Runner Smoke'
     if: "${{ github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true }}"
     runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
+    env:
+      QWEN_CODE_LANG: 'en'
+      LANG: 'en_US.UTF-8'
+      LC_ALL: 'en_US.UTF-8'
     defaults:
       run:
         shell: 'powershell'
@@ -81,6 +85,31 @@ jobs:
           npm --version
           where.exe qwen
           qwen --version
+
+      - name: 'Verify runner environment'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          whoami
+          whoami /priv
+
+          if ($env:QWEN_CODE_LANG -ne 'en') {
+            throw "Expected QWEN_CODE_LANG=en, got '$env:QWEN_CODE_LANG'"
+          }
+
+          $script = @'
+          const fs = require('fs');
+          const os = require('os');
+          const path = require('path');
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-symlink-check-'));
+          const target = path.join(dir, 'target.txt');
+          const link = path.join(dir, 'link.txt');
+          fs.writeFileSync(target, 'ok');
+          fs.symlinkSync(target, link, 'file');
+          console.log('symlink ok:', fs.lstatSync(link).isSymbolicLink());
+          console.log('dir:', dir);
+          console.log('QWEN_CODE_LANG:', process.env.QWEN_CODE_LANG);
+          '@
+          node -e $script
 
       - name: 'Verify checkout'
         run: |-
@@ -94,6 +123,10 @@ jobs:
     name: 'Windows Runner Full Test'
     if: "${{ github.event_name == 'workflow_dispatch' && inputs.windows_runner_full_test == true }}"
     runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
+    env:
+      QWEN_CODE_LANG: 'en'
+      LANG: 'en_US.UTF-8'
+      LC_ALL: 'en_US.UTF-8'
     defaults:
       run:
         shell: 'powershell'
@@ -121,6 +154,31 @@ jobs:
           npm --version
           where.exe qwen
           qwen --version
+
+      - name: 'Verify runner environment'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          whoami
+          whoami /priv
+
+          if ($env:QWEN_CODE_LANG -ne 'en') {
+            throw "Expected QWEN_CODE_LANG=en, got '$env:QWEN_CODE_LANG'"
+          }
+
+          $script = @'
+          const fs = require('fs');
+          const os = require('os');
+          const path = require('path');
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-symlink-check-'));
+          const target = path.join(dir, 'target.txt');
+          const link = path.join(dir, 'link.txt');
+          fs.writeFileSync(target, 'ok');
+          fs.symlinkSync(target, link, 'file');
+          console.log('symlink ok:', fs.lstatSync(link).isSymbolicLink());
+          console.log('dir:', dir);
+          console.log('QWEN_CODE_LANG:', process.env.QWEN_CODE_LANG);
+          '@
+          node -e $script
 
       - name: 'Configure npm for rate limiting'
         run: |-
