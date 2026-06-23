@@ -197,6 +197,27 @@ describe('getAbsolutePosition', () => {
 
     expect(getAbsolutePosition(child)).toEqual({ top: 18, left: 23 });
   });
+
+  it('skips nodes without yogaNode in the parent chain', () => {
+    const root = createElement(2, 3);
+    const middle = { parentNode: root } as unknown as DOMElement;
+    const child = createElement(11, 13, middle);
+
+    expect(getAbsolutePosition(child)).toEqual({ top: 13, left: 16 });
+  });
+
+  it('skips nodes whose getComputedLayout returns undefined', () => {
+    const root = createElement(2, 3);
+    const middle = {
+      yogaNode: {
+        getComputedLayout: () => undefined,
+      },
+      parentNode: root,
+    } as unknown as DOMElement;
+    const child = createElement(11, 13, middle);
+
+    expect(getAbsolutePosition(child)).toEqual({ top: 13, left: 16 });
+  });
 });
 
 describe('defaultRenderLine', () => {

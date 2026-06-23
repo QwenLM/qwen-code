@@ -302,8 +302,12 @@ describe('mcp-client', () => {
       );
     });
 
-    it('reports SSE OAuth credential read failures before connecting', async () => {
+    it('continues connecting when the SSE OAuth credential pre-read fails', async () => {
       const connect = vi.fn();
+      const getCredentials = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Corrupt token file'))
+        .mockResolvedValue(null);
       vi.mocked(ClientLib.Client).mockReturnValue({
         connect,
         registerCapabilities: vi.fn(),
@@ -313,9 +317,7 @@ describe('mcp-client', () => {
       vi.mocked(MCPOAuthTokenStorage).mockImplementation(
         () =>
           ({
-            getCredentials: vi
-              .fn()
-              .mockRejectedValue(new Error('Corrupt token file')),
+            getCredentials,
           }) as unknown as MCPOAuthTokenStorage,
       );
       const workspaceContext = {
@@ -330,12 +332,10 @@ describe('mcp-client', () => {
           false,
           workspaceContext,
         ),
-      ).rejects.toThrow(
-        "Failed to read stored OAuth credentials for SSE server 'sse-server': Corrupt token file",
-      );
-      expect(connect).not.toHaveBeenCalled();
-      expect(mockDebugLogger.error).toHaveBeenCalledWith(
-        "Failed to read stored OAuth credentials for SSE server 'sse-server': Corrupt token file",
+      ).resolves.toBeDefined();
+      expect(connect).toHaveBeenCalledOnce();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "Failed to pre-read stored OAuth credentials for SSE server 'sse-server': Corrupt token file",
       );
     });
   });

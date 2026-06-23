@@ -1339,11 +1339,9 @@ export async function connectToMcpServer(
         await tokenStorage.getCredentials(mcpServerName),
       );
     } catch (error) {
-      unlistenDirectories?.();
-      unlistenDirectories = undefined;
-      const message = `Failed to read stored OAuth credentials for SSE server '${mcpServerName}': ${getErrorMessage(error)}`;
-      debugLogger.error(message);
-      throw new Error(message);
+      debugLogger.warn(
+        `Failed to pre-read stored OAuth credentials for SSE server '${mcpServerName}': ${getErrorMessage(error)}`,
+      );
     }
   }
 
