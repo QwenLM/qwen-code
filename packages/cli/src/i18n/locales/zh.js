@@ -1298,6 +1298,7 @@ export default {
   'Size:': '大小：',
   '{{count}} bytes': '{{count}} 字节',
   'Reference in chat': '在对话中引用',
+  'MCP resource server': 'MCP 资源服务器',
 
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} 个无效工具',
