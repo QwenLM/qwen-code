@@ -485,7 +485,7 @@ The following fields are treated as atomic objects - provider values completely 
 
 ### Example
 
-```json
+```jsonc
 // User settings (~/.qwen/settings.json)
 {
   "model": {
