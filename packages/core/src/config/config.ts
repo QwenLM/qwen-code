@@ -1644,8 +1644,17 @@ export class Config {
     this.promptRegistry = new PromptRegistry();
     this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
+    const explicitExtensionNames = this.isSafeMode()
+      ? []
+      : (this.overrideExtensions ?? []).filter(
+          (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
+        );
     if (!this.isSafeMode() && !this.getBareMode()) {
       await this.extensionManager.refreshCache();
+    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
+      await this.extensionManager.refreshCache({
+        names: explicitExtensionNames,
+      });
     }
     this.debugLogger.debug('Extension manager initialized');
 
