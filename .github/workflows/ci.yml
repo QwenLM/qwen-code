@@ -94,6 +94,9 @@ jobs:
     name: 'Windows Runner Full Test'
     if: "${{ github.event_name == 'workflow_dispatch' && inputs.windows_runner_full_test == true }}"
     runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
+    defaults:
+      run:
+        shell: 'C:\Program Files\Git\bin\bash.exe --noprofile --norc -e -o pipefail {0}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
