@@ -684,9 +684,9 @@
               "default": 60
             },
             "toolResultsNumToKeep": {
-              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
-              "type": "number",
-              "default": 5
+              "type": "integer",
+              "default": 5,
+              "description": "Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1."
             },
             "toolResultsTotalCharsThreshold": {
               "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
