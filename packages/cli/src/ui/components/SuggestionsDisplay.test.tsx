@@ -97,6 +97,37 @@ describe('SuggestionsDisplay', () => {
     expect(output).toContain('First line of the skill description.');
     expect(output).toContain('- bullet one - bullet two');
   });
+
+  it('keeps a reverse-mode label on one line when the row has a description', () => {
+    // Regression: an MCP server/resource suggestion (label + description) in
+    // `@` completion used to let the description column squeeze the label so it
+    // wrapped mid-string — the trailing `:` of `server:` landed on its own line.
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[
+          {
+            label: 'asys-mcp-http:',
+            value: 'asys-mcp-http:',
+            description: 'MCP resource server',
+            isDirectory: true,
+          },
+        ]}
+        activeIndex={0}
+        isLoading={false}
+        width={100}
+        scrollOffset={0}
+        userInput="asys-mcp"
+        mode="reverse"
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    // The whole label (colon included) sits on a single line, before the desc.
+    expect(output).toContain('asys-mcp-http:  MCP resource server');
+    // And the label is not split across lines.
+    expect(output).not.toMatch(/asys-mcp-http\n/);
+    expect(output.split('\n').length).toBe(1);
+  });
 });
 
 describe('normalizeDescription', () => {

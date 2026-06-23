@@ -135,7 +135,17 @@ export function SuggestionsDisplay({
             <Box
               {...(mode === 'slash'
                 ? { width: commandColumnWidth, flexShrink: 0 as const }
-                : { flexShrink: 1 as const })}
+                : // In reverse (`@`) mode a row with a description (e.g. an MCP
+                  // resource/server suggestion) must not let the greedy
+                  // description column shrink the label — otherwise the label
+                  // wraps mid-string (e.g. the trailing `:` of `server:` lands
+                  // on its own line). Pin the label (`flexShrink: 0`) so the
+                  // description column absorbs the shrink and truncates instead.
+                  // Description-less rows (plain files) keep the old shrink
+                  // behaviour so a long path can still wrap rather than overflow.
+                  {
+                    flexShrink: suggestion.description ? 0 : 1,
+                  })}
             >
               <Box>
                 {labelElement}
