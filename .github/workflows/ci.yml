@@ -267,7 +267,7 @@ jobs:
   test_platforms:
     name: 'Test (${{ matrix.os }}, Node ${{ matrix.node-version }})'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name != 'pull_request' }}"
+    if: '${{ !cancelled() }}'
     runs-on: '${{ fromJSON(matrix.runner) }}'
     permissions:
       contents: 'read'
@@ -284,20 +284,22 @@ jobs:
     steps:
       - name: 'Checkout'
         id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         continue-on-error: true
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
       - name: 'Back off for the merge ref to build'
-        if: "${{ steps.checkout.outcome == 'failure' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.checkout.outcome == 'failure' }}"
         run: 'sleep 10'
       - name: 'Checkout (retry on transient ref lag)'
-        if: "${{ steps.checkout.outcome == 'failure' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.checkout.outcome == 'failure' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
 
       - name: 'Set up Node.js ${{ matrix.node-version }}'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
@@ -306,6 +308,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org/'
 
       - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           npm config set fetch-retry-mintimeout 20000
           npm config set fetch-retry-maxtimeout 120000
@@ -313,10 +316,12 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
       - name: 'Run tests and generate reports'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
         run: 'npm run test:ci'
