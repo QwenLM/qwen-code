@@ -87,6 +87,7 @@ import type {
   ExtensionMutationResponse,
   ExtensionInstallRequest,
   ExtensionInstallResponse,
+  ExtensionOperationStatus,
   ExtensionScopeRequest,
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
@@ -708,6 +709,15 @@ export class DaemonClient {
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
       { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus> {
+    return await this.jsonRequest<ExtensionOperationStatus>(
+      `/workspace/extensions/operations/${encodeURIComponent(operationId)}`,
+      'GET /workspace/extensions/operations/:operationId',
     );
   }
 
