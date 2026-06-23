@@ -58,6 +58,21 @@ If the same author has **3+ open PRs in 7 days** with similar patterns:
 - Mostly noise → close the batch with a single explanation.
 - A few have value → extract those, close the rest.
 
+### Stage 0b: Core Module Protection (MANDATORY — run after Stage 0, before Stage 1)
+
+**We do not accept community PRs that refactor core infrastructure. Period.**
+
+Check the PR's changed files. If the PR is a `refactor:` (or large structural change) touching any of these paths, **reject immediately** — do not proceed to Stage 1:
+
+- `packages/core/src/**`
+- `packages/cli/src/config/auth.ts`, `packages/cli/src/ui/auth/**`
+- `packages/cli/src/serve/**`
+- Cross-package changes spanning both `packages/core` and `packages/cli`
+
+Reply: "Core infrastructure refactors must be maintainer-initiated. Please open an issue to discuss the design first."
+
+**Why this is non-negotiable:** "The direction looks correct" is not enough. A community contributor lacks the architectural context to design core refactors — the blast radius, the downstream dependencies, the invariants that must hold. A bad core refactor costs months of breakage. A wrongly rejected one costs a polite comment. The asymmetry is enormous. **When in doubt, reject. Better to wrongly reject a valid PR than to wrongly accept a broken one.**
+
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
 **⛔ Before anything else: create a worktree.** This is the #1 forgotten step.
