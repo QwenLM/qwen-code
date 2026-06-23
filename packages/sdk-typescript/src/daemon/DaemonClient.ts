@@ -92,6 +92,9 @@ import type {
   DaemonWorkspaceHooksStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonPermissionRuleType,
+  DaemonPermissionScope,
+  DaemonWorkspacePermissionsStatus,
 } from './types.js';
 
 /**
@@ -1751,6 +1754,65 @@ export class DaemonClient {
         return (await res.json()) as DaemonSettingUpdateResult;
       },
     );
+  }
+
+  async workspacePermissions(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspacePermissionsStatus> {
+    return this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'GET /workspace/permissions',
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async setWorkspacePermissionRules(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rules: readonly string[],
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    return this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'POST /workspace/permissions',
+      {
+        method: 'POST',
+        body: { scope, ruleType, rules: [...rules] },
+        clientId: opts?.clientId,
+      },
+    );
+  }
+
+  async addWorkspacePermissionRule(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalizedRule = rule.trim();
+    const status = await this.workspacePermissions(opts);
+    const currentRules = status[scope].rules[ruleType];
+    if (currentRules.includes(normalizedRule)) return status;
+    return this.setWorkspacePermissionRules(
+      scope,
+      ruleType,
+      [...currentRules, normalizedRule],
+      opts,
+    );
+  }
+
+  async removeWorkspacePermissionRule(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalizedRule = rule.trim();
+    const status = await this.workspacePermissions(opts);
+    const currentRules = status[scope].rules[ruleType];
+    const nextRules = currentRules.filter((item) => item !== normalizedRule);
+    if (nextRules.length === currentRules.length) return status;
+    return this.setWorkspacePermissionRules(scope, ruleType, nextRules, opts);
   }
 
   /**

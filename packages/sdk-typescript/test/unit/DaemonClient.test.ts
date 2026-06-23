@@ -2632,6 +2632,115 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('workspace permissions helpers', () => {
+    const permissionsStatus = {
+      v: 1 as const,
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        rules: {
+          allow: ['ShellTool(git status)'],
+          ask: [],
+          deny: [],
+        },
+      },
+      workspace: {
+        path: '/work/.qwen/settings.json',
+        rules: {
+          allow: ['ShellTool(npm test)'],
+          ask: [],
+          deny: ['ReadFileTool(**/.env)'],
+        },
+      },
+      merged: {
+        allow: ['ShellTool(git status)', 'ShellTool(npm test)'],
+        ask: [],
+        deny: ['ReadFileTool(**/.env)'],
+      },
+      isTrusted: true,
+    };
+
+    it('workspacePermissions calls GET /workspace/permissions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspacePermissions({ clientId: 'client-1' }),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('setWorkspacePermissionRules posts scope ruleType and rules', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspacePermissionRules(
+          'workspace',
+          'deny',
+          ['ReadFileTool(**/.env)'],
+          { clientId: 'client-2' },
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(calls[0]?.headers['content-type']).toContain('application/json');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-2');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['ReadFileTool(**/.env)'],
+      });
+    });
+
+    it('addWorkspacePermissionRule deduplicates against scope-local rules', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'user',
+          'allow',
+          ' ShellTool(git status) ',
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('removeWorkspacePermissionRule preserves missing rule as no-op', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'ask',
+          'ShellTool(yarn test)',
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+  });
+
   describe('workspace memory + agents helpers (issue #4175 PR 16)', () => {
     it('GETs /workspace/memory and parses the snapshot', async () => {
       const snapshot = {
