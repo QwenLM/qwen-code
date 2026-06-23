@@ -3365,6 +3365,23 @@ export class Config {
   }
 
   /**
+   * Snapshot the runtime-only MCP servers added via `addRuntimeMcpServer`.
+   * Returns a shallow copy so callers can't mutate the private map.
+   *
+   * Reverse tool channel (issue #5626): a per-session Config built by
+   * `newSessionConfig` is independent from the bootstrap/workspace Config and
+   * never re-reads runtime additions (they live outside the settings layer
+   * `loadCliConfig` reloads). The daemon uses this getter to propagate the
+   * bootstrap Config's runtime MCP servers into a freshly created session
+   * Config so a session created AFTER a client MCP server was registered still
+   * discovers the client-hosted tools. Empty when nothing was runtime-added,
+   * so the inheritance step is a no-op in the common case.
+   */
+  getRuntimeMcpServers(): Record<string, MCPServerConfig> {
+    return Object.fromEntries(this.runtimeMcpServers);
+  }
+
+  /**
    * Remove a runtime-only MCP server previously added via
    * `addRuntimeMcpServer`. Returns `true` if the entry existed and was
    * removed, `false` otherwise.

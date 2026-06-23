@@ -6144,6 +6144,50 @@ class QwenAgent implements Agent {
             safeConfig as MCPServerConfig,
             originatorClientId,
           );
+          // Reverse tool channel (issue #5626, Phase 2). The add above lands
+          // the server in the BOOTSTRAP/workspace Config — which is what
+          // discovery and `GET /workspace/mcp/<server>/tools` read, and what a
+          // session created LATER inherits (see `newSessionConfig`). But a
+          // prompt runs against a PER-SESSION Config whose tool registry +
+          // `sendSdkMcpMessage` are independent: an ALREADY-ACTIVE session would
+          // not see the server and a model-driven `tools/call` for a
+          // client-hosted tool would fail with "not found in registry", never
+          // reaching the WS client. Fan the add out to each live session's
+          // manager so the tool lands in that session's registry AND binds that
+          // session's `sendSdkMcpMessage` (the `__clientMcpOverWs` reverse
+          // path). Best-effort + additive: a per-session failure is logged but
+          // does not fail the registration (the bootstrap add already
+          // succeeded and is the result we return); no active sessions ⇒ no-op.
+          await Promise.all(
+            this.getActiveSessions().map(async (session) => {
+              const sessionManager = session
+                .getConfig()
+                .getToolRegistry()
+                ?.getMcpClientManager();
+              if (!sessionManager) return;
+              // `addRuntimeMcpServer` is idempotent on an identical fingerprint
+              // (same name + config) — it updates the overlay without transport
+              // churn — so a session that already inherited this server at
+              // creation re-adds harmlessly.
+              try {
+                await sessionManager.addRuntimeMcpServer(
+                  name,
+                  safeConfig as MCPServerConfig,
+                  originatorClientId,
+                );
+              } catch (sessionErr) {
+                debugLogger.warn(
+                  `workspaceMcpRuntimeAdd: failed to add runtime MCP server ` +
+                    `'${name}' to active session ${session.getConfig().getSessionId()}: ` +
+                    `${
+                      sessionErr instanceof Error
+                        ? sessionErr.message
+                        : String(sessionErr)
+                    }`,
+                );
+              }
+            }),
+          );
           return result as unknown as Record<string, unknown>;
         } catch (err) {
           if (err instanceof McpBudgetWouldExceedError) {
@@ -6209,6 +6253,38 @@ class QwenAgent implements Agent {
         const result = await manager.removeRuntimeMcpServer(
           name,
           originatorClientId,
+        );
+        // Mirror of the add fan-out (#5626): the runtime server was also
+        // registered on each active session's manager, so deregistering it
+        // must tear it down there too — otherwise an active session keeps a
+        // stale client-hosted server (and its WS-bound SDK transport) alive
+        // after the extension is gone. Best-effort + additive: per-session
+        // failures are logged, never failing the deregistration; no active
+        // sessions ⇒ no-op.
+        await Promise.all(
+          this.getActiveSessions().map(async (session) => {
+            const sessionManager = session
+              .getConfig()
+              .getToolRegistry()
+              ?.getMcpClientManager();
+            if (!sessionManager) return;
+            try {
+              await sessionManager.removeRuntimeMcpServer(
+                name,
+                originatorClientId,
+              );
+            } catch (sessionErr) {
+              debugLogger.warn(
+                `workspaceMcpRuntimeRemove: failed to remove runtime MCP server ` +
+                  `'${name}' from active session ${session.getConfig().getSessionId()}: ` +
+                  `${
+                    sessionErr instanceof Error
+                      ? sessionErr.message
+                      : String(sessionErr)
+                  }`,
+              );
+            }
+          }),
         );
         return result as unknown as Record<string, unknown>;
       }
@@ -7106,6 +7182,30 @@ class QwenAgent implements Agent {
     // explicitly so /rewind works across daemon session resume.
     if (typeof config.enableFileCheckpointing === 'function') {
       config.enableFileCheckpointing();
+    }
+    // Reverse tool channel (issue #5626, Phase 2). Runtime-added MCP servers
+    // (notably client-hosted/extension SDK servers registered via
+    // `workspaceMcpRuntimeAdd`) live in a private per-Config map that
+    // `loadCliConfig` does NOT re-read — it only reloads the settings layer.
+    // A session created AFTER a client MCP server was registered would
+    // therefore start with an empty runtime overlay and never discover the
+    // client-hosted tools, so a model-driven `tools/call` for them would fail
+    // with "not found in registry". Copy the bootstrap/workspace Config's
+    // runtime servers onto the new session Config BEFORE `config.initialize()`
+    // so its discovery pass picks them up and binds THIS session's
+    // `sendSdkMcpMessage` (SDK servers route through the per-session callback).
+    // Guarded + additive: no runtime servers ⇒ no-op, and settings-based MCP
+    // servers (already re-read by `loadCliConfig`) are untouched.
+    if (
+      typeof this.config.getRuntimeMcpServers === 'function' &&
+      typeof config.addRuntimeMcpServer === 'function'
+    ) {
+      const bootstrapRuntimeMcpServers = this.config.getRuntimeMcpServers();
+      for (const [runtimeServerName, runtimeServerConfig] of Object.entries(
+        bootstrapRuntimeMcpServers,
+      )) {
+        config.addRuntimeMcpServer(runtimeServerName, runtimeServerConfig);
+      }
     }
     // Inject the workspace-shared MCP transport pool BEFORE
     // `config.initialize()` so the ToolRegistry picks it up.
