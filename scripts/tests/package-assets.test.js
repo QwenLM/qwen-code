@@ -117,6 +117,34 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('omits bundledDependencies when audio-capture artifacts are missing', () => {
+    const rootDir = createFixtureRoot();
+    rmSync(path.join(rootDir, 'packages', 'audio-capture', 'prebuilds'), {
+      recursive: true,
+      force: true,
+    });
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.bundledDependencies).toBeUndefined();
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+        ),
+      ),
+    ).toBe(false);
+  });
+
   function createFixtureRoot() {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-assets-'));
     tempDirs.push(rootDir);
