@@ -56,12 +56,11 @@ function extractUpgradeBearer(req: IncomingMessage): string | undefined {
       const entry = raw.trim();
       if (!entry.startsWith(WS_BEARER_SUBPROTOCOL_PREFIX)) continue;
       const encoded = entry.slice(WS_BEARER_SUBPROTOCOL_PREFIX.length);
-      try {
-        const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
-        if (decoded) return decoded;
-      } catch {
-        // Malformed base64url → treat as no credential.
-      }
+      // `Buffer.from(_, 'base64url')` never throws — malformed input just
+      // decodes to garbage bytes, which fail the constant-time hash compare
+      // at the call site. An empty decode means "no credential offered".
+      const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
+      if (decoded) return decoded;
     }
   }
   return undefined;
@@ -489,9 +488,13 @@ export function mountAcpHttp(
       maxPayload: 10 * 1024 * 1024,
       // Browsers authenticate the upgrade by offering the bearer token as a
       // `qwen-bearer.*` subprotocol (see extractUpgradeBearer). Never echo that
-      // secret-bearing value back in the handshake response: select the first
-      // non-secret subprotocol offered, or none. ACP clients offer no
-      // subprotocol, so this is a no-op for them.
+      // secret-bearing value back in the handshake response — select the first
+      // non-secret subprotocol instead. The web-shell offers a non-secret
+      // marker (`qwen-ws`) alongside the bearer one precisely so there is always
+      // a safe value to select: selecting none would make strict WS clients
+      // (e.g. the `ws` library) reject the handshake with "Server sent no
+      // subprotocol". ACP clients offer no subprotocol, so this is a no-op for
+      // them.
       handleProtocols: (protocols) => {
         for (const proto of protocols) {
           if (!proto.startsWith(WS_BEARER_SUBPROTOCOL_PREFIX)) return proto;

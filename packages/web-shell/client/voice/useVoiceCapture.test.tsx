@@ -28,7 +28,10 @@ class MockWebSocket {
   onclose: ((event: CloseEvent) => void) | null = null;
   readonly sent: unknown[] = [];
 
-  constructor(readonly url: string) {
+  constructor(
+    readonly url: string,
+    readonly protocols?: string | string[],
+  ) {
     MockWebSocket.latest = this;
   }
 
@@ -65,10 +68,23 @@ const onFinal = vi.fn();
 const onError = vi.fn();
 const track = { stop: vi.fn() };
 let baseUrl = 'http://127.0.0.1:1234';
+let token: string | undefined;
+
+/** Decode a `qwen-bearer.<base64url>` subprotocol back to the raw token. */
+function decodeBearerSubprotocol(proto: string): string {
+  const b64 = proto
+    .slice('qwen-bearer.'.length)
+    .replace(/-/g, '+')
+    .replace(/_/g, '/');
+  const binary = atob(b64);
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
 
 function TestHost() {
   capture = useVoiceCapture({
     baseUrl,
+    token,
     onFinal,
     onError,
   });
@@ -92,6 +108,7 @@ beforeEach(() => {
   onError.mockReset();
   track.stop.mockReset();
   baseUrl = 'http://127.0.0.1:1234';
+  token = undefined;
   MockWebSocket.latest = undefined;
   Object.defineProperty(globalThis, 'WebSocket', {
     value: MockWebSocket,
@@ -134,6 +151,35 @@ describe('useVoiceCapture', () => {
     expect(MockWebSocket.latest?.url).toBe(
       'wss://example.test/qwen/voice/stream',
     );
+  });
+
+  it('carries the bearer token as a Sec-WebSocket-Protocol subprotocol', async () => {
+    token = 'secret-token-123';
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+
+    const protocols = MockWebSocket.latest?.protocols;
+    expect(Array.isArray(protocols)).toBe(true);
+    const list = protocols as string[];
+    // Non-secret marker first (what the daemon selects), then the bearer token.
+    expect(list).toHaveLength(2);
+    expect(list[0]).toBe('qwen-ws');
+    expect(list[1].startsWith('qwen-bearer.')).toBe(true);
+    // Round-trips back to the raw token (what the daemon decodes + hashes).
+    expect(decodeBearerSubprotocol(list[1])).toBe('secret-token-123');
+  });
+
+  it('offers no subprotocol when no token is configured', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+
+    expect(MockWebSocket.latest?.protocols).toBeUndefined();
   });
 
   it('uses server error frame messages', async () => {

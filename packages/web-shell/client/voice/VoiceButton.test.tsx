@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 
-import React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,14 +17,14 @@ const mocks = vi.hoisted(() => ({
     capabilities: { features: ['voice_transcribe'] },
   },
   capture: {
-    status: 'idle',
+    status: 'idle' as UseVoiceCaptureReturn['status'],
     interimText: '',
     audioLevel: 0,
-    errorMessage: undefined,
+    errorMessage: undefined as string | undefined,
     start: vi.fn(),
     stop: vi.fn(),
     abort: vi.fn(),
-  } as UseVoiceCaptureReturn,
+  },
 }));
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
@@ -33,7 +32,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 vi.mock('./useVoiceCapture', () => ({
-  useVoiceCapture: () => mocks.capture,
+  useVoiceCapture: (): UseVoiceCaptureReturn =>
+    mocks.capture as unknown as UseVoiceCaptureReturn,
 }));
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];

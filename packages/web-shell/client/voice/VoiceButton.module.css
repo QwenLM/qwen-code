@@ -34,6 +34,11 @@
   color: var(--text-primary);
 }
 
+.iconBtn:focus-visible {
+  outline: 2px solid var(--accent-color, #4a9eff);
+  outline-offset: 1px;
+}
+
 .iconBtn:disabled {
   cursor: default;
   opacity: 0.5;

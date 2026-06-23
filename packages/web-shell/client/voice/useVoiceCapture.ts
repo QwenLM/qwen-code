@@ -13,10 +13,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * transcribes server-side (credentials never reach the browser) and returns
  * interim/final transcripts.
  *
- * Note: browsers cannot set an `Authorization` header on a WebSocket, so this
- * mirrors the daemon's ACP WebSocket posture — it works against the default
- * loopback `qwen serve` (no token). Token-required deployments are unsupported
- * in the browser, same as the ACP WS transport.
+ * Note: browsers cannot set an `Authorization` header on a WebSocket. When a
+ * bearer token is configured it rides in the `Sec-WebSocket-Protocol`
+ * subprotocol as `qwen-bearer.<base64url(token)>` (see `bearerSubprotocol`),
+ * which the daemon's ACP upgrade listener verifies — so this works against both
+ * no-token loopback and token-required deployments.
  */
 export type VoiceCaptureStatus =
   | 'idle'
@@ -63,6 +64,11 @@ function toWebSocketUrl(baseUrl: string): string {
  * this prefix in sync with `WS_BEARER_SUBPROTOCOL_PREFIX` there.
  */
 const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
+// Non-secret marker offered alongside the bearer subprotocol. The daemon
+// completes the handshake by selecting THIS (never echoing the secret), which
+// also satisfies WS clients that require the server to pick an offered
+// subprotocol when any were requested. Must not start with the bearer prefix.
+const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
 
 function bearerSubprotocol(token: string): string {
   const bytes = new TextEncoder().encode(token);
@@ -290,7 +296,7 @@ export function useVoiceCapture(
 
         const ws = new WebSocket(
           toWebSocketUrl(baseUrl),
-          token ? [bearerSubprotocol(token)] : undefined,
+          token ? [WS_AUTH_SUBPROTOCOL, bearerSubprotocol(token)] : undefined,
         );
         ws.binaryType = 'arraybuffer';
         resourcesRef.current.ws = ws;

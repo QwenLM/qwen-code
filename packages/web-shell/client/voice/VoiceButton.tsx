@@ -161,6 +161,7 @@ export function VoiceButton({
     control = (
       <span
         className={`${styles.pill} ${styles.transcribing}`}
+        role="status"
         aria-label={label}
       >
         <span className={styles.spinner} aria-hidden="true" />
@@ -207,6 +208,8 @@ export function VoiceButton({
       {control}
       {showInterim && (
         <span
+          role="status"
+          aria-live="polite"
           className={`${styles.interim}${isError ? ` ${styles.error}` : ''}`}
         >
           {isError
