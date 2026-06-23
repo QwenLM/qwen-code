@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { homedir } from 'node:os';
+import * as os from 'node:os';
 import * as dotenv from 'dotenv';
 import { getErrorMessage, QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
@@ -73,7 +73,7 @@ let lastReloadSnapshotSeeded = false;
  * still allows reading it).
  */
 function getUserLevelEnvPaths(): Set<string> {
-  const homeDir = homedir();
+  const homeDir = os.homedir();
   const globalQwenDir = Storage.getGlobalQwenDir();
   const paths = new Set([
     path.normalize(path.join(homeDir, '.env')),
@@ -204,7 +204,7 @@ function findEnvFile(
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPaths(),
 ): string | null {
-  const homeDir = homedir();
+  const homeDir = os.homedir();
   let realStartDir = path.resolve(startDir);
   try {
     realStartDir = fs.realpathSync(realStartDir);

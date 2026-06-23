@@ -14,7 +14,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import * as os from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -39,6 +39,7 @@ let tempSymlink: string | undefined;
 const originalToken = process.env['QWEN_SERVER_TOKEN'];
 const originalQwenHome = process.env['QWEN_HOME'];
 const originalHome = process.env['HOME'];
+const originalUserProfile = process.env['USERPROFILE'];
 const originalQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const originalMcpApprovalsPath = process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
 const originalSystemSettingsPath =
@@ -52,7 +53,7 @@ const originalCwd = process.cwd();
 
 function useTempQwenHome(): string {
   tempQwenHome = realpathSync(
-    mkdtempSync(join(tmpdir(), 'qws-fast-path-home-')),
+    mkdtempSync(join(os.tmpdir(), 'qws-fast-path-home-')),
   );
   process.env['QWEN_HOME'] = tempQwenHome;
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
@@ -83,6 +84,11 @@ afterEach(() => {
     delete process.env['HOME'];
   } else {
     process.env['HOME'] = originalHome;
+  }
+  if (originalUserProfile === undefined) {
+    delete process.env['USERPROFILE'];
+  } else {
+    process.env['USERPROFILE'] = originalUserProfile;
   }
   if (originalSystemSettingsPath === undefined) {
     delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
@@ -377,7 +383,7 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-env-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
@@ -395,10 +401,10 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-workspace-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-workspace-env-')),
     );
     tempLaunchCwd = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-launch-cwd-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-launch-cwd-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
@@ -422,7 +428,7 @@ describe('serve fast path environment bootstrap', () => {
       JSON.stringify({ excludedProjectEnvVars: ['QWEN_SERVER_TOKEN'] }),
     );
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-legacy-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-legacy-env-')),
     );
     writeFileSync(
       join(tempWorkspace, '.env'),
@@ -439,7 +445,7 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-settings-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-env-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
@@ -463,11 +469,12 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
     delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
     tempLaunchCwd = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-fake-home-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-fake-home-')),
     );
     process.env['HOME'] = tempLaunchCwd;
+    process.env['USERPROFILE'] = tempLaunchCwd;
     tempQwenHome = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-discovered-home-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-discovered-home-')),
     );
     mkdirSync(join(tempLaunchCwd, '.qwen'), { recursive: true });
     writeFileSync(
@@ -517,7 +524,7 @@ describe('serve fast path environment bootstrap', () => {
   it('applies legacy settings keys consumed by the serve fast path', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-legacy-settings-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-legacy-settings-')),
     );
     writeFileSync(
       join(qwenHome, 'settings.json'),
@@ -547,7 +554,7 @@ describe('serve fast path environment bootstrap', () => {
   it('loads runtimeOutputDir for daemon startup artifacts', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-runtime-dir-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-runtime-dir-')),
     );
     writeFileSync(
       join(qwenHome, 'settings.json'),
@@ -564,7 +571,7 @@ describe('serve fast path environment bootstrap', () => {
   it('ignores stale legacy keys in current-version settings files', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-stale-legacy-settings-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-stale-legacy-settings-')),
     );
     writeFileSync(
       join(qwenHome, 'settings.json'),
@@ -594,7 +601,7 @@ describe('serve fast path environment bootstrap', () => {
     const qwenHome = useTempQwenHome();
     const customTrustedFoldersPath = join(qwenHome, 'custom-trusted.json');
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-home-trust-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-home-trust-env-')),
     );
     writeFileSync(
       join(qwenHome, '.env'),
@@ -625,7 +632,7 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-legacy-trust-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-legacy-trust-')),
     );
     writeFileSync(
       join(qwenHome, 'settings.json'),
@@ -654,7 +661,7 @@ describe('serve fast path environment bootstrap', () => {
     useTempQwenHome();
     process.env['FAST_PATH_REFERENCED_TOKEN'] = 'from-referenced-env';
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-settings-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-env-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
@@ -679,7 +686,7 @@ describe('serve fast path environment bootstrap', () => {
       'FAST_PATH_REFERENCED_TOKEN=from-home-env\n',
     );
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-settings-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-env-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
@@ -704,7 +711,7 @@ describe('serve fast path environment bootstrap', () => {
       delete process.env['QWEN_SERVER_TOKEN'];
       useTempQwenHome();
       tempWorkspace = realpathSync(
-        mkdtempSync(join(tmpdir(), 'qws-fast-path-bad-settings-')),
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-bad-settings-')),
       );
       mkdirSync(join(tempWorkspace, '.qwen'));
       writeFileSync(
@@ -723,7 +730,7 @@ describe('serve fast path environment bootstrap', () => {
   it('still reads invalid workspace settings before dropping an untrusted workspace from the merge', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-untrusted-settings-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-untrusted-settings-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
@@ -750,10 +757,10 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-untrusted-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-untrusted-env-')),
     );
     tempLaunchCwd = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-trusted-launch-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-launch-')),
     );
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
@@ -792,10 +799,10 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-real-untrusted-env-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-real-untrusted-env-')),
     );
     tempLaunchCwd = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qws-fast-path-symlink-launch-')),
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-symlink-launch-')),
     );
     tempSymlink = join(tempLaunchCwd, 'workspace-link');
     symlinkSync(tempWorkspace, tempSymlink, 'dir');

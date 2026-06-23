@@ -5,7 +5,7 @@
  */
 
 import * as fs from 'node:fs';
-import { homedir, platform, tmpdir } from 'node:os';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as dotenv from 'dotenv';
 import stripJsonComments from 'strip-json-comments';
@@ -50,10 +50,10 @@ function getSystemSettingsPath(): string {
   if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
     return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
   }
-  if (platform() === 'darwin') {
+  if (os.platform() === 'darwin') {
     return '/Library/Application Support/QwenCode/settings.json';
   }
-  if (platform() === 'win32') {
+  if (os.platform() === 'win32') {
     return 'C:\\ProgramData\\qwen-code\\settings.json';
   }
   return '/etc/qwen-code/settings.json';
@@ -83,7 +83,7 @@ function resolveGlobalConfigPath(dir: string): string {
             .slice(2)
             .split(/[/\\]+/)
             .filter(Boolean);
-    resolved = path.join(homedir(), ...relativeSegments);
+    resolved = path.join(os.homedir(), ...relativeSegments);
   }
   if (!path.isAbsolute(resolved)) {
     resolved = path.resolve(resolved);
@@ -96,9 +96,9 @@ function getGlobalQwenDirFastPath(): string {
   if (envDir) {
     return resolveGlobalConfigPath(envDir);
   }
-  const homeDir = homedir();
+  const homeDir = os.homedir();
   if (!homeDir) {
-    return path.join(tmpdir(), SETTINGS_DIRECTORY_NAME);
+    return path.join(os.tmpdir(), SETTINGS_DIRECTORY_NAME);
   }
   return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
 }
@@ -111,7 +111,7 @@ function getTrustedFoldersPathFastPath(): string {
 }
 
 function getUserLevelEnvPathsFastPath(): Set<string> {
-  const homeDir = homedir();
+  const homeDir = os.homedir();
   const globalQwenDir = getGlobalQwenDirFastPath();
   return new Set([
     path.normalize(path.join(homeDir, '.env')),
@@ -192,7 +192,7 @@ function findEnvFileFastPath(
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPathsFastPath(),
 ): string | null {
-  const homeDir = homedir();
+  const homeDir = os.homedir();
   let realStartDir = path.resolve(startDir);
   try {
     realStartDir = fs.realpathSync(realStartDir);
@@ -690,7 +690,7 @@ export function loadServeFastPathSettings(
 ): ServeFastPathSettings {
   preResolveServeFastPathHomeEnvOverrides();
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const resolvedHomeDir = path.resolve(homedir());
+  const resolvedHomeDir = path.resolve(os.homedir());
   let realWorkspaceDir = resolvedWorkspaceDir;
   try {
     realWorkspaceDir = fs.realpathSync(resolvedWorkspaceDir);

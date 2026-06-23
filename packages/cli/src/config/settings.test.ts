@@ -94,6 +94,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
+const RESOLVED_MOCK_WORKSPACE_DIR = pathActual.resolve(MOCK_WORKSPACE_DIR);
 // Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
 const MOCK_WORKSPACE_SETTINGS_PATH = pathActual.join(
   MOCK_WORKSPACE_DIR,
@@ -214,7 +215,10 @@ describe('Settings Loading and Merging', () => {
 
     it('loads .env starting from the explicit workspace directory', () => {
       const envKey = 'LOAD_SETTINGS_WORKSPACE_ENV_MARKER';
-      const workspaceEnvPath = pathActual.join(MOCK_WORKSPACE_DIR, '.env');
+      const workspaceEnvPath = pathActual.join(
+        RESOLVED_MOCK_WORKSPACE_DIR,
+        '.env',
+      );
       delete process.env[envKey];
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p.toString() === workspaceEnvPath,
@@ -3714,7 +3718,11 @@ describe('Settings Loading and Merging', () => {
       });
 
       it('should allow .env file to override settings.env values', () => {
-        const geminiEnvPath = path.join(MOCK_WORKSPACE_DIR, QWEN_DIR, '.env');
+        const geminiEnvPath = path.join(
+          RESOLVED_MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
         const userSettingsContent: Settings = {
           env: {
             ENV_OVERRIDE_TEST: 'from_settings',

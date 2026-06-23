@@ -16,6 +16,7 @@ import {
   validatePolicyConfig,
 } from './run-qwen-serve.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
@@ -540,6 +541,7 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
     );
+    const boundWorkspace = canonicalizeWorkspace(tmpDir);
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
       throw new Error('runtime boom');
     });
@@ -573,7 +575,7 @@ describe('runQwenServe runtime startup failures', () => {
           'workspace_reload',
         ]),
         modelServices: [],
-        workspaceCwd: tmpDir,
+        workspaceCwd: boundWorkspace,
         transports: ['rest'],
         policy: { permission: 'first-responder' },
         limits: { maxPendingPromptsPerSession: 5 },
@@ -965,6 +967,7 @@ describe('runQwenServe startup observability', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-runtime-dir-')),
     );
+    const boundWorkspace = canonicalizeWorkspace(tmpDir);
     const stderrWrites: string[] = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
       stderrWrites.push(String(chunk));
@@ -990,7 +993,7 @@ describe('runQwenServe startup observability', () => {
         },
       );
       const expectedDaemonDir = path.join(
-        tmpDir,
+        boundWorkspace,
         '.qwen-runtime',
         'debug',
         'daemon',
