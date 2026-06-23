@@ -2275,6 +2275,89 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('includes error field for FAILED server while stripping debug internals', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 0,
+        failedServers: 1,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'FAILED',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+            error: 'connection refused',
+            args: ['--stdio'],
+            pid: 5678,
+            stderrTail: 'ECONNREFUSED',
+            exitCode: 1,
+            rootUri: 'file:///tmp',
+            workspaceFolder: '/tmp',
+          },
+        ],
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const lsp = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      { sessionId },
+    );
+
+    expect(lsp).toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 0,
+      failedServers: 1,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'typescript',
+          status: 'FAILED',
+          languages: ['typescript'],
+          transport: 'stdio',
+          command: 'typescript-language-server',
+          error: 'connection refused',
+        },
+      ],
+    });
+    const lspStr = JSON.stringify(lsp);
+    expect(lspStr).not.toContain('--stdio');
+    expect(lspStr).not.toContain('5678');
+    expect(lspStr).not.toContain('ECONNREFUSED');
+    expect(lspStr).not.toContain('exitCode');
+    expect(lspStr).not.toContain('rootUri');
+    expect(lspStr).not.toContain('workspaceFolder');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('launches fork agents with neutral history text', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
