@@ -3395,18 +3395,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/permissions/setRules rejects malformed permission rules', async () => {
+  it('qwen/permissions/setRules silently drops malformed permission rules', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
-    await expect(
-      agent.extMethod('qwen/permissions/setRules', {
-        scope: 'user',
-        ruleType: 'allow',
-        rules: ['ShellTool(git status'],
-      }),
-    ).rejects.toThrowError(/Malformed permission rule/);
-    expect(settings.setValue).not.toHaveBeenCalled();
+    const result = await agent.extMethod('qwen/permissions/setRules', {
+      scope: 'user',
+      ruleType: 'allow',
+      rules: ['ShellTool(git status'],
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'permissions.allow',
+      [],
+    );
+    expect(result).toMatchObject({
+      user: expect.anything(),
+      workspace: expect.anything(),
+      merged: expect.anything(),
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
