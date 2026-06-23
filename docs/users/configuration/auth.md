@@ -1,10 +1,10 @@
 # Authentication
 
-Qwen Code supports three authentication methods. Pick the one that matches how you want to run the CLI:
+Qwen Code supports four authentication methods. Pick the one that matches how you want to run the CLI:
 
 - **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. **Free tier discontinued on 2026-04-15** — switch to another method.
 - **Alibaba Cloud Coding Plan**: use an API key from Alibaba Cloud. Paid subscription with diverse model options and higher quotas.
-- **API Key**: bring your own API key. Flexible to your own needs — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
+- **API Key**: bring your own API key. Flexible to your own needs — supports OpenAI, Anthropic, Gemini, Vertex AI, and other compatible endpoints.
 
 ## Option 1: Qwen OAuth (Discontinued)
 
@@ -158,6 +158,7 @@ The key concept is **Model Providers** (`modelProviders`): Qwen Code supports mu
 | OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`          | OpenAI, Azure OpenAI, OpenRouter, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
 | Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` | Anthropic Claude                                                                            |
 | Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                             | Google Gemini                                                                               |
+| Vertex AI         | `vertex-ai`          | `GOOGLE_API_KEY`, `GOOGLE_MODEL`                             | Google Cloud Vertex AI                                                                      |
 
 #### Step 1: Configure models and providers in `~/.qwen/settings.json`
 
@@ -192,6 +193,13 @@ Edit `~/.qwen/settings.json` (create it if it doesn't exist). You can mix multip
         "id": "gemini-2.5-pro",
         "name": "Gemini 2.5 Pro",
         "envKey": "GEMINI_API_KEY"
+      }
+    ],
+    "vertex-ai": [
+      {
+        "id": "gemini-2.5-pro",
+        "name": "Gemini 2.5 Pro (Vertex AI)",
+        "envKey": "GOOGLE_API_KEY"
       }
     ]
   }
@@ -239,6 +247,9 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 # Google GenAI
 export GEMINI_API_KEY="AIza..."
+
+# Vertex AI
+export GOOGLE_API_KEY="..."
 ```
 
 **2. `.env` files**

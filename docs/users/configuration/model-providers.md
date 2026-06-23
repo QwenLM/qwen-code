@@ -27,6 +27,7 @@ The `modelProviders` object keys must be valid `authType` values. Currently supp
 | `openai`     | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama) |
 | `anthropic`  | Anthropic Claude API                                                                    |
 | `gemini`     | Google Gemini API                                                                       |
+| `vertex-ai`  | Google Cloud Vertex AI API                                                              |
 | `qwen-oauth` | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                       |
 
 > [!warning]
@@ -41,6 +42,7 @@ Qwen Code uses the following official SDKs to send requests to each provider:
 | `openai`     | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK                  |
 | `anthropic`  | [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) - Official Anthropic SDK |
 | `gemini`     | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK      |
+| `vertex-ai`  | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK      |
 | `qwen-oauth` | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)    |
 
 This means the `baseUrl` you configure should be compatible with the corresponding SDK's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
@@ -189,6 +191,27 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
             "top_k": 40
           }
         }
+      }
+    ]
+  }
+}
+```
+
+### Google Cloud Vertex AI (`vertex-ai`)
+
+Vertex AI uses the Google GenAI SDK with Vertex-specific environment variables. Set `GOOGLE_API_KEY` (or application default credentials) and `GOOGLE_MODEL`:
+
+```json
+{
+  "env": {
+    "GOOGLE_API_KEY": "your-vertex-api-key"
+  },
+  "modelProviders": {
+    "vertex-ai": [
+      {
+        "id": "gemini-2.5-pro",
+        "name": "Gemini 2.5 Pro (Vertex AI)",
+        "envKey": "GOOGLE_API_KEY"
       }
     ]
   }

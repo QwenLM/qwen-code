@@ -47,25 +47,33 @@ Use this index to locate the right document for the user's question. Load only t
 
 ### Features
 
-| Topic                                       | Doc Path                           |
-| ------------------------------------------- | ---------------------------------- |
-| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md`   |
-| Auto mode (AI-driven approval)              | `docs/features/auto-mode.md`       |
-| Hooks (lifecycle hooks)                     | `docs/features/hooks.md`           |
-| MCP (Model Context Protocol)                | `docs/features/mcp.md`             |
-| Memory                                      | `docs/features/memory.md`          |
-| Skills system                               | `docs/features/skills.md`          |
-| Sub-agents                                  | `docs/features/sub-agents.md`      |
-| Sandbox / security                          | `docs/features/sandbox.md`         |
-| Slash commands                              | `docs/features/commands.md`        |
-| Headless / non-interactive mode             | `docs/features/headless.md`        |
-| LSP integration                             | `docs/features/lsp.md`             |
-| Token caching                               | `docs/features/token-caching.md`   |
-| Language / i18n                             | `docs/features/language.md`        |
-| Arena mode                                  | `docs/features/arena.md`           |
-| Status line                                 | `docs/features/status-line.md`     |
-| Scheduled tasks (cron/loop)                 | `docs/features/scheduled-tasks.md` |
-| Worktree                                    | `docs/features/worktree.md`        |
+| Topic                                       | Doc Path                                |
+| ------------------------------------------- | --------------------------------------- |
+| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md`        |
+| Auto mode (AI-driven approval)              | `docs/features/auto-mode.md`            |
+| Hooks (lifecycle hooks)                     | `docs/features/hooks.md`                |
+| MCP (Model Context Protocol)                | `docs/features/mcp.md`                  |
+| Memory                                      | `docs/features/memory.md`               |
+| Skills system                               | `docs/features/skills.md`               |
+| Sub-agents                                  | `docs/features/sub-agents.md`           |
+| Sandbox / security                          | `docs/features/sandbox.md`              |
+| Slash commands                              | `docs/features/commands.md`             |
+| Headless / non-interactive mode             | `docs/features/headless.md`             |
+| LSP integration                             | `docs/features/lsp.md`                  |
+| Token caching                               | `docs/features/token-caching.md`        |
+| Language / i18n                             | `docs/features/language.md`             |
+| Arena mode                                  | `docs/features/arena.md`                |
+| Status line                                 | `docs/features/status-line.md`          |
+| Scheduled tasks (cron/loop)                 | `docs/features/scheduled-tasks.md`      |
+| Worktree                                    | `docs/features/worktree.md`             |
+| Code review (`/review`)                     | `docs/features/code-review.md`          |
+| Followup suggestions (ghost text)           | `docs/features/followup-suggestions.md` |
+| Tool-use summaries                          | `docs/features/tool-use-summaries.md`   |
+| Markdown rendering                          | `docs/features/markdown-rendering.md`   |
+| Structured output (`--json-schema`)         | `docs/features/structured-output.md`    |
+| Dual output                                 | `docs/features/dual-output.md`          |
+| Channels (messaging integrations)           | `docs/features/channels/overview.md`    |
+| Contextual tips                             | `docs/features/tips.md`                 |
 
 ### IDE Integration
 

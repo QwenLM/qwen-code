@@ -4,11 +4,12 @@ Qwen Code is an open-source AI coding assistant tool maintained by the Qwen Code
 
 ## How to determine your authentication method
 
-Qwen Code supports three authentication methods to access AI models. Your authentication method determines which terms of service and privacy policies apply to your usage:
+Qwen Code supports four authentication methods to access AI models. Your authentication method determines which terms of service and privacy policies apply to your usage:
 
 1. **Qwen OAuth** — Log in with your qwen.ai account (free tier discontinued 2026-04-15)
 2. **Alibaba Cloud Coding Plan** — Use an API key from Alibaba Cloud
 3. **API Key** — Bring your own API key
+4. **Vertex AI** — Use Google Cloud Vertex AI
 
 For each authentication method, different Terms of Service and Privacy Notices may apply depending on the underlying service provider.
 
@@ -17,6 +18,7 @@ For each authentication method, different Terms of Service and Privacy Notices m
 | Qwen OAuth                | Qwen AI           | [Qwen Terms of Service](https://qwen.ai/termsservice)              | [Qwen Privacy Policy](https://qwen.ai/privacypolicy)               |
 | Alibaba Cloud Coding Plan | Alibaba Cloud     | See [details below](#2-if-you-are-using-alibaba-cloud-coding-plan) | See [details below](#2-if-you-are-using-alibaba-cloud-coding-plan) |
 | API Key                   | Various Providers | Depends on your chosen API provider (OpenAI, Anthropic, etc.)      | Depends on your chosen API provider                                |
+| Vertex AI                 | Google Cloud      | [Google Cloud Terms](https://cloud.google.com/terms)               | [Google Cloud Privacy](https://cloud.google.com/privacy)           |
 
 ## 1. If you are using Qwen OAuth Authentication
 
