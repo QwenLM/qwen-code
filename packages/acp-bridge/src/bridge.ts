@@ -1614,6 +1614,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           transportClosed,
         ]);
         publishModelSwitched(entry, modelId, originatorClientId);
+        broadcastWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key: 'model.name',
+            value: modelId,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
         succeeded = true;
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
@@ -3944,6 +3952,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // the agent's authoritative canonical id and re-publishes if it
           // differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
+          broadcastWorkspaceEvent({
+            type: 'settings_changed',
+            data: {
+              key: 'model.name',
+              value: req.modelId,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
           succeeded = true;
           return result;
         } finally {
@@ -3983,8 +3999,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
         throw err;
       }
-      // model_switched is published inside the work callback above (while the
-      // suppress flag is still set), mirroring applyModelServiceId.
       return response;
     },
 

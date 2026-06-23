@@ -460,14 +460,19 @@ vi.mock('./session/Session.js', () => ({
     availableSkills: [],
   }),
 }));
-vi.mock('../utils/acpModelUtils.js', () => ({
-  formatAcpModelId: vi.fn(
-    (modelId: string, authType: string) => `${modelId}(${authType})`,
-  ),
-  parseAcpBaseModelId: vi.fn((modelId: string) =>
-    modelId.replace(/\([^)]+\)$/, ''),
-  ),
-}));
+vi.mock('../utils/acpModelUtils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/acpModelUtils.js')>();
+  return {
+    ...actual,
+    formatAcpModelId: vi.fn(
+      (modelId: string, authType: string) => `${modelId}(${authType})`,
+    ),
+    parseAcpBaseModelId: vi.fn((modelId: string) =>
+      modelId.replace(/\([^)]+\)$/, ''),
+    ),
+  };
+});
 vi.mock('../utils/languageUtils.js', () => ({
   updateOutputLanguageFile: vi.fn(),
   writeOutputLanguageAndRegisterPath: vi.fn(
@@ -1067,6 +1072,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockConnectionState.reset();
+    mockRunExitCleanup.mockResolvedValue(undefined);
     mockExtensionManagerState.extensions = [];
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     lastSessionMock = undefined;
