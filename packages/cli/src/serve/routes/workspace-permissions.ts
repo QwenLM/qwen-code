@@ -10,6 +10,7 @@ import {
   isPermissionRuleType,
   normalizePermissionRules,
   PermissionRulesValidationError,
+  readPermissionRuleSet,
   type PermissionSettingsScope,
   type QwenPermissionSettings,
 } from '../../config/permission-settings.js';
@@ -107,7 +108,14 @@ export function registerWorkspacePermissionsRoutes(
 
       let rules: string[];
       try {
-        rules = normalizePermissionRules(body['rules']);
+        const settings = loadSettings(boundWorkspace);
+        const scopeSettings =
+          permissionScope === 'workspace'
+            ? settings.workspace.settings
+            : settings.user.settings;
+        rules = normalizePermissionRules(body['rules'], {
+          existingRules: readPermissionRuleSet(scopeSettings)[ruleType],
+        });
       } catch (err) {
         if (err instanceof PermissionRulesValidationError) {
           res.status(400).json({
@@ -116,7 +124,16 @@ export function registerWorkspacePermissionsRoutes(
           });
           return;
         }
-        throw err;
+        writeStderrLine(
+          `qwen serve: POST /workspace/permissions load error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to load permission rules',
+          code: 'internal_error',
+        });
+        return;
       }
 
       const clientId = parseAndValidateClientId(req, res);

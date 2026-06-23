@@ -227,7 +227,44 @@ describe('workspace permissions routes', () => {
       .send({ scope: 'user', ruleType: 'allow', rules: 'Bash(git *)' });
     expect(invalidRules.status).toBe(400);
     expect(invalidRules.body.code).toBe('invalid_rules');
+
+    const malformedRule = await request(h.app)
+      .post('/workspace/permissions')
+      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *'] });
+    expect(malformedRule.status).toBe(400);
+    expect(malformedRule.body.code).toBe('invalid_rules');
     expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('POST drops already-stored malformed rules without blocking valid updates', async () => {
+    await writeJson(
+      path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+      {
+        permissions: {
+          allow: ['Bash(git log)', 'Bash(rm '],
+        },
+      },
+    );
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git log)', 'Bash(rm ', 'Bash(ls)'],
+      });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.Workspace,
+      'permissions.allow',
+      ['Bash(git log)', 'Bash(ls)'],
+    );
+    expect(res.body.workspace.rules.allow).toEqual([
+      'Bash(git log)',
+      'Bash(ls)',
+    ]);
   });
 
   it('POST replaces one scoped rule list through a live ACP child and publishes settings_changed', async () => {

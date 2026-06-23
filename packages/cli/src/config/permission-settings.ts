@@ -74,7 +74,10 @@ export function readPermissionRuleSet(settings: unknown): PermissionRuleSet {
   };
 }
 
-export function normalizePermissionRules(value: unknown): string[] {
+export function normalizePermissionRules(
+  value: unknown,
+  opts?: { existingRules?: readonly string[] },
+): string[] {
   if (!Array.isArray(value)) {
     throw new PermissionRulesValidationError(
       'rules must be an array',
@@ -84,6 +87,9 @@ export function normalizePermissionRules(value: unknown): string[] {
 
   const result: string[] = [];
   const seen = new Set<string>();
+  const existingRules = new Set(
+    (opts?.existingRules ?? []).map((rule) => rule.trim()),
+  );
   for (const item of value) {
     if (typeof item !== 'string' || !item.trim()) {
       throw new PermissionRulesValidationError(
@@ -93,7 +99,11 @@ export function normalizePermissionRules(value: unknown): string[] {
     }
     const rule = item.trim();
     if (parseRule(rule).invalid) {
-      continue;
+      if (existingRules.has(rule)) continue;
+      throw new PermissionRulesValidationError(
+        `Malformed permission rule: ${rule}`,
+        'invalid_rules',
+      );
     }
     if (!seen.has(rule)) {
       seen.add(rule);

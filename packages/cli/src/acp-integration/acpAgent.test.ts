@@ -3395,26 +3395,42 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/permissions/setRules silently drops malformed permission rules', async () => {
+  it('qwen/permissions/setRules rejects new malformed permission rules', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
-    const result = await agent.extMethod('qwen/permissions/setRules', {
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['ShellTool(git status'],
+      }),
+    ).rejects.toThrowError(/Malformed permission rule/);
+    expect(settings.setValue).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules drops already-stored malformed permission rules', async () => {
+    const settings = makeCoreSettings();
+    settings.setValue(SettingScope.User, 'permissions.allow', [
+      'ShellTool(git status',
+    ]);
+    vi.mocked(settings.setValue).mockClear();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/permissions/setRules', {
       scope: 'user',
       ruleType: 'allow',
-      rules: ['ShellTool(git status'],
+      rules: ['ShellTool(git status', 'ShellTool(npm test)'],
     });
 
     expect(settings.setValue).toHaveBeenCalledWith(
       'User',
       'permissions.allow',
-      [],
+      ['ShellTool(npm test)'],
     );
-    expect(result).toMatchObject({
-      user: expect.anything(),
-      workspace: expect.anything(),
-      merged: expect.anything(),
-    });
 
     mockConnectionState.resolve();
     await agentPromise;
