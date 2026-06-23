@@ -33,6 +33,7 @@ import type {
 import type { SettingScope, EnvReloadResult } from '../../config/settings.js';
 import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
+import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -280,6 +281,13 @@ export interface DaemonWorkspaceServiceDeps {
    * without querying ACP. When absent, falls back to idle placeholders.
    */
   statusProvider?: DaemonStatusProvider;
+
+  /**
+   * Daemon-local provider catalog/default-model snapshot. When present,
+   * `/workspace/providers` is answered from fresh workspace settings/env
+   * instead of querying the ACP child.
+   */
+  workspaceProvidersStatusProvider?: WorkspaceProvidersStatusProvider;
 
   /**
    * Returns whether the ACP channel is currently live. Used by

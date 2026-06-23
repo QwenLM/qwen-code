@@ -32,6 +32,7 @@ import type {
   DaemonModelSwitchedEvent,
   DaemonModelSwitchFailedData,
   DaemonModelSwitchFailedEvent,
+  DaemonLspServerStatus,
   DaemonPermissionOption,
   DaemonPermissionRequestData,
   DaemonPermissionRequestEvent,
@@ -42,6 +43,7 @@ import type {
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
+  DaemonSessionLspStatus,
   DaemonSessionDiedData,
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
@@ -169,6 +171,8 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // assertion a future barrel reshuffle could silently drop the
     // result type SDK consumers need to type `client.recapSession`.
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
+    expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
+    expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {

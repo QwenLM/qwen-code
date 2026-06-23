@@ -21,7 +21,7 @@ import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   type AcpSessionBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -51,8 +51,9 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { isLoopbackBind } from './loopback-binds.js';
-import { resolveWebShellDir } from './webShellStatic.js';
+import { resolveWebShellDir } from './web-shell-static.js';
 import { parseAllowOriginPatterns } from './auth.js';
 import {
   createPermissionAuditPublisher,
@@ -63,7 +64,7 @@ import {
   getActiveSseCount,
   resolveBridgeFsFactory,
 } from './server.js';
-import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
+import { initDaemonLogger, type DaemonLogger } from './daemon-logger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
@@ -76,7 +77,7 @@ import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
-import type { AcpHttpHandle } from './acpHttp/index.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
@@ -881,11 +882,14 @@ export async function runQwenServe(
       { workspace: boundWorkspace },
     );
   }
+  const customIgnoreFiles =
+    bootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,
     injected: deps.fsFactory,
     trusted: trustedWorkspace,
     emit: deps.fsAuditEmit,
+    ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
   });
 
   // Create a spawn channel factory that tees child-stderr diagnostics
@@ -945,6 +949,8 @@ export async function runQwenServe(
   // service so both answer env/preflight cells from the same daemon-local
   // implementation.
   const statusProvider = createDaemonStatusProvider();
+  const workspaceProvidersStatusProvider =
+    createWorkspaceProvidersStatusProvider();
 
   const bridge =
     deps.bridge ??
@@ -1027,6 +1033,7 @@ export async function runQwenServe(
     contextFilename: contextFilenameForInit ?? 'QWEN.md',
     // Daemon-host status provider for env + preflight cells.
     statusProvider,
+    workspaceProvidersStatusProvider,
     // Channel liveness check — proxied through the bridge's live-channel
     // probe (not session count: a channel can be live with zero attached
     // sessions during the cold-spawn window).

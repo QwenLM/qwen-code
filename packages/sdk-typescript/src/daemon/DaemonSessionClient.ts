@@ -16,6 +16,7 @@ import {
   type SubscribeOptions,
 } from './DaemonClient.js';
 import type {
+  DaemonForkSessionResult,
   DaemonEvent,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
@@ -336,10 +337,24 @@ export class DaemonSessionClient {
     return await this.client.getRewindSnapshots(this.sessionId);
   }
 
-  async rewind(promptId: string): Promise<DaemonRewindResult> {
+  async rewind(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): Promise<DaemonRewindResult> {
     return await this.client.rewindSession(this.sessionId, promptId, {
       clientId: this.clientId,
+      ...(opts?.rewindFiles !== undefined
+        ? { rewindFiles: opts.rewindFiles }
+        : {}),
     });
+  }
+
+  async fork(directive: string): Promise<DaemonForkSessionResult> {
+    return await this.client.forkSession(
+      this.sessionId,
+      { directive },
+      this.clientId,
+    );
   }
 
   /**

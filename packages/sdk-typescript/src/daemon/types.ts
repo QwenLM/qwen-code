@@ -190,6 +190,16 @@ export interface DaemonBranchedSession extends DaemonRestoredSession {
   forkedFrom: { sessionId: string; displayName: string };
 }
 
+export interface ForkSessionRequest {
+  directive: string;
+}
+
+export interface DaemonForkSessionResult {
+  sessionId: string;
+  description: string;
+  launched: boolean;
+}
+
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
 export interface DaemonSessionSummary {
   sessionId: string;
@@ -427,6 +437,7 @@ export interface DaemonWorkspaceProvidersStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];
@@ -923,6 +934,30 @@ export interface DaemonSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskStatus[];
+}
+
+export interface DaemonLspServerStatus {
+  name: string;
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+  languages: string[];
+  transport?: string;
+  command?: string;
+  error?: string;
+}
+
+export interface DaemonSessionLspStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  enabled: boolean;
+  configuredServers: number;
+  readyServers: number;
+  failedServers: number;
+  inProgressServers: number;
+  notStartedServers: number;
+  statusUnavailable?: true;
+  initializationError?: string;
+  servers: DaemonLspServerStatus[];
 }
 
 export interface DaemonSessionStatsModelMetrics {
@@ -1899,9 +1934,40 @@ export interface ExtensionInstallRequest {
 
 export interface ExtensionInstallResponse {
   accepted: true;
+  operationId: string;
 }
 
 export type ExtensionMutationResponse = ExtensionInstallResponse;
+
+export type ExtensionOperationState =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'succeeded_with_refresh_error'
+  | 'failed';
+
+export interface ExtensionOperationResult {
+  status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
+  source?: string;
+  name?: string;
+  version?: string;
+  refreshed?: number;
+  failed?: number;
+  error?: string;
+}
+
+export interface ExtensionOperationStatus {
+  v: 1;
+  operationId: string;
+  operation: string;
+  status: ExtensionOperationState;
+  createdAt: number;
+  updatedAt: number;
+  source?: string;
+  name?: string;
+  result?: ExtensionOperationResult;
+  error?: string;
+}
 
 export type ExtensionScope = 'user' | 'workspace';
 

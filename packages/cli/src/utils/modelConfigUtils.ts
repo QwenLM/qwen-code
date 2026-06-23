@@ -15,6 +15,7 @@ import {
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
+import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
 
 /**
  * Env var names that hold model selections for each auth type.
@@ -102,7 +103,7 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
 
   if (
     process.env['OPENAI_API_KEY'] &&
-    process.env['OPENAI_MODEL'] &&
+    (process.env['OPENAI_MODEL'] || process.env['QWEN_MODEL']) &&
     process.env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;
@@ -212,10 +213,14 @@ export function resolveCliGenerationConfig(
         // Surface the silent fallback: the paired provider was removed or its
         // baseUrl changed, so traffic now routes to a different same-id provider.
         if (!exactMatch && modelProvider) {
+          const fallbackBaseUrl =
+            modelProvider.baseUrl === undefined
+              ? '(default baseUrl)'
+              : sanitizeProviderBaseUrl(modelProvider.baseUrl);
           disambiguationWarning =
-            `Persisted model.baseUrl '${persistedBaseUrl}' no longer matches any provider ` +
+            `Persisted model.baseUrl '${sanitizeProviderBaseUrl(persistedBaseUrl)}' no longer matches any provider ` +
             `for model '${resolvedModel}' (authType '${authType}'); using the first id match ` +
-            `('${modelProvider.baseUrl ?? '(default baseUrl)'}'). Re-select the model to update it.`;
+            `('${fallbackBaseUrl}'). Re-select the model to update it.`;
         }
       } else {
         modelProvider = providers.find((p) => p.id === resolvedModel);

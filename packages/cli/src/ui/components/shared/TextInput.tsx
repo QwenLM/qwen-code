@@ -5,7 +5,6 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { useTextBuffer } from './text-buffer.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
@@ -16,6 +15,7 @@ import { theme } from '../../semantic-colors.js';
 import { Colors } from '../../colors.js';
 import type { Key } from '../../hooks/useKeypress.js';
 import { useCallback, useRef, useEffect, useState } from 'react';
+import { renderSoftwareCursor } from '../../utils/software-cursor.js';
 
 export interface TextInputProps {
   value: string;
@@ -197,7 +197,7 @@ export function TextInput({
           {buffer.text.length === 0 && placeholder ? (
             shouldRenderCursor ? (
               <Text>
-                {chalk.inverse(placeholder.slice(0, 1))}
+                {renderSoftwareCursor(placeholder.slice(0, 1))}
                 <Text color={Colors.Gray}>{placeholder.slice(1)}</Text>
               </Text>
             ) : (
@@ -227,7 +227,7 @@ export function TextInput({
                         relativeVisualColForHighlight,
                         relativeVisualColForHighlight + 1,
                       ) || ' ';
-                    const highlighted = chalk.inverse(charToHighlight);
+                    const highlighted = renderSoftwareCursor(charToHighlight);
                     display =
                       cpSlice(display, 0, relativeVisualColForHighlight) +
                       highlighted +
@@ -236,7 +236,7 @@ export function TextInput({
                     relativeVisualColForHighlight === cpLen(display) &&
                     cpLen(display) === inputWidth
                   ) {
-                    display = display + chalk.inverse(' ');
+                    display = display + renderSoftwareCursor(' ');
                   }
                 }
               }

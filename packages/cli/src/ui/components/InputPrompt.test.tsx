@@ -30,7 +30,7 @@ import { useVoiceInput } from '../hooks/use-voice-input.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import {
@@ -3019,8 +3019,8 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      // The component will render the text with the character at the cursor inverted.
-      expect(frame).toContain(`hel${chalk.inverse('l')}o world`);
+      // The component will render the text with the character at the cursor styled.
+      expect(frame).toContain(`hel${renderSoftwareCursor('l')}o world`);
       unmount();
     });
 
@@ -3036,11 +3036,11 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('h')}ello`);
+      expect(frame).toContain(`${renderSoftwareCursor('h')}ello`);
       unmount();
     });
 
-    it('should display cursor at the end of the line as an inverted space', async () => {
+    it('should display cursor at the end of the line as a styled space', async () => {
       mockBuffer.text = 'hello';
       mockBuffer.lines = ['hello'];
       mockBuffer.viewportVisualLines = ['hello'];
@@ -3052,7 +3052,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -3069,7 +3069,7 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       // The token '@path/to/file' is colored, and the cursor highlights one char inside it.
-      expect(frame).toContain(`@path/${chalk.inverse('t')}o/file`);
+      expect(frame).toContain(`@path/${renderSoftwareCursor('t')}o/file`);
       unmount();
     });
 
@@ -3086,7 +3086,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello ${chalk.inverse('👍')} world`);
+      expect(frame).toContain(`hello ${renderSoftwareCursor('👍')} world`);
       unmount();
     });
 
@@ -3103,7 +3103,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello 👍${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello 👍${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -3119,7 +3119,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(chalk.inverse(' '));
+      expect(frame).toContain(renderSoftwareCursor(' '));
       unmount();
     });
 
@@ -3135,7 +3135,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}world`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}world`);
       unmount();
     });
 
@@ -3157,7 +3157,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`sec${chalk.inverse('o')}nd line`);
+      expect(frame).toContain(`sec${renderSoftwareCursor('o')}nd line`);
       unmount();
     });
 
@@ -3178,7 +3178,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('s')}econd line`);
+      expect(frame).toContain(`${renderSoftwareCursor('s')}econd line`);
       unmount();
     });
 
@@ -3199,7 +3199,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`first line${chalk.inverse(' ')}`);
+      expect(frame).toContain(`first line${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -3222,9 +3222,9 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       const lines = frame!.split('\n');
-      // The line with the cursor should just be an inverted space inside the box border
+      // The line with the cursor should just be a styled space inside the box border
       expect(
-        lines.find((l) => l.includes(chalk.inverse(' '))),
+        lines.find((l) => l.includes(renderSoftwareCursor(' '))),
       ).not.toBeUndefined();
       unmount();
     });
@@ -3254,7 +3254,7 @@ describe('InputPrompt', () => {
       // Check that all lines, including the empty one, are rendered.
       // This implicitly tests that the Box wrapper provides height for the empty line.
       expect(frame).toContain('hello');
-      expect(frame).toContain(`world${chalk.inverse(' ')}`);
+      expect(frame).toContain(`world${renderSoftwareCursor(' ')}`);
 
       const outputLines = frame!.split('\n');
       // The number of lines should be 2 for the border plus 3 for the content.
@@ -3992,9 +3992,9 @@ describe('InputPrompt', () => {
         <InputPrompt {...props} />,
       );
       await wait();
-      expect(stdout.lastFrame()).not.toContain(`{chalk.inverse(' ')}`);
+      expect(stdout.lastFrame()).not.toContain(`{renderSoftwareCursor(' ')}`);
       // This snapshot is good to make sure there was an input prompt but does
-      // not show the inverted cursor because snapshots do not show colors.
+      // not show the software cursor because snapshots do not show colors.
       expect(stdout.lastFrame()).toMatchSnapshot();
       unmount();
     });
@@ -4907,6 +4907,47 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down focuses the background-tasks pill when only the pill is shown (workflow-only session)', async () => {
+      // Branch 3 of descendFromComposer: no Arena roster (agents empty) and no
+      // live bg-agent panel, but a workflow run keeps the background-tasks pill
+      // on screen. ↓ from the empty composer must focus the pill so the run's
+      // detail/save dialog stays reachable — without this branch a
+      // workflow-only session could never open it.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('[B'); // Down arrow at the bottom edge
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
       expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
       unmount();
     });

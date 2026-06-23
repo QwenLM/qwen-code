@@ -15,7 +15,7 @@ import {
 } from '../../config/permission-settings.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { SessionNotFoundError } from '../acpSessionBridge.js';
+import { SessionNotFoundError } from '../acp-session-bridge.js';
 
 const SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
   user: SettingScope.User,

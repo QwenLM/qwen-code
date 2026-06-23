@@ -10,13 +10,20 @@ import * as fs from 'node:fs';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 const mockCreateSpawnChannelFactory = vi.hoisted(() => vi.fn());
+const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
+  () => [] as Array<Record<string, unknown>>,
+);
+
 vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/acp-bridge/spawnChannel')>();
   return {
     ...actual,
     createSpawnChannelFactory: mockCreateSpawnChannelFactory.mockImplementation(
-      actual.createSpawnChannelFactory,
+      (options: Record<string, unknown> = {}) => {
+        mockCreateSpawnChannelFactoryOptions.push(options);
+        return actual.createSpawnChannelFactory(options);
+      },
     ),
   };
 });
@@ -27,7 +34,7 @@ import {
   runQwenServe,
   validatePolicyConfig,
 } from './run-qwen-serve.js';
-import type { HttpAcpBridge } from './acpSessionBridge.js';
+import type { HttpAcpBridge } from './acp-session-bridge.js';
 
 /**
  * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Lock the
@@ -495,6 +502,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
   async function bootHandle(extra: {
     serveWebShell?: boolean;
     token?: string;
+    experimentalLsp?: boolean;
   }) {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     return runQwenServe(
@@ -535,5 +543,24 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('passes --experimental-lsp to spawned ACP children only when opted in', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+
+    const defaultHandle = await bootHandle({ serveWebShell: false });
+    await defaultHandle.close();
+    expect(mockCreateSpawnChannelFactoryOptions.at(-1)).not.toHaveProperty(
+      'extraArgs',
+    );
+
+    const lspHandle = await bootHandle({
+      serveWebShell: false,
+      experimentalLsp: true,
+    });
+    await lspHandle.close();
+    expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
+      extraArgs: ['--experimental-lsp'],
+    });
   });
 });

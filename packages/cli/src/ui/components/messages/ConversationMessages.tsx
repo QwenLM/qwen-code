@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { Box, Text, useIsScreenReaderEnabled } from 'ink';
+import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
   MarkdownDisplay,
@@ -16,17 +16,18 @@ import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
-import {
-  resolveColor,
-  subtleBandColor,
-  supportsTrueColor,
-} from '../../themes/color-utils.js';
 import { t } from '../../../i18n/index.js';
 import { getCachedStringWidth } from '../../utils/textUtils.js';
+import { formatDuration } from '../../utils/displayUtils.js';
+
+const isUtf8 = /utf-?8/i.test(
+  process.env['LANG'] || process.env['LC_ALL'] || '',
+);
+export const THINKING_ICON =
+  !process.env['CI'] && isUtf8 ? '💡 ' : isUtf8 ? '⟡ ' : '';
 
 interface UserMessageProps {
   text: string;
-  width?: number;
 }
 
 interface UserShellMessageProps {
@@ -197,66 +198,19 @@ const ContinuationMarkdownMessage: React.FC<
   );
 };
 
-export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
-  const isScreenReaderEnabled = useIsScreenReaderEnabled();
-
-  const useBand =
-    width !== undefined &&
-    width > 0 &&
-    !isScreenReaderEnabled &&
-    !!theme.background.primary &&
-    supportsTrueColor();
-
-  const fallback = (
-    <PrefixedTextMessage
-      text={text}
-      prefix=">"
-      prefixColor={theme.text.accent}
-      textColor={theme.text.accent}
-      ariaLabel={SCREEN_READER_USER_PREFIX}
-      alignSelf="flex-start"
-      marginTop={1}
-    />
-  );
-
-  if (!useBand) {
-    return fallback;
-  }
-
-  const bg = resolveColor(theme.background.primary) || theme.background.primary;
-  const bandColor = subtleBandColor(bg);
-  if (!bandColor) {
-    return fallback;
-  }
-
-  const prefix = '> ';
-  const lines = text.split('\n');
-
-  return (
-    <Box flexDirection="column" width={width}>
-      <Text color={bandColor}>{'▄'.repeat(width)}</Text>
-      {lines.map((line, i) => {
-        const linePrefix = i === 0 ? prefix : '  ';
-        const lineWidth = stringWidth(linePrefix + line);
-        const pad = Math.max(0, width - lineWidth);
-        return (
-          <Text
-            key={i}
-            backgroundColor={bandColor}
-            aria-label={i === 0 ? SCREEN_READER_USER_PREFIX : undefined}
-          >
-            <Text color={theme.text.accent}>
-              {linePrefix}
-              {line}
-            </Text>
-            {pad > 0 ? ' '.repeat(pad) : ''}
-          </Text>
-        );
-      })}
-      <Text color={bandColor}>{'▀'.repeat(width)}</Text>
-    </Box>
-  );
-};
+export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
+  // The TUI paints no background of its own; user messages render directly on
+  // the terminal background so they blend in across terminals and themes.
+  <PrefixedTextMessage
+    text={text}
+    prefix=">"
+    prefixColor={theme.text.accent}
+    textColor={theme.text.accent}
+    ariaLabel={SCREEN_READER_USER_PREFIX}
+    alignSelf="flex-start"
+    marginTop={1}
+  />
+);
 
 export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
   const commandToDisplay = text.startsWith('!') ? text.substring(1) : text;
@@ -360,16 +314,6 @@ function tailVisualLines(
   return lines.slice(-maxLines).join('\n');
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
-  }
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
-}
-
 export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   text,
   isPending,
@@ -388,7 +332,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
         : t('Thinking');
     return (
       <Text dimColor italic>
-        {label} {t('(ctrl+o to expand)')}
+        {THINKING_ICON}
+        {label} {t('(alt+t to expand)')}
       </Text>
     );
   }
@@ -409,7 +354,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Box flexDirection="column">
         <Text dimColor italic>
-          ⟡ {t('Thinking')}…{durationSuffix}
+          {THINKING_ICON}
+          {t('Thinking')}…{durationSuffix}
         </Text>
         <Box paddingLeft={2}>
           <Text dimColor wrap="truncate">
@@ -427,7 +373,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {expandedLabel}
+        {THINKING_ICON}
+        {expandedLabel} {t('(alt+t to collapse)')}
       </Text>
       <Box paddingLeft={2} flexDirection="column">
         <MarkdownDisplay

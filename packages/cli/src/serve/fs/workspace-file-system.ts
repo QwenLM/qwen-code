@@ -265,6 +265,8 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
   ignore?: Ignore;
   /** Override audit raw-path mode. Defaults to env `QWEN_AUDIT_RAW_PATHS=1`. */
   includeRawPaths?: boolean;
+  /** Custom AI ignore files from context.fileFiltering.customIgnoreFiles. */
+  customIgnoreFiles?: string[];
 }
 
 /**
@@ -282,6 +284,9 @@ export function createWorkspaceFileSystemFactory(
       projectRoot: boundWorkspace,
       useGitignore: true,
       useQwenignore: true,
+      ...(deps.customIgnoreFiles !== undefined
+        ? { customIgnoreFiles: deps.customIgnoreFiles }
+        : {}),
       ignoreDirs: [],
     });
   // Freeze the `Ignore` instance so it cannot be mutated after
@@ -393,6 +398,15 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         throw new FsError(
           'parse_error',
           `line must be a positive integer, got ${opts.line}`,
+        );
+      }
+      if (
+        opts.limit !== undefined &&
+        (!Number.isSafeInteger(opts.limit) || opts.limit < 1)
+      ) {
+        throw new FsError(
+          'parse_error',
+          `limit must be a positive integer, got ${opts.limit}`,
         );
       }
       const snapshot = await readTextSnapshotFromResolvedFile(p, opts);
@@ -515,6 +529,18 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'list');
+      // Reject malformed caps the same way readText() guards `limit`/`line`:
+      // an unvalidated Infinity/NaN/float/0/negative makes the
+      // `entries.length >= opts.maxEntries` break check silently wrong.
+      if (
+        opts.maxEntries !== undefined &&
+        (!Number.isSafeInteger(opts.maxEntries) || opts.maxEntries < 1)
+      ) {
+        throw new FsError(
+          'parse_error',
+          `maxEntries must be a positive integer, got ${opts.maxEntries}`,
+        );
+      }
       const entries: FsEntry[] = [];
       const dir = await fsp.opendir(p as string);
       for await (const d of dir) {

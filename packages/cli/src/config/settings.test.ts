@@ -542,6 +542,54 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
+    it('should downgrade a v5 settings file (revert of #5089) to v4 on load', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const v5SettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 1,
+        modelProviders: {
+          openai: {
+            protocol: 'openai',
+            models: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+          },
+          'vertex-ai': {
+            protocol: 'gemini',
+            models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+          },
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(v5SettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const merged = settings.merged as Record<string, unknown>;
+
+      const expectedModelProviders = {
+        openai: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+        'vertex-ai': [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+      };
+
+      expect(merged[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect(merged['modelProviders']).toEqual(expectedModelProviders);
+
+      // The downgrade must also be persisted to disk (writeWithBackupSync
+      // writes to a .tmp file first), otherwise the file stays at $version: 5
+      // and the downgrade re-runs on every startup.
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      const persisted = JSON.parse(writeCall![1] as string);
+      expect(persisted[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect(persisted['modelProviders']).toEqual(expectedModelProviders);
+    });
+
     it('should warn about ignored legacy keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
@@ -4399,12 +4447,24 @@ describe('Settings Loading and Merging', () => {
         expect(needsMigration(settingsWithVersion)).toBe(false);
       });
 
-      it('should return false when version field indicates a newer version', () => {
+      it('should return false when version field indicates a genuinely newer version', () => {
+        // SETTINGS_VERSION + 1 (v5) is handled by the v5->v4 downgrade migration
+        // (revert of #5089), so use +2 for a version with no applicable migration.
         const settingsWithNewerVersion = {
-          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 1,
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 2,
           theme: 'dark',
         };
         expect(needsMigration(settingsWithNewerVersion)).toBe(false);
+      });
+
+      it('should return true for a $version:5 file that needs downgrading (revert of #5089)', () => {
+        const v5Settings = {
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 1,
+          modelProviders: {
+            openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+          },
+        };
+        expect(needsMigration(v5Settings)).toBe(true);
       });
 
       it('should return true when version field indicates an older version', () => {

@@ -171,6 +171,7 @@ export function createDaemonWorkspaceService(
     boundWorkspace,
     contextFilename,
     statusProvider,
+    workspaceProvidersStatusProvider,
     isChannelLive,
     persistDisabledTools,
     persistSetting,
@@ -199,6 +200,12 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
+      if (workspaceProvidersStatusProvider) {
+        return workspaceProvidersStatusProvider(
+          boundWorkspace,
+          isChannelLive?.() ?? false,
+        );
+      }
       return queryWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceProviders,
         () => createIdleWorkspaceProvidersStatus(boundWorkspace),
