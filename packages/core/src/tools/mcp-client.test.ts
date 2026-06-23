@@ -192,6 +192,56 @@ describe('mcp-client', () => {
       );
     });
 
+    it('reports unusable SSE OAuth tokens when token validation fails', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' });
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const getValidToken = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockRejectedValue(new Error('Token store unavailable'));
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken,
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+        getMcpOAuthDialogInstruction('re-authenticate', 'sse-server');
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        "Failed to validate stored OAuth token for SSE server 'sse-server': Token store unavailable",
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(oauthMessage);
+    });
+
     it('logs unusable SSE OAuth tokens when stored credentials disappear', async () => {
       const getCredentials = vi
         .fn()

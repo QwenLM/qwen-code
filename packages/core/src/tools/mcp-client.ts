@@ -1391,12 +1391,19 @@ export async function connectToMcpServer(
           credentials || hadStoredSseOAuthCredentials ? 'unusable' : 'missing';
         if (credentials) {
           const authProvider = new MCPOAuthProvider(tokenStorage);
-          tokenState = (await authProvider.getValidToken(mcpServerName, {
-            // Pass client ID if available
-            clientId: credentials.clientId,
-          }))
-            ? 'accepted-token-rejected'
-            : 'unusable';
+          try {
+            tokenState = (await authProvider.getValidToken(mcpServerName, {
+              // Pass client ID if available
+              clientId: credentials.clientId,
+            }))
+              ? 'accepted-token-rejected'
+              : 'unusable';
+          } catch (tokenError) {
+            debugLogger.error(
+              `Failed to validate stored OAuth token for SSE server '${mcpServerName}': ${getErrorMessage(tokenError)}`,
+            );
+            tokenState = 'unusable';
+          }
         }
         const oauthMessage = getSseOAuth401Message(mcpServerName, tokenState);
         debugLogger.warn(oauthMessage);
