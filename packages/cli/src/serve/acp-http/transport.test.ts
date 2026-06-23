@@ -3009,6 +3009,29 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(101);
   });
 
+  it('falls back to bearer subprotocol when Authorization bearer is empty', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await new Promise<{ code: number }>((resolve) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/acp`,
+        [WS_AUTH_SUBPROTOCOL, bearerProto('secret-token-123')],
+        {
+          headers: { Authorization: 'Bearer ' },
+          handshakeTimeout: 2000,
+        },
+      );
+      ws.once('open', () => {
+        ws.close();
+        resolve({ code: 101 });
+      });
+      ws.once('unexpected-response', (_req, res) =>
+        resolve({ code: res.statusCode ?? 0 }),
+      );
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+    expect(result.code).toBe(101);
+  });
+
   it('never echoes the secret subprotocol back in the handshake', async () => {
     await startServer({ token: 'secret-token-123' });
     const result = await wsConnectWithSubprotocols([

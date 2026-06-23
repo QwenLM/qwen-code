@@ -47,7 +47,8 @@ function extractUpgradeBearer(req: IncomingMessage): string | undefined {
   if (authHeader && authHeader.includes(' ')) {
     const scheme = authHeader.slice(0, authHeader.indexOf(' ')).toLowerCase();
     if (scheme === 'bearer') {
-      return authHeader.slice(authHeader.indexOf(' ') + 1).trim();
+      const credentials = authHeader.slice(authHeader.indexOf(' ') + 1).trim();
+      if (credentials) return credentials;
     }
   }
   const offered = req.headers['sec-websocket-protocol'];

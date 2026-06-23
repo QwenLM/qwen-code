@@ -268,7 +268,14 @@ export function createVoiceWsConnectionHandler(
 
     async function ensureStarted(): Promise<void> {
       if (ctx) return;
-      ctx = loadContext(boundWorkspace);
+      try {
+        ctx = loadContext(boundWorkspace);
+      } catch (error) {
+        debugLogger.debug(
+          `[voice-ws] load context error: ${errMessage(error)}`,
+        );
+        throw new Error(GENERIC_TRANSCRIPTION_ERROR);
+      }
       sendJson({
         type: 'ready',
         streaming: ctx.streaming,
@@ -304,10 +311,12 @@ export function createVoiceWsConnectionHandler(
       if (state === 'closed' || state === 'finalizing') return;
       state = 'finalizing';
       await ensureStarted();
+      if (isClosed()) return;
       let transcript = '';
       if (ctx!.streaming) {
         const active =
           session ?? (sessionPromise ? await sessionPromise : undefined);
+        if (isClosed()) return;
         if (active) {
           try {
             transcript = await active.finish();

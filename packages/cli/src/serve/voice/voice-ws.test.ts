@@ -175,7 +175,7 @@ describe('createVoiceWsConnectionHandler', () => {
     });
   });
 
-  it('reports an error frame and aborts the session when start fails', async () => {
+  it('reports a generic error frame when voice config loading fails', async () => {
     const ws = new FakeWs();
     const handler = createVoiceWsConnectionHandler('/ws', {
       loadContext: () => {
@@ -188,7 +188,7 @@ describe('createVoiceWsConnectionHandler', () => {
     await tick();
     expect(ws.frames().at(-1)).toMatchObject({
       type: 'error',
-      message: 'No voice model is configured for this workspace.',
+      message: 'Voice transcription failed. Please try again.',
     });
     expect(ws.closeCode).toBe(1011);
   });
@@ -237,6 +237,32 @@ describe('createVoiceWsConnectionHandler', () => {
 
     expect(ws.closeCode).toBe(1000);
     expect(session.abort).toHaveBeenCalledOnce();
+  });
+
+  it('does not finalize after abort closes a pending streaming start', async () => {
+    const sessionReady = deferred<VoiceStreamSession>();
+    const session: VoiceStreamSession = {
+      pushAudio: vi.fn(),
+      finish: vi.fn(async () => 'late final'),
+      abort: vi.fn(),
+    };
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => sessionReady.promise,
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'stop' });
+    await tick();
+    ws.text({ type: 'abort' });
+    await tick();
+    sessionReady.resolve(session);
+    await tick();
+
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(session.finish).not.toHaveBeenCalled();
+    expect(ws.frames().some((frame) => frame['type'] === 'final')).toBe(false);
   });
 
   it('aborts a streaming session that resolves after the socket closed', async () => {
