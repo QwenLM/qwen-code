@@ -162,6 +162,8 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
+const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 // Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 // Server deadline + headroom so the client never races the daemon's own budget.
@@ -593,7 +595,12 @@ export class DaemonClient {
   private async jsonRequest<T>(
     path: string,
     label: string,
-    opts: { method?: string; body?: unknown; clientId?: string } = {},
+    opts: {
+      method?: string;
+      body?: unknown;
+      clientId?: string;
+      timeoutMs?: number;
+    } = {},
   ): Promise<T> {
     const hasBody = opts.body !== undefined;
     return await this.fetchWithTimeout(
@@ -610,6 +617,7 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, label);
         return (await res.json()) as T;
       },
+      opts.timeoutMs,
     );
   }
 
@@ -1807,6 +1815,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonWorkspaceVoiceTranscriptionResult;
       },
+      VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
     );
   }
 
@@ -2122,7 +2131,12 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonGithubSetupResult>(
       '/workspace/setup-github',
       'POST /workspace/setup-github',
-      { method: 'POST', body: params, clientId },
+      {
+        method: 'POST',
+        body: params,
+        clientId,
+        timeoutMs: GITHUB_SETUP_DEFAULT_TIMEOUT_MS,
+      },
     );
   }
 

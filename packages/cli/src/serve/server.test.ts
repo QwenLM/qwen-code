@@ -1598,6 +1598,20 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_voice_transcription') {
+          expect(predicate({ voiceTranscriptionAvailable: true })).toBe(true);
+          expect(predicate({ voiceTranscriptionAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              voiceTranscriptionAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'rate_limit') {
           expect(predicate({ rateLimit: true })).toBe(true);
           expect(predicate({ rateLimit: false })).toBe(false);
@@ -1952,11 +1966,15 @@ describe('createServeApp', () => {
       // F2 (#4175 commit 5): the server.ts call site flips
       // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
       // (so a daemon booted without the kill switch advertises the F2
-      // pool surface by default). Anchor the expectation against the
-      // same toggle so the assertion reflects the runtime contract,
-      // not the registry default-OFF predicate.
+      // pool surface by default). Voice transcription is also on for
+      // the daemon's built-in batch service. Anchor the expectation
+      // against those runtime toggles so the assertion reflects the
+      // runtime contract, not the registry default-OFF predicate.
       expect(res.body.features).toEqual(
-        getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
+        getAdvertisedServeFeatures(undefined, {
+          mcpPoolActive: true,
+          voiceTranscriptionAvailable: true,
+        }),
       );
       expect(res.body.modelServices).toEqual([]);
       expect(res.body.limits).toMatchObject({
@@ -2113,6 +2131,40 @@ describe('createServeApp', () => {
   });
 
   describe('read-only status routes', () => {
+    it('registers read-only workspace permissions without settings persistence', async () => {
+      const wsRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-permissions-readonly-'),
+      );
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsRoot, token: 'secret' },
+          undefined,
+          { bridge: fakeBridge(), statusProvider: fakeStatusProvider },
+        );
+
+        const read = await request(app)
+          .get('/workspace/permissions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(read.status).toBe(200);
+        expect(read.body.v).toBe(1);
+
+        const write = await request(app)
+          .post('/workspace/permissions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({
+            scope: 'user',
+            ruleType: 'allow',
+            rules: ['Bash(git status)'],
+          });
+        expect(write.status).toBe(501);
+        expect(write.body.code).toBe('not_implemented');
+      } finally {
+        await fsp.rm(wsRoot, { recursive: true, force: true });
+      }
+    });
+
     it('returns workspace MCP status from the bridge', async () => {
       const payload: ServeWorkspaceMcpStatus = {
         v: 1,

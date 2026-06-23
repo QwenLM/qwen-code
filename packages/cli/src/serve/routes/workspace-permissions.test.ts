@@ -58,6 +58,7 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 
 async function makeHarness(opts?: {
   invokeWorkspaceCommand?: ReturnType<typeof vi.fn>;
+  persistSetting?: boolean;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -101,7 +102,7 @@ async function makeHarness(opts?: {
     boundWorkspace: workspace,
     mutate: () => (_req, _res, next) => next(),
     safeBody,
-    persistSetting,
+    ...(opts?.persistSetting === false ? {} : { persistSetting }),
     invokeWorkspaceCommand,
     broadcastSettingsChanged: (key, value, scope, clientId) => {
       events.push({
@@ -207,6 +208,39 @@ describe('workspace permissions routes', () => {
       },
       isTrusted: true,
     });
+  });
+
+  it('GET remains available when settings persistence is unavailable', async () => {
+    await teardown(h);
+    h = await makeHarness({ persistSetting: false });
+    await writeJson(path.join(h.home, 'settings.json'), {
+      permissions: {
+        allow: ['Bash(git *)'],
+      },
+    });
+
+    const res = await request(h.app).get('/workspace/permissions');
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.rules.allow).toEqual(['Bash(git *)']);
+  });
+
+  it('POST returns 501 when settings persistence is unavailable', async () => {
+    await teardown(h);
+    h = await makeHarness({ persistSetting: false });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['Bash(git status)'],
+      });
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('not_implemented');
+    expect(h.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
   it('POST rejects invalid scope ruleType rules and malformed rule syntax', async () => {

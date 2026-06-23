@@ -1921,6 +1921,7 @@ export function createServeApp(
         ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
         : {}),
       persistSettingAvailable: deps.persistSetting !== undefined,
+      voiceTranscriptionAvailable: true,
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
@@ -2579,18 +2580,18 @@ export function createServeApp(
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, bridge),
     });
-    registerWorkspacePermissionsRoutes(app, {
-      boundWorkspace,
-      mutate,
-      safeBody,
-      persistSetting,
-      invokeWorkspaceCommand: (method, params) =>
-        bridge.invokeWorkspaceCommand(method, params),
-      broadcastSettingsChanged,
-      parseAndValidateClientId: (req, res) =>
-        parseAndValidateWorkspaceClientId(req, res, bridge),
-    });
   }
+  registerWorkspacePermissionsRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    invokeWorkspaceCommand: (method, params) =>
+      bridge.invokeWorkspaceCommand(method, params),
+    broadcastSettingsChanged,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
   registerWorkspaceVoiceRoutes(app, {
     boundWorkspace,
     mutate,

@@ -871,6 +871,16 @@ export async function runQwenServe(
       ? getWorkspaceTrustStatus(bootSettings.merged, boundWorkspace).effective
           .state === 'trusted'
       : true);
+  if (
+    deps.trustedWorkspace === undefined &&
+    bootSettings &&
+    !trustedWorkspace
+  ) {
+    daemonLog.warn(
+      'workspace file writes are disabled because folder trust does not trust the bound workspace',
+      { workspace: boundWorkspace },
+    );
+  }
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,
     injected: deps.fsFactory,

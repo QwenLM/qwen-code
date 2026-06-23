@@ -26,7 +26,7 @@ export interface WorkspacePermissionsRouteDeps {
   boundWorkspace: string;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
-  persistSetting: (
+  persistSetting?: (
     workspace: string,
     scope: SettingScope,
     key: string,
@@ -84,6 +84,14 @@ export function registerWorkspacePermissionsRoutes(
     '/workspace/permissions',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
+      if (!persistSetting) {
+        res.status(501).json({
+          error: 'Workspace permission settings persistence is not available',
+          code: 'not_implemented',
+        });
+        return;
+      }
+
       const body = safeBody(req);
       const scope = body['scope'];
       const ruleType = body['ruleType'];

@@ -12,6 +12,7 @@ interface CapturedRequest {
   method: string;
   headers: Record<string, string>;
   body?: BodyInit | null;
+  signal?: AbortSignal | null;
 }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -43,6 +44,7 @@ function recordingFetch(
         method: init?.method ?? 'GET',
         headers,
         body: init?.body ?? null,
+        signal: init?.signal ?? null,
       };
       calls.push(captured);
       return reply(captured);
@@ -126,5 +128,36 @@ describe('DaemonClient voice helpers', () => {
     expect(calls[0]?.headers['content-type']).toBe('audio/wav');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     expect(calls[0]?.body).toBe(audio);
+  });
+
+  it('allows voice transcription to run longer than the client default timeout', async () => {
+    const response = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const fetch = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(
+              init.signal!.reason ?? new DOMException('aborted', 'AbortError'),
+            );
+          });
+          setTimeout(() => resolve(jsonResponse(200, response)), 20);
+        }),
+    ) as unknown as typeof globalThis.fetch;
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      fetch,
+      fetchTimeoutMs: 1,
+    });
+
+    await expect(
+      client.transcribeWorkspaceVoice(new Uint8Array([1, 2, 3]), {
+        mimeType: 'audio/wav',
+      }),
+    ).resolves.toEqual(response);
   });
 });

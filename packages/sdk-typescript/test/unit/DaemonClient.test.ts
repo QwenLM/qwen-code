@@ -2284,6 +2284,40 @@ describe('DaemonClient', () => {
         client.setupGithub({ consent: true }),
       ).rejects.toBeInstanceOf(DaemonHttpError);
     });
+
+    it('allows setup-github to run longer than the client default timeout', async () => {
+      const body = {
+        kind: 'github_setup',
+        workspaceCwd: '/work',
+        gitRepoRoot: '/work',
+        releaseTag: 'v1.2.3',
+        readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+        workflows: [],
+        gitignore: { path: '.gitignore', status: 'unchanged' },
+        warnings: [],
+      };
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+            setTimeout(() => resolve(jsonResponse(200, body)), 20);
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      await expect(client.setupGithub({ consent: true })).resolves.toEqual(
+        body,
+      );
+    });
   });
 
   describe('MCP restart timeout coupling (#4330)', () => {

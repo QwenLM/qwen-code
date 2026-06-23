@@ -325,12 +325,15 @@ async function downloadWorkflows(options: {
   fetchImpl: typeof fetch;
 }): Promise<Array<{ sourcePath: string; content: string }>> {
   try {
+    const dispatcher = options.proxy
+      ? new ProxyAgent(options.proxy)
+      : undefined;
     return await Promise.all(
       GITHUB_WORKFLOW_PATHS.map(async (workflow) => {
         const endpoint = `https://raw.githubusercontent.com/QwenLM/qwen-code-action/refs/tags/${options.releaseTag}/examples/workflows/${workflow}`;
         const response = await options.fetchImpl(endpoint, {
           method: 'GET',
-          dispatcher: options.proxy ? new ProxyAgent(options.proxy) : undefined,
+          dispatcher,
           signal: AbortSignal.any([
             AbortSignal.timeout(30_000),
             ...(options.abortSignal ? [options.abortSignal] : []),

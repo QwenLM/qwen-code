@@ -17,11 +17,19 @@ import {
   type SetupGithubFileOps,
 } from './setup-github.js';
 
+const mockProxyAgent = vi.hoisted(() =>
+  vi.fn((proxy: string) => ({ proxy })),
+);
+
 vi.mock('../utils/gitUtils.js', () => ({
   isGitHubRepository: vi.fn(),
   getGitRepoRoot: vi.fn(),
   getLatestGitHubRelease: vi.fn(),
   getGitHubRepoInfo: vi.fn(),
+}));
+
+vi.mock('undici', () => ({
+  ProxyAgent: mockProxyAgent,
 }));
 
 function okResponse(text: string): Response {
@@ -33,6 +41,7 @@ describe('setupGithub service', () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
+    mockProxyAgent.mockImplementation((proxy: string) => ({ proxy }));
     scratchDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'setup-github-service-'),
     );
@@ -51,8 +60,14 @@ describe('setupGithub service', () => {
   });
 
   it('downloads latest release workflows with configured proxy', async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
-      okResponse(`body:${path.basename(String(input))}`),
+    const dispatchers: unknown[] = [];
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        dispatchers.push(
+          (init as RequestInit & { dispatcher?: unknown }).dispatcher,
+        );
+        return okResponse(`body:${path.basename(String(input))}`);
+      },
     ) as unknown as typeof fetch;
 
     const result = await setupGithub({
@@ -65,7 +80,13 @@ describe('setupGithub service', () => {
     expect(gitUtils.getLatestGitHubRelease).toHaveBeenCalledWith(
       'http://proxy.local:8080',
     );
+    expect(mockProxyAgent).toHaveBeenCalledTimes(1);
+    expect(mockProxyAgent).toHaveBeenCalledWith('http://proxy.local:8080');
     expect(fetchImpl).toHaveBeenCalledTimes(GITHUB_WORKFLOW_PATHS.length);
+    expect(dispatchers).toHaveLength(GITHUB_WORKFLOW_PATHS.length);
+    expect(
+      dispatchers.every((dispatcher) => dispatcher === dispatchers[0]),
+    ).toBe(true);
     expect(result.releaseTag).toBe('v1.2.3');
     expect(result.secretsUrl).toBe(
       'https://github.com/owner/repo/settings/secrets/actions',

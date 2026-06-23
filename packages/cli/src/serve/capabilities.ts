@@ -258,6 +258,7 @@ export interface AdvertiseFeatureToggles {
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
+  voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
@@ -321,6 +322,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.persistSettingAvailable === true,
   ],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
+  [
+    'workspace_voice_transcription',
+    (toggles) => toggles.voiceTranscriptionAvailable === true,
+  ],
   [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
