@@ -2000,7 +2000,7 @@ export function createServeApp(
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
       voiceWsAvailable:
-        process.env['QWEN_SERVE_ACP_HTTP'] !== '0' && opts.requireAuth !== true,
+        process.env['QWEN_SERVE_ACP_HTTP'] !== '0' && !tokenConfigured,
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 

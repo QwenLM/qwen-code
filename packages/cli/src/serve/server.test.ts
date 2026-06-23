@@ -8699,6 +8699,9 @@ describe('createServeApp', () => {
         v: 1,
         detail: 'summary',
       });
+      expect(withAuth.body.capabilities.features).not.toContain(
+        'voice_transcribe',
+      );
     });
 
     it('returns summary diagnostics without querying workspace status', async () => {
