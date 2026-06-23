@@ -124,9 +124,15 @@ beforeAll(async () => {
     {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
-        ...process.env,
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([key]) => !/^(https?|all)_proxy$/i.test(key),
+          ),
+        ),
         HOME: homeDir,
         QWEN_HOME: path.join(homeDir, '.qwen'),
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
         OPENAI_API_KEY: 'fake-key',
         OPENAI_BASE_URL: fakeServer.baseUrl,
         OPENAI_MODEL: 'fake-model',
