@@ -244,7 +244,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('publishes fallback voice writes committed before a later failure', async () => {
+    it('does not publish fallback voice writes when a later write fails', async () => {
       await withIsolatedQwenHome(async () => {
         const persistSetting = vi.fn(
           async (
@@ -270,12 +270,7 @@ describe('createDaemonWorkspaceService', () => {
           ),
         ).rejects.toThrow('disk full');
 
-        expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
-        expect(publishWorkspaceEvent).toHaveBeenCalledWith({
-          type: 'settings_changed',
-          data: { key: 'general.voice.mode', value: 'tap', scope: 'user' },
-          originatorClientId: 'voice-client',
-        });
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
         expect(mockWriteStderrLine).toHaveBeenCalledWith(
           expect.stringContaining('partial persist error'),
         );

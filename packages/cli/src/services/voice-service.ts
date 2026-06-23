@@ -9,7 +9,8 @@ import {
   ModelsConfig,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../config/settings.js';
+import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import {
   isSelectableVoiceModel,
   resolveVoiceTransport,
@@ -19,6 +20,7 @@ import {
   readVoiceLanguage,
   readVoiceMode,
   readVoiceModel,
+  getVoiceSettingsScope,
   isVoiceEnabled,
   type VoiceMode,
 } from './voice-settings.js';
@@ -66,6 +68,14 @@ export interface WorkspaceVoiceStateUpdate {
   voiceModel?: string;
 }
 
+export type WorkspaceVoiceSettingsWireScope = 'user' | 'workspace';
+
+export interface WorkspaceVoiceSettingsWrite {
+  scope: SettingScope;
+  key: string;
+  value: unknown;
+}
+
 export class WorkspaceVoiceError extends Error {
   readonly status: number;
   readonly code: string;
@@ -76,6 +86,49 @@ export class WorkspaceVoiceError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+export function voiceSettingsScopeToWire(
+  scope: SettingScope,
+): WorkspaceVoiceSettingsWireScope {
+  return scope === SettingScope.Workspace ? 'workspace' : 'user';
+}
+
+export function buildWorkspaceVoiceSettingsWrites(
+  settings: LoadedSettings,
+  update: WorkspaceVoiceStateUpdate,
+): WorkspaceVoiceSettingsWrite[] {
+  const voiceSettingsScope = getVoiceSettingsScope(settings);
+  const writes: WorkspaceVoiceSettingsWrite[] = [];
+  if (update.voiceModel !== undefined) {
+    writes.push({
+      scope: getPersistScopeForModelSelection(settings),
+      key: 'voiceModel',
+      value: update.voiceModel,
+    });
+  }
+  if (update.mode !== undefined) {
+    writes.push({
+      scope: voiceSettingsScope,
+      key: 'general.voice.mode',
+      value: update.mode,
+    });
+  }
+  if (update.language !== undefined) {
+    writes.push({
+      scope: voiceSettingsScope,
+      key: 'general.voice.language',
+      value: update.language,
+    });
+  }
+  if (update.enabled !== undefined) {
+    writes.push({
+      scope: voiceSettingsScope,
+      key: 'general.voice.enabled',
+      value: update.enabled,
+    });
+  }
+  return writes;
 }
 
 export function createVoiceModelSource(

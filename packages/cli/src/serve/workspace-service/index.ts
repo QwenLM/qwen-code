@@ -45,17 +45,18 @@ import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeout
 
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   buildPermissionSettings,
   type PermissionSettingsScope,
 } from '../../config/permission-settings.js';
 import {
+  buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
   validateWorkspaceVoiceState,
+  voiceSettingsScopeToWire,
   WorkspaceVoiceError,
+  type WorkspaceVoiceSettingsWrite,
 } from '../../services/voice-service.js';
-import { getVoiceSettingsScope } from '../../services/voice-settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 import type {
@@ -87,16 +88,6 @@ const PERMISSION_SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
   user: SettingScope.User,
   workspace: SettingScope.Workspace,
 };
-
-type SettingsWrite = {
-  scope: SettingScope;
-  key: string;
-  value: unknown;
-};
-
-function scopeToWire(scope: SettingScope): 'user' | 'workspace' {
-  return scope === SettingScope.Workspace ? 'workspace' : 'user';
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -412,45 +403,15 @@ export function createDaemonWorkspaceService(
 
       const settings = loadSettings(boundWorkspace);
       validateWorkspaceVoiceState(settings, request);
-      const voiceSettingsScope = getVoiceSettingsScope(settings);
-      const writes: SettingsWrite[] = [];
+      const writes = buildWorkspaceVoiceSettingsWrites(settings, request);
 
-      if (request.voiceModel !== undefined) {
-        writes.push({
-          scope: getPersistScopeForModelSelection(settings),
-          key: 'voiceModel',
-          value: request.voiceModel,
-        });
-      }
-      if (request.mode !== undefined) {
-        writes.push({
-          scope: voiceSettingsScope,
-          key: 'general.voice.mode',
-          value: request.mode,
-        });
-      }
-      if (request.language !== undefined) {
-        writes.push({
-          scope: voiceSettingsScope,
-          key: 'general.voice.language',
-          value: request.language,
-        });
-      }
-      if (request.enabled !== undefined) {
-        writes.push({
-          scope: voiceSettingsScope,
-          key: 'general.voice.enabled',
-          value: request.enabled,
-        });
-      }
-
-      const publishWrite = (write: SettingsWrite) => {
+      const publishWrite = (write: WorkspaceVoiceSettingsWrite) => {
         publishWorkspaceEvent({
           type: 'settings_changed',
           data: {
             key: write.key,
             value: write.value,
-            scope: scopeToWire(write.scope),
+            scope: voiceSettingsScopeToWire(write.scope),
           },
           originatorClientId: ctx.originatorClientId,
         });
@@ -462,7 +423,7 @@ export function createDaemonWorkspaceService(
           publishWrite(write);
         }
       } else {
-        const committed: SettingsWrite[] = [];
+        const committed: WorkspaceVoiceSettingsWrite[] = [];
         for (const write of writes) {
           try {
             await persistSetting!(
@@ -473,13 +434,15 @@ export function createDaemonWorkspaceService(
             );
           } catch (err) {
             writeStderrLine(
-              `qwen serve: workspace voice partial persist error (workspace=${boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${scopeToWire(write.scope)}): ${
+              `qwen serve: workspace voice partial persist error (workspace=${boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${voiceSettingsScopeToWire(write.scope)}): ${
                 err instanceof Error ? err.message : String(err)
               }`,
             );
             throw err;
           }
           committed.push(write);
+        }
+        for (const write of committed) {
           publishWrite(write);
         }
       }

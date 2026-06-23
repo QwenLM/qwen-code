@@ -305,7 +305,7 @@ describe('workspace voice routes', () => {
     );
   });
 
-  it('POST broadcasts fallback voice writes that committed before a later failure', async () => {
+  it('POST does not broadcast fallback voice writes when a later write fails', async () => {
     await writeVoiceModelSettings(h);
     const broadcastSettingsChanged = vi.fn();
     const persistSetting = vi.fn(
@@ -339,13 +339,7 @@ describe('workspace voice routes', () => {
     });
 
     expect(res.status).toBe(500);
-    expect(broadcastSettingsChanged).toHaveBeenCalledTimes(1);
-    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
-      'voiceModel',
-      'qwen3-asr-flash',
-      'user',
-      'client-1',
-    );
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('partial persist error'),
     );

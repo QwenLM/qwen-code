@@ -9,22 +9,23 @@ import express, {
   type Request,
   type Response,
 } from 'express';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   loadSettings,
-  SettingScope,
+  type SettingScope,
   type LoadedSettings,
 } from '../../config/settings.js';
 import {
+  buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
   transcribeWorkspaceVoiceAudio,
   validateWorkspaceVoiceState,
+  voiceSettingsScopeToWire,
   WorkspaceVoiceError,
+  type WorkspaceVoiceSettingsWrite,
   type WorkspaceVoiceTranscriptionInput,
   type WorkspaceVoiceTranscriptionResult,
 } from '../../services/voice-service.js';
 import {
-  getVoiceSettingsScope,
   isVoiceMode,
   readVoiceModel,
   type VoiceMode,
@@ -33,12 +34,6 @@ import { MAX_VOICE_LANGUAGE_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
-
-type VoiceSettingsWrite = {
-  scope: SettingScope;
-  key: string;
-  value: unknown;
-};
 
 type WorkspaceVoiceTranscriber = (
   input: WorkspaceVoiceTranscriptionInput,
@@ -82,10 +77,6 @@ interface ParsedVoiceUpdate {
   voiceModel?: string;
 }
 
-function scopeToWire(scope: SettingScope): 'user' | 'workspace' {
-  return scope === SettingScope.Workspace ? 'workspace' : 'user';
-}
-
 function sendVoiceError(res: Response, err: unknown): boolean {
   if (err instanceof WorkspaceVoiceError) {
     res.status(err.status).json({ error: err.message, code: err.code });
@@ -110,19 +101,19 @@ function sanitizeErrorMessage(raw: string): string {
 
 function broadcastVoiceWrite(
   deps: WorkspaceVoiceRouteDeps,
-  write: VoiceSettingsWrite,
+  write: WorkspaceVoiceSettingsWrite,
   clientId: string | undefined,
 ): void {
   try {
     deps.broadcastSettingsChanged(
       write.key,
       write.value,
-      scopeToWire(write.scope),
+      voiceSettingsScopeToWire(write.scope),
       clientId,
     );
   } catch (err) {
     writeStderrLine(
-      `qwen serve: POST /workspace/voice broadcast error (key=${write.key}, scope=${scopeToWire(write.scope)}): ${
+      `qwen serve: POST /workspace/voice broadcast error (key=${write.key}, scope=${voiceSettingsScopeToWire(write.scope)}): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -189,39 +180,10 @@ async function persistVoiceUpdate(
   update: ParsedVoiceUpdate,
   clientId: string | undefined,
 ): Promise<void> {
-  const voiceSettingsScope = getVoiceSettingsScope(settings);
   if (!deps.persistSettings && !deps.persistSetting) {
     throw new Error('workspace voice settings persistence is not available');
   }
-  const writes: VoiceSettingsWrite[] = [];
-  if (update.voiceModel !== undefined) {
-    writes.push({
-      scope: getPersistScopeForModelSelection(settings),
-      key: 'voiceModel',
-      value: update.voiceModel,
-    });
-  }
-  if (update.mode !== undefined) {
-    writes.push({
-      scope: voiceSettingsScope,
-      key: 'general.voice.mode',
-      value: update.mode,
-    });
-  }
-  if (update.language !== undefined) {
-    writes.push({
-      scope: voiceSettingsScope,
-      key: 'general.voice.language',
-      value: update.language,
-    });
-  }
-  if (update.enabled !== undefined) {
-    writes.push({
-      scope: voiceSettingsScope,
-      key: 'general.voice.enabled',
-      value: update.enabled,
-    });
-  }
+  const writes = buildWorkspaceVoiceSettingsWrites(settings, update);
 
   if (deps.persistSettings) {
     await deps.persistSettings(deps.boundWorkspace, writes);
@@ -229,7 +191,7 @@ async function persistVoiceUpdate(
       broadcastVoiceWrite(deps, write, clientId);
     }
   } else {
-    const committed: VoiceSettingsWrite[] = [];
+    const committed: WorkspaceVoiceSettingsWrite[] = [];
     for (const write of writes) {
       try {
         await deps.persistSetting!(
@@ -240,13 +202,15 @@ async function persistVoiceUpdate(
         );
       } catch (err) {
         writeStderrLine(
-          `qwen serve: POST /workspace/voice partial persist error (workspace=${deps.boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${scopeToWire(write.scope)}): ${
+          `qwen serve: POST /workspace/voice partial persist error (workspace=${deps.boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${voiceSettingsScopeToWire(write.scope)}): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
         throw err;
       }
       committed.push(write);
+    }
+    for (const write of committed) {
       broadcastVoiceWrite(deps, write, clientId);
     }
   }

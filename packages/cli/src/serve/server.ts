@@ -1273,6 +1273,9 @@ export function createServeApp(
           );
         }),
       ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
+      ...(deps.persistSettings
+        ? { persistSettings: deps.persistSettings }
+        : {}),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
