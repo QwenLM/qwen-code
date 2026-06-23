@@ -116,9 +116,29 @@ jobs:
       checks: 'write'
       pull-requests: 'write'
     steps:
-      - name: 'Prepare clean Git config for checkout'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        run: ': > "${RUNNER_TEMP}/checkout-gitconfig"'
+      - name: 'Refresh self-hosted git cache'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
+        run: |-
+          cache='/opt/qwen-git-cache/qwen-code'
+          if [[ ! -d "${cache}" ]]; then
+            echo "No self-hosted git cache at ${cache}; checkout will use the configured origin."
+            exit 0
+          fi
+
+          : > "${RUNNER_TEMP}/cache-refresh-gitconfig"
+          for attempt in 1 2; do
+            echo "Refreshing self-hosted git cache (attempt ${attempt}/2)"
+            if GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/cache-refresh-gitconfig" \
+              GIT_CONFIG_NOSYSTEM='true' \
+              git -C "${cache}" fetch --prune --no-tags origin \
+                "+refs/heads/${GITHUB_HEAD_REF}:refs/heads/${GITHUB_HEAD_REF}" \
+                "+${GITHUB_REF}:${GITHUB_REF}"; then
+              exit 0
+            fi
+            sleep 10
+          done
+
+          exit 1
 
       # On PRs github.ref is the merge ref (refs/pull/N/merge), so the required
       # checks validate the merge result, not just the PR tip. GitHub builds that
@@ -129,9 +149,6 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         continue-on-error: true
-        env:
-          GIT_CONFIG_GLOBAL: '${{ runner.temp }}/checkout-gitconfig'
-          GIT_CONFIG_NOSYSTEM: 'true'
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
@@ -141,9 +158,6 @@ jobs:
       - name: 'Checkout (retry on transient ref lag)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.checkout.outcome == 'failure' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        env:
-          GIT_CONFIG_GLOBAL: '${{ runner.temp }}/checkout-gitconfig'
-          GIT_CONFIG_NOSYSTEM: 'true'
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
