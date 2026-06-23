@@ -263,7 +263,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_supported_commands',
       'session_tasks',
       'session_stats',
-      'session_lsp_status',
+      'session_lsp',
       'session_close',
       'session_metadata',
       'mcp_guardrails',
