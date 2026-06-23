@@ -505,6 +505,7 @@ describe('<ToolGroupMessage />', () => {
       const toolCalls = [
         createToolCall({
           callId: 'tool-1',
+          status: ToolCallStatus.Executing,
           resultDisplay: 'Result 1',
         }),
         createToolCall({

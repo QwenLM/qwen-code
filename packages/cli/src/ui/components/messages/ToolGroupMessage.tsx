@@ -299,9 +299,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // and the inline path must render `SubagentScrollbackSummary`
   // immediately so the user keeps a record of the run.
   // (Gate on `isPending` so a degenerate empty `toolCalls=[]` in the
-  // committed phase still falls through to the legacy empty-container
-  // snapshot — the suppression is specifically about live-phase
-  // panel ownership, not about hiding empty inputs in general.)
+  // committed phase falls through to showCompact, where
+  // CompactToolGroupDisplay returns null for empty arrays.)
   if (isPending && inlineToolCalls.length === 0) {
     return null;
   }

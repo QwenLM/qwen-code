@@ -11,6 +11,7 @@ import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
+import { SHELL_COMMAND_NAME } from '../../constants.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
@@ -87,9 +88,13 @@ const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
   [ToolDisplayNames.GLOB]: 'search',
   [ToolDisplayNames.LS]: 'list',
   [ToolDisplayNames.SHELL]: 'command',
+  [SHELL_COMMAND_NAME]: 'command',
   [ToolDisplayNames.AGENT]: 'agent',
   [ToolDisplayNames.WORKFLOW]: 'agent',
   [ToolDisplayNames.SEND_MESSAGE]: 'agent',
+  'Read File': 'read',
+  'Read File(s)': 'read',
+  'Read Directory': 'list',
 };
 
 type CategoryTemplate = {
