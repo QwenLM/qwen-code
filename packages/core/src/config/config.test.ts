@@ -4508,6 +4508,7 @@ describe('Model Switching and Config Updates', () => {
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
       ['toolResultContentFormat']: 'string',
+      ['modalities']: { image: true },
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -4518,6 +4519,7 @@ describe('Model Switching and Config Updates', () => {
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
+        modalities: { kind: 'computed', detail: 'auto' },
       },
     });
 
@@ -4538,6 +4540,10 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
+    // Modalities are model-derived; a hot switch must refresh them so the
+    // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
+    expect(updatedConfig['modalities']).toEqual({ image: true });
+    expect(config.getEffectiveInputModalities()).toEqual({ image: true });
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -4548,6 +4554,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
+    expect(sources['modalities']?.kind).toBe('computed');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {

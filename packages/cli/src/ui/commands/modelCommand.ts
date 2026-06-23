@@ -17,6 +17,7 @@ import {
   AuthType,
   type AvailableModel,
   type Config,
+  isImageCapable,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -141,6 +142,12 @@ function formatUnavailableVisionModelMessage(
     `${availableModelsLine}\n` +
     VISION_MODEL_CONFIGURATION_HINT
   );
+}
+
+// Shown when a user pins a model that isn't known to accept images. The pin is
+// still honored, but the bridge will send images to it, so flag it.
+function formatNonVisionModelWarning(modelName: string): string {
+  return `⚠ '${modelName}' is not a known image-capable model; the vision bridge may fail on images. If it does support images, set its modalities to { image: true } in settings.modelProviders.`;
 }
 
 function formatUnavailableVoiceModelMessage(
@@ -464,8 +471,11 @@ export const modelCommand: SlashCommand = {
         selector.authType
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
-      ).filter((m) => !m.voiceOnly);
-      if (!availableModels.some((model) => model.id === selector.modelId)) {
+      ).filter((m) => !m.fastOnly && !m.voiceOnly);
+      const matched = availableModels.find(
+        (model) => model.id === selector.modelId,
+      );
+      if (!matched) {
         return {
           type: 'message',
           messageType: 'error',
@@ -483,10 +493,15 @@ export const modelCommand: SlashCommand = {
       persistSetting(settings, 'visionModel', modelName);
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(modelName);
+      // The pin is honored even if the model isn't image-capable (the user may
+      // know better than our metadata), but warn — the bridge sends images to it.
+      const visionWarning = isImageCapable(matched)
+        ? ''
+        : `\n${formatNonVisionModelWarning(modelName)}`;
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Vision Model') + ': ' + modelName,
+        content: t('Vision Model') + ': ' + modelName + visionWarning,
       };
     }
 

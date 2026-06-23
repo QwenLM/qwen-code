@@ -638,6 +638,54 @@ describe('modelCommand', () => {
     });
   });
 
+  it('still sets a non-image-capable vision model but warns', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision qwen3.7-max',
+        name: 'model',
+        args: '--vision qwen3.7-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen3.7-max',
+            authType: AuthType.USE_OPENAI,
+          }),
+          // qwen3.7-max is text-only (no modalities / isVision) → bridge can't use it.
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen3.7-max',
+              label: 'qwen3.7-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision qwen3.7-max',
+    );
+
+    // The pin is still honored...
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'visionModel',
+      'qwen3.7-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('qwen3.7-max');
+    // ...but the confirmation warns it isn't image-capable.
+    const msg = result as { messageType: string; content: string };
+    expect(msg.messageType).toBe('info');
+    expect(msg.content).toContain('Vision Model: qwen3.7-max');
+    expect(msg.content).toMatch(/not a known image-capable model/i);
+  });
+
   it('should reject unavailable vision models across all auth types', async () => {
     const setValue = vi.fn();
     const setVisionModel = vi.fn();

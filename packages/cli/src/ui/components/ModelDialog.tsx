@@ -13,6 +13,7 @@ import {
   ModelSlashCommandEvent,
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
+  isImageCapable,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
@@ -587,10 +588,16 @@ export function ModelDialog({
         settings.setValue(scope, 'visionModel', visionModel);
         // Sync runtime Config so the vision bridge picks it up without a restart.
         config?.setVisionModel(visionModel);
+        // Honor the pin even if the model isn't image-capable, but warn — the
+        // bridge will send images to it.
+        const visionWarning =
+          selectedEntry && !isImageCapable(selectedEntry.model)
+            ? `\n${t("⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.", { model: visionModel })}`
+            : '';
         uiState?.historyManager.addItem(
           {
             type: 'success',
-            text: `${t('Vision Model')}: ${visionModel}`,
+            text: `${t('Vision Model')}: ${visionModel}${visionWarning}`,
           },
           Date.now(),
         );

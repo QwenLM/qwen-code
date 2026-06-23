@@ -39,7 +39,13 @@ export interface VisionBridgeModelSelection {
   baseUrl?: string;
 }
 
-function isImageCapable(model: VisionModelCandidate): boolean {
+/**
+ * Whether a model can accept image input — the single source of truth the vision
+ * bridge uses both to auto-pick a bridge model and to warn when a user pins a
+ * non-image-capable one via `/model --vision`. Trusts an explicit `isVision`
+ * flag or resolved `modalities`, else falls back to name-based defaults.
+ */
+export function isImageCapable(model: VisionModelCandidate): boolean {
   return (
     model.isVision === true ||
     (model.modalities ?? defaultModalities(model.id)).image === true
