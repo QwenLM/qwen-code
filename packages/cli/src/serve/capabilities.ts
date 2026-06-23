@@ -323,9 +323,13 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   [
+    // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
+    // token (or `--require-auth`) no longer suppresses it: browsers can't set
+    // an `Authorization` header on a WebSocket, so the Web Shell carries the
+    // bearer token in the `Sec-WebSocket-Protocol` subprotocol, which the ACP
+    // upgrade listener verifies (see acp-http/index.ts).
     'voice_transcribe',
-    (toggles) =>
-      toggles.voiceWsAvailable !== false && toggles.requireAuth !== true,
+    (toggles) => toggles.voiceWsAvailable !== false,
   ],
 ]);
 

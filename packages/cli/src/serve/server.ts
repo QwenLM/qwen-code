@@ -1999,8 +1999,11 @@ export function createServeApp(
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
-      voiceWsAvailable:
-        process.env['QWEN_SERVE_ACP_HTTP'] !== '0' && !tokenConfigured,
+      // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
+      // on). A configured token no longer suppresses it — the browser carries
+      // the bearer token via the WS subprotocol, which the upgrade listener
+      // verifies (acp-http/index.ts).
+      voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 

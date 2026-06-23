@@ -28,6 +28,46 @@ export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
 
 /**
+ * Browsers cannot set an `Authorization` header on a WebSocket, so the Web
+ * Shell authenticates the `/voice/stream` (and `/acp`) upgrade by offering the
+ * bearer token as a `Sec-WebSocket-Protocol` subprotocol of the form
+ * `qwen-bearer.<base64url(token)>`. Kept in sync with the encoder in
+ * `packages/web-shell/client/voice/useVoiceCapture.ts`.
+ */
+export const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
+
+/**
+ * Pull the bearer credential off a WS upgrade request. Prefer the standard
+ * `Authorization: Bearer <token>` header (non-browser clients); fall back to
+ * the `qwen-bearer.*` subprotocol (browser clients). Returns `undefined` when
+ * neither is present or parseable.
+ */
+function extractUpgradeBearer(req: IncomingMessage): string | undefined {
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.includes(' ')) {
+    const scheme = authHeader.slice(0, authHeader.indexOf(' ')).toLowerCase();
+    if (scheme === 'bearer') {
+      return authHeader.slice(authHeader.indexOf(' ') + 1).trim();
+    }
+  }
+  const offered = req.headers['sec-websocket-protocol'];
+  if (offered) {
+    for (const raw of offered.split(',')) {
+      const entry = raw.trim();
+      if (!entry.startsWith(WS_BEARER_SUBPROTOCOL_PREFIX)) continue;
+      const encoded = entry.slice(WS_BEARER_SUBPROTOCOL_PREFIX.length);
+      try {
+        const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
+        if (decoded) return decoded;
+      } catch {
+        // Malformed base64url → treat as no credential.
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * Grace window after the connection-scoped SSE stream closes before the
  * connection is reaped (if not reconnected and no session stream is live).
  * Long enough to ride out a transient blip / reconnect, short enough to free
@@ -444,7 +484,21 @@ export function mountAcpHttp(
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
     if (wss) return;
-    wss = new WebSocketServer({ noServer: true, maxPayload: 10 * 1024 * 1024 });
+    wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: 10 * 1024 * 1024,
+      // Browsers authenticate the upgrade by offering the bearer token as a
+      // `qwen-bearer.*` subprotocol (see extractUpgradeBearer). Never echo that
+      // secret-bearing value back in the handshake response: select the first
+      // non-secret subprotocol offered, or none. ACP clients offer no
+      // subprotocol, so this is a no-op for them.
+      handleProtocols: (protocols) => {
+        for (const proto of protocols) {
+          if (!proto.startsWith(WS_BEARER_SUBPROTOCOL_PREFIX)) return proto;
+        }
+        return false;
+      },
+    });
     upgradeServer = httpServer;
     const expectedTokenHash = opts.token
       ? createHash('sha256').update(opts.token).digest()
@@ -518,22 +572,17 @@ export function mountAcpHttp(
       // Auth: WS bypasses Express middleware. Same posture as REST:
       // loopback without token = allow; non-loopback/token-mismatch = reject.
       if (opts.token) {
-        const authHeader = req.headers['authorization'];
-        if (!authHeader || !authHeader.includes(' ')) {
-          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-          socket.destroy();
-          return;
-        }
-        const scheme = authHeader
-          .slice(0, authHeader.indexOf(' '))
-          .toLowerCase();
-        const credentials = authHeader
-          .slice(authHeader.indexOf(' ') + 1)
-          .trim();
-        const actual = createHash('sha256').update(credentials).digest();
+        // Accept the token from `Authorization` (non-browser clients) or the
+        // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
+        // on a WebSocket). Hash-compare in constant time, same posture as REST.
+        const credentials = extractUpgradeBearer(req);
+        const actual = credentials
+          ? createHash('sha256').update(credentials).digest()
+          : undefined;
         if (
-          scheme !== 'bearer' ||
+          !actual ||
           !expectedTokenHash ||
+          actual.length !== expectedTokenHash.length ||
           !timingSafeEqual(expectedTokenHash, actual)
         ) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');

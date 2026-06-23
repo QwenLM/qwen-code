@@ -56,6 +56,27 @@ function toWebSocketUrl(baseUrl: string): string {
   return url.toString();
 }
 
+/**
+ * Browsers can't set an `Authorization` header on a WebSocket, so the bearer
+ * token rides in `Sec-WebSocket-Protocol` as `qwen-bearer.<base64url(token)>`.
+ * The daemon's ACP upgrade listener decodes it (serve/acp-http/index.ts) — keep
+ * this prefix in sync with `WS_BEARER_SUBPROTOCOL_PREFIX` there.
+ */
+const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
+
+function bearerSubprotocol(token: string): string {
+  const bytes = new TextEncoder().encode(token);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const b64 = btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return `${WS_BEARER_SUBPROTOCOL_PREFIX}${b64}`;
+}
+
 /** Turn a getUserMedia rejection into an actionable, human message. */
 function describeMicError(err: unknown): string {
   const name = (err as { name?: string } | undefined)?.name;
@@ -111,7 +132,7 @@ interface CaptureResources {
 export function useVoiceCapture(
   options: UseVoiceCaptureOptions,
 ): UseVoiceCaptureReturn {
-  const { baseUrl, onFinal, onError } = options;
+  const { baseUrl, token, onFinal, onError } = options;
 
   const [status, setStatus] = useState<VoiceCaptureStatus>('idle');
   const [interimText, setInterimText] = useState('');
@@ -267,7 +288,10 @@ export function useVoiceCapture(
         resourcesRef.current.processor = processor;
         resourcesRef.current.sink = sink;
 
-        const ws = new WebSocket(toWebSocketUrl(baseUrl));
+        const ws = new WebSocket(
+          toWebSocketUrl(baseUrl),
+          token ? [bearerSubprotocol(token)] : undefined,
+        );
         ws.binaryType = 'arraybuffer';
         resourcesRef.current.ws = ws;
 
@@ -351,7 +375,7 @@ export function useVoiceCapture(
         fail(error instanceof Error ? error.message : String(error));
       }
     })();
-  }, [baseUrl, fail, finishWith, applyStatus]);
+  }, [baseUrl, token, fail, finishWith, applyStatus]);
 
   const stop = useCallback(() => {
     const ws = resourcesRef.current.ws;

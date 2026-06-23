@@ -1519,12 +1519,15 @@ describe('createServeApp', () => {
       expect(
         getAdvertisedServeFeatures(undefined, { voiceWsAvailable: false }),
       ).not.toContain('voice_transcribe');
+      // A configured token / `--require-auth` no longer suppresses voice: the
+      // browser carries the bearer token via the WS subprotocol, which the
+      // upgrade listener verifies.
       expect(
         getAdvertisedServeFeatures(undefined, {
           requireAuth: true,
           voiceWsAvailable: true,
         }),
-      ).not.toContain('voice_transcribe');
+      ).toContain('voice_transcribe');
     });
 
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
@@ -1665,8 +1668,10 @@ describe('createServeApp', () => {
         if (feature === 'voice_transcribe') {
           expect(predicate({ voiceWsAvailable: true })).toBe(true);
           expect(predicate({ voiceWsAvailable: false })).toBe(false);
+          // requireAuth no longer suppresses voice (token rides the WS
+          // subprotocol), so the predicate ignores it.
           expect(predicate({ requireAuth: true, voiceWsAvailable: true })).toBe(
-            false,
+            true,
           );
           expect(predicate({})).toBe(true);
           expect(
@@ -8699,9 +8704,10 @@ describe('createServeApp', () => {
         v: 1,
         detail: 'summary',
       });
-      expect(withAuth.body.capabilities.features).not.toContain(
-        'voice_transcribe',
-      );
+      // Voice is advertised even with a token configured: browsers authenticate
+      // the WS via the `qwen-bearer.*` subprotocol, so the token no longer
+      // suppresses the capability.
+      expect(withAuth.body.capabilities.features).toContain('voice_transcribe');
     });
 
     it('returns summary diagnostics without querying workspace status', async () => {
