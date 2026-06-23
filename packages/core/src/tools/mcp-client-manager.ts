@@ -278,8 +278,12 @@ function readBudgetFromEnv(): McpBudgetConfig {
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
   let clientBudget: number | undefined;
   if (rawBudget !== undefined && rawBudget !== '') {
-    const parsed = Number(rawBudget);
-    if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
+    // Parse strictly as a decimal integer: Number('0x10')=16, Number('1e2')=100
+    // and Number('1.0')=1 all pass isInteger, so a loose parse would silently
+    // accept them. Only plain decimal digits should set a budget.
+    const trimmed = rawBudget.trim();
+    const parsed = Number(trimmed);
+    if (/^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) && parsed > 0) {
       clientBudget = parsed;
     } else {
       // operator typos
