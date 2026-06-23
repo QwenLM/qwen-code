@@ -118,8 +118,8 @@ jobs:
     steps:
       # On PRs github.ref is the merge ref (refs/pull/N/merge), so the required
       # checks validate the merge result, not just the PR tip. GitHub builds that
-      # ref asynchronously and it can briefly 404 right after a push, so on
-      # failure we back off and retry the same ref once.
+      # ref asynchronously and it can briefly 404 or lag right after a push, so
+      # we back off and retry the same ref once on checkout failure or stale HEAD.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -138,30 +138,30 @@ jobs:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
 
-      - name: 'Refresh PR refs after cached checkout'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
-        run: |-
-          github_url="https://github.com:443/${GITHUB_REPOSITORY}.git"
-          merge_ref='refs/remotes/pull/${{ github.event.pull_request.number }}/merge'
-
-          for attempt in 1 2; do
-            echo "Refreshing PR refs from GitHub (attempt ${attempt}/2)"
-            if git fetch --no-tags "${github_url}" \
-                "+refs/heads/${GITHUB_HEAD_REF}:refs/remotes/origin/${GITHUB_HEAD_REF}" \
-                "+${GITHUB_REF}:${merge_ref}"; then
-              git checkout --force "${merge_ref}"
-              exit 0
-            fi
-            sleep 10
-          done
-
-          exit 1
-
       - name: 'Verify PR checkout includes head commit'
+        id: 'verify_pr_checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
+        continue-on-error: true
         run: |-
           if ! git merge-base --is-ancestor '${{ github.event.pull_request.head.sha }}' HEAD; then
-            echo "::error::Checked out ref does not contain PR head ${{ github.event.pull_request.head.sha }}."
+            echo "::warning::Checked out ref does not contain PR head ${{ github.event.pull_request.head.sha }}; retrying checkout after the merge ref refreshes."
+            git log --oneline --decorate -5
+            exit 1
+          fi
+      - name: 'Back off for stale merge ref to refresh'
+        if: "${{ steps.verify_pr_checkout.outcome == 'failure' }}"
+        run: 'sleep 10'
+      - name: 'Checkout (retry on stale merge ref)'
+        if: "${{ steps.verify_pr_checkout.outcome == 'failure' }}"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
+          fetch-depth: 0
+      - name: 'Verify PR checkout includes head commit after retry'
+        if: "${{ steps.verify_pr_checkout.outcome == 'failure' }}"
+        run: |-
+          if ! git merge-base --is-ancestor '${{ github.event.pull_request.head.sha }}' HEAD; then
+            echo "::error::Checked out ref still does not contain PR head ${{ github.event.pull_request.head.sha }} after retry."
             git log --oneline --decorate -5
             exit 1
           fi

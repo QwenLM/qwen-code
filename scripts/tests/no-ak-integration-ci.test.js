@@ -62,24 +62,34 @@ describe('no-AK integration CI wiring', () => {
     expect(platformJob).not.toContain(NO_AK_SCRIPT);
   });
 
-  it('refreshes and verifies the Ubuntu self-hosted PR refs', () => {
+  it('retries stale Ubuntu PR merge refs before running checks', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
 
-    expect(ubuntuJob).toContain(
+    expect(ubuntuJob).not.toContain(
       "name: 'Refresh PR refs after cached checkout'",
     );
-    expect(ubuntuJob).toContain('https://github.com:443/');
-    expect(ubuntuJob).toContain('git fetch --no-tags "${github_url}"');
-    expect(ubuntuJob).toContain('"+${GITHUB_REF}:${merge_ref}"');
-    expect(ubuntuJob).toContain('git checkout --force "${merge_ref}"');
+    expect(ubuntuJob).not.toContain('https://github.com:443/');
+    expect(ubuntuJob).not.toContain('git fetch --no-tags "${github_url}"');
     expect(ubuntuJob).toContain(
       "name: 'Verify PR checkout includes head commit'",
     );
+    expect(ubuntuJob).toContain("id: 'verify_pr_checkout'");
+    expect(ubuntuJob).toContain('continue-on-error: true');
     expect(ubuntuJob).toContain('git merge-base --is-ancestor');
     expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
+    expect(ubuntuJob).toContain(
+      "name: 'Back off for stale merge ref to refresh'",
+    );
+    expect(ubuntuJob).toContain("name: 'Checkout (retry on stale merge ref)'");
+    expect(ubuntuJob).toContain(
+      "steps.verify_pr_checkout.outcome == 'failure'",
+    );
+    expect(ubuntuJob).toContain(
+      "name: 'Verify PR checkout includes head commit after retry'",
+    );
   });
 });
