@@ -2993,6 +2993,8 @@ describe('CoreToolScheduler', () => {
     const makeScheduler = (opts: {
       mcpServers?: Record<string, unknown>;
       removed?: string[];
+      // Per-server admission reason for configured-but-unavailable servers.
+      reasons?: Record<string, 'not_allowed' | 'excluded' | 'pending_approval'>;
       allToolNames?: string[];
     }) => {
       const mockToolRegistry = {
@@ -3008,8 +3010,13 @@ describe('CoreToolScheduler', () => {
         isInteractive: () => true,
         getMessageBus: vi.fn().mockReturnValue(undefined),
         getDisableAllHooks: vi.fn().mockReturnValue(true),
-        getMcpServers: () => opts.mcpServers,
+        getMcpServerNames: () => Object.keys(opts.mcpServers ?? {}),
         getRecentlyRemovedMcpServers: () => opts.removed ?? [],
+        getMcpServerUnavailableReason: (name: string) => {
+          if ((opts.removed ?? []).includes(name)) return 'removed';
+          if (!(name in (opts.mcpServers ?? {}))) return undefined;
+          return opts.reasons?.[name];
+        },
       } as unknown as Config;
       return new CoreToolScheduler({
         config: mockConfig,
@@ -3052,6 +3059,46 @@ describe('CoreToolScheduler', () => {
         'mcp__pangu-server__missing_tool',
       );
       expect(msg).toContain('on MCP server "pangu-server"');
+    });
+
+    it('explains a not-allowed server with the allow-list recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'not_allowed' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('"pangu-server"');
+      expect(msg).toContain('allow-list');
+      expect(msg).toContain('mcp.allowed');
+    });
+
+    it('explains an excluded server with the mcp.excluded recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'excluded' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('excluded');
+      expect(msg).toContain('mcp.excluded');
+    });
+
+    it('explains a pending-approval server with the approval recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'pending_approval' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('awaiting approval');
+      expect(msg).toContain('/mcp');
     });
 
     it('prefers the removed-this-session message over the generic one', () => {

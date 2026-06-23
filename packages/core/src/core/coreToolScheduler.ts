@@ -1660,30 +1660,39 @@ export class CoreToolScheduler {
     const byPrefixLengthDesc = (a: string, b: string) =>
       prefixOf(b).length - prefixOf(a).length;
 
-    // (B) Removed this session — precise, names the server.
-    const removed = (this.config.getRecentlyRemovedMcpServers?.() ?? [])
-      .slice()
-      .sort(byPrefixLengthDesc);
-    const removedHit = removed.find((s) =>
+    // Candidate servers: everything still configured (regardless of admission
+    // state) plus servers removed this session. Longest-prefix-first so the most
+    // specific server wins when one name is a prefix of another.
+    const candidates = Array.from(
+      new Set([
+        ...(this.config.getMcpServerNames?.() ?? []),
+        ...(this.config.getRecentlyRemovedMcpServers?.() ?? []),
+      ]),
+    ).sort(byPrefixLengthDesc);
+    const serverHit = candidates.find((s) =>
       unknownToolName.startsWith(prefixOf(s)),
     );
-    if (removedHit) {
-      return `Tool "${unknownToolName}" is unavailable: the MCP server "${removedHit}" was removed during this session, so its tools were unloaded. Re-add it to your settings to use this tool again.`;
-    }
 
-    // (A) Not (or no longer) a configured MCP server.
-    const configured = Object.keys(this.config.getMcpServers?.() ?? {}).sort(
-      byPrefixLengthDesc,
-    );
-    const serverHit = configured.find((s) =>
-      unknownToolName.startsWith(prefixOf(s)),
-    );
     if (!serverHit) {
+      // No known server owns this prefix → never configured.
       return `Tool "${unknownToolName}" not found: no MCP server providing it is currently configured. If you recently removed or renamed an MCP server, its tools are no longer available.`;
     }
 
-    // Server is configured but this exact tool is not registered.
-    return `Tool "${unknownToolName}" not found on MCP server "${serverHit}". The server may be disconnected, still starting up, or the tool was renamed.`;
+    // Explain WHY the owning server's tools aren't loaded, with the matching
+    // recovery action for each admission gate.
+    switch (this.config.getMcpServerUnavailableReason?.(serverHit)) {
+      case 'removed':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" was removed during this session, so its tools were unloaded. Re-add it to your settings to use this tool again.`;
+      case 'not_allowed':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is not in the allow-list (mcp.allowed / --allowed-mcp-server-names), so its tools are not loaded. Add it to mcp.allowed to use this tool.`;
+      case 'excluded':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is excluded (mcp.excluded), so its tools are not loaded. Remove it from mcp.excluded to use this tool.`;
+      case 'pending_approval':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is awaiting approval, so its tools are not loaded. Approve it (run /mcp) to use this tool.`;
+      default:
+        // Configured and admitted — a genuine "tool not found".
+        return `Tool "${unknownToolName}" not found on MCP server "${serverHit}". The server may be disconnected, still starting up, or the tool was renamed.`;
+    }
   }
 
   /** Suggests similar tool names using Levenshtein distance. */

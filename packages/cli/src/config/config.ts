@@ -1890,6 +1890,11 @@ export async function loadCliConfig(
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
+    // The flag ONLY (not the settings-derived list) — the hot-reload upper
+    // bound. Undefined when `--allowed-mcp-server-names` was not passed.
+    cliAllowedMcpServerNames: argv.allowedMcpServerNames
+      ? argv.allowedMcpServerNames.filter(Boolean)
+      : undefined,
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)
       : undefined,

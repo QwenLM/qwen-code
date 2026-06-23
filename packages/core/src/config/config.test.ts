@@ -577,27 +577,44 @@ describe('Server Config (config.ts)', () => {
       expect(config.getRecentlyRemovedMcpServers()).toEqual(['b']);
     });
 
-    it('records a server hidden by a narrowed allow-list as removed (uses the caller pre-gating snapshot)', async () => {
+    it('classifies a server filtered by a narrowed allow-list as not_allowed (not removed)', async () => {
       const config = new Config({
         ...baseParams,
         mcpServers: { a: srvA, b: srvB },
       });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB });
 
-      // Both a and b are effective before any gating. Capture that set the way
-      // hot-reload.ts does — BEFORE narrowing the allow-list.
-      const prevEffective = Object.keys(config.getMcpServers() ?? {});
-      expect(prevEffective.sort()).toEqual(['a', 'b']);
-
-      // Narrow the allow-list to just `a` (mirrors editing mcp.allowed), then
-      // reconcile with the same server map. `b` is still configured but is now
-      // filtered out of the effective map.
+      // Narrow the allow-list to just `a` (mirrors editing mcp.allowed). `b` is
+      // still configured (merged map) but filtered out of the effective map.
       config.setAllowedMcpServers(['a']);
-      await config.reinitializeMcpServers({ a: srvA, b: srvB }, prevEffective);
 
-      // `b` was live but is now excluded → must be recorded as removed so the
-      // tool-not-found path can explain it. Reading getMcpServers() through the
-      // already-narrowed allow-list (without the snapshot) would miss it.
-      expect(config.getRecentlyRemovedMcpServers()).toContain('b');
+      // `b` is NOT "removed" — it's still in config, just not allowed. The
+      // tool-not-found path can still explain it precisely, with the right
+      // recovery action (adjust mcp.allowed, not "re-add the server").
+      expect(config.getRecentlyRemovedMcpServers()).not.toContain('b');
+      expect(config.getMcpServerUnavailableReason('b')).toBe('not_allowed');
+      expect(config.getMcpServerUnavailableReason('a')).toBeUndefined();
+    });
+
+    it('classifies excluded / pending / removed servers with the right reason', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB, c: srvA },
+      });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB, c: srvA });
+
+      config.setExcludedMcpServers(['b']);
+      config.setPendingMcpServers(['c']);
+      expect(config.getMcpServerUnavailableReason('b')).toBe('excluded');
+      expect(config.getMcpServerUnavailableReason('c')).toBe(
+        'pending_approval',
+      );
+
+      // Delete `a` from config → removed this session.
+      await config.reinitializeMcpServers({ b: srvB, c: srvA });
+      expect(config.getMcpServerUnavailableReason('a')).toBe('removed');
+      // A never-configured name has no reason (falls through to generic).
+      expect(config.getMcpServerUnavailableReason('ghost')).toBeUndefined();
     });
 
     it('reinitializeMcpServers replaces config then drives incremental reconcile', async () => {

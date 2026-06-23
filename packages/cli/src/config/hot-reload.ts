@@ -47,36 +47,62 @@ export function mcpServersEqual(
 }
 
 /**
- * Whether two admission-list snapshots are equivalent. `excluded` / `allowed`
- * / `pending` are sets (order-irrelevant), but `fast-deep-equal` is
- * array-order-sensitive, so sort copies before comparing. `undefined` ≡ `[]`.
+ * Whether two admission-list snapshots are equivalent. `excluded` / `pending`
+ * are sets (order-irrelevant) where `undefined` ≡ `[]` (both mean "no entries").
+ * `allowed` is different: an absent allow-list (`undefined`) means "allow all",
+ * but an explicit empty allow-list (`[]`) means "deny all" — so for `allowed`,
+ * absent and empty are NOT equal (otherwise editing `mcp.allowed` to `[]` would
+ * be treated as a no-op and the deny-all never reconciles). `fast-deep-equal`
+ * is array-order-sensitive, so sort copies before comparing.
  */
 export function mcpGatingEqual(a: McpGating, b: McpGating): boolean {
   const norm = (xs: string[] | undefined) => [...(xs ?? [])].sort();
+  const allowedEqual =
+    (a.allowed === undefined) === (b.allowed === undefined) &&
+    equal(norm(a.allowed), norm(b.allowed));
   return (
     equal(norm(a.excluded), norm(b.excluded)) &&
-    equal(norm(a.allowed), norm(b.allowed)) &&
+    allowedEqual &&
     equal(norm(a.pending), norm(b.pending))
   );
 }
 
 /**
- * Recompute the connection-admission lists from the *current* settings — NOT
- * pinned to the startup `--allowed-mcp-server-names`. A runtime edit to
- * `mcp.allowed` / `mcp.excluded` therefore takes effect immediately (the
- * deliberate "settings win" stance; see the design doc's 准入取向决策). The
- * pending list is always recomputed per #4615 so a hot-reload never connects an
- * unapproved gated server.
+ * Recompute the connection-admission lists from the *current* settings. Runtime
+ * edits to `mcp.allowed` / `mcp.excluded` take effect immediately, with two
+ * deliberate rules:
+ *
+ * - **`allowed` empty vs absent**: an absent `mcp.allowed` means "allow all"
+ *   (`undefined`); an explicit `mcp.allowed: []` means "deny all" (`[]` is
+ *   preserved, NOT collapsed to `undefined`), matching the boot-time semantics
+ *   of `getMcpServers()` (an empty allow-list filters everything out).
+ * - **CLI allow-list is an upper bound (K)**: if launched with
+ *   `--allowed-mcp-server-names`, `bootAllowed` is that flag value and the
+ *   settings-derived allow-list is intersected with it — a settings edit may
+ *   narrow within the launch bound but never widen beyond it. With no settings
+ *   allow-list, the boot bound applies in full. Without the flag (`bootAllowed`
+ *   undefined), settings fully drive admission.
+ *
+ * The pending list is always recomputed per #4615 so a hot-reload never
+ * connects an unapproved gated server.
  */
 function recomputeMcpGating(
   settings: LoadedSettings,
   assembled: Record<string, MCPServerConfig>,
   cwd: string,
+  bootAllowed: readonly string[] | undefined,
 ): McpGating {
-  const allowed = settings.merged.mcp?.allowed?.filter(Boolean);
+  // Preserve `[]` (deny-all); only an absent key yields `undefined` (allow-all).
+  const settingsAllowed = settings.merged.mcp?.allowed?.filter(Boolean);
   const excluded = settings.merged.mcp?.excluded?.filter(Boolean);
+  let allowed = settingsAllowed;
+  if (bootAllowed) {
+    allowed = settingsAllowed
+      ? settingsAllowed.filter((n) => bootAllowed.includes(n))
+      : [...bootAllowed];
+  }
   return {
-    allowed: allowed && allowed.length > 0 ? allowed : undefined,
+    allowed,
     excluded: excluded && excluded.length > 0 ? excluded : undefined,
     pending: getPendingGatedMcpServers(assembled, cwd),
   };
@@ -117,7 +143,12 @@ export function registerMcpHotReload(
       cwd,
       topTierMcpServers,
     );
-    const nextGating = recomputeMcpGating(settings, next, cwd);
+    const nextGating = recomputeMcpGating(
+      settings,
+      next,
+      cwd,
+      config.getCliAllowedMcpServerNames(),
+    );
 
     const prevServers = config.getSettingsMcpServers();
     const prevGating = config.getMcpGating();
@@ -163,13 +194,6 @@ export function registerMcpHotReload(
     // #4615.
     const promptable = getPromptableMcpServers(next, cwd);
 
-    // Snapshot the effective server set BEFORE narrowing the admission lists
-    // below. `reinitializeMcpServers` diffs this against the post-reconcile set
-    // to record servers removed this session (for the tool-not-found message).
-    // Capturing it after the gating setters would filter the OLD map through
-    // the NEW allow-list, hiding a server that was live but is now excluded.
-    const prevEffectiveServerNames = Object.keys(config.getMcpServers() ?? {});
-
     // Push the admission lists BEFORE reconcile — the discovery pass inside
     // reinitializeMcpServers reads them to skip excluded / non-allowed /
     // pending servers.
@@ -178,7 +202,7 @@ export function registerMcpHotReload(
     config.setPendingMcpServers(nextGating.pending);
 
     try {
-      await config.reinitializeMcpServers(next, prevEffectiveServerNames);
+      await config.reinitializeMcpServers(next);
       const finalStatuses = Object.keys(next)
         .map((name) => `${name}=${getMCPServerStatus(name)}`)
         .join(', ');

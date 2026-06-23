@@ -595,6 +595,21 @@ export const DEFAULT_TOOL_OUTPUT_BATCH_BUDGET = 200_000;
 export type McpServerScope = 'project' | 'workspace' | 'system';
 
 /**
+ * Why an MCP server's tools are currently unavailable, used to give the model a
+ * precise tool-not-found recovery action. See
+ * {@link Config.getMcpServerUnavailableReason}.
+ * - `removed`: deleted from config this session.
+ * - `not_allowed`: filtered out by the `mcp.allowed` allow-list.
+ * - `excluded`: present in the `mcp.excluded` list.
+ * - `pending_approval`: a gated server awaiting approval (#4615).
+ */
+export type McpServerUnavailableReason =
+  | 'removed'
+  | 'not_allowed'
+  | 'excluded'
+  | 'pending_approval';
+
+/**
  * Scopes whose servers are checked-in / shareable and therefore untrusted: they
  * must be approved before the discovery layer connects them. `'system'`
  * (enterprise-enforced) and unset (user/default/CLI/extension) scopes are
@@ -870,6 +885,14 @@ export interface ConfigParameters {
   /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
   locale?: string;
   allowedMcpServers?: string[];
+  /**
+   * The startup `--allowed-mcp-server-names` CLI flag value, if passed (the
+   * flag only — NOT the settings-derived allow-list). When present it is an
+   * immutable upper bound on MCP admission: a hot-reload may narrow within it
+   * but never widen beyond it. Undefined when the flag was not passed (then
+   * settings fully drive admission). See issue #3696 sub-task 3.
+   */
+  cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
   /**
    * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
@@ -1276,6 +1299,8 @@ export class Config {
   private lspClient?: LspClient;
   private lspInitializationError?: string;
   private allowedMcpServers?: string[];
+  /** Immutable upper bound from `--allowed-mcp-server-names`; see ConfigParameters. */
+  private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
   /**
@@ -1489,6 +1514,7 @@ export class Config {
     this.lspEnabled = params.lsp?.enabled ?? false;
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
+    this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
     this.sessionSubagents = params.sessionSubagents ?? [];
@@ -3401,8 +3427,16 @@ export class Config {
     return this.topTierMcpServers;
   }
 
-  getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    let mcpServers = { ...(this.mcpServers || {}) };
+  /**
+   * The merged MCP server map (settings + extensions + runtime overlay) WITHOUT
+   * any admission filtering. `getMcpServers()` is this map with the
+   * `allowedMcpServers` filter applied; the unfiltered form is what tells us a
+   * server is "configured" regardless of allow-list / excluded / pending gating
+   * (used to classify why a server is unavailable — see
+   * {@link getMcpServerUnavailableReason}).
+   */
+  private getMergedMcpServers(): Record<string, MCPServerConfig> {
+    const mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
     for (const extension of extensions) {
       Object.entries(extension.config.mcpServers || {}).forEach(
@@ -3420,6 +3454,12 @@ export class Config {
     for (const [name, cfg] of this.runtimeMcpServers) {
       mcpServers[name] = cfg;
     }
+
+    return mcpServers;
+  }
+
+  getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    let mcpServers = this.getMergedMcpServers();
 
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
@@ -3524,6 +3564,16 @@ export class Config {
   }
 
   /**
+   * The startup `--allowed-mcp-server-names` upper bound (the CLI flag only),
+   * or undefined if the flag was not passed. The hot-reload recompute caps the
+   * settings-derived allow-list to this so a runtime settings edit can narrow
+   * MCP admission but never widen it beyond what the launch flag permitted.
+   */
+  getCliAllowedMcpServerNames(): string[] | undefined {
+    return this.cliAllowedMcpServerNames;
+  }
+
+  /**
    * Replace the pending-approval set of gated MCP server names at runtime
    * (hot-reload). The discovery layer skips these BEFORE any connection side
    * effect, so a hot-reload must recompute them (#4615) lest it connect a
@@ -3552,14 +3602,48 @@ export class Config {
   }
 
   /**
-   * Names of MCP servers removed during this session by a runtime reconcile and
-   * not since re-added. Consumed by the tool-not-found path to explain that a
-   * now-missing `mcp__<server>__*` tool belongs to a server the user removed
-   * mid-session, rather than emitting an unrelated fuzzy suggestion. Maintained
-   * by {@link reinitializeMcpServers}.
+   * Names of MCP servers removed from config during this session by a runtime
+   * reconcile and not since re-added. "Removed" means gone from the merged map
+   * (settings + extensions + runtime), NOT merely filtered out by an admission
+   * gate — a server that is still configured but excluded / not-allowed /
+   * pending is reported via {@link getMcpServerUnavailableReason} instead.
+   * Consumed by the tool-not-found path.
    */
   getRecentlyRemovedMcpServers(): string[] {
     return [...this.recentlyRemovedMcpServers];
+  }
+
+  /** All configured MCP server names (merged, before admission gating). */
+  getMcpServerNames(): string[] {
+    return Object.keys(this.getMergedMcpServers());
+  }
+
+  /**
+   * Why a given MCP server is currently unavailable (its tools aren't usable),
+   * or `undefined` if it is configured and admitted (so a missing tool is a
+   * genuine "not found" / disconnected, not an admission decision). Lets the
+   * tool-not-found path explain the right recovery action. Covers every
+   * admission gate:
+   * - `removed`: deleted from config this session (see
+   *   {@link getRecentlyRemovedMcpServers}).
+   * - `not_allowed`: filtered out by the `mcp.allowed` allow-list.
+   * - `excluded`: in the `mcp.excluded` list.
+   * - `pending_approval`: a gated server awaiting approval (#4615).
+   */
+  getMcpServerUnavailableReason(
+    serverName: string,
+  ): McpServerUnavailableReason | undefined {
+    if (this.recentlyRemovedMcpServers.has(serverName)) return 'removed';
+    if (!(serverName in this.getMergedMcpServers())) return undefined;
+    if (
+      this.allowedMcpServers &&
+      !this.allowedMcpServers.includes(serverName)
+    ) {
+      return 'not_allowed';
+    }
+    if (this.excludedMcpServers?.includes(serverName)) return 'excluded';
+    if (this.isMcpServerPendingApproval(serverName)) return 'pending_approval';
+    return undefined;
   }
 
   /**
@@ -3569,18 +3653,9 @@ export class Config {
    * "reconcile in progress" guard serializes against a concurrent caller (e.g.
    * `/reload`): a request arriving mid-flight is coalesced into a single
    * follow-up pass so the latest config always wins. See sub-task 3.
-   *
-   * `prevEffectiveServerNames` is the effective server set captured by the
-   * caller BEFORE it narrowed the admission lists (`setAllowedMcpServers` etc.).
-   * The hot-reload path applies the new gating before calling this, so reading
-   * `getMcpServers()` here would filter the OLD map through the NEW allow-list
-   * and miss a server that was live but is now filtered out — it would never be
-   * recorded as removed-this-session. Callers that have not pre-applied gating
-   * (e.g. `/reload`) may omit it and we fall back to the current effective set.
    */
   async reinitializeMcpServers(
     servers: Record<string, MCPServerConfig> | undefined,
-    prevEffectiveServerNames?: readonly string[],
   ): Promise<void> {
     this.debugLogger.debug(
       `[mcp-hot-reload] reinitializeMcpServers: servers=[${Object.keys(
@@ -3590,23 +3665,20 @@ export class Config {
       )}] initialized=${this.initialized} inProgress=${this.mcpReconcileInProgress}`,
     );
 
-    // Track which servers disappeared from / reappeared in the *effective* map
-    // (settings + extensions + runtime) so the tool-not-found path can tell the
-    // model a missing tool belongs to a server removed this session. Diff the
-    // merged map (not just `servers`) so a server still provided by an
-    // extension is not falsely flagged as removed. Re-added names self-heal.
-    // Prefer the caller's pre-gating snapshot (see param doc) over reading the
-    // already-narrowed effective map.
-    const prevEffective = new Set(
-      prevEffectiveServerNames ?? Object.keys(this.getMcpServers() ?? {}),
-    );
+    // Track which servers were DELETED from config this session (gone from the
+    // merged map), so the tool-not-found path can say "removed this session"
+    // vs an admission-gate reason. The merged map is independent of the
+    // admission gates (allowed/excluded/pending), so the diff is unaffected by
+    // the gating setters the hot-reload caller applied just before this — no
+    // pre-gating snapshot needed. Re-added names self-heal.
+    const prevConfigured = new Set(Object.keys(this.getMergedMcpServers()));
     this.setMcpServers(servers);
-    const nextEffective = Object.keys(this.getMcpServers() ?? {});
-    for (const name of nextEffective) {
+    const nextConfigured = new Set(Object.keys(this.getMergedMcpServers()));
+    for (const name of nextConfigured) {
       this.recentlyRemovedMcpServers.delete(name);
     }
-    for (const name of prevEffective) {
-      if (!nextEffective.includes(name)) {
+    for (const name of prevConfigured) {
+      if (!nextConfigured.has(name)) {
         this.recentlyRemovedMcpServers.add(name);
       }
     }

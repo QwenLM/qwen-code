@@ -85,6 +85,18 @@ describe('mcpGatingEqual', () => {
     );
     expect(mcpGatingEqual({ excluded: [] }, { excluded: ['a'] })).toBe(false);
   });
+
+  it('treats allowed absent (allow-all) and [] (deny-all) as DIFFERENT', () => {
+    // For `allowed`, undefined ≠ [] — otherwise editing mcp.allowed to [] would
+    // look like a no-op and the deny-all would never reconcile.
+    expect(mcpGatingEqual({ allowed: undefined }, { allowed: [] })).toBe(false);
+    expect(mcpGatingEqual({ allowed: [] }, { allowed: [] })).toBe(true);
+    expect(mcpGatingEqual({ allowed: ['a'] }, { allowed: ['a'] })).toBe(true);
+    // excluded keeps undefined ≡ [] (both mean "exclude nothing").
+    expect(mcpGatingEqual({ excluded: undefined }, { excluded: [] })).toBe(
+      true,
+    );
+  });
 });
 
 // ── Subscriber gate branches ──────────────────────────────────────────
@@ -92,6 +104,8 @@ describe('mcpGatingEqual', () => {
 interface FakeConfigState {
   settingsMcp: Record<string, MCPServerConfig> | undefined;
   gating: { excluded?: string[]; allowed?: string[]; pending?: string[] };
+  /** Startup `--allowed-mcp-server-names` upper bound (K); default undefined. */
+  bootAllowed?: string[];
 }
 
 function makeFakeConfig(cwd: string, state: FakeConfigState) {
@@ -113,6 +127,9 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
     // lists and passes them to reinitializeMcpServers.
     getMcpServers: () => state.settingsMcp,
     getMcpGating: () => state.gating,
+    // Default: no startup --allowed-mcp-server-names flag (settings fully win).
+    // Individual tests override via state.bootAllowed.
+    getCliAllowedMcpServerNames: () => state.bootAllowed,
     setExcludedMcpServers,
     setAllowedMcpServers,
     setPendingMcpServers,
@@ -184,31 +201,10 @@ describe('registerMcpHotReload', () => {
     await listener([]);
 
     expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
-    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith(
-      { a: { command: 'a' }, cliSrv: { command: 'cli' } },
-      expect.anything(),
-    );
-  });
-
-  it('passes the pre-gating effective snapshot to reinitializeMcpServers', async () => {
-    // The listener must capture the effective server set BEFORE narrowing the
-    // admission lists, so a server that becomes filtered out this reconcile is
-    // still recorded as removed (for the tool-not-found message). Here `b` is
-    // effective at call time and must appear in the snapshot handed to
-    // reinitializeMcpServers (its 2nd arg).
-    const fc = makeFakeConfig(cwd, {
-      settingsMcp: { a: { command: 'a' }, b: { command: 'b' } },
-      gating: { allowed: ['a', 'b'] },
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
+      a: { command: 'a' },
+      cliSrv: { command: 'cli' },
     });
-    registerMcpHotReload(watcher, settings, fc.config, undefined);
-
-    merged.mcpServers = { a: { command: 'a' } };
-    await listener([]);
-
-    expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
-    const firstCallArgs = fc.reinitializeMcpServers.mock.calls[0] as unknown[];
-    const prevEffective = firstCallArgs[1] as readonly string[] | undefined;
-    expect(prevEffective).toContain('b');
   });
 
   it('reconciles on an admission-list-only change (mcp.excluded), servers unchanged', async () => {
@@ -229,6 +225,89 @@ describe('registerMcpHotReload', () => {
     expect(fc.setExcludedMcpServers.mock.invocationCallOrder[0]).toBeLessThan(
       fc.reinitializeMcpServers.mock.invocationCallOrder[0],
     );
+  });
+
+  // ── H: mcp.allowed [] semantics ──────────────────────────────────────
+  it('H: an explicit mcp.allowed [] is preserved as deny-all (not collapsed to undefined)', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: {}, // allow-all before
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { a: { command: 'a' } };
+    merged.mcp = { allowed: [] }; // deny all
+    await listener([]);
+
+    // Reconcile fires (absent → [] is a real change) and [] is pushed through.
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith([]);
+  });
+
+  // ── K: startup --allowed-mcp-server-names as an upper bound ───────────
+  it('K: with the startup flag and no settings allow-list, applies the flag in full', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: {},
+      bootAllowed: ['a', 'b'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { a: { command: 'a' } };
+    merged.mcp = {}; // no settings allow-list
+    await listener([]);
+
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(['a', 'b']);
+  });
+
+  it('K: a settings allow-list is capped to the startup flag (cannot widen beyond it)', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: {},
+      bootAllowed: ['a', 'b'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = {
+      a: { command: 'a' },
+      b: { command: 'b' },
+      c: { command: 'c' },
+    };
+    merged.mcp = { allowed: ['a', 'b', 'c'] }; // tries to widen to c
+    await listener([]);
+
+    // `c` is outside the launch bound → dropped.
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(['a', 'b']);
+  });
+
+  it('K: a settings allow-list may narrow within the startup flag', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: {},
+      bootAllowed: ['a', 'b'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { a: { command: 'a' }, b: { command: 'b' } };
+    merged.mcp = { allowed: ['a'] };
+    await listener([]);
+
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(['a']);
+  });
+
+  it('K: without the startup flag, the settings allow-list wins unbounded', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: {},
+      // no bootAllowed
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { a: { command: 'a' }, x: { command: 'x' } };
+    merged.mcp = { allowed: ['x'] };
+    await listener([]);
+
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(['x']);
   });
 
   it('does NOT reconcile when neither servers nor admission lists changed', async () => {
