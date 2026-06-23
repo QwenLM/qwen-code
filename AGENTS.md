@@ -23,21 +23,17 @@ _Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej
 
 ### Core Infrastructure Is Maintainer-Only
 
-**Before approving any PR touching core modules, the reviewer must honestly
-ask: do I truly understand this change's full impact?**
+**Non-maintainer PRs touching core infrastructure are rejected. No
+exceptions, no evaluation, no judgment.**
 
 Core modules — `packages/core/src/**`, auth, providers, models, config, tools,
-services — are the architectural backbone. If the reviewer cannot name every
-downstream consumer affected by the change, they do not understand the blast
-radius — escalate to a maintainer. "The direction looks correct" is not
-confidence; it means the reviewer understood the intent but not the impact.
+services — are the architectural backbone. The gate cannot assess the blast
+radius of changes to these modules. "The direction looks correct" is not
+confidence; it is how bad refactors get approved (see PR #5089: 75 files
+across core/auth/providers/models, approved by gate, design was wrong).
 
-Community PRs that refactor core infrastructure are rejected by default. Core
-refactors must be maintainer-initiated, with design discussion in an issue
-before any PR is opened.
-
-**When in doubt, escalate. Better to wrongly reject a valid PR than to wrongly
-accept a broken one.**
+Core refactors must be maintainer-initiated, with design discussion in an
+issue before any PR is opened. **This is not a guideline. It is a wall.**
 
 ## Common Commands
 

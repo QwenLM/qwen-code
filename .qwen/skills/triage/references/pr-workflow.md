@@ -58,17 +58,22 @@ If the same author has **3+ open PRs in 7 days** with similar patterns:
 - Mostly noise → close the batch with a single explanation.
 - A few have value → extract those, close the rest.
 
-### Stage 0b: Core Module Protection (MANDATORY — run after Stage 0, before Stage 1)
+### Stage 0b: Core Module Protection (HARD BLOCK — no exceptions, no judgment)
 
-**The gate must honestly assess: do I truly understand this PR's full impact?**
+**If the PR author is NOT a maintainer AND the PR touches core infrastructure → reject immediately. Do NOT evaluate. Do NOT proceed to Stage 1. No exceptions.**
 
-Before proceeding, check the PR's changed files. For any PR touching core infrastructure (`packages/core/src/**`, auth, providers, models, config, tools, services, or cross-package refactors):
+Core infrastructure paths:
 
-1. **Can I name every downstream consumer that this change affects?** If not, you do not understand the blast radius — escalate to maintainer immediately.
-2. **Is this a `refactor:` or large structural change from a community contributor?** → Reject. Core refactors must be maintainer-initiated. Reply: "Core infrastructure refactors must be maintainer-initiated. Please open an issue to discuss the design first."
-3. **Am I 100% confident this change is safe?** If there is any doubt — "the direction looks correct" is NOT confidence — escalate to maintainer. Do not approve.
+- `packages/core/src/**`
+- `packages/cli/src/config/auth.ts`, `packages/cli/src/ui/auth/**`
+- `packages/cli/src/serve/**`
+- Any PR spanning both `packages/core` and `packages/cli`
 
-**The meta-principle:** "The direction looks correct" is the most dangerous sentence in triage. It means the gate understood the intent but not the impact. A bad core refactor costs months of breakage. A wrongly rejected one costs a polite comment. **When in doubt, escalate. Better to wrongly reject a valid PR than to wrongly accept a broken one.**
+Check the author: `gh pr view "$PR_NUMBER" --json author --jq '.author.login'`. If the author is not a maintainer, and any changed file matches the paths above → request changes with: "Core infrastructure changes must be maintainer-initiated. Please open an issue to discuss the design first." Then **stop**.
+
+**Do NOT try to evaluate whether the change "looks correct" or "seems safe."** You will be wrong. The gate cannot assess the blast radius of core refactors — that requires architectural context no PR review provides. "The direction looks correct" has caused real damage (see PR #5089: 75 files, core/auth/providers/models, approved by gate, design was wrong).
+
+**This rule is not a guideline. It is a wall. Do not think around it.**
 
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
