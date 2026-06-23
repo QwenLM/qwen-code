@@ -34,6 +34,9 @@ import {
 
 const debugLogger = createDebugLogger('VOICE_SERVICE');
 
+export const EMPTY_WORKSPACE_VOICE_UPDATE_ERROR =
+  'At least one of `enabled`, `mode`, `language`, or `voiceModel` must be provided';
+
 export interface WorkspaceVoiceModelDescriptor {
   id: string;
   transport: Exclude<VoiceTransport, 'unsupported'>;
@@ -274,6 +277,18 @@ export function validateWorkspaceVoiceState(
   settings: LoadedSettings,
   update: WorkspaceVoiceStateUpdate,
 ): void {
+  if (
+    update.enabled === undefined &&
+    update.mode === undefined &&
+    update.language === undefined &&
+    update.voiceModel === undefined
+  ) {
+    throw new WorkspaceVoiceError(
+      400,
+      'invalid_voice_update',
+      EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
+    );
+  }
   const nextEnabled = update.enabled ?? isVoiceEnabled(settings);
   const nextVoiceModel = update.voiceModel ?? readVoiceModel(settings);
   if (update.voiceModel) {

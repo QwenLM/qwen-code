@@ -269,7 +269,24 @@ function getExplicitTrustLevel(
 ): TrustLevel | null {
   const normalizedWorkspace = path.normalize(workspaceCwd);
   for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (path.normalize(rulePath) === normalizedWorkspace) {
+    if (
+      trustLevel === TrustLevel.TRUST_FOLDER &&
+      isWithinRoot(workspaceCwd, rulePath)
+    ) {
+      return trustLevel;
+    }
+    if (
+      trustLevel === TrustLevel.TRUST_PARENT &&
+      isWithinRoot(workspaceCwd, path.dirname(rulePath))
+    ) {
+      return trustLevel;
+    }
+  }
+  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
+    if (
+      trustLevel === TrustLevel.DO_NOT_TRUST &&
+      path.normalize(rulePath) === normalizedWorkspace
+    ) {
       return trustLevel;
     }
   }

@@ -40,7 +40,10 @@ import {
   normalizePermissionRules,
   PermissionRulesValidationError,
 } from '../../config/permission-settings.js';
-import { WorkspaceVoiceError } from '../../services/voice-service.js';
+import {
+  EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
+  WorkspaceVoiceError,
+} from '../../services/voice-service.js';
 import { SetupGithubError, setupGithub } from '../../services/setup-github.js';
 import {
   createSetupGithubFileOps,
@@ -1461,6 +1464,18 @@ export class AcpDispatcher {
               return;
             }
             update.voiceModel = voiceModel.trim();
+          }
+          if (Object.keys(update).length === 0) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
+                ),
+              );
+            }
+            return;
           }
 
           const result = await this.workspace.setWorkspaceVoiceSettings(

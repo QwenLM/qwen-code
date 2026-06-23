@@ -196,17 +196,17 @@ describe('createDaemonWorkspaceService', () => {
 
         expect(persistSettings).toHaveBeenCalledWith('/workspace', [
           {
-            scope: SettingScope.Workspace,
+            scope: SettingScope.User,
             key: 'general.voice.mode',
             value: 'tap',
           },
           {
-            scope: SettingScope.Workspace,
+            scope: SettingScope.User,
             key: 'general.voice.language',
             value: 'english',
           },
           {
-            scope: SettingScope.Workspace,
+            scope: SettingScope.User,
             key: 'general.voice.enabled',
             value: false,
           },
@@ -217,7 +217,7 @@ describe('createDaemonWorkspaceService', () => {
           data: {
             key: 'general.voice.enabled',
             value: false,
-            scope: 'workspace',
+            scope: 'user',
           },
           originatorClientId: 'voice-client',
         });
@@ -238,6 +238,9 @@ describe('createDaemonWorkspaceService', () => {
             voiceModel: 'not-configured',
           }),
         ).rejects.toMatchObject({ code: 'unknown_voice_model' });
+        await expect(
+          svc.setWorkspaceVoiceSettings(makeCtx(), {}),
+        ).rejects.toMatchObject({ code: 'invalid_voice_update' });
 
         expect(persistSettings).not.toHaveBeenCalled();
         expect(publishWorkspaceEvent).not.toHaveBeenCalled();

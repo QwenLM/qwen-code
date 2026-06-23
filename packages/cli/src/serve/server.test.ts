@@ -223,6 +223,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // workspace tool enable/disable, init scaffold, MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
+  'workspace_permissions',
   'workspace_trust',
   'workspace_init',
   'workspace_github_setup',
@@ -273,6 +274,7 @@ const EXPECTED_REGISTERED_FEATURES = [
     (f) =>
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
+      f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
@@ -1620,11 +1622,7 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (
-          feature === 'workspace_settings' ||
-          feature === 'workspace_permissions' ||
-          feature === 'workspace_voice'
-        ) {
+        if (feature === 'workspace_settings' || feature === 'workspace_voice') {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);

@@ -595,6 +595,24 @@ describe('getWorkspaceTrustStatus', () => {
     });
   });
 
+  it('reports trust levels inherited from matching parent rules', () => {
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+    mockRules['/home/user/projectB/child'] = TrustLevel.TRUST_PARENT;
+
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/projectA/subdir'),
+    ).toMatchObject({
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: TrustLevel.TRUST_FOLDER,
+    });
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/projectB/sibling'),
+    ).toMatchObject({
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: TrustLevel.TRUST_PARENT,
+    });
+  });
+
   it('reports disabled folder trust as trusted disabled source', () => {
     expect(
       getWorkspaceTrustStatus(

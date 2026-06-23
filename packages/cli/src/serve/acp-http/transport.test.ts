@@ -1887,6 +1887,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     setSpy.mockRestore();
   });
 
+  it('rejects _qwen/workspace/voice/set with no recognized update fields', async () => {
+    const setSpy = vi.spyOn(fakeWorkspace, 'setWorkspaceVoiceSettings');
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 221,
+      method: '_qwen/workspace/voice/set',
+      params: { enabled_: true },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message?: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 221,
+      error: {
+        code: -32602,
+        message:
+          'At least one of `enabled`, `mode`, `language`, or `voiceModel` must be provided',
+      },
+    });
+    expect(setSpy).not.toHaveBeenCalled();
+    setSpy.mockRestore();
+  });
+
   it('dispatches _qwen/workspace/setup-github', async () => {
     await restartServer({ fsFactory: makeFileFsFactory({}) });
     const connId = await initialize();

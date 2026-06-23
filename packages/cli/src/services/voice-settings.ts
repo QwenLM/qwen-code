@@ -43,8 +43,10 @@ export function readVoiceLanguage(settings: LoadedSettings): string {
 
 export function getVoiceSettingsScope(settings: {
   isTrusted?: boolean;
+  workspace?: { settings?: { general?: { voice?: { enabled?: unknown } } } };
 }): SettingScope {
-  return settings.isTrusted === true
+  return settings.isTrusted === true &&
+    typeof settings.workspace?.settings?.general?.voice?.enabled === 'boolean'
     ? SettingScope.Workspace
     : SettingScope.User;
 }

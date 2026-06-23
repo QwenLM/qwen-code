@@ -317,10 +317,6 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
-  [
-    'workspace_permissions',
-    (toggles) => toggles.persistSettingAvailable === true,
-  ],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
     'workspace_voice_transcription',

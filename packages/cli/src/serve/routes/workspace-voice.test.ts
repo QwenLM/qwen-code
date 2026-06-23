@@ -172,6 +172,15 @@ async function writeVoiceProviderSettings(h: Harness): Promise<void> {
   });
 }
 
+async function writeWorkspaceVoiceEnabled(
+  h: Harness,
+  enabled: boolean,
+): Promise<void> {
+  await writeJson(path.join(h.workspace, '.qwen', 'settings.json'), {
+    general: { voice: { enabled } },
+  });
+}
+
 describe('workspace voice routes', () => {
   let h: Harness;
 
@@ -233,28 +242,58 @@ describe('workspace voice routes', () => {
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.Workspace,
+      SettingScope.User,
       'general.voice.mode',
       'hold',
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.Workspace,
+      SettingScope.User,
       'general.voice.language',
       'english',
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.Workspace,
+      SettingScope.User,
       'general.voice.enabled',
       true,
     );
   });
 
-  it('POST writes initial trusted workspace voice settings to workspace scope', async () => {
+  it('POST writes initial trusted workspace voice settings to user scope', async () => {
     await teardown(h);
     h = await makeHarness({ trusted: true });
     await writeVoiceProviderSettings(h);
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({
+        enabled: true,
+        mode: 'tap',
+      });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'general.voice.mode',
+      'tap',
+    );
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'general.voice.enabled',
+      true,
+    );
+  });
+
+  it('POST writes trusted workspace voice settings to workspace scope after workspace opt-in', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: true });
+    await writeVoiceProviderSettings(h);
+    await writeWorkspaceVoiceEnabled(h, false);
 
     const res = await request(h.app)
       .post('/workspace/voice')
@@ -278,6 +317,24 @@ describe('workspace voice routes', () => {
       'general.voice.enabled',
       true,
     );
+  });
+
+  it('POST rejects requests without recognized voice update fields', async () => {
+    await writeVoiceModelSettings(h);
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ enabled_: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: 'invalid_voice_update',
+      error:
+        'At least one of `enabled`, `mode`, `language`, or `voiceModel` must be provided',
+    });
+    expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
   it('POST broadcasts settings_changed for persisted voice settings', async () => {
@@ -314,17 +371,17 @@ describe('workspace voice routes', () => {
         value: 'qwen3-asr-flash',
       },
       {
-        scope: SettingScope.Workspace,
+        scope: SettingScope.User,
         key: 'general.voice.mode',
         value: 'hold',
       },
       {
-        scope: SettingScope.Workspace,
+        scope: SettingScope.User,
         key: 'general.voice.language',
         value: 'english',
       },
       {
-        scope: SettingScope.Workspace,
+        scope: SettingScope.User,
         key: 'general.voice.enabled',
         value: true,
       },
@@ -340,21 +397,21 @@ describe('workspace voice routes', () => {
       2,
       'general.voice.mode',
       'hold',
-      'workspace',
+      'user',
       'client-1',
     );
     expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
       3,
       'general.voice.language',
       'english',
-      'workspace',
+      'user',
       'client-1',
     );
     expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
       4,
       'general.voice.enabled',
       true,
-      'workspace',
+      'user',
       'client-1',
     );
   });
@@ -496,7 +553,7 @@ describe('workspace voice routes', () => {
     expect(res.status).toBe(200);
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.Workspace,
+      SettingScope.User,
       'general.voice.enabled',
       false,
     );
