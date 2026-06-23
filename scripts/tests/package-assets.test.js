@@ -141,6 +141,19 @@ describe('package asset scripts', () => {
     ).toBe(false);
     expect(
       existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+          'dist',
+          'index.spec.js',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
       ),
     ).toBe(true);
@@ -221,6 +234,25 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
+  it('fails packaging when required audio-capture dependencies are missing', () => {
+    const rootDir = createFixtureRoot();
+    const audioPackagePath = path.join(
+      rootDir,
+      'packages',
+      'audio-capture',
+      'package.json',
+    );
+    const audioPackageJson = JSON.parse(readFileSync(audioPackagePath, 'utf8'));
+    audioPackageJson.dependencies['missing-audio-runtime'] = '1.0.0';
+    writeFileSync(audioPackagePath, JSON.stringify(audioPackageJson, null, 2));
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: true }),
+    ).toThrow(/Required audio capture dependency not resolvable/);
+  });
+
   function createFixtureRoot() {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-assets-'));
     tempDirs.push(rootDir);
@@ -282,6 +314,11 @@ describe('package asset scripts', () => {
       rootDir,
       'packages/audio-capture/dist/index.test.js',
       'throw new Error("should not copy tests");\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/audio-capture/dist/index.spec.js',
+      'throw new Error("should not copy specs");\n',
     );
     writeFile(
       rootDir,
