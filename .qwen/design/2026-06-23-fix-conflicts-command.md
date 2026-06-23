@@ -18,9 +18,9 @@ The first version is intentionally conservative:
 
 ## Workflow
 
-1. `issue_comment` or `workflow_dispatch` resolves the target pull request.
+1. The existing PR command workflow handles `issue_comment` or `workflow_dispatch` and resolves the target pull request.
 2. An authorization job checks the requester's collaborator permission with `CI_BOT_PAT`.
-3. The fix job acknowledges comment triggers with an `eyes` reaction.
+3. The resolve job acknowledges comment triggers with an `eyes` reaction.
 4. The job reads pull request metadata and rejects closed, draft, non-conflicting, or fork pull requests.
 5. For eligible pull requests, the job checks out the pull request branch with persisted credentials disabled, fetches the base branch, and verifies the branch still points at the expected head SHA.
 6. Qwen Code runs without GitHub credentials, merges `origin/<base>`, resolves conflicts, verifies the result, commits, and writes a summary artifact.

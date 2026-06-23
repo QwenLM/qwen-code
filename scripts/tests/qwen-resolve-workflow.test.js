@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,9 +15,21 @@ const repoRoot = path.resolve(
 
 describe('qwen resolve workflow', () => {
   const workflow = readFileSync(
-    path.join(repoRoot, '.github/workflows/qwen-fix-conflicts.yml'),
+    path.join(repoRoot, '.github/workflows/qwen-code-pr-review.yml'),
     'utf8',
   );
+
+  it('uses the existing PR command workflow', () => {
+    expect(
+      existsSync(path.join(repoRoot, '.github/workflows/qwen-fix-conflicts.yml')),
+    ).toBe(false);
+    expect(workflow).toContain("name: 'Qwen Pull Request Commands'");
+    expect(workflow).toContain('issue_comment:');
+    expect(workflow).toContain("github.event.inputs.command == 'resolve'");
+    expect(workflow).toContain('needs.authorize-resolve.outputs.should_run');
+    expect(workflow).not.toContain('needs.authorize.outputs');
+    expect(workflow).toContain("sed 's/.*@qwen \\/review//'");
+  });
 
   it('listens for /resolve comments', () => {
     expect(workflow).toContain(
@@ -26,7 +38,7 @@ describe('qwen resolve workflow', () => {
     expect(workflow).toContain(
       "startsWith(github.event.comment.body, '@qwen-code /resolve ')",
     );
-    expect(workflow).toContain("format('@qwen-code /resolve{0}', '\\n')");
+    expect(workflow).toContain("format('@qwen-code /resolve{0}',");
     expect(workflow).not.toContain('/fix_conflicts');
   });
 
@@ -51,5 +63,12 @@ describe('qwen resolve workflow', () => {
   it('refreshes dependencies after conflict resolution', () => {
     expect(workflow).toContain("- name: 'Refresh dependencies'");
     expect(workflow).toContain("steps.resolve_conflicts.outcome == 'success'");
+  });
+
+  it('uses resolve naming for run artifacts', () => {
+    expect(workflow).toContain('qwen-resolve-');
+    expect(workflow).toContain('/tmp/qwen-resolve');
+    expect(workflow).toContain('<!-- qwen-resolve-result -->');
+    expect(workflow).not.toContain('qwen-fix-conflicts');
   });
 });
