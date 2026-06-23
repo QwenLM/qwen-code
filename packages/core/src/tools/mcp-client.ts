@@ -1628,28 +1628,25 @@ export async function connectToMcpServer(
                     throw retryError;
                   }
                 } else {
-                  debugLogger.error(
-                    `Failed to create OAuth transport for server '${mcpServerName}'`,
-                  );
-                  throw new Error(
-                    `Failed to create OAuth transport for server '${mcpServerName}'`,
-                  );
+                  const oauthMessage =
+                    `Failed to create OAuth transport for server '${mcpServerName}'. ` +
+                    getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+                  debugLogger.error(oauthMessage);
+                  throw new Error(oauthMessage);
                 }
               } else {
-                debugLogger.error(
-                  `Failed to get OAuth token for server '${mcpServerName}'`,
-                );
-                throw new Error(
-                  `Failed to get OAuth token for server '${mcpServerName}'`,
-                );
+                const oauthMessage =
+                  `Failed to get OAuth token for server '${mcpServerName}'. ` +
+                  getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+                debugLogger.error(oauthMessage);
+                throw new Error(oauthMessage);
               }
             } else {
-              debugLogger.error(
-                `Failed to get stored credentials for server '${mcpServerName}'`,
-              );
-              throw new Error(
-                `Failed to get stored credentials for server '${mcpServerName}'`,
-              );
+              const oauthMessage =
+                `Failed to get stored credentials for server '${mcpServerName}'. ` +
+                getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+              debugLogger.error(oauthMessage);
+              throw new Error(oauthMessage);
             }
           } else {
             debugLogger.error(
@@ -1810,7 +1807,8 @@ export async function createTransport(
         );
       } else {
         debugLogger.warn(
-          `Stored OAuth credentials exist for server '${mcpServerName}' but no valid token could be obtained. Transport will be created without authentication; expect a 401.`,
+          `Stored OAuth credentials exist for server '${mcpServerName}' but no valid token could be obtained. Transport will be created without authentication; expect a 401. ` +
+            getMcpOAuthDialogInstruction('re-authenticate', mcpServerName),
         );
       }
     }

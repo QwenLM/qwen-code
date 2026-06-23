@@ -325,14 +325,10 @@ export const BaseTextInput = ({
     prefixWidth,
   });
 
-  // Ink publishes this value from its own insertion effect, so write it before
-  // Ink's effect setup reads the latest committed position.
-  setCursorPosition(cursorPosition);
-
-  useInsertionEffect(
-    () => () => setCursorPosition(undefined),
-    [setCursorPosition],
-  );
+  useInsertionEffect(() => {
+    setCursorPosition(cursorPosition);
+    return () => setCursorPosition(undefined);
+  }, [setCursorPosition, cursorPosition]);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (

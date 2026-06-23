@@ -158,6 +158,7 @@ describe('mcp-client', () => {
         authenticate,
         connect,
         discoverOAuthConfig,
+        getCredentials,
         getValidToken,
         workspaceContext,
       };
@@ -553,6 +554,79 @@ describe('mcp-client', () => {
         'http://test-server/mcp',
       );
       expect(connect).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports OAuth guidance when post-discovery transport creation fails', async () => {
+      const config = { httpUrl: 'http://test-server/mcp' };
+      const { connect, discoverOAuthConfig, getValidToken, workspaceContext } =
+        setupHttpOAuthRetry(new Error('HTTP 401 Unauthorized'));
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getValidToken.mockImplementation(async () => {
+        config.httpUrl = 'not a valid URL';
+        return 'access-token';
+      });
+      const oauthMessage =
+        "Failed to create OAuth transport for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer('http-server', config, false, workspaceContext),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports OAuth guidance when post-discovery token lookup fails', async () => {
+      const { getValidToken, workspaceContext } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getValidToken.mockResolvedValue(null);
+      const oauthMessage =
+        "Failed to get OAuth token for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports OAuth guidance when post-discovery credentials are unavailable', async () => {
+      const { getCredentials, workspaceContext } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getCredentials.mockReset();
+      getCredentials.mockResolvedValue(null);
+      const oauthMessage =
+        "Failed to get stored credentials for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
     });
 
     it('wraps OAuth discovery errors with remediation guidance', async () => {
@@ -2040,7 +2114,11 @@ describe('mcp-client', () => {
           clientId: 'client-id',
         });
         expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-          "Stored OAuth credentials exist for server 'oauth-test-server' but no valid token could be obtained. Transport will be created without authentication; expect a 401.",
+          "Stored OAuth credentials exist for server 'oauth-test-server' but no valid token could be obtained. Transport will be created without authentication; expect a 401. " +
+            getMcpOAuthDialogInstruction(
+              're-authenticate',
+              'oauth-test-server',
+            ),
         );
       });
 
