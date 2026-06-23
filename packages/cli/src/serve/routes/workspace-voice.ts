@@ -363,7 +363,7 @@ export function registerWorkspaceVoiceRoutes(
 
   app.post(
     '/workspace/voice/transcribe',
-    deps.mutate(),
+    deps.mutate({ strict: true }),
     express.raw({
       type: (req) =>
         isSupportedAudioContentType(

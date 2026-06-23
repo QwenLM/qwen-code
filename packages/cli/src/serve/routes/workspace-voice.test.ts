@@ -529,7 +529,23 @@ describe('workspace voice routes', () => {
     expect(h.transcribe).not.toHaveBeenCalled();
   });
 
-  it('registers transcription as a non-strict mutation route', () => {
+  it('POST /workspace/voice/transcribe requires a configured token on loopback defaults', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: '' });
+    await writeVoiceModelSettings(h);
+
+    const res = await request(h.app)
+      .post('/workspace/voice/transcribe?voiceModel=qwen3-asr-flash')
+      .set('Host', hostHeader)
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3, 4]));
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    expect(h.transcribe).not.toHaveBeenCalled();
+  });
+
+  it('registers transcription as a strict mutation route', () => {
     const mutate = vi.fn(
       () => (_req: Request, _res: Response, next: NextFunction) => next(),
     );
@@ -545,7 +561,7 @@ describe('workspace voice routes', () => {
     });
 
     expect(mutate).toHaveBeenNthCalledWith(1, { strict: true });
-    expect(mutate).toHaveBeenNthCalledWith(2);
+    expect(mutate).toHaveBeenNthCalledWith(2, { strict: true });
   });
 
   it('POST /workspace/voice/transcribe accepts omitted client id', async () => {
