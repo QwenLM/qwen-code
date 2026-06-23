@@ -194,9 +194,21 @@ export function registerWorkspacePermissionsRoutes(
         );
       }
 
-      res
-        .status(200)
-        .json(buildPermissionSettings(loadSettings(boundWorkspace)));
+      try {
+        res
+          .status(200)
+          .json(buildPermissionSettings(loadSettings(boundWorkspace)));
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /workspace/permissions response error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to load permission rules',
+          code: 'internal_error',
+        });
+      }
     },
   );
 }

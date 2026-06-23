@@ -303,6 +303,45 @@ describe('workspace permissions routes', () => {
     ]);
   });
 
+  it('POST returns 500 when ACP child throws non-SessionNotFoundError', async () => {
+    await teardown(h);
+    h = await makeHarness({
+      invokeWorkspaceCommand: vi.fn(async () => {
+        throw new Error('unexpected ACP failure');
+      }),
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *)'] });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('permission_update_failed');
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('POST returns 500 when persistSetting throws', async () => {
+    h.persistSetting.mockRejectedValueOnce(new Error('disk full'));
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *)'] });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('persist_error');
+  });
+
+  it('POST rejects unknown client id', async () => {
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .set('X-Qwen-Client-Id', 'unknown-client')
+      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *)'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_client_id');
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
   it('POST persists untrusted workspace rules without merging them into effective rules', async () => {
     await writeJson(path.join(h.home, 'settings.json'), {
       security: { folderTrust: { enabled: true } },
