@@ -29,25 +29,34 @@ export const OAUTH_REDIRECT_PATH = '/oauth/callback';
 /**
  * Build the default OAuth redirect URI.
  *
- * When running inside a DSW instance (dsw_baseUrl is set), the local
- * callback server is not directly reachable from the user's browser.
- * Instead, traffic arrives through the DSW reverse proxy, so the redirect
- * URI must point to the proxy path:
+ * The local callback server (localhost:<port>) is not always reachable from
+ * the user's browser, so depending on the runtime the redirect URI must point
+ * at a reverse proxy instead:
  *
- *   https://<dsw-base>/proxy/<OAUTH_REDIRECT_PORT><OAUTH_REDIRECT_PATH>
+ * 1. BFF proxy (newer Data Agent runtime) — when BFF_ENDPOINT and
+ *    DATA_AGENT_INSTANCE_ID are set:
+ *      <BFF_ENDPOINT>/skwacb/<segment>/<instanceId><OAUTH_REDIRECT_PATH>
+ *    where <segment> is `bxkxuth` for ACS_SANDBOX instances
+ *    (DA_RUNTIME_TYPE=ACS_SANDBOX) and `kxuth` otherwise.
  *
- * dsw_baseUrl is already the DSW base URL, e.g.:
- *   https://dw.aliyun.com/dsw-380036
+ * 2. DSW proxy (legacy) — when dsw_baseUrl is set, e.g.
+ *    https://dw.aliyun.com/dsw-380036:
+ *      <dsw_baseUrl>/proxy/<OAUTH_REDIRECT_PORT><OAUTH_REDIRECT_PATH>
  *
- * When dsw_baseUrl is not set (local dev), fall back to localhost.
+ * 3. Local dev — neither is set: fall back to localhost.
  */
 export function getOAuthRedirectUri(): string {
   // 新版，走 bff 代理转发的逻辑
   const bffEndpoint = process.env['BFF_ENDPOINT'];
   const dataAgentInstanceId = process.env['DATA_AGENT_INSTANCE_ID'];
   if (bffEndpoint && dataAgentInstanceId) {
-    const bffOAuthProxyPath = '/skwacb/kxuth/';
-    return `${bffEndpoint}${bffOAuthProxyPath}${dataAgentInstanceId}${OAUTH_REDIRECT_PATH}`;
+    // 新版 Data Agent 实例（DA_RUNTIME_TYPE=ACS_SANDBOX）使用 bxkxuth 代理段，
+    // 旧实例仍使用 kxuth。
+    const proxySegment =
+      process.env['DA_RUNTIME_TYPE'] === 'ACS_SANDBOX' ? 'bxkxuth' : 'kxuth';
+    const base = bffEndpoint.replace(/\/+$/, '');
+    const bffOAuthProxyPath = `/skwacb/${proxySegment}/`;
+    return `${base}${bffOAuthProxyPath}${dataAgentInstanceId}${OAUTH_REDIRECT_PATH}`;
   }
 
   // 兼容旧版 DSW 实例

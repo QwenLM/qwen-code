@@ -142,9 +142,7 @@ export class MCPOAuthProvider {
     registrationUrl: string,
     config: MCPOAuthConfig,
   ): Promise<OAuthClientRegistrationResponse> {
-    const redirectUri =
-      config.redirectUri ||
-      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
+    const redirectUri = config.redirectUri || getOAuthRedirectUri();
 
     const registrationRequest: OAuthClientRegistrationRequest = {
       client_name: MCP_OAUTH_CLIENT_NAME,
@@ -414,9 +412,7 @@ export class MCPOAuthProvider {
     codeVerifier: string,
     mcpServerUrl?: string,
   ): Promise<OAuthTokenResponse> {
-    const redirectUri =
-      config.redirectUri ||
-      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
+    const redirectUri = config.redirectUri || getOAuthRedirectUri();
 
     const params = new URLSearchParams({
       grant_type: 'authorization_code',
@@ -743,6 +739,14 @@ export class MCPOAuthProvider {
         }
       }
     }
+
+    // Freeze the redirect URI once for the whole flow so dynamic client
+    // registration, the authorization request, and the token exchange all carry
+    // an identical value. They each fall back to getOAuthRedirectUri()
+    // independently, but recomputing per-call would risk divergence if an env
+    // var (e.g. DA_RUNTIME_TYPE) changed during the human-in-the-loop wait —
+    // which the OAuth server would reject as redirect_uri_mismatch.
+    config.redirectUri = config.redirectUri || getOAuthRedirectUri();
 
     // If no client ID is provided, try dynamic client registration
     if (!config.clientId) {

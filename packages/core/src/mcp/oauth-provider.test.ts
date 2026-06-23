@@ -246,6 +246,120 @@ describe('MCPOAuthProvider', () => {
       );
     });
 
+    it('uses an identical redirect_uri across registration, authorization, and token exchange when none is configured', async () => {
+      // Force getOAuthRedirectUri() to return a BFF proxy URL so the assertion
+      // is meaningful: the original bug hardcoded localhost at the registration
+      // and token-exchange sites while the authorization URL used the proxy, so
+      // the three only diverged in a proxied environment.
+      const envKeys = [
+        'BFF_ENDPOINT',
+        'DATA_AGENT_INSTANCE_ID',
+        'DA_RUNTIME_TYPE',
+      ] as const;
+      const savedEnv: Record<string, string | undefined> = {};
+      for (const key of envKeys) {
+        savedEnv[key] = process.env[key];
+      }
+      process.env['BFF_ENDPOINT'] = 'https://bff.example.com';
+      process.env['DATA_AGENT_INSTANCE_ID'] = 'inst-xyz';
+      process.env['DA_RUNTIME_TYPE'] = 'ACS_SANDBOX';
+      const expectedRedirectUri =
+        'https://bff.example.com/skwacb/bxkxuth/inst-xyz/oauth/callback';
+
+      try {
+        // No redirectUri (exercises the fallback) and no clientId (forces
+        // dynamic client registration, so all three sites run).
+        const config: MCPOAuthConfig = {
+          enabled: true,
+          authorizationUrl: 'https://auth.example.com/authorize',
+          tokenUrl: 'https://auth.example.com/token',
+          registrationUrl: 'https://auth.example.com/register',
+          scopes: ['read'],
+        };
+
+        let callbackHandler: unknown;
+        vi.mocked(http.createServer).mockImplementation((handler) => {
+          callbackHandler = handler;
+          return mockHttpServer as unknown as http.Server;
+        });
+        mockHttpServer.listen.mockImplementation((port, callback) => {
+          callback?.();
+          setTimeout(() => {
+            (callbackHandler as (req: unknown, res: unknown) => void)(
+              {
+                url: '/oauth/callback?code=auth_code_123&state=bW9ja19zdGF0ZV8xNl9ieXRlcw',
+              },
+              { writeHead: vi.fn(), end: vi.fn() },
+            );
+          }, 10);
+        });
+
+        // First fetch: dynamic client registration. Second fetch: token exchange.
+        mockFetch
+          .mockResolvedValueOnce(
+            createMockResponse({
+              ok: true,
+              contentType: 'application/json',
+              json: {
+                client_id: 'registered-client',
+                redirect_uris: [expectedRedirectUri],
+                grant_types: ['authorization_code', 'refresh_token'],
+                response_types: ['code'],
+                token_endpoint_auth_method: 'none',
+              },
+            }),
+          )
+          .mockResolvedValueOnce(
+            createMockResponse({
+              ok: true,
+              contentType: 'application/json',
+              text: JSON.stringify(mockTokenResponse),
+              json: mockTokenResponse,
+            }),
+          );
+
+        const authProvider = new MCPOAuthProvider();
+        await authProvider.authenticate('test-server', config);
+
+        // 1. Dynamic client registration request body.
+        const registrationCall = mockFetch.mock.calls.find(
+          (call) => call[0] === 'https://auth.example.com/register',
+        );
+        expect(registrationCall).toBeDefined();
+        const registrationBody = JSON.parse(
+          (registrationCall![1] as { body: string }).body,
+        );
+        expect(registrationBody.redirect_uris).toEqual([expectedRedirectUri]);
+
+        // 2. Authorization URL opened in the browser.
+        const authUrl = new URL(
+          mockOpenBrowserSecurely.mock.calls[0][0] as string,
+        );
+        expect(authUrl.searchParams.get('redirect_uri')).toBe(
+          expectedRedirectUri,
+        );
+
+        // 3. Token exchange request body.
+        const tokenCall = mockFetch.mock.calls.find(
+          (call) => call[0] === 'https://auth.example.com/token',
+        );
+        expect(tokenCall).toBeDefined();
+        const tokenBody = new URLSearchParams(
+          (tokenCall![1] as { body: string }).body,
+        );
+        expect(tokenBody.get('redirect_uri')).toBe(expectedRedirectUri);
+      } finally {
+        for (const key of envKeys) {
+          const value = savedEnv[key];
+          if (value === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = value;
+          }
+        }
+      }
+    });
+
     it('should handle OAuth discovery when no authorization URL provided', async () => {
       // Use a mutable config object
       const configWithoutAuth: MCPOAuthConfig = {

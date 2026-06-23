@@ -5,14 +5,154 @@ Patch-Base: cc800d01322c3bf642b919425576da09f182c3d5
 Fork-Ref: origin/main (c6b168ec034253e76a07492a30cfb134eae47545)
 Upstream-Ref: upstream/main
 Paths:
+  - packages/core/src/mcp/constants.test.ts
   - packages/core/src/mcp/constants.ts
+  - packages/core/src/mcp/oauth-provider.test.ts
   - packages/core/src/mcp/oauth-provider.ts
+Tests:
+  - cd packages/core && npx vitest run src/mcp/constants.test.ts src/mcp/oauth-provider.test.ts
 
+diff --git a/packages/core/src/mcp/constants.test.ts b/packages/core/src/mcp/constants.test.ts
+new file mode 100644
+index 000000000..7bd0fbcf6
+--- /dev/null
++++ b/packages/core/src/mcp/constants.test.ts
+@@ -0,0 +1,130 @@
++/**
++ * @license
++ * Copyright 2025 Qwen
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++import { describe, it, expect, beforeEach, afterEach } from 'vitest';
++import {
++  getOAuthRedirectUri,
++  OAUTH_REDIRECT_PORT,
++  OAUTH_REDIRECT_PATH,
++} from './constants.js';
++
++describe('getOAuthRedirectUri', () => {
++  const ENV_KEYS = [
++    'BFF_ENDPOINT',
++    'DATA_AGENT_INSTANCE_ID',
++    'DA_RUNTIME_TYPE',
++    'dsw_baseUrl',
++  ] as const;
++
++  let savedEnv: Record<string, string | undefined>;
++
++  beforeEach(() => {
++    // Snapshot then clear all env vars that influence the result so each
++    // test starts from a known-empty state.
++    savedEnv = {};
++    for (const key of ENV_KEYS) {
++      savedEnv[key] = process.env[key];
++      delete process.env[key];
++    }
++  });
++
++  afterEach(() => {
++    // Restore the original environment.
++    for (const key of ENV_KEYS) {
++      const value = savedEnv[key];
++      if (value === undefined) {
++        delete process.env[key];
++      } else {
++        process.env[key] = value;
++      }
++    }
++  });
++
++  it('falls back to localhost when no environment hints are set', () => {
++    expect(getOAuthRedirectUri()).toBe(
++      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`,
++    );
++  });
++
++  describe('BFF proxy', () => {
++    beforeEach(() => {
++      process.env['BFF_ENDPOINT'] = 'https://bff.example.com';
++      process.env['DATA_AGENT_INSTANCE_ID'] = 'inst-123';
++    });
++
++    it('uses the kxuth segment for legacy instances', () => {
++      expect(getOAuthRedirectUri()).toBe(
++        `https://bff.example.com/skwacb/kxuth/inst-123${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('uses the bxkxuth segment when DA_RUNTIME_TYPE is ACS_SANDBOX', () => {
++      process.env['DA_RUNTIME_TYPE'] = 'ACS_SANDBOX';
++      expect(getOAuthRedirectUri()).toBe(
++        `https://bff.example.com/skwacb/bxkxuth/inst-123${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('keeps the kxuth segment for any other DA_RUNTIME_TYPE value', () => {
++      process.env['DA_RUNTIME_TYPE'] = 'DSW';
++      expect(getOAuthRedirectUri()).toBe(
++        `https://bff.example.com/skwacb/kxuth/inst-123${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('keeps the kxuth segment for an empty DA_RUNTIME_TYPE', () => {
++      process.env['DA_RUNTIME_TYPE'] = '';
++      expect(getOAuthRedirectUri()).toBe(
++        `https://bff.example.com/skwacb/kxuth/inst-123${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('strips trailing slashes from BFF_ENDPOINT to avoid a double slash', () => {
++      process.env['BFF_ENDPOINT'] = 'https://bff.example.com///';
++      expect(getOAuthRedirectUri()).toBe(
++        `https://bff.example.com/skwacb/kxuth/inst-123${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('takes priority over dsw_baseUrl when both are present', () => {
++      process.env['dsw_baseUrl'] = 'https://dw.aliyun.com/dsw-380036';
++      expect(getOAuthRedirectUri()).toBe(
++        `https://bff.example.com/skwacb/kxuth/inst-123${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('falls through when BFF_ENDPOINT is set but the instance id is missing', () => {
++      delete process.env['DATA_AGENT_INSTANCE_ID'];
++      expect(getOAuthRedirectUri()).toBe(
++        `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('treats empty-string env values as unset and falls through to localhost', () => {
++      process.env['BFF_ENDPOINT'] = '';
++      process.env['DATA_AGENT_INSTANCE_ID'] = '';
++      expect(getOAuthRedirectUri()).toBe(
++        `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++  });
++
++  describe('DSW proxy', () => {
++    it('builds a proxy path from dsw_baseUrl', () => {
++      process.env['dsw_baseUrl'] = 'https://dw.aliyun.com/dsw-380036';
++      expect(getOAuthRedirectUri()).toBe(
++        `https://dw.aliyun.com/dsw-380036/proxy/${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++
++    it('strips trailing slashes from dsw_baseUrl', () => {
++      process.env['dsw_baseUrl'] = 'https://dw.aliyun.com/dsw-380036///';
++      expect(getOAuthRedirectUri()).toBe(
++        `https://dw.aliyun.com/dsw-380036/proxy/${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`,
++      );
++    });
++  });
++});
 diff --git a/packages/core/src/mcp/constants.ts b/packages/core/src/mcp/constants.ts
-index ca9c27f3c..cbeb174ef 100644
+index ca9c27f3c..2c0467eed 100644
 --- a/packages/core/src/mcp/constants.ts
 +++ b/packages/core/src/mcp/constants.ts
-@@ -25,3 +25,36 @@ export const OAUTH_REDIRECT_PORT = 7777;
+@@ -25,3 +25,45 @@ export const OAUTH_REDIRECT_PORT = 7777;
   * Path for OAuth redirect callback.
   */
  export const OAUTH_REDIRECT_PATH = '/oauth/callback';
@@ -20,25 +160,34 @@ index ca9c27f3c..cbeb174ef 100644
 +/**
 + * Build the default OAuth redirect URI.
 + *
-+ * When running inside a DSW instance (dsw_baseUrl is set), the local
-+ * callback server is not directly reachable from the user's browser.
-+ * Instead, traffic arrives through the DSW reverse proxy, so the redirect
-+ * URI must point to the proxy path:
++ * The local callback server (localhost:<port>) is not always reachable from
++ * the user's browser, so depending on the runtime the redirect URI must point
++ * at a reverse proxy instead:
 + *
-+ *   https://<dsw-base>/proxy/<OAUTH_REDIRECT_PORT><OAUTH_REDIRECT_PATH>
++ * 1. BFF proxy (newer Data Agent runtime) — when BFF_ENDPOINT and
++ *    DATA_AGENT_INSTANCE_ID are set:
++ *      <BFF_ENDPOINT>/skwacb/<segment>/<instanceId><OAUTH_REDIRECT_PATH>
++ *    where <segment> is `bxkxuth` for ACS_SANDBOX instances
++ *    (DA_RUNTIME_TYPE=ACS_SANDBOX) and `kxuth` otherwise.
 + *
-+ * dsw_baseUrl is already the DSW base URL, e.g.:
-+ *   https://dw.aliyun.com/dsw-380036
++ * 2. DSW proxy (legacy) — when dsw_baseUrl is set, e.g.
++ *    https://dw.aliyun.com/dsw-380036:
++ *      <dsw_baseUrl>/proxy/<OAUTH_REDIRECT_PORT><OAUTH_REDIRECT_PATH>
 + *
-+ * When dsw_baseUrl is not set (local dev), fall back to localhost.
++ * 3. Local dev — neither is set: fall back to localhost.
 + */
 +export function getOAuthRedirectUri(): string {
 +  // 新版，走 bff 代理转发的逻辑
 +  const bffEndpoint = process.env['BFF_ENDPOINT'];
 +  const dataAgentInstanceId = process.env['DATA_AGENT_INSTANCE_ID'];
 +  if (bffEndpoint && dataAgentInstanceId) {
-+    const bffOAuthProxyPath = '/skwacb/kxuth/';
-+    return `${bffEndpoint}${bffOAuthProxyPath}${dataAgentInstanceId}${OAUTH_REDIRECT_PATH}`;
++    // 新版 Data Agent 实例（DA_RUNTIME_TYPE=ACS_SANDBOX）使用 bxkxuth 代理段，
++    // 旧实例仍使用 kxuth。
++    const proxySegment =
++      process.env['DA_RUNTIME_TYPE'] === 'ACS_SANDBOX' ? 'bxkxuth' : 'kxuth';
++    const base = bffEndpoint.replace(/\/+$/, '');
++    const bffOAuthProxyPath = `/skwacb/${proxySegment}/`;
++    return `${base}${bffOAuthProxyPath}${dataAgentInstanceId}${OAUTH_REDIRECT_PATH}`;
 +  }
 +
 +  // 兼容旧版 DSW 实例
@@ -49,8 +198,133 @@ index ca9c27f3c..cbeb174ef 100644
 +  }
 +  return `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
 +}
+diff --git a/packages/core/src/mcp/oauth-provider.test.ts b/packages/core/src/mcp/oauth-provider.test.ts
+index 2edf45860..97ac0f0ba 100644
+--- a/packages/core/src/mcp/oauth-provider.test.ts
++++ b/packages/core/src/mcp/oauth-provider.test.ts
+@@ -246,6 +246,120 @@ describe('MCPOAuthProvider', () => {
+       );
+     });
+ 
++    it('uses an identical redirect_uri across registration, authorization, and token exchange when none is configured', async () => {
++      // Force getOAuthRedirectUri() to return a BFF proxy URL so the assertion
++      // is meaningful: the original bug hardcoded localhost at the registration
++      // and token-exchange sites while the authorization URL used the proxy, so
++      // the three only diverged in a proxied environment.
++      const envKeys = [
++        'BFF_ENDPOINT',
++        'DATA_AGENT_INSTANCE_ID',
++        'DA_RUNTIME_TYPE',
++      ] as const;
++      const savedEnv: Record<string, string | undefined> = {};
++      for (const key of envKeys) {
++        savedEnv[key] = process.env[key];
++      }
++      process.env['BFF_ENDPOINT'] = 'https://bff.example.com';
++      process.env['DATA_AGENT_INSTANCE_ID'] = 'inst-xyz';
++      process.env['DA_RUNTIME_TYPE'] = 'ACS_SANDBOX';
++      const expectedRedirectUri =
++        'https://bff.example.com/skwacb/bxkxuth/inst-xyz/oauth/callback';
++
++      try {
++        // No redirectUri (exercises the fallback) and no clientId (forces
++        // dynamic client registration, so all three sites run).
++        const config: MCPOAuthConfig = {
++          enabled: true,
++          authorizationUrl: 'https://auth.example.com/authorize',
++          tokenUrl: 'https://auth.example.com/token',
++          registrationUrl: 'https://auth.example.com/register',
++          scopes: ['read'],
++        };
++
++        let callbackHandler: unknown;
++        vi.mocked(http.createServer).mockImplementation((handler) => {
++          callbackHandler = handler;
++          return mockHttpServer as unknown as http.Server;
++        });
++        mockHttpServer.listen.mockImplementation((port, callback) => {
++          callback?.();
++          setTimeout(() => {
++            (callbackHandler as (req: unknown, res: unknown) => void)(
++              {
++                url: '/oauth/callback?code=auth_code_123&state=bW9ja19zdGF0ZV8xNl9ieXRlcw',
++              },
++              { writeHead: vi.fn(), end: vi.fn() },
++            );
++          }, 10);
++        });
++
++        // First fetch: dynamic client registration. Second fetch: token exchange.
++        mockFetch
++          .mockResolvedValueOnce(
++            createMockResponse({
++              ok: true,
++              contentType: 'application/json',
++              json: {
++                client_id: 'registered-client',
++                redirect_uris: [expectedRedirectUri],
++                grant_types: ['authorization_code', 'refresh_token'],
++                response_types: ['code'],
++                token_endpoint_auth_method: 'none',
++              },
++            }),
++          )
++          .mockResolvedValueOnce(
++            createMockResponse({
++              ok: true,
++              contentType: 'application/json',
++              text: JSON.stringify(mockTokenResponse),
++              json: mockTokenResponse,
++            }),
++          );
++
++        const authProvider = new MCPOAuthProvider();
++        await authProvider.authenticate('test-server', config);
++
++        // 1. Dynamic client registration request body.
++        const registrationCall = mockFetch.mock.calls.find(
++          (call) => call[0] === 'https://auth.example.com/register',
++        );
++        expect(registrationCall).toBeDefined();
++        const registrationBody = JSON.parse(
++          (registrationCall![1] as { body: string }).body,
++        );
++        expect(registrationBody.redirect_uris).toEqual([expectedRedirectUri]);
++
++        // 2. Authorization URL opened in the browser.
++        const authUrl = new URL(
++          mockOpenBrowserSecurely.mock.calls[0][0] as string,
++        );
++        expect(authUrl.searchParams.get('redirect_uri')).toBe(
++          expectedRedirectUri,
++        );
++
++        // 3. Token exchange request body.
++        const tokenCall = mockFetch.mock.calls.find(
++          (call) => call[0] === 'https://auth.example.com/token',
++        );
++        expect(tokenCall).toBeDefined();
++        const tokenBody = new URLSearchParams(
++          (tokenCall![1] as { body: string }).body,
++        );
++        expect(tokenBody.get('redirect_uri')).toBe(expectedRedirectUri);
++      } finally {
++        for (const key of envKeys) {
++          const value = savedEnv[key];
++          if (value === undefined) {
++            delete process.env[key];
++          } else {
++            process.env[key] = value;
++          }
++        }
++      }
++    });
++
+     it('should handle OAuth discovery when no authorization URL provided', async () => {
+       // Use a mutable config object
+       const configWithoutAuth: MCPOAuthConfig = {
 diff --git a/packages/core/src/mcp/oauth-provider.ts b/packages/core/src/mcp/oauth-provider.ts
-index ce92e97da..3ffa0d859 100644
+index ce92e97da..c0f17a517 100644
 --- a/packages/core/src/mcp/oauth-provider.ts
 +++ b/packages/core/src/mcp/oauth-provider.ts
 @@ -18,6 +18,7 @@ import {
@@ -61,7 +335,18 @@ index ce92e97da..3ffa0d859 100644
  } from './constants.js';
  
  export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
-@@ -357,9 +358,7 @@ export class MCPOAuthProvider {
+@@ -141,9 +142,7 @@ export class MCPOAuthProvider {
+     registrationUrl: string,
+     config: MCPOAuthConfig,
+   ): Promise<OAuthClientRegistrationResponse> {
+-    const redirectUri =
+-      config.redirectUri ||
+-      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
++    const redirectUri = config.redirectUri || getOAuthRedirectUri();
+ 
+     const registrationRequest: OAuthClientRegistrationRequest = {
+       client_name: MCP_OAUTH_CLIENT_NAME,
+@@ -357,9 +356,7 @@ export class MCPOAuthProvider {
      pkceParams: PKCEParams,
      mcpServerUrl?: string,
    ): string {
@@ -72,3 +357,29 @@ index ce92e97da..3ffa0d859 100644
  
      const params = new URLSearchParams({
        client_id: config.clientId!,
+@@ -415,9 +412,7 @@ export class MCPOAuthProvider {
+     codeVerifier: string,
+     mcpServerUrl?: string,
+   ): Promise<OAuthTokenResponse> {
+-    const redirectUri =
+-      config.redirectUri ||
+-      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
++    const redirectUri = config.redirectUri || getOAuthRedirectUri();
+ 
+     const params = new URLSearchParams({
+       grant_type: 'authorization_code',
+@@ -745,6 +740,14 @@ export class MCPOAuthProvider {
+       }
+     }
+ 
++    // Freeze the redirect URI once for the whole flow so dynamic client
++    // registration, the authorization request, and the token exchange all carry
++    // an identical value. They each fall back to getOAuthRedirectUri()
++    // independently, but recomputing per-call would risk divergence if an env
++    // var (e.g. DA_RUNTIME_TYPE) changed during the human-in-the-loop wait —
++    // which the OAuth server would reject as redirect_uri_mismatch.
++    config.redirectUri = config.redirectUri || getOAuthRedirectUri();
++
+     // If no client ID is provided, try dynamic client registration
+     if (!config.clientId) {
+       let registrationUrl = config.registrationUrl;

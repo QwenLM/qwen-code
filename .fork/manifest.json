@@ -50,8 +50,13 @@
         "title": "DSW OAuth redirect rewrite",
         "reason": "Rewrite MCP OAuth redirect URLs for the DSW proxy environment.",
         "paths": [
+          "packages/core/src/mcp/constants.test.ts",
           "packages/core/src/mcp/constants.ts",
+          "packages/core/src/mcp/oauth-provider.test.ts",
           "packages/core/src/mcp/oauth-provider.ts"
+        ],
+        "tests": [
+          "cd packages/core && npx vitest run src/mcp/constants.test.ts src/mcp/oauth-provider.test.ts"
         ]
       },
       {
