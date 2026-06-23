@@ -32,6 +32,7 @@ import stringWidth from 'string-width';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
+import { getInputBackgroundFill } from '../utils/theme-background.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -373,7 +374,7 @@ export const BaseTextInput = ({
         <Box
           flexGrow={1}
           flexDirection="column"
-          backgroundColor={theme.background.primary}
+          backgroundColor={getInputBackgroundFill()}
         >
           {buffer.text.length === 0 && placeholder ? (
             showCursor ? (
