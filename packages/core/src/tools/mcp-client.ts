@@ -1327,18 +1327,26 @@ export async function connectToMcpServer(
   // "never had OAuth configuration."
   let hadStoredSseOAuthCredentials = false;
 
-  try {
-    if (
-      mcpServerConfig.url &&
-      !mcpServerConfig.httpUrl &&
-      !mcpServerConfig.oauth?.enabled
-    ) {
-      const tokenStorage = new MCPOAuthTokenStorage();
+  if (
+    mcpServerConfig.url &&
+    !mcpServerConfig.httpUrl &&
+    !mcpServerConfig.oauth?.enabled
+  ) {
+    const tokenStorage = new MCPOAuthTokenStorage();
+    try {
       hadStoredSseOAuthCredentials = Boolean(
         await tokenStorage.getCredentials(mcpServerName),
       );
+    } catch (error) {
+      unlistenDirectories?.();
+      unlistenDirectories = undefined;
+      const message = `Failed to read stored OAuth credentials for SSE server '${mcpServerName}': ${getErrorMessage(error)}`;
+      debugLogger.error(message);
+      throw new Error(message);
     }
+  }
 
+  try {
     const transport = await createTransport(
       mcpServerName,
       mcpServerConfig,

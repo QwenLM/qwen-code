@@ -261,6 +261,43 @@ describe('mcp-client', () => {
           getMcpOAuthDialogInstruction('authenticate', 'sse-server'),
       );
     });
+
+    it('reports SSE OAuth credential read failures before connecting', async () => {
+      const connect = vi.fn();
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect,
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi
+              .fn()
+              .mockRejectedValue(new Error('Corrupt token file')),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Failed to read stored OAuth credentials for SSE server 'sse-server': Corrupt token file",
+      );
+      expect(connect).not.toHaveBeenCalled();
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        "Failed to read stored OAuth credentials for SSE server 'sse-server': Corrupt token file",
+      );
+    });
   });
 
   describe('McpClient', () => {
