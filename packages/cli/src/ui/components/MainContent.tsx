@@ -7,6 +7,7 @@
 import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import { ToolCallStatus } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -147,7 +148,7 @@ export const MainContent = () => {
     // don't mark summaries as absorbed so the standalone `● <label>` line
     // in HistoryItemDisplay can render — <Static> can't repaint committed
     // items, so the label's only path to the screen is the standalone line.
-    if (!compactMode || !uiState.useTerminalBuffer || compactInline)
+    if (!uiState.useTerminalBuffer || compactInline)
       return EMPTY_ABSORBED_CALL_IDS;
     const absorbed = new Set<string>();
     for (const item of visibleHistory) {
@@ -160,6 +161,18 @@ export const MainContent = () => {
         )
       ) {
         continue;
+      }
+      // In non-compact mode, only completed groups render via
+      // CompactToolGroupDisplay (unified mode). Active groups still
+      // expand inline, so their summaries should NOT be absorbed.
+      if (!compactMode) {
+        const groupComplete = item.tools.every(
+          (t) =>
+            t.status === ToolCallStatus.Success ||
+            t.status === ToolCallStatus.Error ||
+            t.status === ToolCallStatus.Canceled,
+        );
+        if (!groupComplete) continue;
       }
       for (const tool of item.tools) absorbed.add(tool.callId);
     }

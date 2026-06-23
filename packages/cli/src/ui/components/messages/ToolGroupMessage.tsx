@@ -201,7 +201,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       toolCalls.every(
         (t) =>
           t.status === ToolCallStatus.Success ||
-          t.status === ToolCallStatus.Error,
+          t.status === ToolCallStatus.Error ||
+          t.status === ToolCallStatus.Canceled,
       ),
     [toolCalls],
   );
@@ -298,11 +299,38 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // and the inline path must render `SubagentScrollbackSummary`
   // immediately so the user keeps a record of the run.
   // (Gate on `isPending` so a degenerate empty `toolCalls=[]` in the
-  // committed phase still falls through to the legacy empty-container
-  // snapshot — the suppression is specifically about live-phase
-  // panel ownership, not about hiding empty inputs in general.)
+  // committed phase falls through to showCompact, where
+  // CompactToolGroupDisplay returns null for empty arrays.)
   if (isPending && inlineToolCalls.length === 0) {
     return null;
+  }
+
+  // Memory-only groups get their own compact rendering with read/write
+  // counts. Check BEFORE showCompact so they aren't swallowed by the
+  // generic CompactToolGroupDisplay path.
+  if (isMemoryOnlyGroup && allComplete) {
+    const readCount = memoryReadCount ?? 0;
+    const writeCount = memoryWriteCount ?? 0;
+    return (
+      <Box flexDirection="column" width={contentWidth}>
+        {readCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {'● '}
+              Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
+            </Text>
+          </Box>
+        )}
+        {writeCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {'● '}
+              Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
+            </Text>
+          </Box>
+        )}
+      </Box>
+    );
   }
 
   // Compact mode: entire group → single line summary
@@ -324,7 +352,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   //     gate either).
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const showCompact =
-    compactMode &&
+    (compactMode || allComplete) &&
     !hasConfirmingTool &&
     !hasSubagentPendingConfirmation &&
     !hasErrorTool &&
@@ -363,32 +391,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         1,
       )
     : undefined;
-
-  // For completed memory-only groups, show a compact summary instead of individual tool calls
-  if (isMemoryOnlyGroup && allComplete) {
-    const readCount = memoryReadCount ?? 0;
-    const writeCount = memoryWriteCount ?? 0;
-    return (
-      <Box flexDirection="column" width={contentWidth}>
-        {readCount > 0 && (
-          <Box paddingLeft={1}>
-            <Text dimColor>
-              {'● '}
-              Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
-            </Text>
-          </Box>
-        )}
-        {writeCount > 0 && (
-          <Box paddingLeft={1}>
-            <Text dimColor>
-              {'● '}
-              Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
-            </Text>
-          </Box>
-        )}
-      </Box>
-    );
-  }
 
   return (
     <Box flexDirection="column" width={contentWidth} gap={0}>
@@ -453,12 +455,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   tool.status === ToolCallStatus.Error ||
                   isAgentWithPendingConfirmation(tool.resultDisplay) ||
                   // Terminal subagents need their result block to render
-                  // even in compact mode — that's where
+                  // even when collapsed — that's where
                   // `SubagentScrollbackSummary` lands. ToolMessage's
-                  // compact-mode gate
-                  // (`!compactMode || forceShowResult ? renderer : 'none'`)
-                  // would otherwise drop the result block, leaving the
-                  // committed audit trail empty for compact-mode users.
+                  // collapse gate (`isCompleted && !forceShowResult`)
+                  // would otherwise drop the result block.
                   isTerminalSubagentTool(tool)
                 }
                 isFocused={isSubagentFocused}
