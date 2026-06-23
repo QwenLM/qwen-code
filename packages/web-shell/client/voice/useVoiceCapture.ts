@@ -49,7 +49,9 @@ const FRAME_SIZE = 4096;
 const TRANSCRIPTION_TIMEOUT_MS = 60_000;
 
 function toWebSocketUrl(baseUrl: string): string {
-  const url = new URL('/voice/stream', baseUrl);
+  const base = new URL(baseUrl);
+  const basePath = base.pathname.replace(/\/?$/, '/');
+  const url = new URL('voice/stream', `${base.origin}${basePath}`);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url.toString();
 }

@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // @vitest-environment jsdom
 
 import * as React from 'react';
@@ -58,10 +64,11 @@ let capture: UseVoiceCaptureReturn | undefined;
 const onFinal = vi.fn();
 const onError = vi.fn();
 const track = { stop: vi.fn() };
+let baseUrl = 'http://127.0.0.1:1234';
 
 function TestHost() {
   capture = useVoiceCapture({
-    baseUrl: 'http://127.0.0.1:1234',
+    baseUrl,
     onFinal,
     onError,
   });
@@ -84,6 +91,7 @@ beforeEach(() => {
   onFinal.mockReset();
   onError.mockReset();
   track.stop.mockReset();
+  baseUrl = 'http://127.0.0.1:1234';
   MockWebSocket.latest = undefined;
   Object.defineProperty(globalThis, 'WebSocket', {
     value: MockWebSocket,
@@ -115,6 +123,19 @@ afterEach(async () => {
 });
 
 describe('useVoiceCapture', () => {
+  it('preserves reverse-proxy base paths in the websocket URL', async () => {
+    baseUrl = 'https://example.test/qwen/';
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+
+    expect(MockWebSocket.latest?.url).toBe(
+      'wss://example.test/qwen/voice/stream',
+    );
+  });
+
   it('uses server error frame messages', async () => {
     const result = await renderHookHost();
 

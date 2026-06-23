@@ -48,6 +48,9 @@ export function VoiceButton({
 }: VoiceButtonProps): React.JSX.Element | null {
   const workspace = useWorkspace();
   const features = workspace.capabilities?.features ?? [];
+  const [noticeMessage, setNoticeMessage] = React.useState<string | undefined>(
+    undefined,
+  );
 
   const { status, interimText, audioLevel, errorMessage, start, stop, abort } =
     useVoiceCapture({
@@ -55,7 +58,12 @@ export function VoiceButton({
       token: workspace.token,
       onFinal: (text) => {
         const trimmed = text.trim();
-        if (trimmed) onInsert(trimmed);
+        if (trimmed) {
+          setNoticeMessage(undefined);
+          onInsert(trimmed);
+        } else {
+          setNoticeMessage('No speech detected.');
+        }
       },
     });
 
@@ -67,6 +75,7 @@ export function VoiceButton({
   const isTranscribing = status === 'transcribing';
   const isError = status === 'error';
   const isBusy = isConnecting || isTranscribing;
+  const isNotice = Boolean(noticeMessage) && !isError;
 
   const handleClick = () => {
     if (disabled) return;
@@ -75,7 +84,8 @@ export function VoiceButton({
     } else if (isConnecting) {
       abort();
     } else if (!isBusy) {
-      // idle or error → (re)start
+      // idle or error -> (re)start
+      setNoticeMessage(undefined);
       start();
     }
   };
@@ -88,7 +98,9 @@ export function VoiceButton({
         ? 'Starting…'
         : isError
           ? `Voice error — click to retry${errorMessage ? `: ${errorMessage}` : ''}`
-          : 'Start voice dictation';
+          : isNotice
+            ? 'No speech detected — click to retry'
+            : 'Start voice dictation';
 
   // Amplify the raw RMS for a livelier meter, clamped to [0, 1].
   const level = Math.min(1, audioLevel * 8);
@@ -106,7 +118,7 @@ export function VoiceButton({
         onClick={handleClick}
         disabled={disabled || isTranscribing}
         aria-label={label}
-        title={errorMessage ?? label}
+        title={errorMessage ?? noticeMessage ?? label}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -159,7 +171,10 @@ export function VoiceButton({
         )}
         {isTranscribing && <span style={{ fontSize: 11 }}>…</span>}
       </button>
-      {((isRecording && interimText) || isTranscribing || isError) && (
+      {((isRecording && interimText) ||
+        isTranscribing ||
+        isError ||
+        isNotice) && (
         <div
           style={{
             position: 'absolute',
@@ -170,7 +185,7 @@ export function VoiceButton({
             padding: '4px 8px',
             borderRadius: 6,
             fontSize: 12,
-            whiteSpace: isError ? 'normal' : 'nowrap',
+            whiteSpace: isError || isNotice ? 'normal' : 'nowrap',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             lineHeight: 1.4,
@@ -184,9 +199,11 @@ export function VoiceButton({
         >
           {isError
             ? errorMessage || 'Voice error'
-            : isTranscribing
-              ? 'Transcribing…'
-              : interimText}
+            : isNotice
+              ? noticeMessage
+              : isTranscribing
+                ? 'Transcribing…'
+                : interimText}
         </div>
       )}
     </div>

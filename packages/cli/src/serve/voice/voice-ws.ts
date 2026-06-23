@@ -362,15 +362,6 @@ export function createVoiceWsConnectionHandler(
           writeStderrLine('qwen serve: voice websocket stop received');
           await finalize();
           return;
-        case 'abort':
-          writeStderrLine('qwen serve: voice websocket abort received');
-          cleanup();
-          try {
-            ws.close(1000, 'aborted');
-          } catch {
-            // ignore
-          }
-          return;
         default:
           return;
       }
