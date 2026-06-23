@@ -116,6 +116,10 @@ jobs:
       checks: 'write'
       pull-requests: 'write'
     steps:
+      - name: 'Prepare clean Git config for checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: ': > "${RUNNER_TEMP}/checkout-gitconfig"'
+
       # On PRs github.ref is the merge ref (refs/pull/N/merge), so the required
       # checks validate the merge result, not just the PR tip. GitHub builds that
       # ref asynchronously and it can briefly 404 right after a push, so on
@@ -125,6 +129,9 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         continue-on-error: true
+        env:
+          GIT_CONFIG_GLOBAL: '${{ runner.temp }}/checkout-gitconfig'
+          GIT_CONFIG_NOSYSTEM: 'true'
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
@@ -134,9 +141,21 @@ jobs:
       - name: 'Checkout (retry on transient ref lag)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.checkout.outcome == 'failure' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        env:
+          GIT_CONFIG_GLOBAL: '${{ runner.temp }}/checkout-gitconfig'
+          GIT_CONFIG_NOSYSTEM: 'true'
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
+
+      - name: 'Verify PR checkout includes head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
+        run: |-
+          if ! git merge-base --is-ancestor '${{ github.event.pull_request.head.sha }}' HEAD; then
+            echo "::error::Checked out ref does not contain PR head ${{ github.event.pull_request.head.sha }}."
+            git log --oneline --decorate -5
+            exit 1
+          fi
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'

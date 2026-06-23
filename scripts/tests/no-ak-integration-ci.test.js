@@ -61,4 +61,23 @@ describe('no-AK integration CI wiring', () => {
 
     expect(platformJob).not.toContain(NO_AK_SCRIPT);
   });
+
+  it('guards the Ubuntu checkout against stale self-hosted git caches', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const ubuntuJob = getWorkflowJob(workflow, 'test');
+
+    expect(ubuntuJob).toContain(
+      "name: 'Prepare clean Git config for checkout'",
+    );
+    expect(ubuntuJob).toContain('GIT_CONFIG_GLOBAL');
+    expect(ubuntuJob).toContain('GIT_CONFIG_NOSYSTEM');
+    expect(ubuntuJob).toContain(
+      "name: 'Verify PR checkout includes head commit'",
+    );
+    expect(ubuntuJob).toContain('git merge-base --is-ancestor');
+    expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
+  });
 });
