@@ -296,6 +296,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ sessionId: segs[0] }),
     },
   },
+  // GET /session/:id/lsp → _qwen/session/lsp_status
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/lsp$/,
+    mapping: {
+      method: '_qwen/session/lsp_status',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
 
   // ---- Granular workspace routes (_qwen/workspace/*) ---------------------
 

@@ -1977,6 +1977,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           },
         ]),
       }),
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 1,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'READY',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+            args: ['--stdio'],
+            pid: 1234,
+            stderrTail: 'hidden',
+            rootUri: 'file:///tmp',
+            workspaceFolder: '/tmp',
+          },
+        ],
+      }),
     });
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValueOnce({
       availableCommands: [
@@ -2017,6 +2039,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
+    );
+    const lsp = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      {
+        sessionId,
+      },
     );
 
     expect(context).toMatchObject({
@@ -2106,9 +2134,143 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       formattedText: expect.stringContaining('## Context Usage'),
     });
+    expect(lsp).toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 1,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'typescript',
+          status: 'READY',
+          languages: ['typescript'],
+          transport: 'stdio',
+          command: 'typescript-language-server',
+        },
+      ],
+    });
+    expect(JSON.stringify(lsp)).not.toContain('--stdio');
+    expect(JSON.stringify(lsp)).not.toContain('hidden');
+    expect(JSON.stringify(lsp)).not.toContain('pid');
+    expect(JSON.stringify(lsp)).not.toContain('rootUri');
+    expect(JSON.stringify(lsp)).not.toContain('workspaceFolder');
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
     dateNowSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('status ext method returns disabled LSP status', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: false,
+        configuredServers: 0,
+        readyServers: 0,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [],
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionLspStatus, {
+        sessionId,
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: false,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+    });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionLspStatus, {}),
+    ).rejects.toThrow('Invalid or missing sessionId');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('status ext method returns unavailable LSP status', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getLspStatusSnapshot: vi.fn().mockReturnValue({
+        enabled: true,
+        configuredServers: 0,
+        readyServers: 0,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [],
+        statusUnavailable: true,
+        initializationError: 'client failed',
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionLspStatus, {
+        sessionId,
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      enabled: true,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      statusUnavailable: true,
+      initializationError: 'client failed',
+      servers: [],
+    });
+
     mockConnectionState.resolve();
     await agentPromise;
   });

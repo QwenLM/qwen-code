@@ -1008,6 +1008,7 @@ function advertisedMaxPendingPromptsPerSession(
  *   - `GET  /session/:id/context`
  *   - `GET  /session/:id/supported-commands`
  *   - `GET  /session/:id/tasks`
+ *   - `GET  /session/:id/lsp`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/heartbeat`
@@ -3104,6 +3105,19 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/tasks',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/lsp', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.getSessionLspStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/lsp',
         sessionId,
       });
     }

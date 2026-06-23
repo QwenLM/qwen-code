@@ -883,6 +883,9 @@ export async function runQwenServe(
     daemonLog.raw(line, level);
   const channelFactory = createSpawnChannelFactory({
     onDiagnosticLine: diagnosticSink,
+    ...(opts.experimentalLsp === true
+      ? { extraArgs: ['--experimental-lsp'] }
+      : {}),
   });
 
   const persistDisabledToolsFn = (

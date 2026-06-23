@@ -355,6 +355,8 @@ export type {
   DaemonSessionProcessTaskLifecycleStatus,
   DaemonSessionContextUsage,
   DaemonSessionContextUsageStatus,
+  DaemonLspServerStatus,
+  DaemonSessionLspStatus,
   DaemonSessionState,
   DaemonSessionSummary,
   DaemonSessionShellTaskStatus,
