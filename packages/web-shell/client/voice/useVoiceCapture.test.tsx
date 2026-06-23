@@ -4,10 +4,7 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  useVoiceCapture,
-  type UseVoiceCaptureReturn,
-} from './useVoiceCapture';
+import { useVoiceCapture, type UseVoiceCaptureReturn } from './useVoiceCapture';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -22,7 +19,7 @@ class MockWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
   readonly sent: unknown[] = [];
 
   constructor(readonly url: string) {
@@ -44,6 +41,7 @@ function node() {
 
 class MockAudioContext {
   state = 'running';
+  sampleRate = 16_000;
   readonly destination = {};
   createMediaStreamSource = vi.fn(() => node());
   createScriptProcessor = vi.fn(() => ({ ...node(), onaudioprocess: null }));
@@ -158,11 +156,11 @@ describe('useVoiceCapture', () => {
     expect(capture?.status).toBe('transcribing');
 
     await act(async () => {
-      ws.onclose?.();
+      ws.onclose?.({ code: 1006, reason: '' } as CloseEvent);
     });
 
     expect(onError).toHaveBeenCalledWith(
-      'Voice connection closed unexpectedly.',
+      'Voice connection closed (code=1006, reason=none).',
     );
     expect(capture?.status).toBe('error');
   });

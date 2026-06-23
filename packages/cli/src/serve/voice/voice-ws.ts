@@ -19,6 +19,7 @@ import {
 import { openVoiceStream } from '../../ui/voice/voice-stream-session.js';
 import { openQwenAsrRealtimeStream } from '../../ui/voice/qwen-asr-realtime-session.js';
 import { openVoiceStreamWithRetry } from '../../ui/voice/voice-stream-retry.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type {
   VoiceStreamCallbacks,
   VoiceStreamSession,
@@ -37,6 +38,8 @@ const MAX_CONNECTION_MS = 6 * 60_000;
 // client can't open unbounded sockets (each opens an upstream ASR connection).
 // Generous for one interactive user across a few tabs.
 const MAX_CONCURRENT_VOICE_SESSIONS = 8;
+const GENERIC_TRANSCRIPTION_ERROR =
+  'Voice transcription failed. Please try again.';
 
 // Audio is 16 kHz mono signed-16-bit PCM. Browser capture sends raw frames; the
 // batch transcription path (non-streaming models) wants a WAV container.
@@ -75,17 +78,22 @@ async function defaultOpenStream(
   ctx: DaemonVoiceContext,
   callbacks: VoiceStreamCallbacks,
 ): Promise<VoiceStreamSession> {
-  const cfg = resolveVoiceStreamConfig({
-    config: ctx.models,
-    settings: ctx.settings,
-    voiceModel: ctx.voiceModel,
-  });
-  await assertVoiceBaseUrlNetworkAllowed(cfg);
-  return openVoiceStreamWithRetry(() =>
-    cfg.transport === 'qwen-asr-realtime'
-      ? openQwenAsrRealtimeStream(cfg, callbacks)
-      : openVoiceStream(cfg, callbacks),
-  );
+  try {
+    const cfg = resolveVoiceStreamConfig({
+      config: ctx.models,
+      settings: ctx.settings,
+      voiceModel: ctx.voiceModel,
+    });
+    await assertVoiceBaseUrlNetworkAllowed(cfg);
+    return await openVoiceStreamWithRetry(() =>
+      cfg.transport === 'qwen-asr-realtime'
+        ? openQwenAsrRealtimeStream(cfg, callbacks)
+        : openVoiceStream(cfg, callbacks),
+    );
+  } catch (error) {
+    debugLogger.debug(`[voice-ws] stream open error: ${errMessage(error)}`);
+    throw new Error(GENERIC_TRANSCRIPTION_ERROR);
+  }
 }
 
 function defaultTranscribe(
@@ -95,7 +103,12 @@ function defaultTranscribe(
   return transcribeVoiceAudio(
     { data: encodeWav(pcm), mimeType: 'audio/wav' },
     { config: ctx.models, settings: ctx.settings, voiceModel: ctx.voiceModel },
-  );
+  ).catch((error: unknown) => {
+    debugLogger.debug(
+      `[voice-ws] batch transcription error: ${errMessage(error)}`,
+    );
+    throw new Error(GENERIC_TRANSCRIPTION_ERROR);
+  });
 }
 
 function errMessage(error: unknown): string {
@@ -158,6 +171,9 @@ export function createVoiceWsConnectionHandler(
 
   return (ws: WebSocket) => {
     if (activeSessions >= MAX_CONCURRENT_VOICE_SESSIONS) {
+      writeStderrLine(
+        `qwen serve: voice websocket rejected; activeSessions=${activeSessions}`,
+      );
       try {
         ws.send(
           JSON.stringify({
@@ -172,11 +188,17 @@ export function createVoiceWsConnectionHandler(
       return;
     }
     activeSessions++;
+    writeStderrLine(
+      `qwen serve: voice websocket accepted; activeSessions=${activeSessions}`,
+    );
     let released = false;
     const releaseSlot = () => {
       if (!released) {
         released = true;
         activeSessions--;
+        writeStderrLine(
+          `qwen serve: voice websocket slot released; activeSessions=${activeSessions}`,
+        );
       }
     };
 
@@ -234,6 +256,7 @@ export function createVoiceWsConnectionHandler(
 
     function fail(message: string): void {
       if (state === 'closed') return;
+      writeStderrLine(`qwen serve: voice websocket failed: ${message}`);
       sendJson({ type: 'error', message });
       cleanup();
       try {
@@ -254,7 +277,12 @@ export function createVoiceWsConnectionHandler(
       if (ctx.streaming) {
         const callbacks: VoiceStreamCallbacks = {
           onInterim: (text) => sendJson({ type: 'interim', text }),
-          onError: (error) => fail(errMessage(error)),
+          onError: (error) => {
+            debugLogger.debug(
+              `[voice-ws] upstream error: ${errMessage(error)}`,
+            );
+            fail(GENERIC_TRANSCRIPTION_ERROR);
+          },
         };
         const opening = openStream(ctx, callbacks);
         sessionPromise = opening;
@@ -291,6 +319,7 @@ export function createVoiceWsConnectionHandler(
         transcript = await transcribe(ctx!, Buffer.concat(pcmChunks));
       }
       sendJson({ type: 'final', text: transcript });
+      writeStderrLine('qwen serve: voice websocket finalized successfully');
       cleanup();
       try {
         ws.close(1000, 'done');
@@ -326,12 +355,15 @@ export function createVoiceWsConnectionHandler(
       if (!control) return;
       switch (control.type) {
         case 'start':
+          writeStderrLine('qwen serve: voice websocket start received');
           await ensureStarted();
           return;
         case 'stop':
+          writeStderrLine('qwen serve: voice websocket stop received');
           await finalize();
           return;
         case 'abort':
+          writeStderrLine('qwen serve: voice websocket abort received');
           cleanup();
           try {
             ws.close(1000, 'aborted');
@@ -349,6 +381,7 @@ export function createVoiceWsConnectionHandler(
       if (!isBinary) {
         const control = parseControl(buf.toString('utf8'));
         if (control?.type === 'abort') {
+          writeStderrLine('qwen serve: voice websocket abort received');
           cleanup();
           try {
             ws.close(1000, 'aborted');

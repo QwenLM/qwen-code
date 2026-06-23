@@ -1495,6 +1495,12 @@ describe('createServeApp', () => {
       expect(
         getAdvertisedServeFeatures(undefined, { voiceWsAvailable: false }),
       ).not.toContain('voice_transcribe');
+      expect(
+        getAdvertisedServeFeatures(undefined, {
+          requireAuth: true,
+          voiceWsAvailable: true,
+        }),
+      ).not.toContain('voice_transcribe');
     });
 
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
@@ -1635,6 +1641,9 @@ describe('createServeApp', () => {
         if (feature === 'voice_transcribe') {
           expect(predicate({ voiceWsAvailable: true })).toBe(true);
           expect(predicate({ voiceWsAvailable: false })).toBe(false);
+          expect(predicate({ requireAuth: true, voiceWsAvailable: true })).toBe(
+            false,
+          );
           expect(predicate({})).toBe(true);
           expect(
             getAdvertisedServeFeatures(undefined, {

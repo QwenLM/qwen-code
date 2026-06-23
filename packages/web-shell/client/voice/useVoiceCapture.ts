@@ -46,6 +46,7 @@ export interface UseVoiceCaptureReturn {
 
 const SAMPLE_RATE = 16_000;
 const FRAME_SIZE = 4096;
+const TRANSCRIPTION_TIMEOUT_MS = 60_000;
 
 function toWebSocketUrl(baseUrl: string): string {
   const url = new URL('/voice/stream', baseUrl);
@@ -102,6 +103,7 @@ interface CaptureResources {
   // needs no module load, so it sidesteps CSP entirely.
   processor?: ScriptProcessorNode;
   sink?: GainNode;
+  transcribeTimeout?: ReturnType<typeof setTimeout>;
 }
 
 export function useVoiceCapture(
@@ -158,6 +160,10 @@ export function useVoiceCapture(
     captureGenerationRef.current++;
     teardownAudio();
     const res = resourcesRef.current;
+    if (res.transcribeTimeout) {
+      clearTimeout(res.transcribeTimeout);
+      res.transcribeTimeout = undefined;
+    }
     if (res.ws) {
       try {
         res.ws.onmessage = null;
@@ -233,6 +239,13 @@ export function useVoiceCapture(
         resourcesRef.current.stream = stream;
 
         const context = new AudioContext({ sampleRate: SAMPLE_RATE });
+        if (context.sampleRate !== SAMPLE_RATE) {
+          stream.getTracks().forEach((track) => track.stop());
+          void context.close().catch(() => {});
+          throw new Error(
+            `Browser audio rate ${context.sampleRate} Hz is not the required ${SAMPLE_RATE} Hz.`,
+          );
+        }
         resourcesRef.current.context = context;
         // Resume in case the browser created it suspended (pre-gesture).
         if (context.state === 'suspended') await context.resume();
@@ -316,9 +329,9 @@ export function useVoiceCapture(
         };
 
         ws.onerror = () => {
-          fail('Voice connection error.');
+          // The following close event carries the useful code/reason.
         };
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           // A close before a final result (and not during normal teardown)
           // surfaces as an error so the user isn't left stuck.
           if (
@@ -327,7 +340,9 @@ export function useVoiceCapture(
               statusRef.current === 'connecting' ||
               statusRef.current === 'transcribing')
           ) {
-            fail('Voice connection closed unexpectedly.');
+            const code = event.code || 1006;
+            const reason = event.reason || 'none';
+            fail(`Voice connection closed (code=${code}, reason=${reason}).`);
           }
         };
       } catch (error) {
@@ -350,6 +365,11 @@ export function useVoiceCapture(
     applyStatus('transcribing');
     try {
       ws.send(JSON.stringify({ type: 'stop' }));
+      resourcesRef.current.transcribeTimeout = setTimeout(() => {
+        if (statusRef.current === 'transcribing') {
+          fail('Transcription timed out.');
+        }
+      }, TRANSCRIPTION_TIMEOUT_MS);
     } catch {
       fail('Failed to finalize voice transcription.');
     }
