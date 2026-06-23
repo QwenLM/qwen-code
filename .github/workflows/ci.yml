@@ -19,6 +19,11 @@ on:
         required: true
         default: 'main'
         type: 'string'
+      windows_runner_smoke:
+        description: 'Run a smoke check on the self-hosted Windows runner'
+        required: false
+        default: false
+        type: 'boolean'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
@@ -40,6 +45,46 @@ env:
   YAMLLINT_VERSION: '1.35.1'
 
 jobs:
+  windows_runner_smoke:
+    name: 'Windows Runner Smoke'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true }}"
+    runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
+    defaults:
+      run:
+        shell: 'powershell'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
+          fetch-depth: 1
+
+      - name: 'Verify runner tools'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          Write-Host "RUNNER_NAME=$env:RUNNER_NAME"
+          Write-Host "RUNNER_OS=$env:RUNNER_OS"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          Write-Host "RUNNER_TEMP=$env:RUNNER_TEMP"
+          Write-Host "RUNNER_WORKSPACE=$env:RUNNER_WORKSPACE"
+
+          where.exe git
+          git --version
+          where.exe node
+          node --version
+          where.exe npm
+          npm --version
+          where.exe qwen
+          qwen --version
+
+      - name: 'Verify checkout'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path package.json)) {
+            throw 'package.json was not checked out'
+          }
+          git status --short
+
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' }}"
@@ -104,7 +149,7 @@ jobs:
   lint:
     name: 'Lint'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true) }}"
     runs-on: "${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]') }}"
     steps:
       # On PRs github.ref is the merge ref (refs/pull/N/merge), so the required
@@ -203,7 +248,7 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    if: '${{ !cancelled() }}'
+    if: "${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true) }}"
     runs-on: '${{ fromJSON(matrix.runner) }}'
     permissions:
       contents: 'read'
@@ -359,7 +404,7 @@ jobs:
   codeql:
     name: 'CodeQL'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true) }}"
     runs-on: 'ubuntu-latest'
     permissions:
       actions: 'read'
