@@ -5,7 +5,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
@@ -101,12 +102,30 @@ function setupAcpTest(
   const acpFlag =
     options?.useNewFlag !== false ? '--acp' : '--experimental-acp';
 
+  // Isolate this agent's GLOBAL (User-scope) qwen config dir via QWEN_HOME.
+  // `globalSetup` does not sandbox HOME, so every integration test shares the
+  // real `$HOME/.qwen`, and `vitest.config.ts` runs test files with
+  // `fileParallelism: true` (up to 4 at once). The ACP `authenticate` /
+  // `setModel` handlers persist `security.auth.selectedType` (and `model.name`)
+  // to User scope, so a concurrent test (e.g. `system-control`'s
+  // `setModel('qwen3-...')`) can clobber the persisted auth type in the window
+  // between this agent's `authenticate({ methodId: 'openai' })` and its
+  // `session/new`. When that happens the new session config resolves a
+  // non-openai auth, the openai runtime model is never captured, and it drops
+  // out of `availableModels` — flaking `expect(openaiModel).toBeDefined()` in
+  // the `set_config_option` test (acp-integration.test.ts:516). A per-agent
+  // QWEN_HOME redirects `getGlobalQwenDir()` so the authenticate -> session/new
+  // round-trip reads back exactly what this agent wrote.
+  const qwenHome = join(rig.testDir!, '.qwen-home');
+  mkdirSync(qwenHome, { recursive: true });
+
   const agent = spawn(
     'node',
     [rig.bundlePath, acpFlag, '--no-chat-recording'],
     {
       cwd: rig.testDir!,
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, QWEN_HOME: qwenHome },
     },
   );
 
