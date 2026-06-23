@@ -415,6 +415,47 @@ describe('useAtCompletion', () => {
       ]);
     });
 
+    it('should respect configured custom qwen ignore files', async () => {
+      const structure: FileSystemStructure = {
+        '.cursorignore': 'cursor-secret.txt',
+        '.agentignore': 'agent-secret.txt',
+        'cursor-secret.txt': '',
+        'agent-secret.txt': '',
+        'visible.txt': '',
+      };
+      testRootDir = await createTmpDir(structure);
+
+      const customIgnoreConfig = {
+        getEnableRecursiveFileSearch: () => true,
+        getFileFilteringOptions: vi.fn(() => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        })),
+        getFileFilteringEnableFuzzySearch: () => true,
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          '',
+          customIgnoreConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        '.agentignore',
+        '.cursorignore',
+        'agent-secret.txt',
+        'visible.txt',
+      ]);
+    });
+
     it('should work correctly when config is undefined', async () => {
       const structure: FileSystemStructure = {
         node_modules: {},

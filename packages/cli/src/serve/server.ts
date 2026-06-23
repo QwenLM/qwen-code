@@ -208,12 +208,16 @@ export function resolveBridgeFsFactory(input: {
   injected?: WorkspaceFileSystemFactory;
   trusted: boolean;
   emit?: (event: BridgeEvent) => void;
+  customIgnoreFiles?: string[];
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
     boundWorkspace: input.boundWorkspace,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
+    ...(input.customIgnoreFiles !== undefined
+      ? { customIgnoreFiles: input.customIgnoreFiles }
+      : {}),
   });
 }
 

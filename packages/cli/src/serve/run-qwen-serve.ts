@@ -866,11 +866,14 @@ export async function runQwenServe(
   // through `BridgeFileSystem` for ACP-side writeTextFile / readTextFile
   // calls. See `bridge-file-system-adapter.ts` for the translation layer.
   const trustedWorkspace = deps.trustedWorkspace ?? true;
+  const customIgnoreFiles =
+    bootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,
     injected: deps.fsFactory,
     trusted: trustedWorkspace,
     emit: deps.fsAuditEmit,
+    ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
   });
 
   // Create a spawn channel factory that tees child-stderr diagnostics

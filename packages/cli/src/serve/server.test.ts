@@ -10504,6 +10504,37 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
   });
 
+  it('passes custom ignore files through resolveBridgeFsFactory', async () => {
+    const { resolveBridgeFsFactory } = await import('./server.js');
+    const tmp = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-fs-ignore-'),
+    );
+    try {
+      await fsp.writeFile(path.join(tmp, '.cursorignore'), 'secret.txt\n');
+      await fsp.writeFile(path.join(tmp, '.agentignore'), 'agent.txt\n');
+      await fsp.writeFile(path.join(tmp, 'secret.txt'), 'secret');
+      await fsp.writeFile(path.join(tmp, 'agent.txt'), 'agent');
+
+      const factory = resolveBridgeFsFactory({
+        boundWorkspace: tmp,
+        trusted: true,
+        customIgnoreFiles: ['.cursorignore'],
+      });
+      const fs = factory.forRequest({ route: 'TEST /op' });
+      const root = await fs.resolve('.', 'list');
+      const entries = await fs.list(root, { includeIgnored: true });
+
+      expect(
+        entries.find((entry) => entry.name === 'secret.txt')?.ignored,
+      ).toBe(true);
+      expect(entries.find((entry) => entry.name === 'agent.txt')?.ignored).toBe(
+        false,
+      );
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('default fsFactory is built with trusted=false (writes refused)', async () => {
     const { createServeApp } = await import('./server.js');
     const { isFsError } = await import('./fs/index.js');

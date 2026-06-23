@@ -254,6 +254,36 @@ describe('WorkspaceFileSystem - list', () => {
     expect(log?.ignored).toBe(true);
   });
 
+  it('uses configured custom ignore files in the default ignore loader', async () => {
+    const scratch = await fsp.mkdtemp(
+      path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
+    );
+    try {
+      const wsDir = path.join(scratch, 'ws');
+      await fsp.mkdir(wsDir);
+      await fsp.writeFile(path.join(wsDir, '.cursorignore'), 'secret.txt\n');
+      await fsp.writeFile(path.join(wsDir, '.agentignore'), 'agent.txt\n');
+      await fsp.writeFile(path.join(wsDir, 'secret.txt'), 'secret');
+      await fsp.writeFile(path.join(wsDir, 'agent.txt'), 'agent');
+
+      const workspace = canonicalizeWorkspace(wsDir);
+      const factory = createWorkspaceFileSystemFactory({
+        boundWorkspace: workspace,
+        trusted: true,
+        emit: () => undefined,
+        customIgnoreFiles: ['.cursorignore'],
+      });
+      const workspaceFs = factory.forRequest({ route: 'TEST /op' });
+      const r = await workspaceFs.resolve('.', 'list');
+      const entries = await workspaceFs.list(r, { includeIgnored: true });
+
+      expect(entries.find((e) => e.name === 'secret.txt')?.ignored).toBe(true);
+      expect(entries.find((e) => e.name === 'agent.txt')?.ignored).toBe(false);
+    } finally {
+      await fsp.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('stops collecting entries once maxEntries is reached', async () => {
     const r = await h.fs.resolve('.', 'list');
     const entries = await h.fs.list(r, {
