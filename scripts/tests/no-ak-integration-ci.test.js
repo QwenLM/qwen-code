@@ -62,19 +62,21 @@ describe('no-AK integration CI wiring', () => {
     expect(platformJob).not.toContain(NO_AK_SCRIPT);
   });
 
-  it('refreshes and verifies the Ubuntu self-hosted checkout', () => {
+  it('refreshes and verifies the Ubuntu self-hosted PR refs', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
 
-    expect(ubuntuJob).toContain("name: 'Refresh self-hosted git cache'");
-    expect(ubuntuJob).toContain('/opt/qwen-git-cache/qwen-code');
+    expect(ubuntuJob).toContain(
+      "name: 'Refresh PR refs after cached checkout'",
+    );
     expect(ubuntuJob).toContain('GIT_CONFIG_GLOBAL');
     expect(ubuntuJob).toContain('GIT_CONFIG_NOSYSTEM');
-    expect(ubuntuJob).toContain('git -C "${cache}" fetch');
-    expect(ubuntuJob).toContain('"+${GITHUB_REF}:${GITHUB_REF}"');
+    expect(ubuntuJob).toContain('git fetch --no-tags origin');
+    expect(ubuntuJob).toContain('"+${GITHUB_REF}:${merge_ref}"');
+    expect(ubuntuJob).toContain('git checkout --force "${merge_ref}"');
     expect(ubuntuJob).toContain(
       "name: 'Verify PR checkout includes head commit'",
     );

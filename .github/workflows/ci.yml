@@ -116,30 +116,6 @@ jobs:
       checks: 'write'
       pull-requests: 'write'
     steps:
-      - name: 'Refresh self-hosted git cache'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
-        run: |-
-          cache='/opt/qwen-git-cache/qwen-code'
-          if [[ ! -d "${cache}" ]]; then
-            echo "No self-hosted git cache at ${cache}; checkout will use the configured origin."
-            exit 0
-          fi
-
-          : > "${RUNNER_TEMP}/cache-refresh-gitconfig"
-          for attempt in 1 2; do
-            echo "Refreshing self-hosted git cache (attempt ${attempt}/2)"
-            if GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/cache-refresh-gitconfig" \
-              GIT_CONFIG_NOSYSTEM='true' \
-              git -C "${cache}" fetch --prune --no-tags origin \
-                "+refs/heads/${GITHUB_HEAD_REF}:refs/heads/${GITHUB_HEAD_REF}" \
-                "+${GITHUB_REF}:${GITHUB_REF}"; then
-              exit 0
-            fi
-            sleep 10
-          done
-
-          exit 1
-
       # On PRs github.ref is the merge ref (refs/pull/N/merge), so the required
       # checks validate the merge result, not just the PR tip. GitHub builds that
       # ref asynchronously and it can briefly 404 right after a push, so on
@@ -161,6 +137,27 @@ jobs:
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
+
+      - name: 'Refresh PR refs after cached checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
+        run: |-
+          : > "${RUNNER_TEMP}/pr-ref-refresh-gitconfig"
+          merge_ref='refs/remotes/pull/${{ github.event.pull_request.number }}/merge'
+
+          for attempt in 1 2; do
+            echo "Refreshing PR refs from GitHub (attempt ${attempt}/2)"
+            if GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/pr-ref-refresh-gitconfig" \
+              GIT_CONFIG_NOSYSTEM='true' \
+              git fetch --no-tags origin \
+                "+refs/heads/${GITHUB_HEAD_REF}:refs/remotes/origin/${GITHUB_HEAD_REF}" \
+                "+${GITHUB_REF}:${merge_ref}"; then
+              git checkout --force "${merge_ref}"
+              exit 0
+            fi
+            sleep 10
+          done
+
+          exit 1
 
       - name: 'Verify PR checkout includes head commit'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
