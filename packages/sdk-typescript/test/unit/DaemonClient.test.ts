@@ -2321,6 +2321,33 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('extension operations', () => {
+    it('GETs an extension operation status by id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          operationId: 'op/1',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.extensionOperationStatus('op/1');
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations/op%2F1',
+      );
+      expect(calls[0]?.method).toBe('GET');
+      expect(result).toMatchObject({
+        operationId: 'op/1',
+        status: 'succeeded',
+      });
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(

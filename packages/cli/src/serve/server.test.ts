@@ -2674,7 +2674,8 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(202);
-        expect(res.body).toEqual({ accepted: true });
+        expect(res.body).toMatchObject({ accepted: true });
+        expect(res.body.operationId).toEqual(expect.any(String));
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
@@ -2698,9 +2699,53 @@ describe('createServeApp', () => {
         expect(requestSettingError).toContain(
           'requires interactive configuration',
         );
+
+        const poll = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(poll.status).toBe(200);
+        expect(poll.body).toMatchObject({
+          v: 1,
+          operationId: res.body.operationId,
+          operation: 'install',
+          status: 'succeeded',
+          source: 'https://example.com/installed-ext',
+          result: {
+            status: 'installed',
+            name: 'installed-ext',
+            version: '1.2.3',
+            refreshed: 1,
+            failed: 0,
+          },
+        });
       } finally {
         restore();
       }
+    });
+
+    it('returns 404 for unknown extension operation ids', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/workspace/extensions/operations/missing-operation')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        code: 'extension_operation_not_found',
+      });
     });
 
     it('broadcasts a failed extension install with redacted error details', async () => {
@@ -2729,6 +2774,7 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(202);
+        expect(res.body.operationId).toEqual(expect.any(String));
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'failed',
@@ -2739,6 +2785,24 @@ describe('createServeApp', () => {
           });
         });
         expect(bridge.extensionEvents.at(-1)?.error).not.toContain('token');
+
+        const poll = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(poll.status).toBe(200);
+        expect(poll.body).toMatchObject({
+          operationId: res.body.operationId,
+          operation: 'install',
+          status: 'failed',
+          source: 'https://example.com/private-ext',
+          error: 'https://***REDACTED***@example.com/private-ext failed',
+        });
+        expect(poll.body.error).not.toContain('token');
       } finally {
         restore();
       }
@@ -2773,6 +2837,7 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(202);
+        expect(res.body.operationId).toEqual(expect.any(String));
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
@@ -2782,6 +2847,27 @@ describe('createServeApp', () => {
             failed: 1,
             error: 'refresh broke',
           });
+        });
+
+        const poll = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(poll.status).toBe(200);
+        expect(poll.body).toMatchObject({
+          operationId: res.body.operationId,
+          operation: 'install',
+          status: 'succeeded_with_refresh_error',
+          result: {
+            status: 'installed',
+            refreshed: 0,
+            failed: 1,
+            error: 'refresh broke',
+          },
         });
       } finally {
         restore();
