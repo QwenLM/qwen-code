@@ -34,6 +34,7 @@ import {
   resetTrustedFoldersForTesting,
   TrustLevel,
 } from '../config/trustedFolders.js';
+import * as runQwenServeModule from './run-qwen-serve.js';
 
 let tempWorkspace: string | undefined;
 let tempLaunchCwd: string | undefined;
@@ -52,6 +53,8 @@ const originalSystemDefaultsPath =
 const originalTrustedFoldersPath =
   process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
 const originalReferencedToken = process.env['FAST_PATH_REFERENCED_TOKEN'];
+const originalRateLimit = process.env['QWEN_SERVE_RATE_LIMIT'];
+const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCwd = process.cwd();
 
 function useTempQwenHome(): string {
@@ -112,6 +115,16 @@ afterEach(() => {
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
   } else {
     process.env['FAST_PATH_REFERENCED_TOKEN'] = originalReferencedToken;
+  }
+  if (originalRateLimit === undefined) {
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
+  } else {
+    process.env['QWEN_SERVE_RATE_LIMIT'] = originalRateLimit;
+  }
+  if (originalRateLimitPrompt === undefined) {
+    delete process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
+  } else {
+    process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'] = originalRateLimitPrompt;
   }
   if (originalQwenRuntimeDir === undefined) {
     delete process.env['QWEN_RUNTIME_DIR'];
@@ -387,6 +400,84 @@ describe('serve fast path environment bootstrap', () => {
     expect(stderrWrites.join('')).toContain(
       'qwen serve: runtime startup failed after listener was ready: runtime boom',
     );
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('validates rate limit env after settings bootstrap enables rate limiting', async () => {
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-rate-limit-env-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: {
+          QWEN_SERVE_RATE_LIMIT: '1',
+          QWEN_SERVE_RATE_LIMIT_PROMPT: '0',
+        },
+      }),
+    );
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    await expect(
+      tryRunServeFastPath([
+        'serve',
+        '--workspace',
+        tempWorkspace,
+        '--port',
+        '0',
+        '--hostname',
+        '127.0.0.1',
+        '--no-open',
+        '--no-web',
+      ]),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(stderrWrites.join('')).toContain(
+      'qwen serve: --rate-limit-prompt must be a positive integer.',
+    );
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('exits when runQwenServe fails after settings bootstrap succeeds', async () => {
+    useTempQwenHome();
+    vi.spyOn(runQwenServeModule, 'runQwenServe').mockRejectedValue(
+      new Error('listen boom'),
+    );
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    await expect(
+      tryRunServeFastPath([
+        'serve',
+        '--port',
+        '0',
+        '--hostname',
+        '127.0.0.1',
+        '--no-open',
+        '--no-web',
+      ]),
+    ).rejects.toThrow('process.exit(1)');
+
+    expect(stderrWrites.join('')).toContain('qwen serve: listen boom');
     expect(process.exit).toHaveBeenCalledWith(1);
   });
 

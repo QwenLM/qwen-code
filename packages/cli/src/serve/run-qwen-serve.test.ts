@@ -9,11 +9,13 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  createLazyBridgeProxy,
   extractContextFilename,
   InvalidPolicyConfigError,
   runQwenServe,
   type RunHandle,
   validatePolicyConfig,
+  waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
@@ -537,6 +539,44 @@ describe('runQwenServe runtime startup failures', () => {
     ).rejects.toThrow('runtime boom');
   });
 
+  it('bounds shutdown waiting when runtime startup never settles', async () => {
+    const daemonLog = { warn: vi.fn() };
+
+    await expect(
+      waitForRuntimeStartingForShutdown(
+        new Promise<void>(() => {}),
+        daemonLog,
+        1,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      '1ms runtime-startup wait reached during shutdown; continuing listener close',
+    );
+  });
+
+  it('proxies bridge access only after the runtime bridge is ready', async () => {
+    let bridge: HttpAcpBridge | undefined;
+    const proxy = createLazyBridgeProxy(() => bridge);
+
+    expect(() => proxy.getDaemonStatusSnapshot()).toThrow(
+      'Daemon bridge runtime is still starting.',
+    );
+
+    const getDaemonStatusSnapshot = vi.fn(function (this: HttpAcpBridge) {
+      return this === bridge
+        ? BASE_BRIDGE_SNAPSHOT
+        : {
+            ...BASE_BRIDGE_SNAPSHOT,
+            channelLive: false,
+          };
+    });
+    bridge = { getDaemonStatusSnapshot } as unknown as HttpAcpBridge;
+
+    expect(proxy.getDaemonStatusSnapshot()).toBe(BASE_BRIDGE_SNAPSHOT);
+    expect(getDaemonStatusSnapshot).toHaveBeenCalledTimes(1);
+  });
+
   it('reports bootstrap status and capabilities when fast path resolves on listen', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
@@ -587,6 +627,24 @@ describe('runQwenServe runtime startup failures', () => {
         policy: { permission: 'first-responder' },
         limits: { maxPendingPromptsPerSession: 5 },
       });
+
+      const port = new URL(handle.url).port;
+      for (const origin of [
+        `http://127.0.0.1:${port}`,
+        `http://localhost:${port}`,
+        `http://[::1]:${port}`,
+        `http://host.docker.internal:${port}`,
+      ]) {
+        const sameOriginRes = await fetch(`${handle.url}/capabilities`, {
+          headers: { Origin: origin },
+        });
+        expect(sameOriginRes.status).toBe(200);
+      }
+
+      const crossOriginRes = await fetch(`${handle.url}/capabilities`, {
+        headers: { Origin: 'http://example.com' },
+      });
+      expect(crossOriginRes.status).toBe(403);
 
       const res = await fetch(`${handle.url}/daemon/status`);
       const body = (await res.json()) as {

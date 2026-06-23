@@ -721,7 +721,7 @@ function installSameOriginOriginStrip(
   });
 }
 
-function createLazyBridgeProxy(
+export function createLazyBridgeProxy(
   getBridge: () => AcpSessionBridge | undefined,
 ): AcpSessionBridge {
   return new Proxy(
@@ -737,6 +737,30 @@ function createLazyBridgeProxy(
       },
     },
   ) as AcpSessionBridge;
+}
+
+export async function waitForRuntimeStartingForShutdown(
+  runtimeStarting: Promise<void> | undefined,
+  daemonLog: Pick<DaemonLogger, 'warn'>,
+  timeoutMs = SHUTDOWN_FORCE_CLOSE_MS,
+): Promise<void> {
+  if (!runtimeStarting) return;
+
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    runtimeStarting,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        daemonLog.warn(
+          `${timeoutMs}ms runtime-startup wait reached during shutdown; continuing listener close`,
+        );
+        resolve();
+      }, timeoutMs);
+      timer.unref();
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function createBootstrapServeApp(input: {
@@ -2032,7 +2056,10 @@ export async function runQwenServe(
                 );
               })
               .then(async () => {
-                await runtimeStarting;
+                await waitForRuntimeStartingForShutdown(
+                  runtimeStarting,
+                  daemonLog,
+                );
                 const appForCleanup = runtimeApp ?? runtimeAppForCleanup;
                 // Dispose the device-flow registry FIRST so any
                 // in-flight IdP poll is cancelled and timers are cleared
