@@ -4086,6 +4086,9 @@ describe('createServeApp', () => {
         sessionTasksImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
+        sessionLspImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -4102,6 +4105,9 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/missing/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const lspRes = await request(app)
+        .get('/session/missing/lsp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(404);
       expect(contextRes.body.sessionId).toBe('missing');
@@ -4109,6 +4115,8 @@ describe('createServeApp', () => {
       expect(commandsRes.body.sessionId).toBe('missing');
       expect(tasksRes.status).toBe(404);
       expect(tasksRes.body.sessionId).toBe('missing');
+      expect(lspRes.status).toBe(404);
+      expect(lspRes.body.sessionId).toBe('missing');
     });
 
     it('rejects task cancellation with invalid kind', async () => {

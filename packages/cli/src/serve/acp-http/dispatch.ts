@@ -96,7 +96,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
-  `${QWEN_METHOD_NS}session/lsp_status`,
+  `${QWEN_METHOD_NS}session/lsp`,
   // Wave 1: memory
   `${QWEN_METHOD_NS}workspace/memory`,
   `${QWEN_METHOD_NS}workspace/memory/write`,
@@ -1408,7 +1408,7 @@ export class AcpDispatcher {
           return;
         }
 
-        case `${QWEN_METHOD_NS}session/lsp_status`: {
+        case `${QWEN_METHOD_NS}session/lsp`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionLspStatus(sessionId);

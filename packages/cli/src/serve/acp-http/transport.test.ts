@@ -599,7 +599,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
   });
 
-  it('initialize advertises _qwen/session/lsp_status', async () => {
+  it('initialize advertises _qwen/session/lsp', async () => {
     const { body } = await initializeRaw();
     const result = body['result'] as {
       agentCapabilities: {
@@ -607,7 +607,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       };
     };
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
-      '_qwen/session/lsp_status',
+      '_qwen/session/lsp',
     );
   });
 
@@ -2179,7 +2179,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/lsp_status returns status', async () => {
+    it('_qwen/session/lsp returns status', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
       await new Promise((r) => setTimeout(r, 30));
@@ -2193,7 +2193,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       await post(connId, {
         jsonrpc: '2.0',
         id: 57,
-        method: '_qwen/session/lsp_status',
+        method: '_qwen/session/lsp',
         params: { sessionId: 'sess-1' },
       });
       const frames = await takeFrames(await streamRes, 2);
