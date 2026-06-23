@@ -17,6 +17,8 @@ import { ToolNames } from '../tool-names.js';
 import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
+import { FORK_AGENT, FORK_DEFAULT_MAX_TURNS } from './fork-subagent.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
@@ -1311,6 +1313,37 @@ describe('AgentTool', () => {
         'general-purpose',
       );
       expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('caps fork turns and uses bubble approval mode', async () => {
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+      });
+      await invocation.execute();
+
+      expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
+      const createArgs = vi.mocked(AgentHeadless.create).mock.calls[0];
+      // RunConfig (5th positional) carries the detached-fork turn cap so a
+      // fire-and-forget fork can't loop unbounded.
+      expect(createArgs[4]).toEqual({ max_turns: FORK_DEFAULT_MAX_TURNS });
+      // The fork agent uses `bubble` approval so its permission prompts surface
+      // to the parent's Background-tasks UI instead of being auto-denied.
+      expect(FORK_AGENT.approvalMode).toBe(BUBBLE_APPROVAL_MODE);
     });
 
     it('omitting subagent_type uses general-purpose, not fork', async () => {
