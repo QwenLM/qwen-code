@@ -31,6 +31,26 @@ type IssueSeverity = 'warning' | 'error';
 type SectionSummary = Record<string, string | number | boolean | null>;
 type StatusRecord = Record<string, unknown>;
 
+export type DaemonStartupPreheatStatus =
+  | 'external_bridge'
+  | 'not_scheduled'
+  | 'scheduled'
+  | 'running'
+  | 'succeeded'
+  | 'failed';
+
+export interface DaemonStartupSnapshot {
+  processStartedAt: string;
+  listenerReadyAt?: string;
+  processToListenMs?: number;
+  runQwenServeToListenMs?: number;
+  preheat: {
+    status: DaemonStartupPreheatStatus;
+    durationMs?: number;
+    error?: string;
+  };
+}
+
 export interface DaemonStatusIssue {
   code:
     | 'session_capacity_high'
@@ -41,7 +61,9 @@ export interface DaemonStatusIssue {
     | 'mcp_budget_warning'
     | 'mcp_budget_exhausted'
     | 'rate_limit_hits'
-    | 'workspace_status_unavailable';
+    | 'workspace_status_unavailable'
+    | 'daemon_runtime_starting'
+    | 'daemon_runtime_failed';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -67,6 +89,7 @@ export interface BuildDaemonStatusOptions {
   supportedDeviceFlowProviders: readonly string[];
   deviceFlowRegistry: DeviceFlowRegistry;
   sessionShellCommandEnabled: boolean;
+  startup?: DaemonStartupSnapshot;
 }
 
 interface DaemonStatusSection<T> {
@@ -142,6 +165,7 @@ export async function buildDaemonStatusResponse(
       uptimeMs: Math.round(process.uptime() * 1000),
       mode: input.opts.mode,
       workspaceCwd: input.boundWorkspace,
+      ...(input.startup ? { startup: cloneStartup(input.startup) } : {}),
       ...(input.qwenCodeVersion
         ? { qwenCodeVersion: input.qwenCodeVersion }
         : {}),
@@ -204,6 +228,28 @@ export async function buildDaemonStatusResponse(
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),
+  };
+}
+
+function cloneStartup(startup: DaemonStartupSnapshot): DaemonStartupSnapshot {
+  return {
+    processStartedAt: startup.processStartedAt,
+    ...(startup.listenerReadyAt
+      ? { listenerReadyAt: startup.listenerReadyAt }
+      : {}),
+    ...(startup.processToListenMs !== undefined
+      ? { processToListenMs: startup.processToListenMs }
+      : {}),
+    ...(startup.runQwenServeToListenMs !== undefined
+      ? { runQwenServeToListenMs: startup.runQwenServeToListenMs }
+      : {}),
+    preheat: {
+      status: startup.preheat.status,
+      ...(startup.preheat.durationMs !== undefined
+        ? { durationMs: startup.preheat.durationMs }
+        : {}),
+      ...(startup.preheat.error ? { error: startup.preheat.error } : {}),
+    },
   };
 }
 

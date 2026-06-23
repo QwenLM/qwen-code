@@ -72,6 +72,7 @@ import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import {
   buildDaemonStatusResponse,
+  type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from './daemon-status.js';
 import {
@@ -767,6 +768,7 @@ export interface ServeAppDeps {
    * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
+  startup?: DaemonStartupSnapshot;
   workspace?: DaemonWorkspaceService;
   persistDisabledTools?: (
     workspace: string,
@@ -1288,9 +1290,12 @@ export function createServeApp(
   const createExtensionManager = () =>
     new ExtensionManager({
       workspaceDir: boundWorkspace,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(boundWorkspace).merged,
-      ),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(
+          loadSettings(boundWorkspace).merged,
+          undefined,
+          boundWorkspace,
+        ).isTrusted ?? true,
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -1920,6 +1925,7 @@ export function createServeApp(
           bridge,
           workspace,
           daemonLog,
+          startup: deps.startup,
           qwenCodeVersion: deps.qwenCodeVersion,
           acpHandle: acpHandleRef.current,
           rateLimiter,

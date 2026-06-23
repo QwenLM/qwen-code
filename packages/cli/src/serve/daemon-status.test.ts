@@ -189,6 +189,40 @@ describe('buildDaemonStatusResponse', () => {
       },
     });
   });
+
+  it('includes additive daemon startup timing when provided', async () => {
+    const options = makeOptions() as BuildDaemonStatusOptions & {
+      startup: {
+        processStartedAt: string;
+        listenerReadyAt?: string;
+        processToListenMs?: number;
+        runQwenServeToListenMs?: number;
+        preheat: { status: string; durationMs?: number; error?: string };
+      };
+    };
+    options.startup = {
+      processStartedAt: '2026-06-23T08:00:00.000Z',
+      listenerReadyAt: '2026-06-23T08:00:01.250Z',
+      processToListenMs: 1250,
+      runQwenServeToListenMs: 500,
+      preheat: { status: 'succeeded', durationMs: 300 },
+    };
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response).toMatchObject({
+      status: 'ok',
+      daemon: {
+        startup: {
+          processStartedAt: '2026-06-23T08:00:00.000Z',
+          listenerReadyAt: '2026-06-23T08:00:01.250Z',
+          processToListenMs: 1250,
+          runQwenServeToListenMs: 500,
+          preheat: { status: 'succeeded', durationMs: 300 },
+        },
+      },
+    });
+  });
 });
 
 interface MakeOptionsInput {

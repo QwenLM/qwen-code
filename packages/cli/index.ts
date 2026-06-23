@@ -7,6 +7,7 @@
  */
 
 import { initStartupProfiler } from './src/utils/startupProfiler.js';
+import { isServeFastPathArgv } from './src/serve/fast-path-argv.js';
 
 // Must run before any other imports to capture the earliest possible T0.
 initStartupProfiler();
@@ -16,13 +17,11 @@ import { initCpuProfiler } from './src/utils/cpuProfiler.js';
 // QWEN_CODE_CPU_PROFILE=1, capturing as much of the startup as possible.
 initCpuProfiler();
 
-import './src/gemini.js';
-import { main } from './src/gemini.js';
-import { FatalError } from '@qwen-code/qwen-code-core';
-import { AlreadyReportedError } from './src/utils/errors.js';
-import { writeStderrLine } from './src/utils/stdioHelpers.js';
-
 // --- Global Entry Point ---
+
+function writeStderrLine(line: string): void {
+  process.stderr.write(`${line}\n`);
+}
 
 // Suppress known race conditions in @lydell/node-pty.
 //
@@ -76,20 +75,22 @@ const isExpectedPtyRaceError = (error: unknown): boolean => {
   return false;
 };
 
-process.on('uncaughtException', (error) => {
-  if (isExpectedPtyRaceError(error)) {
-    return;
+async function runCliEntry(): Promise<void> {
+  if (isServeFastPathArgv(process.argv.slice(2))) {
+    const { tryRunServeFastPath } = await import('./src/serve/fast-path.js');
+    if (await tryRunServeFastPath()) return;
   }
 
-  if (error instanceof Error) {
-    writeStderrLine(error.stack ?? error.message);
-  } else {
-    writeStderrLine(String(error));
-  }
-  process.exit(1);
-});
+  const { main } = await import('./src/gemini.js');
+  await main();
+}
 
-main().catch((error) => {
+async function handleCriticalError(error: unknown): Promise<void> {
+  const [{ FatalError }, { AlreadyReportedError }] = await Promise.all([
+    import('@qwen-code/qwen-code-core'),
+    import('./src/utils/errors.js'),
+  ]);
+
   if (error instanceof FatalError) {
     let errorMessage = error.message;
     if (!process.env['NO_COLOR']) {
@@ -114,4 +115,29 @@ main().catch((error) => {
     console.error(String(error));
   }
   process.exit(1);
+}
+
+process.on('uncaughtException', (error) => {
+  if (isExpectedPtyRaceError(error)) {
+    return;
+  }
+
+  if (error instanceof Error) {
+    writeStderrLine(error.stack ?? error.message);
+  } else {
+    writeStderrLine(String(error));
+  }
+  process.exit(1);
+});
+
+runCliEntry().catch((error: unknown) => {
+  void handleCriticalError(error).catch((handlerError: unknown) => {
+    console.error('An unexpected critical error occurred:');
+    if (handlerError instanceof Error) {
+      console.error(handlerError.stack);
+    } else {
+      console.error(String(handlerError));
+    }
+    process.exit(1);
+  });
 });

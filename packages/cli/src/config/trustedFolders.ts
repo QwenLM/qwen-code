@@ -98,15 +98,26 @@ export class LoadedTrustedFolders {
       }
     }
 
+    const locationVariants = getPathComparisonVariants(location);
     for (const trustedPath of trustedPaths) {
-      if (isWithinRoot(location, trustedPath)) {
-        return true;
+      for (const locationVariant of locationVariants) {
+        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
+          if (isWithinRoot(locationVariant, trustedVariant)) {
+            return true;
+          }
+        }
       }
     }
 
     for (const untrustedPath of untrustedPaths) {
-      if (path.normalize(location) === path.normalize(untrustedPath)) {
-        return false;
+      for (const locationVariant of locationVariants) {
+        for (const untrustedVariant of getPathComparisonVariants(
+          untrustedPath,
+        )) {
+          if (locationVariant === untrustedVariant) {
+            return false;
+          }
+        }
       }
     }
 
@@ -117,6 +128,26 @@ export class LoadedTrustedFolders {
     this.user.config[path] = trustLevel;
     saveTrustedFolders(this.user);
   }
+}
+
+function getPathComparisonVariants(rawPath: string): Set<string> {
+  const variants = new Set<string>([path.normalize(path.resolve(rawPath))]);
+  try {
+    variants.add(path.normalize(fs.realpathSync(rawPath)));
+  } catch {
+    // Non-existent paths still compare by their resolved lexical form.
+  }
+  return variants;
+}
+
+function arePathsEquivalent(left: string, right: string): boolean {
+  const rightVariants = getPathComparisonVariants(right);
+  for (const leftVariant of getPathComparisonVariants(left)) {
+    if (rightVariants.has(leftVariant)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 let loadedTrustedFolders: LoadedTrustedFolders | undefined;
@@ -249,6 +280,7 @@ export function isFolderTrustEnabled(settings: Settings): boolean {
 
 function getWorkspaceTrustFromLocalConfig(
   trustConfig?: Record<string, TrustLevel>,
+  workspacePath: string = process.cwd(),
 ): TrustResult {
   const folders = loadTrustedFolders();
 
@@ -265,7 +297,7 @@ function getWorkspaceTrustFromLocalConfig(
     );
   }
 
-  const isTrusted = folders.isPathTrusted(process.cwd());
+  const isTrusted = folders.isPathTrusted(workspacePath);
   return {
     isTrusted,
     source: isTrusted !== undefined ? 'file' : undefined,
@@ -275,16 +307,21 @@ function getWorkspaceTrustFromLocalConfig(
 export function isWorkspaceTrusted(
   settings: Settings,
   trustConfig?: Record<string, TrustLevel>,
+  workspacePath?: string,
 ): TrustResult {
   if (!isFolderTrustEnabled(settings)) {
     return { isTrusted: true, source: undefined };
   }
 
   const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (ideTrust !== undefined) {
+  if (
+    ideTrust !== undefined &&
+    (workspacePath === undefined ||
+      arePathsEquivalent(workspacePath, process.cwd()))
+  ) {
     return { isTrusted: ideTrust, source: 'ide' };
   }
 
   // Fall back to the local user configuration
-  return getWorkspaceTrustFromLocalConfig(trustConfig);
+  return getWorkspaceTrustFromLocalConfig(trustConfig, workspacePath);
 }

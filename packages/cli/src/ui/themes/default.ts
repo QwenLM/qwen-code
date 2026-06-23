@@ -5,9 +5,10 @@
  */
 
 import { darkTheme, Theme } from './theme.js';
+import { DEFAULT_DARK_THEME_NAME } from '../../config/default-theme-names.js';
 
 export const DefaultDark: Theme = new Theme(
-  'Default',
+  DEFAULT_DARK_THEME_NAME,
   'dark',
   {
     hljs: {
