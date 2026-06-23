@@ -110,7 +110,13 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
+          # Check out the PR head commit directly instead of the synthetic
+          # refs/pull/N/merge ref. GitHub recomputes that merge ref asynchronously
+          # whenever the PR head or base (main) moves, so a fetch landing in that
+          # window fails with "couldn't find remote ref". head.sha only changes when
+          # the PR is pushed. Falls through to branch_ref (workflow_dispatch) and
+          # github.ref (push / merge_group queue commit) for non-PR events.
+          ref: '${{ github.event.pull_request.head.sha || github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
 
       # Self-hosted reuses the machine's Node (nodejs.org unreachable via proxy); linters are pre-installed on PATH so scripts/lint.js skips downloading them.
@@ -214,6 +220,11 @@ jobs:
       - name: 'Checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # See the Lint job's checkout: pin to the PR head SHA so a missing
+          # refs/pull/N/merge ref can't fail this required check. Non-PR events
+          # fall through to github.ref (push branch / merge_group queue commit).
+          ref: '${{ github.event.pull_request.head.sha || github.ref }}'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js ${{ matrix.node-version }} (hosted)'
