@@ -292,6 +292,25 @@ describe('WorkspaceFileSystem - list', () => {
     });
     expect(entries).toHaveLength(2);
   });
+
+  it('rejects a non-positive-integer maxEntries with parse_error', async () => {
+    const r = await h.fs.resolve('.', 'list');
+    // Infinity/NaN make `entries.length >= maxEntries` silently never break;
+    // floats / 0 / negatives are equally meaningless. Reject them up front,
+    // matching how readText() guards its `limit` / `line`.
+    for (const bad of [
+      Infinity,
+      NaN,
+      0,
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      const err = await h.fs.list(r, { maxEntries: bad }).catch((e) => e);
+      expect(isFsError(err)).toBe(true);
+      expect(String(err)).toContain('maxEntries');
+    }
+  });
 });
 
 describe('WorkspaceFileSystem - glob', () => {

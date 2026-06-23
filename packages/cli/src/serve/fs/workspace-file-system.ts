@@ -525,6 +525,18 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'list');
+      // Reject malformed caps the same way readText() guards `limit`/`line`:
+      // an unvalidated Infinity/NaN/float/0/negative makes the
+      // `entries.length >= opts.maxEntries` break check silently wrong.
+      if (
+        opts.maxEntries !== undefined &&
+        (!Number.isSafeInteger(opts.maxEntries) || opts.maxEntries < 1)
+      ) {
+        throw new FsError(
+          'parse_error',
+          `maxEntries must be a positive integer, got ${opts.maxEntries}`,
+        );
+      }
       const entries: FsEntry[] = [];
       const dir = await fsp.opendir(p as string);
       for await (const d of dir) {
