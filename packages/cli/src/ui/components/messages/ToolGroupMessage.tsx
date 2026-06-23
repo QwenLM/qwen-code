@@ -429,7 +429,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
                 forceShowResult={
-                  isUserInitiated ||
+                  forceExpandAll ||
                   tool.status === ToolCallStatus.Confirming ||
                   tool.status === ToolCallStatus.Error ||
                   isAgentWithPendingConfirmation(tool.resultDisplay) ||

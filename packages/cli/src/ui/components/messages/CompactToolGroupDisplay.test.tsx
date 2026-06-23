@@ -122,7 +122,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
     // CATEGORY_ORDER: search → read → list → ...
-    expect(frame).toContain('Searched search pattern');
+    expect(frame).toContain('Searched 1 pattern');
     expect(frame).toContain('read 2 files');
   });
 
@@ -144,7 +144,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     const { lastFrame } = render(
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
-    expect(lastFrame()).toContain('Ran ls -la');
+    expect(lastFrame()).toContain('Ran 1 command');
   });
 });
 
@@ -165,18 +165,12 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary([], false)).toBe('');
   });
 
-  it('single tool uses description directly', () => {
-    expect(buildToolSummary([make({})], false)).toBe('Read a.ts');
-  });
-
-  it('single tool without description falls back to count', () => {
-    expect(buildToolSummary([make({ description: '' })], false)).toBe(
-      'Read 1 file',
-    );
+  it('single tool uses count format', () => {
+    expect(buildToolSummary([make({})], false)).toBe('Read 1 file');
   });
 
   it('single tool uses progressive verb when active', () => {
-    expect(buildToolSummary([make({})], true)).toBe('Reading a.ts');
+    expect(buildToolSummary([make({})], true)).toBe('Reading 1 file');
   });
 
   it('multiple same-type tools use count', () => {
@@ -196,7 +190,7 @@ describe('buildToolSummary', () => {
     ];
     // CATEGORY_ORDER: search → read → list → command → edit
     expect(buildToolSummary(tools, false)).toBe(
-      'Read a.ts, ran npm test, edited b.ts',
+      'Read 1 file, ran 1 command, edited 1 file',
     );
   });
 
@@ -206,27 +200,22 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'Shell', description: 'ls' }),
     ];
     const result = buildToolSummary(tools, false);
-    expect(result.startsWith('Read')).toBe(true);
+    expect(result).toBe('Read 1 file, ran 1 command');
   });
 
   it('unknown tool names fall to other category', () => {
     const tools = [
       make({ callId: 'c1', name: 'UnknownTool', description: 'something' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe('Used something');
+    expect(buildToolSummary(tools, false)).toBe('Used 1 tool');
   });
 
-  it('multi-line description uses only first line', () => {
-    const tools = [make({ description: 'first line\nsecond line' })];
-    expect(buildToolSummary(tools, false)).toBe('Read first line');
-  });
-
-  it('single category with exactly 1 tool keeps description in mixed group', () => {
+  it('mixed group with count per category', () => {
     const tools = [
       make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
       make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
       make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran npm test');
+    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran 1 command');
   });
 });

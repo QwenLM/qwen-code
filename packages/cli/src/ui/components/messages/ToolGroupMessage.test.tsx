@@ -300,6 +300,60 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
+  describe('Memory-only group', () => {
+    it('renders read/write counts for completed memory-only groups', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+        }),
+        createToolCall({
+          callId: 'm2',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+        }),
+        createToolCall({
+          callId: 'm3',
+          name: 'SaveMemory',
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={2}
+          memoryWriteCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Recalled 2 memories');
+      expect(frame).toContain('Wrote 1 memory');
+    });
+
+    it('renders singular form for single memory op', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={1}
+          memoryWriteCount={0}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Recalled 1 memory');
+      expect(frame).not.toContain('Wrote');
+    });
+  });
+
   describe('SubAgent focus', () => {
     // Helper to build a running SubAgent result display
     const createRunningSubagentDisplay = (
@@ -695,7 +749,8 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // Sibling shown — read_file is collapsible, renders via summary.
+      // Sibling shown — read_file maps to 'other' (non-collapsible),
+      // renders individually via ToolMessage.
       expect(frame).toContain('read config.yaml');
       // Subagent hidden — panel owns the live row.
       expect(frame).not.toContain('MockSubagent[task-running]');
@@ -853,8 +908,8 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // Sibling is the only inline survivor → compact overview shows
-      // its description, not the subagent's.
+      // Sibling is the only inline survivor — read_file maps to 'other'
+      // (non-collapsible), renders individually via ToolMessage.
       expect(frame).toContain('read config.yaml');
       expect(frame).not.toMatch(/× 2/);
       expect(frame).not.toContain('Delegate task to subagent');

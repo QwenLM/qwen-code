@@ -193,34 +193,12 @@ export function buildToolSummary(
 ): string {
   if (toolCalls.length === 0) return '';
 
-  // Single tool: use description directly for richer context
-  if (toolCalls.length === 1) {
-    const tool = toolCalls[0]!;
-    const category = getToolCategory(tool.name);
-    const template = CATEGORY_TEMPLATES[category];
-    const verb = isActive ? template.activeVerb : template.pastVerb;
-    const desc = tool.description?.split('\n')[0];
-    if (desc) {
-      return `${verb} ${desc}`;
-    }
-    return `${verb} 1 ${template.singular}`;
-  }
-
   // Group by category and count
   const counts = new Map<ToolCategory, number>();
-  // For categories with exactly 1 tool, keep the description for richer output
-  const singleDescs = new Map<ToolCategory, string>();
 
   for (const tool of toolCalls) {
     const cat = getToolCategory(tool.name);
-    const prev = counts.get(cat) ?? 0;
-    counts.set(cat, prev + 1);
-    if (prev === 0) {
-      const desc = tool.description?.split('\n')[0];
-      if (desc) singleDescs.set(cat, desc);
-    } else {
-      singleDescs.delete(cat);
-    }
+    counts.set(cat, (counts.get(cat) ?? 0) + 1);
   }
 
   const parts: string[] = [];
@@ -234,12 +212,7 @@ export function buildToolSummary(
     const v = lower ? verb.toLowerCase() : verb;
 
     if (count === 1) {
-      const desc = singleDescs.get(cat);
-      if (desc) {
-        parts.push(`${v} ${desc}`);
-      } else {
-        parts.push(`${v} 1 ${template.singular}`);
-      }
+      parts.push(`${v} 1 ${template.singular}`);
     } else {
       parts.push(`${v} ${count} ${template.plural}`);
     }
