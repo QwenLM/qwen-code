@@ -106,7 +106,7 @@ class NativeAudioRecorder implements VoiceRecorder {
       }
     } catch (error) {
       this.starting = false;
-      throw explainMissingNativePackage(error);
+      throw error;
     }
   }
 

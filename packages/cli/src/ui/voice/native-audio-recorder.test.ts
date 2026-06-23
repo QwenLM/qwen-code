@@ -173,6 +173,27 @@ describe('createNativeAudioRecorder', () => {
     await expect(recorder.start()).rejects.toThrow(/@qwen-code\/audio-capture/);
   });
 
+  it('does not explain native start failures as missing packages', async () => {
+    const startError = new Error(
+      "Cannot find package '@qwen-code/audio-capture' while starting",
+    );
+    const backend = {
+      startRecording: vi.fn(() => {
+        throw startError;
+      }),
+      stopRecording: vi.fn(() => new Uint8Array([1])),
+      isRecording: vi.fn(() => false),
+      microphoneAuthorizationStatus: vi.fn(() => 'unknown' as const),
+    };
+    const recorder = createNativeAudioRecorder({
+      loadBackend: () => backend,
+    });
+
+    await expect(recorder.start()).rejects.toBe(startError);
+
+    expect(backend.startRecording).toHaveBeenCalledTimes(1);
+  });
+
   it('allows retry after native stop throws', async () => {
     const backend = {
       startRecording: vi.fn(),
