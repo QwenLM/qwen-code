@@ -1178,9 +1178,9 @@ export const AppContainer = (props: AppContainerProps) => {
     setIsDiffDialogOpen(false);
   }, []);
 
-  // Skill-review dialog: shown to confirm auto-generated skills before they
-  // enter the skill library. State is populated by Task 11 (subscription);
-  // the dialog component is Task 9. Only the plumbing lives here.
+  // Skill-review dialog: confirms auto-generated skills before they enter the
+  // skill library. This state is populated by the skill-review subscription
+  // effect below; the dialog component itself lives in SkillReviewDialog.tsx.
   const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
   const [skillReviewPending, setSkillReviewPending] =
     useState<UIState['skillReviewPending']>(null);

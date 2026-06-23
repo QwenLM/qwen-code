@@ -112,8 +112,22 @@ export async function acceptPendingSkill(pending: PendingSkill): Promise<void> {
   try {
     await fs.access(stagedDir);
   } catch {
-    debugLogger.debug(`Accept skipped "${pending.name}": staged dir gone.`);
-    return;
+    // Staged dir is gone. If the skill already landed in the skills root this
+    // is a harmless re-accept; otherwise the staged copy was lost — throw so
+    // the caller keeps it in pendingSkills and logs, rather than silently
+    // dropping it from metadata (which would make the skill vanish without a
+    // trace).
+    try {
+      await fs.access(finalDir);
+      debugLogger.debug(
+        `Accept no-op "${pending.name}": already in the skills library.`,
+      );
+      return;
+    } catch {
+      throw new Error(
+        `Cannot accept "${pending.name}": staged directory is missing and it is not in the skills root.`,
+      );
+    }
   }
   await fs.mkdir(path.dirname(finalDir), { recursive: true });
   await fs.rm(finalDir, { recursive: true, force: true });

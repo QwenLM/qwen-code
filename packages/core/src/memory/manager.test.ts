@@ -434,6 +434,38 @@ describe('MemoryManager', () => {
       // The skill must still be under .qwen/skills/
       await expect(fs.access(skillFilePath)).resolves.toBeUndefined();
     });
+
+    it('falls back to systemMessage as progress text when staging yields zero pending', async () => {
+      // The skill exists BEFORE the review, so the agent edits it in place and
+      // staging skips it (only new skills are staged) — zero pending, but the
+      // edit is still a durable change, so the agent's systemMessage should win
+      // over the "without durable changes" default.
+      await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
+      await fs.writeFile(skillFilePath, '---\ndescription: Foo\n---\n# Foo\n');
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        await fs.writeFile(
+          skillFilePath,
+          '---\ndescription: Foo v2\n---\n# Foo v2\n',
+        );
+        return {
+          touchedSkillFiles: [skillFilePath],
+          systemMessage: 'Skill review updated 1 file(s).',
+        };
+      });
+      const mgr = new MemoryManager();
+      const record = await mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      }).promise!;
+      expect(record.metadata?.['pendingSkills']).toBeUndefined();
+      expect(record.progressText).toBe('Skill review updated 1 file(s).');
+    });
   });
 
   // ─── listTasksByType() ────────────────────────────────────────────────────

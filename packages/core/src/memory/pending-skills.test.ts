@@ -78,12 +78,22 @@ describe('pendingSkills', () => {
     await expect(fs.access(p.stagedManifestPath)).rejects.toThrow();
   });
 
-  it('accept is a no-op when the staged dir is already gone', async () => {
+  it('accept is a no-op when the skill is already in the skills root', async () => {
     const file = await makeSkill(root, 'delta');
     const [p] = await stageSkillDirs([file], root);
-    await rejectPendingSkill(p); // remove the staged dir first
+    await acceptPendingSkill(p); // promote it
+    // Re-accepting (staged dir gone, but skill already live) is harmless.
     await expect(acceptPendingSkill(p)).resolves.toBeUndefined();
-    await expect(fs.access(p.finalManifestPath)).rejects.toThrow();
+    await expect(fs.access(p.finalManifestPath)).resolves.toBeUndefined();
+  });
+
+  it('accept throws when staged dir is gone and skill is not in skills root', async () => {
+    const file = await makeSkill(root, 'delta2');
+    const [p] = await stageSkillDirs([file], root);
+    await rejectPendingSkill(p); // staged dir removed, never promoted
+    // Data-loss case: surface it instead of silently dropping the skill from
+    // pendingSkills metadata.
+    await expect(acceptPendingSkill(p)).rejects.toThrow();
   });
 
   it('reject deletes the staged dir and never touches skills root', async () => {

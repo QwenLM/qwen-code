@@ -914,7 +914,8 @@ export class MemoryManager {
           progressText:
             pending.length > 0
               ? `${pending.length} skill(s) awaiting review.`
-              : 'Managed skill review completed without durable changes.',
+              : (result.systemMessage ??
+                'Managed skill review completed without durable changes.'),
           metadata: {
             touchedSkillFiles: result.touchedSkillFiles,
             ...(pending.length > 0 ? { pendingSkills: pending } : {}),
@@ -1102,11 +1103,19 @@ export class MemoryManager {
     action: 'accept' | 'reject',
   ): Promise<void> {
     const record = this.tasks.get(taskId);
-    if (!record) return;
+    if (!record) {
+      debugLogger.warn(`Cannot resolve pending skill: no task ${taskId}.`);
+      return;
+    }
     const target = (
       (record.metadata?.['pendingSkills'] as PendingSkill[]) ?? []
     ).find((p) => p.name === skillName);
-    if (!target) return;
+    if (!target) {
+      debugLogger.warn(
+        `Cannot resolve pending skill "${skillName}": not pending on task ${taskId}.`,
+      );
+      return;
+    }
     try {
       if (action === 'accept') {
         await acceptPendingSkill(target);
