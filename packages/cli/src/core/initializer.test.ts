@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeApp } from './initializer.js';
 
 const mockPerformInitialAuth = vi.fn();
@@ -53,6 +53,7 @@ describe('initializeApp', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv('QWEN_CODE_LANG', '');
 
     mockConfig = {
       getModelsConfig: vi.fn().mockReturnValue({
@@ -73,6 +74,10 @@ describe('initializeApp', () => {
     mockInitializeI18n.mockResolvedValue(undefined);
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('should initialize i18n with language from settings', async () => {
     await initializeApp(mockConfig as never, mockSettings as never);
 
@@ -84,8 +89,6 @@ describe('initializeApp', () => {
 
     await initializeApp(mockConfig as never, mockSettings as never);
     expect(mockInitializeI18n).toHaveBeenCalledWith('zh');
-
-    vi.unstubAllEnvs();
   });
 
   it('should return no errors on successful initialization', async () => {
