@@ -180,6 +180,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
       })
+      .option('experimental-lsp', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Forward the experimental LSP opt-in to spawned agent sessions.',
+      })
       .option('web', {
         type: 'boolean',
         default: true,

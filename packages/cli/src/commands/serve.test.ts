@@ -42,7 +42,7 @@ describe('serve command args', () => {
   });
 
   it('parses --experimental-lsp for daemon child opt-in', () => {
-    const parsed = buildParser().parseSync('--experimental-lsp');
+    const parsed = buildParser().strict().parseSync('--experimental-lsp');
     expect(parsed['experimentalLsp']).toBe(true);
   });
 
