@@ -30,7 +30,8 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-const CURRENT_SETTINGS_VERSION = 5;
+// Keep in sync with SETTINGS_VERSION in packages/cli/src/config/settings.ts.
+const CURRENT_SETTINGS_VERSION = 4;
 
 // Helper: list files under a directory recursively, returning relative paths
 function listFilesRecursive(dir: string, base = dir): string[] {
