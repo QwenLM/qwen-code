@@ -231,7 +231,7 @@ export function registerWorkspacePermissionsRoutes(
             }`,
           );
         }
-        res.status(200).json(response);
+        res.status(200).json({ ...response, appliedVia: 'live-child' });
         return;
       }
 
@@ -310,7 +310,7 @@ export function registerWorkspacePermissionsRoutes(
           }`,
         );
       }
-      res.status(200).json(response);
+      res.status(200).json({ ...response, appliedVia: 'persist-fallback' });
     },
   );
 }

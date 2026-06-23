@@ -448,6 +448,7 @@ describe('workspace permissions routes', () => {
       },
       merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
       isTrusted: true,
+      appliedVia: 'live-child',
     });
     expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
       cwd: h.workspace,
@@ -506,6 +507,7 @@ describe('workspace permissions routes', () => {
       },
       merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
       isTrusted: true,
+      appliedVia: 'live-child',
     });
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
       'permissions.allow',
@@ -595,6 +597,7 @@ describe('workspace permissions routes', () => {
     );
     expect(res.body.workspace.rules.deny).toEqual(['Read(.env)', 'Bash(rm *)']);
     expect(res.body.merged.deny).toEqual(['Read(.env)', 'Bash(rm *)']);
+    expect(res.body.appliedVia).toBe('persist-fallback');
     expect(h.events).toEqual([
       {
         key: 'permissions.deny',
