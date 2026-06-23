@@ -26,18 +26,13 @@ import type {
   AutoModeDecision,
   AutoModeOutcome,
   GoalTerminalEvent,
-  TurnInterruption,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
-  buildSyntheticToolResponseParts,
   CompressionStatus,
-  detectTurnInterruption,
-  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-  ORPHAN_TOOL_USE_REPAIR_REASON,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   createDebugLogger,
@@ -66,6 +61,8 @@ import {
   createHookOutput,
   generateToolUseId,
   MessageBusType,
+  getPlanModeSystemReminder,
+  getArenaSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
   evaluatePermissionFlow,
@@ -130,11 +127,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
-import {
-  buildInitialSystemReminders,
-  insertAfterFunctionResponses,
-  normalizePartList,
-} from '../../utils/nonInteractiveHelpers.js';
+import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -625,25 +618,6 @@ export async function buildAvailableCommandsSnapshot(
 }
 
 /**
- * Result of {@link Session.continueTurn} / the `qwen/session/continue`
- * vendor method.
- */
-export interface ContinueTurnResponse {
-  stopReason: PromptResponse['stopReason'];
-  /** True only when a continuation actually reached the model turn path. */
-  resumed: boolean;
-  /** Last detected interruption shape; use `resumed` to tell if work ran. */
-  interruption: TurnInterruption['kind'];
-}
-
-interface ModelTurnLoopResult {
-  earlyExit: { stopReason: PromptResponse['stopReason'] } | null;
-  iterationsRun: number;
-  sendStarted: boolean;
-  error?: unknown;
-}
-
-/**
  * Session represents an active conversation session with the AI model.
  * It uses modular components for consistent event emission:
  * - HistoryReplayer for replaying past conversations
@@ -669,7 +643,6 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
-  private continueSequence: number = 0;
   private readonly createdAt: number = Date.now();
   /**
    * Running cumulative usage for this session, snapshotted onto each todo/plan
@@ -1072,59 +1045,6 @@ export class Session implements SessionContext {
       this.followupAbort = null;
     }
     // Abort any in-progress cron execution (user prompt takes priority)
-    await this.#abortAndDrainCronTurn();
-
-    // Wait for the previous prompt to finish so chat history is consistent.
-    if (this.pendingPromptCompletion) {
-      try {
-        await this.pendingPromptCompletion;
-      } catch {
-        // Expected: previous prompt was cancelled or errored
-      }
-    }
-
-    // A background notification turn mutates the same chat history as a user
-    // prompt. Abort it before awaiting the drain so user input is not blocked
-    // behind notification tool calls.
-    await this.#abortAndDrainNotificationTurn();
-
-    // Cancelled while waiting for the previous prompt to finish.
-    if (pendingSend.signal.aborted) {
-      return { stopReason: 'cancelled' };
-    }
-
-    // Track this prompt's completion for the next prompt to await
-    let resolveCompletion!: () => void;
-    this.pendingPromptCompletion = new Promise<void>((resolve) => {
-      resolveCompletion = resolve;
-    });
-
-    try {
-      const result = await this.#executePrompt(params, pendingSend);
-      if (this.pendingPrompt === pendingSend) {
-        this.pendingPrompt = null;
-      }
-      // Drain any cron prompts that queued while the prompt was active
-      void this.#drainCronQueue();
-      void this.#drainNotificationQueue();
-      this.#maybeEmitFollowupSuggestion(result);
-      return result;
-    } finally {
-      if (this.pendingPrompt === pendingSend) {
-        this.pendingPrompt = null;
-      }
-      // Start the scheduler in finally, not the success path: a turn can arm
-      // a wakeup via LoopWakeup and then throw on a later step. Gated on
-      // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
-      // cron job) is actually pending — otherwise the loop dies silently on
-      // any post-arm error.
-      void this.#startCronSchedulerIfNeeded();
-      resolveCompletion();
-      this.pendingPromptCompletion = null;
-    }
-  }
-
-  async #abortAndDrainCronTurn(): Promise<void> {
     if (this.cronAbortController) {
       this.cronAbortController.abort();
       this.cronAbortController = null;
@@ -1139,9 +1059,19 @@ export class Session implements SessionContext {
       }
       this.cronCompletion = null;
     }
-  }
 
-  async #abortAndDrainNotificationTurn(): Promise<void> {
+    // Wait for the previous prompt to finish so chat history is consistent.
+    if (this.pendingPromptCompletion) {
+      try {
+        await this.pendingPromptCompletion;
+      } catch {
+        // Expected: previous prompt was cancelled or errored
+      }
+    }
+
+    // A background notification turn mutates the same chat history as a user
+    // prompt. Abort it before awaiting the drain so user input is not blocked
+    // behind notification tool calls.
     if (this.notificationAbortController) {
       this.notificationAbortController.abort();
       this.notificationAbortController = null;
@@ -1154,26 +1084,37 @@ export class Session implements SessionContext {
       } catch {
         // Notification errors are surfaced through the session stream.
       }
-      this.notificationCompletion = null;
     }
-  }
 
-  async #snapshotFileHistory(promptId: string): Promise<void> {
+    // Cancelled while waiting for the previous prompt to finish.
+    if (pendingSend.signal.aborted) {
+      return { stopReason: 'cancelled' };
+    }
+
+    // Track this prompt's completion for the next prompt to await
+    let resolveCompletion!: () => void;
+    this.pendingPromptCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
     try {
-      const fileHistoryService = this.config.getFileHistoryService();
-      await fileHistoryService.makeSnapshot(promptId);
-      try {
-        const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
-        if (latestSnapshot) {
-          this.config
-            .getChatRecordingService()
-            ?.recordFileHistorySnapshot(latestSnapshot);
-        }
-      } catch (e) {
-        debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
-      }
-    } catch (e) {
-      debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+      const result = await this.#executePrompt(params, pendingSend);
+      this.pendingPrompt = null;
+      // Drain any cron prompts that queued while the prompt was active
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+      this.#maybeEmitFollowupSuggestion(result);
+      return result;
+    } finally {
+      this.pendingPrompt = null;
+      // Start the scheduler in finally, not the success path: a turn can arm
+      // a wakeup via LoopWakeup and then throw on a later step. Gated on
+      // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
+      // cron job) is actually pending — otherwise the loop dies silently on
+      // any post-arm error.
+      void this.#startCronSchedulerIfNeeded();
+      resolveCompletion();
+      this.pendingPromptCompletion = null;
     }
   }
 
@@ -1199,10 +1140,7 @@ export class Session implements SessionContext {
    * error here would propagate up through `prompt()` and break the
    * primary response path.
    */
-  #maybeEmitFollowupSuggestion(
-    result: PromptResponse,
-    promptId = this.config.getSessionId() + '########' + String(this.turn),
-  ): void {
+  #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
     // Enabled by default — only an explicit `false` opts out. The schema
     // `default: true` isn't applied at runtime by `mergeSettings`, so an unset
@@ -1215,6 +1153,8 @@ export class Session implements SessionContext {
 
     const ac = new AbortController();
     this.followupAbort = ac;
+    const promptId =
+      this.config.getSessionId() + '########' + String(this.turn);
 
     void (async () => {
       try {
@@ -1274,292 +1214,6 @@ export class Session implements SessionContext {
     })();
   }
 
-  /**
-   * Continue the most recent unfinished turn of this session without
-   * appending any new user message to the transcript. Backs the
-   * `qwen/session/continue` vendor method.
-   *
-   * Unlike {@link prompt}, an in-flight turn is NOT aborted: continue only
-   * applies to a session whose previous turn already stopped (process
-   * crash, stream cut-off, abort). Detection runs on persisted chat
-   * history, so it also works right after a session resume.
-   *
-   * @returns Stop reason plus which interruption shape (if any) was resumed.
-   * @throws RequestError 409 when a prompt/continue turn is already running.
-   */
-  async continueTurn(): Promise<ContinueTurnResponse> {
-    if (this.pendingPrompt) {
-      throw new RequestError(
-        409,
-        'A turn is already in flight; continue only applies to a stopped session.',
-      );
-    }
-    if (this.cronProcessing || this.notificationProcessing) {
-      throw new RequestError(
-        409,
-        'A background turn is already in flight; continue only applies to a stopped session.',
-      );
-    }
-    const pendingSend = new AbortController();
-    this.pendingPrompt = pendingSend;
-
-    if (this.followupAbort) {
-      this.followupAbort.abort();
-      this.followupAbort = null;
-    }
-
-    let drainedBackgroundTurns = false;
-    let resolveCompletion: () => void = () => {};
-    let hasCompletion = false;
-    try {
-      // Wait for any just-finished prompt cleanup to settle so continuation
-      // detection sees a stable chat history.
-      if (this.pendingPromptCompletion) {
-        try {
-          await this.pendingPromptCompletion;
-        } catch {
-          // Expected: previous prompt was cancelled or errored.
-        }
-      }
-
-      if (pendingSend.signal.aborted) {
-        return {
-          stopReason: 'cancelled',
-          resumed: false,
-          interruption: 'none',
-        };
-      }
-
-      let historyTail = this.#getInterruptionHistoryTail();
-      let detection = detectTurnInterruption(historyTail);
-
-      if (detection.kind !== 'none') {
-        // Background cron/notification turns mutate the same chat history;
-        // only stop and drain them when there is real continuation work.
-        await this.#abortAndDrainCronTurn();
-        await this.#abortAndDrainNotificationTurn();
-        drainedBackgroundTurns = true;
-
-        historyTail = this.#getInterruptionHistoryTail();
-        detection = detectTurnInterruption(historyTail);
-
-        // Cancelled while draining background turns.
-        if (pendingSend.signal.aborted) {
-          return {
-            stopReason: 'cancelled',
-            resumed: false,
-            interruption: detection.kind,
-          };
-        }
-
-        // Track this turn's completion for the next prompt to await.
-        this.pendingPromptCompletion = new Promise<void>((resolve) => {
-          resolveCompletion = resolve;
-          hasCompletion = true;
-        });
-      }
-
-      try {
-        const result = await this.#executeContinue(
-          pendingSend,
-          detection,
-          historyTail.length,
-        );
-        return result;
-      } finally {
-        if (this.pendingPrompt === pendingSend) {
-          this.pendingPrompt = null;
-        }
-        if (hasCompletion) {
-          resolveCompletion();
-          this.pendingPromptCompletion = null;
-        }
-        if (drainedBackgroundTurns) {
-          void this.#startCronSchedulerIfNeeded();
-          void this.#drainCronQueue();
-          void this.#drainNotificationQueue();
-        }
-      }
-    } finally {
-      if (this.pendingPrompt === pendingSend) {
-        this.pendingPrompt = null;
-      }
-    }
-  }
-
-  /**
-   * Body of {@link continueTurn}: classify how the last turn ended and
-   * re-drive the model loop from existing history.
-   *
-   *  - `interrupted_prompt` (orphaned trailing user entry): strip it and
-   *    re-submit the same content — the transcript gains nothing new.
-   *  - `interrupted_turn` (dangling functionCall): close each pair with a
-   *    synthesized error functionResponse, the same continuation signal a
-   *    real tool completion would have sent.
-   *  - `none`: idempotent no-op.
-   *
-   * The continuation reuses the interrupted turn's number for its
-   * prompt id — it is the same logical turn, not a new one — and fires no
-   * UserPromptSubmit hook (there is no user prompt).
-   */
-  async #executeContinue(
-    pendingSend: AbortController,
-    detection: TurnInterruption,
-    historyTailCount: number,
-  ): Promise<ContinueTurnResponse> {
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      Storage.runWithRuntimeBaseDir(
-        this.runtimeBaseDir,
-        this.config.getWorkingDir(),
-        async () => {
-          const continueSequence = ++this.continueSequence;
-          const promptId =
-            this.config.getSessionId() +
-            '########' +
-            this.turn +
-            '.c' +
-            continueSequence;
-          return await withInteractionSpan(
-            this.config,
-            {
-              promptId,
-              model: this.config.getModel(),
-              messageType: 'acp_continue',
-            },
-            async () => {
-              debugLogger.info('[Session] continueTurn detected interruption', {
-                kind: detection.kind,
-                historyTailCount,
-                danglingCallCount:
-                  detection.kind === 'interrupted_turn'
-                    ? detection.danglingCalls.length
-                    : 0,
-              });
-              if (detection.kind === 'none') {
-                return {
-                  stopReason: 'end_turn' as const,
-                  resumed: false,
-                  interruption: 'none' as const,
-                };
-              }
-
-              let parts: Part[];
-              let strippedPromptEntries: Content[] = [];
-              if (detection.kind === 'interrupted_prompt') {
-                // The send below re-pushes this content; strip the orphaned
-                // original first so history doesn't carry it twice.
-                strippedPromptEntries =
-                  this.config
-                    .getGeminiClient()!
-                    .stripOrphanedUserEntriesFromHistory(
-                      TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-                    ) ?? [];
-                debugLogger.info(
-                  '[Session] continueTurn stripped orphaned user entries',
-                  { strippedCount: strippedPromptEntries.length },
-                );
-                parts = detection.parts;
-              } else {
-                parts = buildSyntheticToolResponseParts(
-                  detection.danglingCalls,
-                  ORPHAN_TOOL_USE_REPAIR_REASON,
-                );
-              }
-
-              const systemReminders = await this.#buildInitialSystemReminders();
-              const hasSystemReminderPart = parts.some((part) =>
-                isSystemReminderContent({ role: 'user', parts: [part] }),
-              );
-              if (systemReminders.length > 0 && !hasSystemReminderPart) {
-                // Keep functionResponse parts first for backends that require
-                // tool results to precede text blocks in the same user turn.
-                parts = insertAfterFunctionResponses(parts, systemReminders);
-              }
-
-              if (this.pendingWorktreeNotice) {
-                parts = insertAfterFunctionResponses(parts, [
-                  {
-                    text: `<system-reminder>
-${this.pendingWorktreeNotice}
-</system-reminder>
-
-`,
-                  },
-                ]);
-                this.pendingWorktreeNotice = null;
-              }
-
-              const hooksEnabled = !this.config.getDisableAllHooks?.();
-              const messageBus = this.config.getMessageBus?.();
-              let turnCount = 0;
-              let continueSendStarted = false;
-              // When we have orphaned entries to restore, `restoreStrippedPromptEntries`
-              // below is the single source of truth for re-adding the unsent initial
-              // message. Tell the turn loop to skip its own functionResponse-only
-              // preservation of that message so a tool_result orphan isn't written
-              // to history twice (once by preserve, once by restore).
-              const ownsInitialUnsentMessage = strippedPromptEntries.length > 0;
-              let continueResult!: ContinueTurnResponse;
-              const restoreStrippedPromptEntries = () => {
-                if (continueSendStarted || strippedPromptEntries.length === 0) {
-                  return;
-                }
-                const restoredCount = strippedPromptEntries.length;
-                for (const entry of strippedPromptEntries) {
-                  this.#getCurrentChat().addHistory(entry);
-                }
-                strippedPromptEntries = [];
-                debugLogger.info(
-                  '[Session] continueTurn restored stripped prompt entries',
-                  { restoredCount },
-                );
-              };
-              try {
-                const loopResult = await this.#runModelTurnLoop(
-                  promptId,
-                  { role: 'user', parts },
-                  pendingSend,
-                  ownsInitialUnsentMessage,
-                );
-                turnCount += loopResult.iterationsRun;
-                continueSendStarted = loopResult.sendStarted;
-                if (loopResult.error) {
-                  throw loopResult.error;
-                }
-                const result =
-                  loopResult.earlyExit ??
-                  (await this.#finishTurn(
-                    pendingSend,
-                    promptId,
-                    hooksEnabled,
-                    messageBus,
-                  ));
-                continueResult = {
-                  ...result,
-                  resumed: true,
-                  interruption: detection.kind,
-                };
-              } finally {
-                restoreStrippedPromptEntries();
-                logConversationFinishedEvent(
-                  this.config,
-                  new ConversationFinishedEvent(
-                    this.config.getApprovalMode(),
-                    turnCount,
-                  ),
-                );
-              }
-              this.#maybeEmitFollowupSuggestion(continueResult, promptId);
-              return continueResult;
-            },
-            (result) =>
-              result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
-          );
-        },
-      ),
-    );
-  }
-
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
@@ -1581,443 +1235,377 @@ ${this.pendingWorktreeNotice}
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
-        let retrySendStarted = false;
-        let strippedRetryEntries: Content[] = [];
-        const restoreStrippedRetryEntries = () => {
-          if (retrySendStarted || strippedRetryEntries.length === 0) {
-            return;
-          }
-          for (const entry of strippedRetryEntries) {
-            this.#getCurrentChat().addHistory(entry);
-          }
-          strippedRetryEntries = [];
-        };
         // Increment turn counter for each user prompt
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
         const parentContext = extractDaemonTraceContext(params);
 
-        try {
-          return await withInteractionSpan(
-            this.config,
-            {
-              promptId,
-              model: this.config.getModel(),
-              messageType: 'acp_prompt',
-              ...(parentContext ? { parentContext } : {}),
-            },
-            async () => {
-              // Extract text from all text blocks to construct the full prompt text for logging
-              const promptText = params.prompt
-                .filter((block) => block.type === 'text')
-                .map((block) => (block.type === 'text' ? block.text : ''))
-                .join(' ');
+        return await withInteractionSpan(
+          this.config,
+          {
+            promptId,
+            model: this.config.getModel(),
+            messageType: 'acp_prompt',
+            ...(parentContext ? { parentContext } : {}),
+          },
+          async () => {
+            // Extract text from all text blocks to construct the full prompt text for logging
+            const promptText = params.prompt
+              .filter((block) => block.type === 'text')
+              .map((block) => (block.type === 'text' ? block.text : ''))
+              .join(' ');
 
-              // Log user prompt
-              logUserPrompt(
+            // Log user prompt
+            logUserPrompt(
+              this.config,
+              new UserPromptEvent(
+                promptText.length,
+                promptId,
+                this.config.getContentGeneratorConfig()?.authType,
+                promptText,
+              ),
+            );
+
+            // Retry: strip orphaned user entries so the model sees a clean
+            // history (no dangling user message from the failed attempt).
+            // Also skip recordUserMessage to avoid duplicating the user
+            // turn in the JSONL transcript.
+            const isRetry =
+              (params as { retry?: boolean }).retry === true ||
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_RETRY_META_KEY
+              ] === true;
+            if (isRetry) {
+              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+            } else {
+              // record user message for session management
+              this.config
+                .getChatRecordingService()
+                ?.recordUserMessage(promptText);
+            }
+
+            // Check if the input contains a slash command
+            // Extract text from the first text block if present
+            const firstTextBlock = params.prompt.find(
+              (block) => block.type === 'text',
+            );
+            const inputText = firstTextBlock?.text || '';
+
+            let parts: Part[] | null;
+
+            if (isSlashCommand(inputText)) {
+              // Handle slash command in ACP mode using capability-based filtering
+              const slashCommandResult = await handleSlashCommand(
+                inputText,
+                pendingSend,
                 this.config,
-                new UserPromptEvent(
-                  promptText.length,
-                  promptId,
-                  this.config.getContentGeneratorConfig()?.authType,
-                  promptText,
+                this.settings,
+              );
+
+              parts = await this.#processSlashCommandResult(
+                slashCommandResult,
+                params.prompt,
+              );
+
+              // If parts is null, the command was fully handled (e.g., /summary completed)
+              // Return early without sending to the model
+              if (parts === null) {
+                return { stopReason: 'end_turn' };
+              }
+            } else {
+              // Normal processing for non-slash commands
+              parts = await this.#resolvePrompt(
+                params.prompt,
+                pendingSend.signal,
+              );
+            }
+
+            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+            const hooksEnabled = !this.config.getDisableAllHooks?.();
+            const messageBus = this.config.getMessageBus?.();
+            if (
+              hooksEnabled &&
+              messageBus &&
+              this.config.hasHooksForEvent?.('UserPromptSubmit')
+            ) {
+              const response = await messageBus.request<
+                HookExecutionRequest,
+                HookExecutionResponse
+              >(
+                {
+                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  eventName: 'UserPromptSubmit',
+                  input: {
+                    prompt: promptText,
+                  },
+                  signal: pendingSend.signal,
+                },
+                MessageBusType.HOOK_EXECUTION_RESPONSE,
+              );
+              const hookOutput = response.output
+                ? createHookOutput('UserPromptSubmit', response.output)
+                : undefined;
+
+              if (
+                hookOutput?.isBlockingDecision() ||
+                hookOutput?.shouldStopExecution()
+              ) {
+                // Hook blocked the prompt - send notification to UI and return
+                const blockReason =
+                  hookOutput?.getEffectiveReason() || 'No reason provided';
+                await this.messageEmitter.emitAgentMessage(
+                  `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+                );
+                return { stopReason: 'end_turn' };
+              }
+
+              // Add additional context from hooks to the request
+              const additionalContext = hookOutput?.getAdditionalContext();
+              if (additionalContext) {
+                parts = [...parts, { text: additionalContext }];
+              }
+            }
+
+            // Snapshot file state before this turn (mirrors the makeSnapshot
+            // block in GeminiClient.sendMessageStream). Placed after
+            // slash-command and hook early-returns so locally handled commands
+            // don't create phantom snapshots that desync the snapshot index.
+            try {
+              const fileHistoryService = this.config.getFileHistoryService();
+              await fileHistoryService.makeSnapshot(promptId);
+              try {
+                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+                if (latestSnapshot) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordFileHistorySnapshot(latestSnapshot);
+                }
+              } catch (e) {
+                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+              }
+            } catch (e) {
+              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+            }
+
+            // Prepend session-level system reminders (plan mode / subagent /
+            // arena) so the model sees them, matching the behaviour of
+            // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+            // plan mode in ACP has no effect because the model never learns it
+            // should avoid edits.
+            const systemReminders = await this.#buildInitialSystemReminders();
+            if (systemReminders.length > 0) {
+              parts = [...systemReminders, ...parts];
+            }
+
+            // Phase C: one-shot worktree restore notice, set by acpAgent on
+            // --resume / loadSession when the session's worktree is still alive.
+            // Prepended exactly once, then cleared so it doesn't repeat on
+            // subsequent turns.
+            if (this.pendingWorktreeNotice) {
+              parts = [
+                {
+                  text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+                },
+                ...parts,
+              ];
+              this.pendingWorktreeNotice = null;
+            }
+
+            let nextMessage: Content | null = { role: 'user', parts };
+            let turnCount = 0;
+
+            // conversation_finished must fire on every terminal path of the
+            // turn — the loop below has cancel/abort/no-stream early-returns
+            // and API-error throws — so the emission lives in a finally that
+            // wraps the whole turn, not just the stop-hook loop. Daemon turns
+            // run autonomously in all approval modes (approvals are mediated by
+            // the ACP client rather than by gating this loop), so unlike the
+            // CLI reference (useGeminiStream.ts, which only emits in YOLO) this
+            // is intentionally emitted for every mode.
+            try {
+              while (nextMessage !== null) {
+                turnCount++;
+                if (pendingSend.signal.aborted) {
+                  this.#getCurrentChat().addHistory(nextMessage);
+                  return { stopReason: 'cancelled' };
+                }
+
+                const functionCalls: FunctionCall[] = [];
+                let usageMetadata: GenerateContentResponseUsageMetadata | null =
+                  null;
+                const streamStartTime = Date.now();
+
+                try {
+                  const sendResult =
+                    await this.#sendMessageStreamWithAutoCompression(
+                      promptId,
+                      nextMessage?.parts ?? [],
+                      pendingSend.signal,
+                    );
+                  if (!sendResult.responseStream) {
+                    this.#preserveUnsentMessageHistory(
+                      nextMessage,
+                      sendResult.stopReason === 'cancelled',
+                    );
+                    return { stopReason: sendResult.stopReason };
+                  }
+                  const responseStream = sendResult.responseStream;
+                  nextMessage = null;
+
+                  for await (const resp of responseStream) {
+                    if (pendingSend.signal.aborted) {
+                      return { stopReason: 'cancelled' };
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.candidates &&
+                      resp.value.candidates.length > 0
+                    ) {
+                      const candidate = resp.value.candidates[0];
+                      for (const part of candidate.content?.parts ?? []) {
+                        if (!part.text) {
+                          continue;
+                        }
+
+                        this.messageEmitter.emitMessage(
+                          part.text,
+                          'assistant',
+                          part.thought,
+                        );
+                      }
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.usageMetadata
+                    ) {
+                      usageMetadata = resp.value.usageMetadata;
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.functionCalls
+                    ) {
+                      functionCalls.push(...resp.value.functionCalls);
+                    }
+                  }
+                } catch (error) {
+                  // Only explicit user cancellation maps to a normal
+                  // cancelled turn. Other aborts/errors should surface so
+                  // infra failures are not hidden as successful cancels.
+                  if (
+                    pendingSend.signal.aborted &&
+                    pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+                    this.#isAbortError(error)
+                  ) {
+                    return { stopReason: 'cancelled' };
+                  }
+
+                  // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                  const errorStatus = getErrorStatus(error);
+                  const errorMessage =
+                    error instanceof Error ? error.message : String(error);
+                  const errorType = classifyApiError({
+                    message: errorMessage,
+                    status: errorStatus,
+                  });
+
+                  const hookSystem = this.config.getHookSystem?.();
+                  const hooksEnabledForStopFailure =
+                    !this.config.getDisableAllHooks?.();
+                  if (
+                    hooksEnabledForStopFailure &&
+                    hookSystem &&
+                    this.config.hasHooksForEvent?.('StopFailure')
+                  ) {
+                    // Fire-and-forget: don't wait for hook to complete
+                    hookSystem
+                      .fireStopFailureEvent(errorType, errorMessage)
+                      .catch((err) => {
+                        debugLogger.warn(`StopFailure hook failed: ${err}`);
+                      });
+                  }
+
+                  if (errorStatus === 429) {
+                    throw new RequestError(
+                      429,
+                      'Rate limit exceeded. Try again later.',
+                    );
+                  }
+
+                  throw error;
+                }
+
+                if (usageMetadata) {
+                  this.#recordPromptTokenCount(usageMetadata);
+                  // Kick off rewrite in background (non-blocking, runs parallel to tools)
+                  if (this.messageRewriter) {
+                    this.messageRewriter.flushTurn(pendingSend.signal);
+                  }
+
+                  const durationMs = Date.now() - streamStartTime;
+                  await this.messageEmitter.emitUsageMetadata(
+                    usageMetadata,
+                    '',
+                    durationMs,
+                  );
+                }
+
+                if (functionCalls.length > 0) {
+                  const toolRun = await this.runToolCalls(
+                    pendingSend.signal,
+                    promptId,
+                    functionCalls,
+                  );
+                  if (toolRun.stopAfterPermissionCancel) {
+                    await this.#preserveCancelledPermissionToolRun(
+                      toolRun,
+                      pendingSend.signal,
+                    );
+                    return { stopReason: 'end_turn' };
+                  }
+                  nextMessage = {
+                    role: 'user',
+                    parts: [
+                      ...toolRun.parts,
+                      ...(await this.#drainMidTurnUserMessages(
+                        pendingSend.signal,
+                      )),
+                    ],
+                  };
+                }
+              }
+
+              // Wait for any pending rewrite before returning
+              if (this.messageRewriter) {
+                await this.messageRewriter.waitForPendingRewrites();
+              }
+
+              // Fire Stop hook loop (aligned with core path in client.ts)
+              // This is triggered after model response completes with no pending tool calls
+              return await this.#handleStopHookLoop(
+                pendingSend,
+                promptId,
+                hooksEnabled,
+                messageBus,
+              );
+            } finally {
+              logConversationFinishedEvent(
+                this.config,
+                new ConversationFinishedEvent(
+                  this.config.getApprovalMode(),
+                  turnCount,
                 ),
               );
-
-              // Retry: strip orphaned user entries so the model sees a clean
-              // history (no dangling user message from the failed attempt).
-              // Also skip recordUserMessage to avoid duplicating the user
-              // turn in the JSONL transcript.
-              const isRetry =
-                (params as { retry?: boolean }).retry === true ||
-                (params as { _meta?: Record<string, unknown> })._meta?.[
-                  DAEMON_RETRY_META_KEY
-                ] === true;
-              if (isRetry) {
-                strippedRetryEntries =
-                  this.config
-                    .getGeminiClient()!
-                    .stripOrphanedUserEntriesFromHistory() ?? [];
-              } else {
-                // record user message for session management
-                this.config
-                  .getChatRecordingService()
-                  ?.recordUserMessage(promptText);
-              }
-
-              // Check if the input contains a slash command
-              const firstTextBlock = params.prompt.find(
-                (block) => block.type === 'text',
-              );
-              const inputText = firstTextBlock?.text || '';
-
-              let parts: Part[] | null;
-
-              if (isSlashCommand(inputText)) {
-                // Handle slash command in ACP mode using capability-based filtering
-                const slashCommandResult = await handleSlashCommand(
-                  inputText,
-                  pendingSend,
-                  this.config,
-                  this.settings,
-                );
-
-                parts = await this.#processSlashCommandResult(
-                  slashCommandResult,
-                  params.prompt,
-                );
-
-                // If parts is null, the command was fully handled (e.g., /summary completed)
-                // Return early without sending to the model
-                if (parts === null) {
-                  return { stopReason: 'end_turn' };
-                }
-              } else {
-                // Normal processing for non-slash commands
-                parts = await this.#resolvePrompt(
-                  params.prompt,
-                  pendingSend.signal,
-                );
-              }
-
-              // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
-              const hooksEnabled = !this.config.getDisableAllHooks?.();
-              const messageBus = this.config.getMessageBus?.();
-              if (
-                hooksEnabled &&
-                messageBus &&
-                this.config.hasHooksForEvent?.('UserPromptSubmit')
-              ) {
-                const response = await messageBus.request<
-                  HookExecutionRequest,
-                  HookExecutionResponse
-                >(
-                  {
-                    type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                    eventName: 'UserPromptSubmit',
-                    input: {
-                      prompt: promptText,
-                    },
-                    signal: pendingSend.signal,
-                  },
-                  MessageBusType.HOOK_EXECUTION_RESPONSE,
-                );
-                const hookOutput = response.output
-                  ? createHookOutput('UserPromptSubmit', response.output)
-                  : undefined;
-
-                if (
-                  hookOutput?.isBlockingDecision() ||
-                  hookOutput?.shouldStopExecution()
-                ) {
-                  // Hook blocked the prompt - send notification to UI and return
-                  const blockReason =
-                    hookOutput?.getEffectiveReason() || 'No reason provided';
-                  await this.messageEmitter.emitAgentMessage(
-                    `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
-                  );
-                  return { stopReason: 'end_turn' };
-                }
-
-                // Add additional context from hooks to the request
-                const additionalContext = hookOutput?.getAdditionalContext();
-                if (additionalContext) {
-                  parts = [...parts, { text: additionalContext }];
-                }
-              }
-
-              // Snapshot file state before this turn (mirrors the makeSnapshot
-              // block in GeminiClient.sendMessageStream). Placed after
-              // slash-command and hook early-returns so locally handled commands
-              // don't create phantom snapshots that desync the snapshot index.
-              if (!isRetry) {
-                await this.#snapshotFileHistory(promptId);
-              }
-
-              // Prepend session-level system reminders (plan mode / subagent /
-              // arena) so the model sees them, matching the behaviour of
-              // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
-              // plan mode in ACP has no effect because the model never learns it
-              // should avoid edits.
-              const systemReminders = await this.#buildInitialSystemReminders();
-              if (systemReminders.length > 0) {
-                parts = [...systemReminders, ...parts];
-              }
-
-              // Phase C: one-shot worktree restore notice, set by acpAgent on
-              // --resume / loadSession when the session's worktree is still alive.
-              // Prepended exactly once, then cleared so it doesn't repeat on
-              // subsequent turns.
-              if (this.pendingWorktreeNotice) {
-                parts = [
-                  {
-                    text: `<system-reminder>
-${this.pendingWorktreeNotice}
-</system-reminder>
-
-`,
-                  },
-                  ...parts,
-                ];
-                this.pendingWorktreeNotice = null;
-              }
-
-              let turnCount = 0;
-              // conversation_finished must fire on every terminal path of the
-              // turn, so the emission lives in a finally that wraps the whole
-              // turn. Daemon turns run autonomously in all approval modes.
-              try {
-                const loopResult = await this.#runModelTurnLoop(
-                  promptId,
-                  { role: 'user', parts },
-                  pendingSend,
-                  isRetry && strippedRetryEntries.length > 0,
-                );
-                turnCount += loopResult.iterationsRun;
-                retrySendStarted = loopResult.sendStarted;
-                if (loopResult.error) {
-                  throw loopResult.error;
-                }
-                return (
-                  loopResult.earlyExit ??
-                  (await this.#finishTurn(
-                    pendingSend,
-                    promptId,
-                    hooksEnabled,
-                    messageBus,
-                  ))
-                );
-              } finally {
-                logConversationFinishedEvent(
-                  this.config,
-                  new ConversationFinishedEvent(
-                    this.config.getApprovalMode(),
-                    turnCount,
-                  ),
-                );
-              }
-            },
-            (result: { stopReason: PromptResponse['stopReason'] }) =>
-              result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
-          );
-        } finally {
-          restoreStrippedRetryEntries();
-        }
+            }
+          },
+          (result: { stopReason: PromptResponse['stopReason'] }) =>
+            result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
+        );
       },
-    );
-  }
-
-  /**
-   * Drive the model-call / tool-call loop for one turn: send, stream chunks
-   * to the client, run requested tools, feed their results back, repeat
-   * until the model stops calling tools. Extracted from #executePromptInner
-   * and shared with continueTurn so the two paths stay behaviorally identical.
-   */
-  async #runModelTurnLoop(
-    promptId: string,
-    initialMessage: Content,
-    pendingSend: AbortController,
-    ownsInitialUnsentMessage = false,
-  ): Promise<ModelTurnLoopResult> {
-    let nextMessage: Content | null = initialMessage;
-    let iterationsRun = 0;
-    let sendStarted = false;
-    // Tracks the first loop iteration so a caller that restores the initial
-    // message itself (continue-interrupted) can suppress the duplicate
-    // functionResponse-only preservation for that one message.
-    let isInitialMessage = true;
-
-    const result = (
-      earlyExit: ModelTurnLoopResult['earlyExit'],
-    ): ModelTurnLoopResult => ({
-      earlyExit,
-      iterationsRun,
-      sendStarted,
-    });
-
-    try {
-      while (nextMessage !== null) {
-        iterationsRun++;
-        if (pendingSend.signal.aborted) {
-          if (!(ownsInitialUnsentMessage && isInitialMessage)) {
-            this.#getCurrentChat().addHistory(nextMessage);
-          }
-          return result({ stopReason: 'cancelled' });
-        }
-
-        const functionCalls: FunctionCall[] = [];
-        let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-        const streamStartTime = Date.now();
-
-        try {
-          const sendResult = await this.#sendMessageStreamWithAutoCompression(
-            promptId,
-            nextMessage?.parts ?? [],
-            pendingSend.signal,
-          );
-          if (!sendResult.responseStream) {
-            const wasCancelled = sendResult.stopReason === 'cancelled';
-            // If the continue path already stripped the initial orphaned entries,
-            // it restores those originals itself until a send really starts.
-            // That keeps max-token and pre-send cancellation exits from writing
-            // a merged replacement or duplicating functionResponse-only turns.
-            if (!(ownsInitialUnsentMessage && isInitialMessage)) {
-              this.#preserveUnsentMessageHistory(nextMessage, wasCancelled);
-            }
-            return result({ stopReason: sendResult.stopReason });
-          }
-          const responseStream = sendResult.responseStream;
-          sendStarted = true;
-          nextMessage = null;
-          isInitialMessage = false;
-
-          for await (const resp of responseStream) {
-            if (pendingSend.signal.aborted) {
-              return result({ stopReason: 'cancelled' });
-            }
-
-            if (
-              resp.type === StreamEventType.CHUNK &&
-              resp.value.candidates &&
-              resp.value.candidates.length > 0
-            ) {
-              const candidate = resp.value.candidates[0];
-              for (const part of candidate.content?.parts ?? []) {
-                if (!part.text) {
-                  continue;
-                }
-
-                this.messageEmitter.emitMessage(
-                  part.text,
-                  'assistant',
-                  part.thought,
-                );
-              }
-            }
-
-            if (
-              resp.type === StreamEventType.CHUNK &&
-              resp.value.usageMetadata
-            ) {
-              usageMetadata = resp.value.usageMetadata;
-            }
-
-            if (
-              resp.type === StreamEventType.CHUNK &&
-              resp.value.functionCalls
-            ) {
-              functionCalls.push(...resp.value.functionCalls);
-            }
-          }
-        } catch (error) {
-          // Only explicit user cancellation maps to a normal cancelled turn.
-          // Other aborts/errors should surface so infra failures are not hidden
-          // as successful cancels.
-          if (
-            pendingSend.signal.aborted &&
-            pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
-            (this.#isAbortError(error) || error === USER_CANCEL_ABORT_REASON)
-          ) {
-            return result({ stopReason: 'cancelled' });
-          }
-
-          // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-          const errorStatus = getErrorStatus(error);
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          const errorType = classifyApiError({
-            message: errorMessage,
-            status: errorStatus,
-          });
-
-          const hookSystem = this.config.getHookSystem?.();
-          const hooksEnabledForStopFailure =
-            !this.config.getDisableAllHooks?.();
-          if (
-            hooksEnabledForStopFailure &&
-            hookSystem &&
-            this.config.hasHooksForEvent?.('StopFailure')
-          ) {
-            hookSystem
-              .fireStopFailureEvent(errorType, errorMessage)
-              .catch((err) => {
-                debugLogger.warn(`StopFailure hook failed: ${err}`);
-              });
-          }
-
-          if (errorStatus === 429) {
-            throw new RequestError(
-              429,
-              'Rate limit exceeded. Try again later.',
-            );
-          }
-
-          throw error;
-        }
-
-        if (usageMetadata) {
-          this.#recordPromptTokenCount(usageMetadata);
-          if (this.messageRewriter) {
-            this.messageRewriter.flushTurn(pendingSend.signal);
-          }
-
-          const durationMs = Date.now() - streamStartTime;
-          await this.messageEmitter.emitUsageMetadata(
-            usageMetadata,
-            '',
-            durationMs,
-          );
-        }
-
-        if (functionCalls.length > 0) {
-          const toolRun = await this.runToolCalls(
-            pendingSend.signal,
-            promptId,
-            functionCalls,
-          );
-          if (toolRun.stopAfterPermissionCancel) {
-            await this.#preserveCancelledPermissionToolRun(
-              toolRun,
-              pendingSend.signal,
-            );
-            return result({ stopReason: 'end_turn' });
-          }
-          nextMessage = {
-            role: 'user',
-            parts: [
-              ...toolRun.parts,
-              ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
-            ],
-          };
-        }
-      }
-
-      return result(null);
-    } catch (error) {
-      return { ...result(null), error };
-    }
-  }
-
-  /**
-   * Post-loop turn epilogue shared by the prompt and continue paths: wait
-   * for any pending message rewrite, then run the Stop-hook loop.
-   */
-  async #finishTurn(
-    pendingSend: AbortController,
-    promptId: string,
-    hooksEnabled: boolean,
-    messageBus: MessageBus | undefined,
-  ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
-    if (this.messageRewriter) {
-      await this.messageRewriter.waitForPendingRewrites();
-    }
-
-    return this.#handleStopHookLoop(
-      pendingSend,
-      promptId,
-      hooksEnabled,
-      messageBus,
     );
   }
 
@@ -2195,14 +1783,6 @@ ${this.pendingWorktreeNotice}
               }
             }
           } catch (error) {
-            if (
-              pendingSend.signal.aborted &&
-              pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
-              (this.#isAbortError(error) || error === USER_CANCEL_ABORT_REASON)
-            ) {
-              return { stopReason: 'cancelled' };
-            }
-
             // Fire StopFailure hook (fire-and-forget)
             const errorStatus = getErrorStatus(error);
             const errorMessage =
@@ -2293,14 +1873,6 @@ ${this.pendingWorktreeNotice}
 
   #getCurrentChat(): GeminiChat {
     return this.config.getGeminiClient()!.getChat();
-  }
-
-  #getInterruptionHistoryTail(): Content[] {
-    const chat = this.#getCurrentChat();
-    return (
-      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
-      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)
-    );
   }
 
   /**
@@ -3890,7 +3462,26 @@ ${this.pendingWorktreeNotice}
    * separately as part of the broader middleware-alignment work.
    */
   async #buildInitialSystemReminders(): Promise<Part[]> {
-    return buildInitialSystemReminders(this.config);
+    const reminders: Part[] = [];
+
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      reminders.push({
+        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
+      });
+    }
+
+    const arenaManager = this.config.getArenaManager?.();
+    if (arenaManager) {
+      try {
+        const sessionDir = arenaManager.getArenaSessionDir();
+        const configPath = `${sessionDir}/config.json`;
+        reminders.push({ text: getArenaSystemReminder(configPath) });
+      } catch {
+        // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    return reminders;
   }
 
   private async runTool(

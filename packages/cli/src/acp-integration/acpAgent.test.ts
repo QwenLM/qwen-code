@@ -1052,7 +1052,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
-        continueTurn: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -1362,11 +1361,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: vi
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
-        continueTurn: vi.fn().mockResolvedValue({
-          stopReason: 'end_turn',
-          resumed: true,
-          interruption: 'interrupted_prompt',
-        }),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -3230,56 +3224,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }) as unknown as InstanceType<typeof SessionService>,
     );
   }
-
-  it('qwen/session/continue rejects an invalid sessionId', async () => {
-    const settings = makeCoreSettings();
-    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
-
-    await expect(
-      agent.extMethod('qwen/session/continue', { sessionId: 'nope' }),
-    ).rejects.toThrowError(/Invalid or missing sessionId/);
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('qwen/session/continue rejects a missing session', async () => {
-    const settings = makeCoreSettings();
-    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
-
-    await expect(
-      agent.extMethod('qwen/session/continue', { sessionId: VALID_SESSION_ID }),
-    ).rejects.toThrowError(/Session not found/);
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('qwen/session/continue delegates to the matching session', async () => {
-    await setupSessionMocks(VALID_SESSION_ID);
-    const settings = makeSessionSettings();
-    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    }) as AgentLike;
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-
-    await expect(
-      agent.extMethod('qwen/session/continue', { sessionId: VALID_SESSION_ID }),
-    ).resolves.toEqual({
-      stopReason: 'end_turn',
-      resumed: true,
-      interruption: 'interrupted_prompt',
-    });
-    expect(lastSessionMock?.continueTurn).toHaveBeenCalledTimes(1);
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
 
   it('qwen/session/loadUpdates rejects an invalid sessionId', async () => {
     const settings = makeCoreSettings();

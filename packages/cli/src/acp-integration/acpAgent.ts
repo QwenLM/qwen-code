@@ -2699,15 +2699,6 @@ class QwenAgent implements Agent {
           sse: true,
           http: true,
         },
-        // Vendor capability advertisement (ACP spec: extensions declare
-        // themselves via _meta on capability objects). Lets clients
-        // feature-detect `qwen/session/continue` instead of relying on a
-        // "Method not found" probe against older agents.
-        _meta: {
-          qwen: {
-            sessionContinue: true,
-          },
-        },
       },
     };
   }
@@ -6215,28 +6206,6 @@ class QwenAgent implements Agent {
           filesChanged,
           filesFailed,
         };
-      }
-      case 'qwen/session/continue': {
-        const sessionId = params['sessionId'] as string;
-        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing sessionId',
-          );
-        }
-        const session = this.sessions.get(sessionId);
-        if (!session) {
-          throw RequestError.invalidParams(
-            undefined,
-            `Session not found for id: ${sessionId}`,
-          );
-        }
-        // Continue the session's unfinished turn from existing history —
-        // no new user message enters the transcript. Streaming output
-        // arrives through the regular session/update notifications;
-        // this reply carries the final stop reason.
-        const result = await session.continueTurn();
-        return result as unknown as Record<string, unknown>;
       }
       case 'qwen/session/loadUpdates': {
         const sessionId = params['sessionId'] as string;
