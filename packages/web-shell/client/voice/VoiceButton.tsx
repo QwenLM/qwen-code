@@ -75,14 +75,17 @@ export function VoiceButton({
   const isTranscribing = status === 'transcribing';
   const isError = status === 'error';
   const isBusy = isConnecting || isTranscribing;
+  const canCancel = isRecording || isConnecting;
+  const isButtonDisabled = isTranscribing || (Boolean(disabled) && !canCancel);
   const isNotice = Boolean(noticeMessage) && !isError;
 
   const handleClick = () => {
-    if (disabled) return;
     if (isRecording) {
       stop();
     } else if (isConnecting) {
       abort();
+    } else if (disabled) {
+      return;
     } else if (!isBusy) {
       // idle or error -> (re)start
       setNoticeMessage(undefined);
@@ -116,7 +119,7 @@ export function VoiceButton({
       <button
         type="button"
         onClick={handleClick}
-        disabled={disabled || isTranscribing}
+        disabled={isButtonDisabled}
         aria-label={label}
         title={errorMessage ?? noticeMessage ?? label}
         style={{
@@ -129,7 +132,7 @@ export function VoiceButton({
           padding: isRecording ? '0 8px' : 0,
           borderRadius: 14,
           border: '1px solid var(--border-color, rgba(127,127,127,0.4))',
-          cursor: disabled || isTranscribing ? 'default' : 'pointer',
+          cursor: isButtonDisabled ? 'default' : 'pointer',
           background: isRecording
             ? 'var(--error-color, #d9534f)'
             : 'transparent',
@@ -138,7 +141,7 @@ export function VoiceButton({
             : status === 'error'
               ? 'var(--error-color, #d9534f)'
               : 'var(--text-secondary, currentColor)',
-          opacity: disabled ? 0.5 : 1,
+          opacity: disabled && !canCancel ? 0.5 : 1,
           transition: 'background 0.15s, color 0.15s',
         }}
       >
