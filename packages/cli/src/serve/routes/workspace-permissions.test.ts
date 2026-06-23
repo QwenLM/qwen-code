@@ -65,6 +65,7 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 async function makeHarness(opts?: {
   invokeWorkspaceCommand?: ReturnType<typeof vi.fn>;
   loadSettings?: (workspace: string) => LoadedSettings;
+  persistSetting?: ReturnType<typeof vi.fn>;
   broadcastSettingsChanged?: (
     key: string,
     value: unknown,
@@ -98,18 +99,20 @@ async function makeHarness(opts?: {
     vi.fn(async () => {
       throw new SessionNotFoundError('workspace-command:qwen/permissions');
     });
-  const persistSetting = vi.fn(
-    async (
-      targetWorkspace: string,
-      scope: SettingScope,
-      key: string,
-      value: unknown,
-    ) => {
-      const settings = loadSettings(targetWorkspace);
-      settings.setValue(scope, key, value);
-      return settings;
-    },
-  );
+  const persistSetting =
+    opts?.persistSetting ??
+    vi.fn(
+      async (
+        targetWorkspace: string,
+        scope: SettingScope,
+        key: string,
+        value: unknown,
+      ) => {
+        const settings = loadSettings(targetWorkspace);
+        settings.setValue(scope, key, value);
+        return settings;
+      },
+    );
   const broadcastSettingsChanged: (
     key: string,
     value: unknown,
@@ -276,6 +279,24 @@ describe('workspace permissions routes', () => {
       .send({ scope: 'workspace', ruleType: 'allow', rules: 'Bash(git *)' });
     expect(invalidRules.status).toBe(400);
     expect(invalidRules.body.code).toBe('invalid_rules');
+
+    const nonStringRule = await request(h.app)
+      .post('/workspace/permissions')
+      .send({ scope: 'workspace', ruleType: 'allow', rules: [123] });
+    expect(nonStringRule.status).toBe(400);
+    expect(nonStringRule.body).toMatchObject({
+      code: 'invalid_rules',
+      error: 'rules must contain only non-empty strings',
+    });
+
+    const emptyRule = await request(h.app)
+      .post('/workspace/permissions')
+      .send({ scope: 'workspace', ruleType: 'allow', rules: ['   '] });
+    expect(emptyRule.status).toBe(400);
+    expect(emptyRule.body).toMatchObject({
+      code: 'invalid_rules',
+      error: 'rules must contain only non-empty strings',
+    });
 
     const malformedRule = await request(h.app)
       .post('/workspace/permissions')
@@ -494,9 +515,11 @@ describe('workspace permissions routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
-  it('POST maps live ACP invalid params to invalid_rules', async () => {
-    const err = new Error('Malformed permission rule: Bash(git *');
-    Object.assign(err, { code: -32602 });
+  it('POST maps live ACP plain invalid params to invalid_rules', async () => {
+    const err = {
+      code: -32602,
+      message: 'Invalid params: Malformed permission rule: Bash(git *',
+    };
     const live = vi.fn(async () => {
       throw err;
     });
@@ -516,6 +539,38 @@ describe('workspace permissions routes', () => {
       code: 'invalid_rules',
       error: 'Malformed permission rule: Bash(git *',
     });
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('POST returns response_build_error when live response reload fails', async () => {
+    const live = vi.fn(async () => ({}));
+    const loadSettingsForRoute = vi.fn(() => {
+      throw new Error('settings unreadable');
+    });
+    const broadcastSettingsChanged = vi.fn();
+    await teardown(h);
+    h = await makeHarness({
+      invokeWorkspaceCommand: live,
+      loadSettings: loadSettingsForRoute,
+      broadcastSettingsChanged,
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git status)'],
+      });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('response_build_error');
+    expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
+      scope: 'workspace',
+      ruleType: 'allow',
+      rules: ['Bash(git status)'],
+    });
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
@@ -565,6 +620,51 @@ describe('workspace permissions routes', () => {
     expect(res.status).toBe(200);
     expect(res.body.workspace.rules.deny).toEqual(['Read(.env)']);
     expect(loadSettingsForRoute).toHaveBeenCalledTimes(1);
+  });
+
+  it('POST returns response_build_error when fallback response reload fails', async () => {
+    const loadSettingsForRoute = vi
+      .fn()
+      .mockImplementationOnce((workspace: string) => loadSettings(workspace))
+      .mockImplementationOnce(() => {
+        throw new Error('settings unreadable');
+      });
+    const persistSetting = vi.fn(
+      async (
+        targetWorkspace: string,
+        scope: SettingScope,
+        key: string,
+        value: unknown,
+      ) => {
+        loadSettings(targetWorkspace).setValue(scope, key, value);
+      },
+    );
+    const broadcastSettingsChanged = vi.fn();
+    await teardown(h);
+    h = await makeHarness({
+      loadSettings: loadSettingsForRoute,
+      persistSetting,
+      broadcastSettingsChanged,
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['Read(.env)'],
+      });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('response_build_error');
+    expect(persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.Workspace,
+      'permissions.deny',
+      ['Read(.env)'],
+    );
+    expect(loadSettingsForRoute).toHaveBeenCalledTimes(2);
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
   });
 
   it('POST still succeeds when fallback broadcast throws after persisting', async () => {

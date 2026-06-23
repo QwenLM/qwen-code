@@ -24,8 +24,13 @@ import { SessionNotFoundError } from '../acp-session-bridge.js';
 
 function getInvalidParamsMessage(err: unknown): string | undefined {
   if (err && typeof err === 'object' && 'code' in err) {
-    const code = (err as { code?: unknown }).code;
-    if (code === -32602 && err instanceof Error) return err.message;
+    const { code, message } = err as {
+      code?: unknown;
+      message?: unknown;
+    };
+    if (code === -32602 && typeof message === 'string') {
+      return message.replace(/^Invalid params:\s*/, '');
+    }
   }
   return undefined;
 }

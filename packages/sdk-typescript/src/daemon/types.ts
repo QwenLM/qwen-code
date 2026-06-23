@@ -1077,7 +1077,7 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
-export type DaemonPermissionScope = 'user' | 'workspace';
+export type DaemonPermissionScope = 'workspace';
 export type DaemonPermissionRuleType = 'allow' | 'ask' | 'deny';
 
 export interface DaemonPermissionRuleSet {
