@@ -83,6 +83,18 @@ describe('runVisionBridge', () => {
     expect(JSON.stringify(callOptions.contents)).toContain('PAYLOAD64');
   });
 
+  it('caps the intent so large @-file context is not dumped to the bridge model', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    await runVisionBridge({
+      config,
+      parts: ['x'.repeat(5000), image()],
+      signal: signal(),
+    });
+    const sent = JSON.stringify(mockSideQuery.mock.calls[0][1].contents);
+    expect(sent).toContain('x'.repeat(2000)); // the question still reaches it
+    expect(sent).not.toContain('x'.repeat(2001)); // but capped at 2000 chars
+  });
+
   it('reports the bridge model endpoint host for cross-provider egress clarity', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
     const configWithEndpoint = {

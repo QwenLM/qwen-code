@@ -18,9 +18,10 @@ import {
 
 const debugLogger = createDebugLogger('VISION_BRIDGE');
 const BRIDGE_MAX_OUTPUT_TOKENS = 2048;
-// Per-call cap on images sent to the bridge model; extras are reported as omitted.
 const VISION_BRIDGE_MAX_IMAGES = 4;
 const VISION_BRIDGE_TIMEOUT_MS = 30_000;
+// Cap intent so @-file contents in nonImageParts aren't dumped to the bridge model.
+const BRIDGE_INTENT_MAX_CHARS = 2000;
 
 /** Minimal shape of a registered model needed to auto-pick a bridge model. */
 export interface VisionModelCandidate {
@@ -269,7 +270,7 @@ export async function runVisionBridge(params: {
   const validImages = imageParts.filter(isUsableImagePart);
   const toConvert = validImages.slice(0, VISION_BRIDGE_MAX_IMAGES);
   const omittedCount = imageParts.length - toConvert.length;
-  const intent = collectText(nonImageParts);
+  const intent = collectText(nonImageParts).slice(0, BRIDGE_INTENT_MAX_CHARS);
 
   const selection = config.getDefaultVisionBridgeModel?.();
   const model = selection?.id;

@@ -438,11 +438,8 @@ describe('useGeminiStream', () => {
         status: 'ok',
         parts: [{ text: '[transcribed image]' }],
         transcript: '[transcribed image]',
-        imageCount: 1,
         convertedCount: 1,
         omittedCount: 0,
-        omittedInvalidCount: 0,
-        omittedCappedCount: 0,
         modelId: 'vm',
       });
       const { result, mockSendMessageStream } = renderTestHook();
@@ -479,11 +476,8 @@ describe('useGeminiStream', () => {
         status: 'ok',
         parts: [{ text: '[transcribed image]' }],
         transcript: `${'a'.repeat(5000)}TAIL_SHOULD_BE_TRUNCATED`,
-        imageCount: 1,
         convertedCount: 1,
         omittedCount: 0,
-        omittedInvalidCount: 0,
-        omittedCappedCount: 0,
         modelId: 'vm',
       });
       const { result } = renderTestHook();
@@ -543,11 +537,8 @@ describe('useGeminiStream', () => {
             text: '[Vision bridge could not interpret the attached image(s): timed out.]',
           },
         ],
-        imageCount: 1,
         convertedCount: 0,
         omittedCount: 0,
-        omittedInvalidCount: 0,
-        omittedCappedCount: 0,
         modelId: 'vm',
         modelEndpoint: 'vision.example.com',
         egressOccurred: true,
@@ -584,11 +575,8 @@ describe('useGeminiStream', () => {
             text: '[Vision bridge could not interpret the attached image(s): the vision model request failed.]',
           },
         ],
-        imageCount: 1,
         convertedCount: 0,
         omittedCount: 0,
-        omittedInvalidCount: 0,
-        omittedCappedCount: 0,
         modelId: 'vm',
         modelEndpoint: 'vision.example.com',
         egressOccurred: true,
@@ -627,11 +615,8 @@ describe('useGeminiStream', () => {
         return Promise.resolve({
           applied: false,
           status: 'skipped',
-          imageCount: 1,
           convertedCount: 0,
           omittedCount: 0,
-          omittedInvalidCount: 0,
-          omittedCappedCount: 0,
           modelId: 'vm',
           modelEndpoint: 'vision.example.com',
           egressOccurred: true,
@@ -666,11 +651,8 @@ describe('useGeminiStream', () => {
         return Promise.resolve({
           applied: false,
           status: 'skipped',
-          imageCount: 1,
           convertedCount: 0,
           omittedCount: 0,
-          omittedInvalidCount: 0,
-          omittedCappedCount: 0,
           modelId: 'vm',
         });
       });
@@ -714,11 +696,8 @@ describe('useGeminiStream', () => {
         status: 'ok',
         parts: [{ text: '[transcribed image]' }],
         transcript: '[transcribed image]',
-        imageCount: 1,
         convertedCount: 1,
         omittedCount: 0,
-        omittedInvalidCount: 0,
-        omittedCappedCount: 0,
         modelId: 'vm',
       });
       const { result, mockSendMessageStream } = renderTestHook();
@@ -1144,11 +1123,8 @@ describe('useGeminiStream', () => {
       status: 'ok',
       parts: [transcriptPart],
       transcript: '[mid-turn image transcript]',
-      imageCount: 1,
       convertedCount: 1,
       omittedCount: 0,
-      omittedInvalidCount: 0,
-      omittedCappedCount: 0,
       modelId: 'vm',
     });
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -1314,11 +1290,8 @@ describe('useGeminiStream', () => {
     mockRunVisionBridge.mockResolvedValue({
       applied: false,
       status: 'failed',
-      imageCount: 1,
       convertedCount: 0,
       omittedCount: 0,
-      omittedInvalidCount: 0,
-      omittedCappedCount: 0,
       modelId: 'vm',
       egressOccurred: true,
       error: 'provider failed',
