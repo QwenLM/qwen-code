@@ -1644,13 +1644,8 @@ export class Config {
     this.promptRegistry = new PromptRegistry();
     this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
-    const explicitExtensionNames = this.getExplicitExtensionNames();
     if (!this.isSafeMode() && !this.getBareMode()) {
       await this.extensionManager.refreshCache();
-    } else if (!this.getBareMode() && explicitExtensionNames.length > 0) {
-      await this.extensionManager.refreshCache({
-        names: explicitExtensionNames,
-      });
     }
     this.debugLogger.debug('Extension manager initialized');
 
@@ -4253,7 +4248,7 @@ export class Config {
   }
 
   getPreventSystemSleepEnabled(): boolean {
-    return this.preventSystemSleep && !this.getBareMode() && !this.isSafeMode();
+    return this.preventSystemSleep && !this.isSafeMode();
   }
 
   /**
@@ -4326,12 +4321,6 @@ export class Config {
     } else {
       return extensions;
     }
-  }
-
-  private getExplicitExtensionNames(): string[] {
-    return (this.overrideExtensions ?? []).filter(
-      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
-    );
   }
 
   getActiveExtensions(): Extension[] {
