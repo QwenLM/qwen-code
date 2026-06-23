@@ -5321,6 +5321,28 @@ describe('createServeApp', () => {
       expect(res.body.promptId).toBeDefined();
     });
 
+    it('400 without promptId when bridge rejects invalid client admission synchronously', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new InvalidClientIdError('session-A', 'client-stale');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-stale')
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-stale',
+      });
+      expect(res.body.promptId).toBeUndefined();
+    });
+
     it('503 without promptId when bridge rejects prompt admission synchronously', async () => {
       const bridge = fakeBridge({
         promptImpl: () => {

@@ -593,7 +593,7 @@ describe('createAcpSessionBridge', () => {
         { clientId: first.clientId },
       ),
     ).resolves.toMatchObject({ stopReason: 'end_turn' });
-    await expect(
+    expect(() =>
       bridge.sendPrompt(
         second.sessionId,
         {
@@ -603,7 +603,7 @@ describe('createAcpSessionBridge', () => {
         undefined,
         { clientId: second.clientId },
       ),
-    ).rejects.toBeInstanceOf(InvalidClientIdError);
+    ).toThrow(InvalidClientIdError);
 
     await bridge.shutdown();
   });
@@ -5338,7 +5338,7 @@ describe('createAcpSessionBridge', () => {
 
     it('rejects unregistered client ids on session-scoped requests', async () => {
       const { bridge, session } = await setup();
-      await expect(
+      expect(() =>
         bridge.sendPrompt(
           session.sessionId,
           {
@@ -5348,7 +5348,8 @@ describe('createAcpSessionBridge', () => {
           undefined,
           { clientId: 'client-not-issued' },
         ),
-      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      ).toThrow(InvalidClientIdError);
+      expect(bridge.activePromptCount).toBe(0);
       await expect(
         bridge.cancelSession(session.sessionId, undefined, {
           clientId: 'client-not-issued',
