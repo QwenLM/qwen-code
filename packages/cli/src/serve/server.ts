@@ -9,6 +9,13 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
+import type {
+  ApprovalMode,
+  Protocol,
+  Extension,
+  ExtensionInstallMetadata,
+  ExtensionSetting,
+} from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
   ALL_PROVIDERS,
@@ -30,13 +37,9 @@ import {
   recordDaemonHttpRequest,
   recordDaemonHttpResponse,
   withDaemonRequestSpan,
-  type ApprovalMode,
-  type Extension,
-  type ExtensionInstallMetadata,
-  type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import type { DaemonLogger } from './daemonLogger.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -55,21 +58,22 @@ import {
   type DeviceFlowProvider,
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
-} from './auth/deviceFlow.js';
+} from './auth/device-flow.js';
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
-import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
-import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
-import { createDaemonStatusProvider } from './daemonStatusProvider.js';
-import { isServeDebugMode } from './debugMode.js';
+import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
+import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+import { isServeDebugMode } from './debug-mode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
-import { isLoopbackBind } from './loopbackBinds.js';
-import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import { isLoopbackBind } from './loopback-binds.js';
+import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import {
   buildDaemonStatusResponse,
   parseDaemonStatusDetail,
-} from './daemonStatus.js';
+} from './daemon-status.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -99,12 +103,12 @@ import {
   WorkspaceMismatchError,
   type BridgeSessionSummary,
   type AcpSessionBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 import {
   getAdvertisedServeFeatures,
   getServeProtocolVersions,
 } from './capabilities.js';
-import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
+import { SubscriberLimitExceededError, type BridgeEvent } from './event-bus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
@@ -118,27 +122,27 @@ import { getDemoHtml } from './demo.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
-} from './webShellStatic.js';
-import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
-import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
+} from './web-shell-static.js';
+import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
+import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 import {
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,
 } from './fs/index.js';
-import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
-import { registerWorkspaceFileWriteRoutes } from './routes/workspaceFileWrite.js';
+import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
+import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
-import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
-import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
+import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
+import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
   createRateLimiter,
   setRateLimiter,
   type RateLimiterInstance,
-} from './rateLimit.js';
+} from './rate-limit.js';
 import {
   STATUS_SCHEMA_VERSION,
   type ServeExtensionCapabilities,
@@ -205,12 +209,16 @@ export function resolveBridgeFsFactory(input: {
   injected?: WorkspaceFileSystemFactory;
   trusted: boolean;
   emit?: (event: BridgeEvent) => void;
+  customIgnoreFiles?: string[];
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
     boundWorkspace: input.boundWorkspace,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
+    ...(input.customIgnoreFiles !== undefined
+      ? { customIgnoreFiles: input.customIgnoreFiles }
+      : {}),
   });
 }
 
@@ -234,6 +242,21 @@ export class InvalidCursorError extends Error {
   }
 }
 
+function parseSessionCursor(cursor: string): number | undefined {
+  if (cursor === '') return undefined;
+  const trimmed = cursor.trim();
+  const parsed = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    parsed > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new InvalidCursorError(cursor);
+  }
+  return parsed;
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -247,12 +270,8 @@ export async function listWorkspaceSessionsForResponse(
   const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
 
   let numericCursor: number | undefined;
-  if (options?.cursor) {
-    const parsed = Number(options.cursor);
-    if (!Number.isFinite(parsed)) {
-      throw new InvalidCursorError(options.cursor);
-    }
-    numericCursor = parsed;
+  if (options?.cursor != null) {
+    numericCursor = parseSessionCursor(options.cursor);
   }
   const isFirstPage = numericCursor === undefined;
 
@@ -1204,6 +1223,8 @@ export function createServeApp(
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider: createDaemonStatusProvider(),
+      workspaceProvidersStatusProvider:
+        createWorkspaceProvidersStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
@@ -1596,7 +1617,7 @@ export function createServeApp(
   // both halves of the policy (matched → CORS headers + pass-through or
   // 204 preflight; unmatched → 403 with the same error envelope as the
   // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
-  // installed. Pattern parsing happens in `runQwenServe.ts` for validation;
+  // installed. Pattern parsing happens in `run-qwen-serve.ts` for validation;
   // here we still keep the wildcard/no-token invariant for embedded
   // callers that construct the app directly.
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -2720,7 +2741,7 @@ export function createServeApp(
           knownProvider.protocolOptions && knownProvider.protocolOptions.length
             ? knownProvider.protocolOptions
             : [knownProvider.protocol];
-        if (!allowedProtocols.includes(installRequest.protocol)) {
+        if (!allowedProtocols.includes(installRequest.protocol as Protocol)) {
           res.status(400).json({
             error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
             code: 'unsupported_protocol',
@@ -2994,6 +3015,35 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'POST /session/:id/branch',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/fork', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const directive = body['directive'];
+    if (typeof directive !== 'string' || directive.trim().length === 0) {
+      res.status(400).json({
+        error: '`directive` is required and must be a non-empty string',
+        code: 'missing_directive',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.launchSessionForkAgent(
+        sessionId,
+        directive,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(202).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/fork',
         sessionId,
       });
     }
@@ -4521,7 +4571,7 @@ export function createServeApp(
         const idleForMs = Date.now() - lastWriteAt;
         if (idleForMs < writerIdleTimeoutMs) return;
         // Reuse the existing `client_evicted` taxonomy from
-        // `eventBus.ts` so SDK reducers branch on the same frame type
+        // `event-bus.ts` so SDK reducers branch on the same frame type
         // they already handle for queue-overflow eviction; the new
         // `reason` slot is the differentiator. Write DIRECTLY here
         // (bypassing `writeWithBackpressure`) because the chain may

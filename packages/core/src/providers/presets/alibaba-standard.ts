@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const alibabaStandardProvider: ProviderConfig = {
   id: 'alibabaStandard',
   label: 'Standard API Key',
   description: 'Connect with an existing ModelStudio API key',
-  protocol: AuthType.USE_OPENAI,
+  protocol: Protocol.OPENAI,
   baseUrl: [
     {
       id: 'cn-beijing',

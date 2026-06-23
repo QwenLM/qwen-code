@@ -1,0 +1,45 @@
+{
+  "name": "@qwen-code/audio-capture",
+  "version": "0.19.0",
+  "description": "Native microphone capture backend for Qwen Code voice input",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "prebuilds",
+    "native/audio_capture.cc",
+    "native/mac_permission.mm",
+    "native/miniaudio.h",
+    "binding.gyp",
+    "install.js"
+  ],
+  "scripts": {
+    "install": "node install.js",
+    "prebuildify": "prebuildify --napi --strip",
+    "build": "node-gyp rebuild && tsc --build",
+    "build:ts": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "node-gyp": "^11.2.0",
+    "prebuildify": "^6.0.1",
+    "typescript": "^5.3.3",
+    "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

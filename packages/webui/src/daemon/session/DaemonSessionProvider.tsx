@@ -43,6 +43,7 @@ import {
   getReplayTokenUsage,
   getTokenCountFromUsage,
   mapProviderStatus,
+  mapSessionContextModels,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -284,6 +285,12 @@ export function DaemonSessionProvider({
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      // Set when the user explicitly deletes the session (server
+      // publishes session_closed with reason 'client_close').
+      // Reconnecting would auto-create a new session, undoing the
+      // user's delete. Other session_closed reasons (idle_timeout,
+      // last_client_detached) fall through to normal reconnect.
+      let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
         try {
@@ -477,8 +484,26 @@ export function DaemonSessionProvider({
               ? loadWarningsRef.current?.context
               : undefined,
           ].filter((warning): warning is string => Boolean(warning));
-          const { models, currentModel, contextWindow } =
-            mapProviderStatus(providers);
+          const providerModelStatus = mapProviderStatus(providers);
+          const contextModelStatus = mapSessionContextModels(context);
+          const sessionModels =
+            contextModelStatus && contextModelStatus.models.length > 0
+              ? contextModelStatus.models
+              : providerModelStatus.models;
+          const sessionCurrentModel =
+            contextModelStatus?.currentModel ??
+            providerModelStatus.currentModel;
+          const providerContextWindow =
+            sessionCurrentModel === providerModelStatus.currentModel
+              ? providerModelStatus.contextWindow
+              : providerModelStatus.models.find(
+                  (model) => model.id === sessionCurrentModel,
+                )?.contextWindow;
+          const sessionContextWindow =
+            contextModelStatus?.contextWindow ??
+            sessionModels.find((model) => model.id === sessionCurrentModel)
+              ?.contextWindow ??
+            providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
           const currentMode = getCurrentMode(context);
 
@@ -493,8 +518,8 @@ export function DaemonSessionProvider({
             workspaceCwd: activeSession.workspaceCwd,
             commands,
             skills,
-            models,
-            currentModel,
+            models: sessionModels,
+            currentModel: sessionCurrentModel,
             currentMode,
             displayName:
               getSessionDisplayName(activeSession.state) ??
@@ -520,7 +545,7 @@ export function DaemonSessionProvider({
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
-            contextWindow,
+            contextWindow: sessionContextWindow,
             providers,
             supportedCommands,
             context,
@@ -768,6 +793,23 @@ export function DaemonSessionProvider({
                   }
                   setConnection((c) => ({ ...c, catchingUp: undefined }));
                 }
+
+                // session_closed with client_close during epoch replay
+                if (
+                  event.type === 'session_closed' &&
+                  (event.data as Record<string, unknown> | undefined)
+                    ?.reason === 'client_close'
+                ) {
+                  userDeletedSession = true;
+                  const closedSessionId = activeSession.sessionId;
+                  const active = activePromptsRef.current.get(closedSessionId);
+                  active?.controller.abort();
+                  activePromptsRef.current.delete(closedSessionId);
+                  session = undefined;
+                  sessionRef.current = undefined;
+                  break;
+                }
+
                 continue;
               }
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
@@ -890,6 +932,27 @@ export function DaemonSessionProvider({
                   break;
                 }
               }
+              // session_closed with reason 'client_close' means the
+              // user explicitly deleted the session. Stop the
+              // reconnect loop — without this, the next iteration
+              // would call createOrAttach and auto-create a new
+              // session, undoing the user's delete action.
+              // Other reasons (idle_timeout, last_client_detached)
+              // fall through to the normal reconnect path.
+              if (
+                event.type === 'session_closed' &&
+                (event.data as Record<string, unknown> | undefined)?.reason ===
+                  'client_close'
+              ) {
+                userDeletedSession = true;
+                const closedSessionId = activeSession.sessionId;
+                const active = activePromptsRef.current.get(closedSessionId);
+                active?.controller.abort();
+                activePromptsRef.current.delete(closedSessionId);
+                session = undefined;
+                sessionRef.current = undefined;
+                break;
+              }
             } catch (error) {
               const message =
                 error instanceof Error ? error.message : String(error);
@@ -907,6 +970,24 @@ export function DaemonSessionProvider({
                 error,
               );
             }
+          }
+          if (userDeletedSession) {
+            // Session was explicitly closed (user deleted it). Do NOT
+            // reconnect — doing so would auto-create a new session.
+            // Note: we intentionally do NOT call setRestoreSessionId(undefined)
+            // here because restoreSessionId is in the useEffect dependency
+            // array — changing it would trigger an effect re-run that could
+            // create a new session via createOrAttach.
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+            setPromptStatus('idle');
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              sessionId: undefined,
+              error: undefined,
+            }));
+            return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
             // Keep the session handle after a normal SSE close so the next

@@ -19,8 +19,11 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
-import { runQwenServe, type RunHandle } from './runQwenServe.js';
-import { resolveWebShellDir, isDocumentNavigation } from './webShellStatic.js';
+import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
+import {
+  resolveWebShellDir,
+  isDocumentNavigation,
+} from './web-shell-static.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
@@ -62,6 +65,7 @@ import {
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -76,8 +80,8 @@ import {
   type BridgeSpawnRequest,
   type AcpSessionBridge,
   type SessionMetadataUpdate,
-} from './acpSessionBridge.js';
-import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+} from './acp-session-bridge.js';
+import type { BridgeEvent, SubscribeOptions } from './event-bus.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
@@ -95,8 +99,9 @@ import type {
   ServeWorkspaceToolsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
-import type { DaemonLogger } from './daemonLogger.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
+import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -114,6 +119,14 @@ function fakeDaemonLog(): DaemonLogger {
     getDaemonId: () => 'test-daemon',
     flush: vi.fn(async () => {}),
   };
+}
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
 }
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -382,6 +395,11 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  launchSessionForkAgentImpl?: (
+    sessionId: string,
+    directive: string,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ sessionId: string; description: string; launched: boolean }>;
   setToolEnabledImpl?: (
     toolName: string,
     enabled: boolean,
@@ -550,6 +568,11 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  forkCalls: Array<{
+    sessionId: string;
+    directive: string;
     context?: BridgeClientRequestContext;
   }>;
   setToolEnabledCalls: Array<{
@@ -841,6 +864,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const forkCalls: FakeBridge['forkCalls'] = [];
+  const launchSessionForkAgentImpl =
+    opts.launchSessionForkAgentImpl ??
+    (async (sessionId: string, directive: string) => ({
+      sessionId,
+      description: directive.slice(0, 60),
+      launched: true,
+    }));
   const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
   const setToolEnabledImpl =
     opts.setToolEnabledImpl ??
@@ -963,6 +994,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    forkCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1188,6 +1220,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async generateSessionBtw(sessionId, _question, _signal, _context) {
       return { sessionId, answer: 'mock btw answer' };
     },
+    async launchSessionForkAgent(sessionId, directive, context) {
+      forkCalls.push({
+        sessionId,
+        directive,
+        ...(context ? { context } : {}),
+      });
+      return launchSessionForkAgentImpl(sessionId, directive, context);
+    },
     enqueueMidTurnMessage(sessionId, message, context) {
       enqueueMidTurnCalls.push({
         sessionId,
@@ -1273,8 +1313,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     publishWorkspaceEvent(_event) {
       // Issue #4175 PR 16 — fakeBridge default is a no-op. Tests that
       // assert on workspace fan-out override this through the dedicated
-      // route-level test files (workspaceMemory.test.ts /
-      // workspaceAgents.test.ts) where the real fan-out behavior is
+      // route-level test files (workspace-memory.test.ts /
+      // workspace-agents.test.ts) where the real fan-out behavior is
       // exercised against a live bridge.
     },
     knownClientIds() {
@@ -1935,7 +1975,7 @@ describe('createServeApp', () => {
     });
 
     it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
-      // Mirrors the env-var kill switch path: `runQwenServe.ts` infers
+      // Mirrors the env-var kill switch path: `run-qwen-serve.ts` infers
       // `mcpPoolActive: false` when the parent process has
       // `QWEN_SERVE_NO_MCP_POOL=1`. Verify the capability envelope
       // tracks the toggle so SDK clients pre-flighting on the tags
@@ -2166,7 +2206,16 @@ describe('createServeApp', () => {
       expect(res.body.servers[2].disabledReason).toBe('budget');
     });
 
-    it('returns workspace skills and providers status from the bridge', async () => {
+    it('returns workspace skills from the bridge and providers from daemon-local settings', async () => {
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-providers-'),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      const previousSystemSettings =
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      const previousSystemDefaults =
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
       const skills: ServeWorkspaceSkillsStatus = {
         v: 1,
         workspaceCwd: WS_BOUND,
@@ -2182,54 +2231,55 @@ describe('createServeApp', () => {
           },
         ],
       };
-      const providers: ServeWorkspaceProvidersStatus = {
-        v: 1,
-        workspaceCwd: WS_BOUND,
-        initialized: true,
-        current: { authType: 'qwen', modelId: 'qwen3(qwen)' },
-        providers: [
-          {
-            kind: 'model_provider',
-            status: 'ok',
-            authType: 'qwen',
-            current: true,
-            models: [
-              {
-                modelId: 'qwen3(qwen)',
-                baseModelId: 'qwen3',
-                name: 'Qwen 3',
-                description: null,
-                contextLimit: 4096,
-                isCurrent: true,
-                isRuntime: false,
-              },
-            ],
-          },
-        ],
-      };
-      const bridge = fakeBridge({
-        workspaceSkillsImpl: async () => skills,
-        workspaceProvidersImpl: async () => providers,
-      });
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      try {
+        process.env['QWEN_HOME'] = path.join(tempHome, 'home');
+        process.env['QWEN_RUNTIME_DIR'] = path.join(tempHome, 'runtime');
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+          tempHome,
+          'system-settings.json',
+        );
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+          tempHome,
+          'system-defaults.json',
+        );
+        resetHomeEnvBootstrapForTesting();
 
-      const skillsRes = await request(app)
-        .get('/workspace/skills')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      const providersRes = await request(app)
-        .get('/workspace/providers')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const bridge = fakeBridge({
+          workspaceSkillsImpl: async () => skills,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      expect(skillsRes.status).toBe(200);
-      expect(skillsRes.body).toEqual(skills);
-      expect(providersRes.status).toBe(200);
-      expect(providersRes.body).toEqual(providers);
-      expect(bridge.workspaceSkillsCalls).toBe(1);
-      expect(bridge.workspaceProvidersCalls).toBe(1);
+        const skillsRes = await request(app)
+          .get('/workspace/skills')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const providersRes = await request(app)
+          .get('/workspace/providers')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(skillsRes.status).toBe(200);
+        expect(skillsRes.body).toEqual(skills);
+        expect(providersRes.status).toBe(200);
+        expect(providersRes.body).toMatchObject({
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          acpChannelLive: false,
+        });
+        expect(providersRes.body.providers.length).toBeGreaterThan(0);
+        expect(bridge.workspaceSkillsCalls).toBe(1);
+        expect(bridge.workspaceProvidersCalls).toBe(0);
+      } finally {
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('QWEN_RUNTIME_DIR', previousRuntimeDir);
+        restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', previousSystemSettings);
+        restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', previousSystemDefaults);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+      }
     });
 
     it('returns workspace tools status from the bridge', async () => {
@@ -5418,7 +5468,34 @@ describe('createServeApp', () => {
       expect(cursoredIds).not.toContain('live-only');
     });
 
-    it('400 invalid_cursor when cursor is not a valid number', async () => {
+    it.each(['abc', '-1', 'Infinity', '9007199254740992', '   '])(
+      '400 invalid_cursor when cursor is not valid: %s',
+      async (cursor) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=${encodeURIComponent(cursor)}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_cursor');
+      },
+    );
+
+    it('accepts fractional mtime cursor values', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '1970-01-01T00:16:39.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('1970-01-01T00:16:39.000Z'),
+      });
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -5426,10 +5503,36 @@ describe('createServeApp', () => {
         { bridge, boundWorkspace: WS_BOUND },
       );
       const res = await request(app)
-        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=abc`)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=1000123.456`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('invalid_cursor');
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(1);
+      expect(res.body.sessions[0].sessionId).toBe(id);
+    });
+
+    it('passes fractional cursor values to SessionService without truncating', async () => {
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items: [],
+          nextCursor: undefined,
+          hasMore: false,
+        });
+
+      try {
+        await listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, {
+          cursor: '1000123.456',
+        });
+
+        expect(listSessionsSpy).toHaveBeenCalledWith({
+          cursor: 1000123.456,
+          size: 20,
+        });
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
     });
 
     it('excludes live sessions from subsequent pages to prevent cross-page duplicates', async () => {
@@ -6090,6 +6193,94 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/fork', () => {
+    it('202 with directive and client identity on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        description: 'review the current code',
+        launched: true,
+      });
+      expect(bridge.forkCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          directive: 'review the current code',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('400 when directive is missing or empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const missing = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('missing_directive');
+
+      const empty = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: '   ' });
+      expect(empty.status).toBe(400);
+      expect(empty.body.code).toBe('missing_directive');
+      expect(bridge.forkCalls).toEqual([]);
+    });
+
+    it('404 when bridge throws SessionNotFoundError', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/missing/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('409 when bridge reports the session is busy', async () => {
+      const bridge = fakeBridge({
+        launchSessionForkAgentImpl: async (sessionId) => {
+          throw new SessionBusyError(
+            sessionId,
+            'Cannot fork while a response or tool call is in progress',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/fork')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_busy',
+        sessionId: 'session-A',
+      });
+      expect(res.headers['retry-after']).toBe('5');
     });
   });
 
@@ -10385,6 +10576,37 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
   });
 
+  it('passes custom ignore files through resolveBridgeFsFactory', async () => {
+    const { resolveBridgeFsFactory } = await import('./server.js');
+    const tmp = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-fs-ignore-'),
+    );
+    try {
+      await fsp.writeFile(path.join(tmp, '.cursorignore'), 'secret.txt\n');
+      await fsp.writeFile(path.join(tmp, '.agentignore'), 'agent.txt\n');
+      await fsp.writeFile(path.join(tmp, 'secret.txt'), 'secret');
+      await fsp.writeFile(path.join(tmp, 'agent.txt'), 'agent');
+
+      const factory = resolveBridgeFsFactory({
+        boundWorkspace: tmp,
+        trusted: true,
+        customIgnoreFiles: ['.cursorignore'],
+      });
+      const fs = factory.forRequest({ route: 'TEST /op' });
+      const root = await fs.resolve('.', 'list');
+      const entries = await fs.list(root, { includeIgnored: true });
+
+      expect(
+        entries.find((entry) => entry.name === 'secret.txt')?.ignored,
+      ).toBe(true);
+      expect(entries.find((entry) => entry.name === 'agent.txt')?.ignored).toBe(
+        false,
+      );
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('default fsFactory is built with trusted=false (writes refused)', async () => {
     const { createServeApp } = await import('./server.js');
     const { isFsError } = await import('./fs/index.js');
@@ -10436,7 +10658,7 @@ describe('auth device-flow routes', () => {
   // whose `poll` is scripted per-test. Lives at the top of the suite so
   // every `it()` can compose it with the registry.
   function makeFakeProvider(): {
-    provider: import('./auth/deviceFlow.js').DeviceFlowProvider;
+    provider: import('./auth/device-flow.js').DeviceFlowProvider;
     startCount: () => number;
   } {
     let starts = 0;
@@ -10449,10 +10671,10 @@ describe('auth device-flow routes', () => {
             deviceCode:
               // Use the brandSecret helper so the secret follows the same
               // redaction shape the production provider produces.
-              (await import('./auth/deviceFlow.js')).brandSecret(
+              (await import('./auth/device-flow.js')).brandSecret(
                 `device-${starts}`,
               ),
-            pkceVerifier: (await import('./auth/deviceFlow.js')).brandSecret(
+            pkceVerifier: (await import('./auth/device-flow.js')).brandSecret(
               `pkce-${starts}`,
             ),
             userCode: `USER-${starts}`,
@@ -10935,16 +11157,17 @@ describe('auth device-flow routes', () => {
     // must surface as 502 with code:'upstream_error' instead of falling
     // through `sendBridgeError`'s generic 500 path. Build a fake
     // provider whose start always throws.
-    const { UpstreamDeviceFlowError } = await import('./auth/deviceFlow.js');
-    const failingProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
-      providerId: 'qwen-oauth',
-      async start() {
-        throw new UpstreamDeviceFlowError('mocked upstream outage');
-      },
-      async poll() {
-        return { kind: 'pending' as const };
-      },
-    };
+    const { UpstreamDeviceFlowError } = await import('./auth/device-flow.js');
+    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider =
+      {
+        providerId: 'qwen-oauth',
+        async start() {
+          throw new UpstreamDeviceFlowError('mocked upstream outage');
+        },
+        async poll() {
+          return { kind: 'pending' as const };
+        },
+      };
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
       bridge,
@@ -10964,9 +11187,9 @@ describe('auth device-flow routes', () => {
     // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
     // injected registry with a controlled clock + manual sweeper trigger.
     const { DeviceFlowRegistry, brandSecret } = await import(
-      './auth/deviceFlow.js'
+      './auth/device-flow.js'
     );
-    const fakeProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+    const fakeProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
       providerId: 'qwen-oauth',
       async start() {
         return {
@@ -11067,7 +11290,7 @@ describe('auth device-flow routes', () => {
   it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
     // Inject a fake registry whose `start` always throws the cap error.
     const { TooManyActiveDeviceFlowsError } = await import(
-      './auth/deviceFlow.js'
+      './auth/device-flow.js'
     );
     const fakeRegistry = {
       start: async () => {
@@ -11077,7 +11300,7 @@ describe('auth device-flow routes', () => {
       cancel: () => undefined,
       listPending: () => [],
       dispose: () => {},
-    } as unknown as import('./auth/deviceFlow.js').DeviceFlowRegistry;
+    } as unknown as import('./auth/device-flow.js').DeviceFlowRegistry;
 
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
@@ -12112,7 +12335,7 @@ describe('sendBridgeError daemonLog routing', () => {
   it('routes 5xx errors through daemonLog when provided', async () => {
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'daemon-log-'));
     const stderrLines: string[] = [];
-    const { initDaemonLogger } = await import('./daemonLogger.js');
+    const { initDaemonLogger } = await import('./daemon-logger.js');
     const daemonLog = initDaemonLogger({
       boundWorkspace: '/w',
       pid: 1,

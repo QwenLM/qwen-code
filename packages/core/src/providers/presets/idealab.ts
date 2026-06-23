@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const idealabProvider: ProviderConfig = {
@@ -12,7 +12,7 @@ export const idealabProvider: ProviderConfig = {
   label: 'Idealab API Key',
   description:
     'Alibaba internal LLM service (Qwen3.6-Plus-DogFooding, DeepSeek V4, Kimi K2.6)',
-  protocol: AuthType.USE_OPENAI,
+  protocol: Protocol.OPENAI,
   baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
   envKey: 'IDEALAB_API_KEY',
   models: [

@@ -24,7 +24,7 @@ This doc walks through each layer and the explicit invariants the boot path enfo
 
 ### Boot-time refuse rules
 
-In `runQwenServe.ts`:
+In `run-qwen-serve.ts`:
 
 ```ts
 if (!isLoopbackBind(opts.hostname) && !token) {
@@ -182,10 +182,10 @@ setups should use a currently supported auth provider when one is available.
 
 SSE events `auth_device_flow_{started, throttled, authorized, failed, cancelled}` fan-out flow state to all subscribers so multi-client UIs stay in sync. See [`09-event-schema.md`](./09-event-schema.md).
 
-Implementation: `packages/cli/src/serve/auth/deviceFlow.ts` + `qwenDeviceFlowProvider.ts`.
+Implementation: `packages/cli/src/serve/auth/device-flow.ts` + `qwen-device-flow-provider.ts`.
 
 **Log injection / Trojan Source defense**: `sanitizeForStderr(value)`
-(`deviceFlow.ts`) replaces ASCII control characters and Unicode control
+(`device-flow.ts`) replaces ASCII control characters and Unicode control
 characters with `?`. A malicious IdP could otherwise forge log lines or hide
 payloads:
 
@@ -271,8 +271,8 @@ sequenceDiagram
 ## Dependencies
 
 - `node:crypto` — `createHash`, `timingSafeEqual`.
-- `packages/cli/src/serve/loopbackBinds.ts` — `isLoopbackBind`.
-- `packages/cli/src/serve/auth/deviceFlow.ts` — device-flow state machine.
+- `packages/cli/src/serve/loopback-binds.ts` — `isLoopbackBind`.
+- `packages/cli/src/serve/auth/device-flow.ts` — device-flow state machine.
 - `@qwen-code/acp-bridge` — surfaces device-flow events on the per-session SSE bus.
 
 ## Configuration
@@ -297,9 +297,9 @@ sequenceDiagram
 ## References
 
 - `packages/cli/src/serve/auth.ts` (entire file)
-- `packages/cli/src/serve/runQwenServe.ts` (refuse rules)
-- `packages/cli/src/serve/loopbackBinds.ts`
-- `packages/cli/src/serve/auth/deviceFlow.ts`
-- `packages/cli/src/serve/auth/qwenDeviceFlowProvider.ts`
+- `packages/cli/src/serve/run-qwen-serve.ts` (refuse rules)
+- `packages/cli/src/serve/loopback-binds.ts`
+- `packages/cli/src/serve/auth/device-flow.ts`
+- `packages/cli/src/serve/auth/qwen-device-flow-provider.ts`
 - User-facing threat model: [`../../users/qwen-serve.md`](../../users/qwen-serve.md).
 - Wire reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md).

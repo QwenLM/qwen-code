@@ -10,6 +10,7 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
   parseAcpModelOption,
+  sanitizeProviderBaseUrl,
 } from './acpModelUtils.js';
 
 describe('acpModelUtils', () => {
@@ -34,9 +35,37 @@ describe('acpModelUtils', () => {
     });
   });
 
-  it('returns trimmed input as modelId when authType is invalid', () => {
+  it('parses modelId and authType for custom authType strings', () => {
     expect(parseAcpModelOption('qwen3(not-a-real-auth)')).toEqual({
-      modelId: 'qwen3(not-a-real-auth)',
+      modelId: 'qwen3',
+      authType: 'not-a-real-auth',
     });
+  });
+
+  it('returns whole input as modelId when trailing parens are empty', () => {
+    expect(parseAcpModelOption('qwen3()')).toEqual({ modelId: 'qwen3()' });
+  });
+
+  it.each([
+    ['not-a-url', 'not-a-url'],
+    ['https://api.example/v1', 'https://api.example/v1'],
+    ['https://api.example/v1/@scope', 'https://api.example/v1/@scope'],
+    ['https://host:99999/path@domain', 'https://host:99999/path@domain'],
+    ['https://user@api.example/v1', 'https://api.example/v1'],
+    ['https://user@host:99999', 'https://host:99999'],
+    ['https://user:secret@api.example/v1', 'https://api.example/v1'],
+    [
+      'https://user:secret@api.example/v1/@scope',
+      'https://api.example/v1/@scope',
+    ],
+    ['https://user:p ass@api.example/v1', 'https://api.example/v1'],
+    [`https://user:p'ass@api.example/v1`, 'https://api.example/v1'],
+    ['https://user:p%2Fx@api.example/v1', 'https://api.example/v1'],
+    ['https://user:p/x@api.example/v1', 'https://api.example/v1'],
+    ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
+    ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
+    ['https://user:secret@api.example', 'https://api.example'],
+  ])('sanitizes provider base URL credentials for %s', (input, expected) => {
+    expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });
 });

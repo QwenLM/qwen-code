@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  AuthType,
   customProvider,
   CUSTOM_API_KEY_ENV_PREFIX,
   buildInstallPlan,
@@ -15,15 +14,16 @@ import {
 // Re-import generateCustomEnvKey from the relative source path so the new
 // hash-suffix format is exercised even before dist/ is rebuilt.
 import { generateCustomEnvKey } from '../../presets/custom-provider.js';
+import { Protocol } from '../../../core/contentGenerator.js';
 
 describe('generateCustomEnvKey', () => {
   it('produces a deterministic URL-based key with a stable hash suffix', () => {
     const key1 = generateCustomEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.example.com/v1',
     );
     const key2 = generateCustomEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.example.com/v1',
     );
     expect(key1).toBe(key2);
@@ -36,20 +36,17 @@ describe('generateCustomEnvKey', () => {
   });
 
   it('produces different keys for different protocols', () => {
-    const k1 = generateCustomEnvKey(
-      AuthType.USE_OPENAI,
-      'https://api.example.com',
-    );
+    const k1 = generateCustomEnvKey(Protocol.OPENAI, 'https://api.example.com');
     const k2 = generateCustomEnvKey(
-      AuthType.USE_ANTHROPIC,
+      Protocol.ANTHROPIC,
       'https://api.example.com',
     );
     expect(k1).not.toBe(k2);
   });
 
   it('produces different keys for different base URLs', () => {
-    const k1 = generateCustomEnvKey(AuthType.USE_OPENAI, 'https://api.a.com');
-    const k2 = generateCustomEnvKey(AuthType.USE_OPENAI, 'https://api.b.com');
+    const k1 = generateCustomEnvKey(Protocol.OPENAI, 'https://api.a.com');
+    const k2 = generateCustomEnvKey(Protocol.OPENAI, 'https://api.b.com');
     expect(k1).not.toBe(k2);
   });
 
@@ -58,15 +55,15 @@ describe('generateCustomEnvKey', () => {
     // all collapsed to `API_EXAMPLE_COM`, so two different custom providers
     // would overwrite each other's API key. The hash suffix prevents that.
     const dotted = generateCustomEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.example.com',
     );
     const dashed = generateCustomEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api-example.com',
     );
     const underscored = generateCustomEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api_example.com',
     );
     expect(dotted).not.toBe(dashed);
@@ -75,7 +72,7 @@ describe('generateCustomEnvKey', () => {
   });
 
   it('normalizes special characters to underscores in the readable part', () => {
-    const k1 = generateCustomEnvKey(AuthType.USE_OPENAI, 'http://api.a-b.com');
+    const k1 = generateCustomEnvKey(Protocol.OPENAI, 'http://api.a-b.com');
     // Readable prefix matches; trailing 6-hex suffix is separate.
     expect(k1).toMatch(
       new RegExp(
@@ -85,7 +82,7 @@ describe('generateCustomEnvKey', () => {
   });
 
   it('handles empty strings', () => {
-    const key = generateCustomEnvKey('' as AuthType, '');
+    const key = generateCustomEnvKey('' as Protocol, '');
     expect(key).toMatch(new RegExp(`^${CUSTOM_API_KEY_ENV_PREFIX}`));
   });
 });
@@ -94,7 +91,7 @@ describe('customProvider', () => {
   it('has correct config shape', () => {
     expect(customProvider).toMatchObject({
       id: 'custom-openai-compatible',
-      protocol: AuthType.USE_OPENAI,
+      protocol: Protocol.OPENAI,
       baseUrl: undefined,
       models: undefined,
       showAdvancedConfig: true,
@@ -104,9 +101,9 @@ describe('customProvider', () => {
 
   it('offers multiple protocol options', () => {
     expect(customProvider.protocolOptions).toEqual([
-      AuthType.USE_OPENAI,
-      AuthType.USE_ANTHROPIC,
-      AuthType.USE_GEMINI,
+      Protocol.OPENAI,
+      Protocol.ANTHROPIC,
+      Protocol.GEMINI,
     ]);
   });
 
@@ -127,7 +124,7 @@ describe('customProvider', () => {
     expect(customProvider.mergeModelsByIdentity).toBe(true);
 
     const plan = buildInstallPlan(customProvider, {
-      protocol: AuthType.USE_OPENAI,
+      protocol: Protocol.OPENAI,
       baseUrl: 'https://my-proxy.com/v1',
       apiKey: 'sk-my-key',
       modelIds: ['model-a'],
@@ -150,18 +147,18 @@ describe('customProvider', () => {
 
   it('creates an install plan with custom inputs', () => {
     const plan = buildInstallPlan(customProvider, {
-      protocol: AuthType.USE_ANTHROPIC,
+      protocol: Protocol.ANTHROPIC,
       baseUrl: 'https://my-proxy.com/v1',
       apiKey: 'sk-my-key',
       modelIds: ['claude-3'],
       advancedConfig: { enableThinking: true, maxTokens: 8192 },
     });
 
-    expect(plan.authType).toBe(AuthType.USE_ANTHROPIC);
+    expect(plan.authType).toBe(Protocol.ANTHROPIC);
     const envKey = Object.keys(plan.env ?? {})[0]!;
     expect(envKey).toMatch(new RegExp(`^${CUSTOM_API_KEY_ENV_PREFIX}`));
     expect(plan.env?.[envKey]).toBe('sk-my-key');
-    expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_ANTHROPIC);
+    expect(plan.modelProviders?.[0]?.authType).toBe(Protocol.ANTHROPIC);
 
     const models = plan.modelProviders?.[0]?.models;
     expect(models?.[0]).toMatchObject({ id: 'claude-3' });

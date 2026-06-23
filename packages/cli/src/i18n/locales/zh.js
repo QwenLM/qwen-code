@@ -177,6 +177,7 @@ export default {
   'toolDisplayName.TodoList': '任务清单',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Artifact': '制品',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
   'toolDisplayName.ExitPlanMode': '退出计划模式',
@@ -1226,6 +1227,7 @@ export default {
     '选择将服务器添加到排除列表的位置：',
   'Press Enter to confirm, Esc to cancel': '按 Enter 确认，Esc 取消',
   'View tools': '查看工具',
+  'View resources': '查看资源',
   Reconnect: '重新连接',
   Enable: '启用',
   Disable: '禁用',
@@ -1238,6 +1240,8 @@ export default {
   'Error:': '错误：',
   tool: '工具',
   tools: '个工具',
+  resource: '资源',
+  resources: '个资源',
   connected: '已连接',
   connecting: '连接中',
   disconnected: '已断开',
@@ -1284,6 +1288,18 @@ export default {
   'No tool selected': '未选择工具',
   Server: '服务器',
 
+  // MCP Resource List/Detail
+  'No resources available for this server.': '此服务器没有可用资源。',
+  'Resources for {{serverName}}': '{{serverName}} 的资源',
+  'No resource selected': '未选择资源',
+  'Resource Detail': '资源详情',
+  'URI:': 'URI：',
+  'MIME Type:': 'MIME 类型：',
+  'Size:': '大小：',
+  '{{count}} bytes': '{{count}} 字节',
+  'Reference in chat': '在对话中引用',
+  'MCP resource server': 'MCP 资源服务器',
+
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} 个无效工具',
   invalid: '无效',
@@ -1324,8 +1340,54 @@ export default {
   // ============================================================================
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
+  'Toggle voice dictation input': '切换语音听写输入',
+  'Set the model for voice transcription': '设置语音转写模型',
+  'Select Fast Model': '选择快速模型',
+  'Select Voice Model': '选择语音模型',
+  'Voice Model': '语音模型',
+  'Selected voice model is unavailable.': '所选语音模型不可用。',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "语音模型 '{{model}}' 被配置了多次。请先移除重复的模型 ID，再将其选为语音转写模型。",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    '语音听写：{{status}}（模式：{{mode}}，{{modelText}}）。',
+  'model: {{voiceModel}}': '模型：{{voiceModel}}',
+  'no voice model selected': '未选择语音模型',
+  'Voice dictation disabled.': '语音听写已禁用。',
+  'Usage: /voice [hold|tap|off|status]': '用法：/voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    '未选择语音模型。请先运行 /model --voice 选择模型，再启用语音听写。',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    '语音听写已启用（点击模式）。在空输入框中点击 Space 开始，再点击一次或停顿后停止并提交，使用 {{voiceModel}}。',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    '语音听写已启用（按住模式）。在空输入框中按住 Space，使用 {{voiceModel}} 听写。',
+  'No models are configured.': '未配置模型。',
+  'Configured models: {{models}}.': '已配置模型：{{models}}。',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    '请在 settings.modelProviders 中配置唯一的模型 ID，或运行 /model --voice 选择可用模型。',
+  "Voice model '{{modelName}}' is not configured.":
+    "语音模型 '{{modelName}}' 未配置。",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "语音模型 '{{modelName}}' 不能用于转写。",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "语音模型 '{{modelName}}' 不能用于转写。请在 settings.modelProviders 中配置带 baseUrl 的 OpenAI 兼容模型。",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    '请在 settings.modelProviders 中配置带 baseUrl 的 OpenAI 兼容模型。',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    '麦克风访问被拒绝。请在系统设置 → 隐私与安全性 → 麦克风中允许当前终端访问，然后重新启动语音听写。',
+  'Voice dictation is not supported on {{platform}}.':
+    '语音听写不支持 {{platform}}。',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    '语音听写需要麦克风访问，但当前 WSL 会话不可用。请使用 WSLg/PulseAudio，或在带麦克风的宿主机上运行 Qwen Code。',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    '语音听写需要麦克风访问。macOS 会在你首次录音时弹出授权请求——请同意后重新开始。弹窗打开期间的首次录音可能为空。',
+  'Voice: recording': '语音：录音中',
+  'Voice: transcribing': '语音：转写中',
+  'listening…': '聆听中…',
+  'transcribing…': '转写中…',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1513,6 +1575,10 @@ export default {
   audio: '音频',
   video: '视频',
   'not set': '未设置',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "语音模型 '{{modelName}}' 不唯一。请先配置唯一的模型 ID，再使用 /model --voice。",
   none: '无',
   unknown: '未知',
   // ============================================================================

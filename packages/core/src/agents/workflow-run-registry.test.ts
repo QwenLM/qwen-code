@@ -191,6 +191,38 @@ describe('WorkflowRunRegistry', () => {
     expect(() => r.complete('wf_throw', null, 1)).not.toThrow();
   });
 
+  // P-notif: terminal-completion notification callback.
+  it('notification callback fires on complete and fail, not on cancel', () => {
+    const r = new WorkflowRunRegistry();
+    const cb = vi.fn();
+    r.setNotificationCallback(cb);
+
+    r.register(reg('wf_done'));
+    r.complete('wf_done', 'ok', 1_000);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb.mock.calls[0][0].status).toBe('completed');
+
+    r.register(reg('wf_bad'));
+    r.fail('wf_bad', 'boom', 2_000);
+    expect(cb).toHaveBeenCalledTimes(2);
+    expect(cb.mock.calls[1][0].status).toBe('failed');
+
+    // A user-initiated cancel is intentionally NOT notified.
+    r.register(reg('wf_cancelled'));
+    r.cancel('wf_cancelled', 3_000);
+    expect(cb).toHaveBeenCalledTimes(2);
+  });
+
+  it('errors thrown by the notification callback do not break the call site', () => {
+    const r = new WorkflowRunRegistry();
+    r.setNotificationCallback(() => {
+      throw new Error('notifier blew up');
+    });
+    r.register(reg('wf_n'));
+    expect(() => r.complete('wf_n', null, 1)).not.toThrow();
+    expect(r.get('wf_n')!.status).toBe('completed');
+  });
+
   // P4 Round 7 (wenshao): dialog-initiated cancel marks status='cancelled'
   // synchronously, then the abort propagates to the tool's catch arm which
   // calls setRecentLogs(runId, logs). The previous guard rejected this

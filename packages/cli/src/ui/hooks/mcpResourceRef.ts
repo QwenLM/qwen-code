@@ -39,3 +39,16 @@ export function matchMcpServerPrefix(
   if (serverName === null) return null;
   return { serverName, rest: input.slice(serverName.length + 1) };
 }
+
+/**
+ * Build the canonical `<serverName>:<uri>` reference for an MCP resource —
+ * the exact inverse of {@link matchMcpServerPrefix} (without the leading `@`,
+ * which is only the input trigger character). Use this everywhere a reference
+ * is rendered or completed (the `@server:uri` hint, the `@server:` autocomplete
+ * value) so the format has a single source of truth and can't drift away from
+ * the parser: `matchMcpServerPrefix(buildMcpResourceRef(s, u), [s])` round-trips
+ * back to `{ serverName: s, rest: u }`.
+ */
+export function buildMcpResourceRef(serverName: string, uri: string): string {
+  return `${serverName}:${uri}`;
+}

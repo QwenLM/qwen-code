@@ -60,7 +60,7 @@ Lift history (#4175 Mode B daemon roadmap):
   `maxSessions`, `eventRingSize`, `permissionResponseTimeoutMs`,
   persistence callbacks, etc.) plus the `DaemonStatusProvider`
   injection seam for daemon-host env / preflight cells (production
-  impl in `cli/src/serve/daemonStatusProvider.ts`) and the F1
+  impl in `cli/src/serve/daemon-status-provider.ts`) and the F1
   `BridgeFileSystem` injection seam for the ACP fs proxy.
 - `spawnChannel` (F1) — `defaultSpawnChannelFactory` + `killChild` +
   `SCRUBBED_CHILD_ENV_KEYS` denylist + `scrubChildEnv` pure env-policy
@@ -113,8 +113,8 @@ Both variants are stable across the F1 lift.
 
 ## Backward compatibility
 
-`packages/cli/src/serve/eventBus.ts` and
-`packages/cli/src/serve/inMemoryChannel.ts` remain as one-line
+`packages/cli/src/serve/event-bus.ts` and
+`packages/cli/src/serve/in-memory-channel.ts` remain as one-line
 re-export wrappers, so every existing relative import inside
 `serve/` and the one external import in `cli/src/commands/serve.ts`
 keeps resolving without churn.
@@ -124,8 +124,8 @@ After F1, `packages/cli/src/serve/httpAcpBridge.ts` shrinks to a
 symbol (`createHttpAcpBridge`, `defaultSpawnChannelFactory`,
 `BridgeClient`, all the typed errors, all the type aliases) from
 the lifted subpaths. Every relative `./httpAcpBridge.js` import in
-`server.ts` / `runQwenServe.ts` / `workspaceAgents.ts` /
-`workspaceMemory.ts` / `index.ts` / the bridge test suite keeps
+`server.ts` / `run-qwen-serve.ts` / `workspace-agents.ts` /
+`workspace-memory.ts` / `index.ts` / the bridge test suite keeps
 resolving without any call-site changes.
 
 ## See also

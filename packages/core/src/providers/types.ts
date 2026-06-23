@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AuthType, InputModalities } from '../core/contentGenerator.js';
+import type {
+  AuthType,
+  InputModalities,
+  Protocol,
+} from '../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from '../models/types.js';
 
 // Re-export for convenience
@@ -38,7 +42,7 @@ export interface ProviderConfig {
   description: string;
 
   /** Always fixed for current providers. */
-  protocol: AuthType;
+  protocol: Protocol;
 
   /**
    * - `string`            → fixed, skip UI step
@@ -48,7 +52,7 @@ export interface ProviderConfig {
   baseUrl?: string | BaseUrlOption[];
 
   /** Environment variable key, or a function to generate one. */
-  envKey: string | ((protocol: AuthType, baseUrl: string) => string);
+  envKey: string | ((protocol: Protocol, baseUrl: string) => string);
 
   /**
    * - `ModelSpec[]`  → model definitions with optional per-model metadata
@@ -71,7 +75,7 @@ export interface ProviderConfig {
    * Protocol options for manual selection (custom provider only).
    * If provided with >1 entry, shows a protocol selection step.
    */
-  protocolOptions?: AuthType[];
+  protocolOptions?: Protocol[];
 
   /** Show advanced config step (thinking, modalities). */
   showAdvancedConfig?: boolean;
@@ -81,6 +85,14 @@ export interface ProviderConfig {
 
   /** API key input placeholder. */
   apiKeyPlaceholder?: string;
+
+  /**
+   * Custom HTTP headers to send with every request to this provider.
+   * Used for attribution headers (e.g. `HTTP-Referer`, `X-Title`) that
+   * gateways like OpenRouter and Requesty expect. Merged into each model's
+   * `generationConfig.customHeaders` at install time.
+   */
+  customHeaders?: Record<string, string>;
 
   /** Documentation URL for the provider. */
   documentationUrl?: string | ((baseUrl: string) => string);
@@ -119,7 +131,7 @@ export interface ProviderConfig {
 
 export interface ProviderSetupInputs {
   /** Override protocol (only for custom provider). Defaults to config.protocol. */
-  protocol?: AuthType;
+  protocol?: Protocol;
   baseUrl: string;
   apiKey: string;
   modelIds: string[];

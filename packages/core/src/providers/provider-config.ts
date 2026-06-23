@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { AuthType } from '../core/contentGenerator.js';
+import { Protocol } from '../core/contentGenerator.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -119,6 +119,26 @@ function specToModelConfig(
   };
 }
 
+function applyProviderCustomHeaders(
+  models: ProviderModelConfig[],
+  config: ProviderConfig,
+): ProviderModelConfig[] {
+  if (!config.customHeaders) return models;
+  return models.map((model) => {
+    const existing = model.generationConfig ?? {};
+    return {
+      ...model,
+      generationConfig: {
+        ...existing,
+        customHeaders: {
+          ...(config.customHeaders as Record<string, string>),
+          ...(existing.customHeaders as Record<string, string> | undefined),
+        },
+      },
+    };
+  });
+}
+
 function buildModelConfigs(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
@@ -126,17 +146,17 @@ function buildModelConfigs(
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
 
+  let models: ProviderModelConfig[];
+
   // Fixed ModelSpec[] (not editable) — use specs directly
   if (config.models && !config.modelsEditable) {
-    return config.models.map((spec) =>
+    models = config.models.map((spec) =>
       specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
     );
-  }
-
-  // Editable ModelSpec[] — look up per-model metadata for known IDs
-  if (config.models && config.modelsEditable) {
+  } else if (config.models && config.modelsEditable) {
+    // Editable ModelSpec[] — look up per-model metadata for known IDs
     const specMap = new Map(config.models.map((s) => [s.id, s]));
-    return inputs.modelIds.map((id) => {
+    models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id);
       if (spec) {
         return specToModelConfig(spec, prefix, inputs.baseUrl, envKey);
@@ -150,23 +170,23 @@ function buildModelConfigs(
         ...(genConfig ? { generationConfig: genConfig } : {}),
       };
     });
+  } else {
+    // No predefined models (custom provider) — use advancedConfig
+    const advCfg = inputs.advancedConfig;
+    const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
+    models = inputs.modelIds.map((id) => {
+      const genConfig = buildAdvancedGenerationConfig(advCfg);
+      return {
+        id,
+        name: displayName(id),
+        baseUrl: inputs.baseUrl,
+        envKey,
+        ...(genConfig ? { generationConfig: genConfig } : {}),
+      };
+    });
   }
 
-  // No predefined models (custom provider) — use advancedConfig
-  const advCfg = inputs.advancedConfig;
-
-  const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
-
-  return inputs.modelIds.map((id) => {
-    const genConfig = buildAdvancedGenerationConfig(advCfg);
-    return {
-      id,
-      name: displayName(id),
-      baseUrl: inputs.baseUrl,
-      envKey,
-      ...(genConfig ? { generationConfig: genConfig } : {}),
-    };
-  });
+  return applyProviderCustomHeaders(models, config);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,15 +297,15 @@ export function computeModelListVersion(models: ProviderModelConfig[]): string {
  * (useProviderSetupFlow) and the VS Code flow (AuthMessageHandler) agree on
  * the same value — if Anthropic ships a new endpoint we only update it here.
  */
-const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
-  [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
-  [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
-  [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
+const DEFAULT_BASE_URLS: Partial<Record<Protocol, string>> = {
+  [Protocol.OPENAI]: 'https://api.openai.com/v1',
+  [Protocol.ANTHROPIC]: 'https://api.anthropic.com/v1',
+  [Protocol.GEMINI]: 'https://generativelanguage.googleapis.com',
 };
 
 /** Resolve the placeholder/default base URL for a chosen protocol. */
 export function getDefaultBaseUrlForProtocol(
-  protocol: AuthType | undefined,
+  protocol: Protocol | undefined,
 ): string {
   if (protocol === undefined) return '';
   return DEFAULT_BASE_URLS[protocol] ?? '';

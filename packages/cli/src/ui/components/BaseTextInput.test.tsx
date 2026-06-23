@@ -9,12 +9,14 @@ import { render } from 'ink-testing-library';
 import type { DOMElement } from 'ink';
 import {
   BaseTextInput,
+  defaultRenderLine,
   getAbsolutePosition,
   getPhysicalCursorPosition,
 } from './BaseTextInput.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 
 const mockSetCursorPosition = vi.hoisted(() => vi.fn());
 const mockUseBoxMetrics = vi.hoisted(() =>
@@ -194,5 +196,45 @@ describe('getAbsolutePosition', () => {
     const child = createElement(11, 13, parent);
 
     expect(getAbsolutePosition(child)).toEqual({ top: 18, left: 23 });
+  });
+});
+
+describe('defaultRenderLine', () => {
+  it('renders the software cursor on the current character', () => {
+    const { lastFrame } = render(
+      <>
+        {defaultRenderLine({
+          lineText: 'hello',
+          isOnCursorLine: true,
+          cursorCol: 2,
+          showCursor: true,
+          visualLineIndex: 0,
+          absoluteVisualIndex: 0,
+          buffer: createBuffer(),
+          scrollVisualRow: 0,
+        })}
+      </>,
+    );
+
+    expect(lastFrame()).toContain(`he${renderSoftwareCursor('l')}lo`);
+  });
+
+  it('renders the software cursor as a trailing space', () => {
+    const { lastFrame } = render(
+      <>
+        {defaultRenderLine({
+          lineText: 'hello',
+          isOnCursorLine: true,
+          cursorCol: 5,
+          showCursor: true,
+          visualLineIndex: 0,
+          absoluteVisualIndex: 0,
+          buffer: createBuffer(),
+          scrollVisualRow: 0,
+        })}
+      </>,
+    );
+
+    expect(lastFrame()).toContain(`hello${renderSoftwareCursor(' ')}`);
   });
 });

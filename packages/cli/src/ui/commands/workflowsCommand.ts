@@ -4,11 +4,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { WorkflowTask } from '@qwen-code/qwen-code-core';
+import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
+import { listWorkflowSnapshots } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
+
+/**
+ * P7b: adapt a persisted snapshot to the `WorkflowTask` shape the row /
+ * detail formatters expect. The dialog-only fields (`abortController`,
+ * `outputFile`, etc.) are filled with inert values — a snapshot is always
+ * terminal, so the controls that read those fields are never reached.
+ */
+function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
+  return {
+    id: s.runId,
+    kind: 'workflow',
+    runId: s.runId,
+    description: s.meta?.name ?? s.runId,
+    meta: s.meta,
+    status: s.status,
+    currentPhase: null,
+    phases: s.phases ?? [],
+    agentsDispatched: s.agentsDispatched ?? 0,
+    agentsCompleted: s.agentsCompleted ?? 0,
+    recentLogs: s.recentLogs ?? [],
+    tokensSpent: s.tokensSpent ?? 0,
+    tokenBudgetTotal: s.tokenBudgetTotal ?? null,
+    perPhaseTokens: new Map(s.perPhaseTokens ?? []),
+    script: s.script ?? '',
+    scriptPath: s.scriptPath,
+    result: s.result,
+    error: s.error,
+    startTime: s.startTime,
+    endTime: s.endTime,
+    outputFile: '',
+    outputOffset: 0,
+    notified: true,
+    abortController: new AbortController(),
+  } as WorkflowTask;
+}
 
 /**
  * Format one workflow run as a one-line summary used by both the
@@ -144,7 +180,16 @@ export const workflowsCommand: SlashCommand = {
     // the user sees a clear error instead of an empty listing.
     const trimmedArgs = (args ?? '').trim();
     if (trimmedArgs.length > 0) {
-      const target = registry.get(trimmedArgs);
+      let target = registry.get(trimmedArgs);
+      if (!target) {
+        // Fall back to a persisted snapshot — the run may predate this CLI
+        // process (the in-memory registry dies with the process, the
+        // snapshot on disk does not).
+        const snapshot = (await listWorkflowSnapshots(config)).find(
+          (s) => s.runId === trimmedArgs,
+        );
+        if (snapshot) target = snapshotToTask(snapshot);
+      }
       if (!target) {
         return {
           type: 'message' as const,
@@ -159,7 +204,16 @@ export const workflowsCommand: SlashCommand = {
       };
     }
 
-    if (allEntries.length === 0) {
+    // Merge persisted snapshots (runs from earlier CLI processes) into the
+    // listing. In-memory registry entries win on a runId collision — they
+    // carry live status, while a snapshot is a frozen terminal projection.
+    const snapshots = await listWorkflowSnapshots(config);
+    const liveRunIds = new Set(allEntries.map((e) => e.runId));
+    const snapshotTasks = snapshots
+      .filter((s) => !liveRunIds.has(s.runId))
+      .map(snapshotToTask);
+
+    if (allEntries.length === 0 && snapshotTasks.length === 0) {
       return {
         type: 'message' as const,
         messageType: 'info' as const,
@@ -170,13 +224,15 @@ export const workflowsCommand: SlashCommand = {
     const now = Date.now();
     // Order: running first (oldest startTime first inside the bucket so
     // long-runners stay visible), then terminal by endTime DESC. Mirrors
-    // the dialog's two-bucket sort.
+    // the dialog's two-bucket sort. Snapshots are always terminal, so they
+    // only ever join the second bucket.
     const running = allEntries
       .filter((e) => e.status === 'running')
       .sort((a, b) => a.startTime - b.startTime);
-    const terminal = allEntries
-      .filter((e) => e.status !== 'running')
-      .sort((a, b) => (b.endTime ?? 0) - (a.endTime ?? 0));
+    const terminal = [
+      ...allEntries.filter((e) => e.status !== 'running'),
+      ...snapshotTasks,
+    ].sort((a, b) => (b.endTime ?? 0) - (a.endTime ?? 0));
 
     const lines: string[] = [];
     if (context.executionMode === 'interactive') {
@@ -188,7 +244,7 @@ export const workflowsCommand: SlashCommand = {
       );
     }
     lines.push(
-      `Workflow runs (${allEntries.length} total · ${running.length} running)`,
+      `Workflow runs (${running.length + terminal.length} total · ${running.length} running)`,
       '',
     );
     if (running.length > 0) {

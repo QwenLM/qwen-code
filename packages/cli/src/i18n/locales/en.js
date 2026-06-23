@@ -185,6 +185,7 @@ export default {
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
+  'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -1317,6 +1318,7 @@ export default {
   'Press Enter to confirm, Esc to cancel':
     'Press Enter to confirm, Esc to cancel',
   'View tools': 'View tools',
+  'View resources': 'View resources',
   Reconnect: 'Reconnect',
   Enable: 'Enable',
   Disable: 'Disable',
@@ -1331,6 +1333,8 @@ export default {
   'Error:': 'Error:',
   tool: 'tool',
   tools: 'tools',
+  resource: 'resource',
+  resources: 'resources',
   connected: 'connected',
   connecting: 'connecting',
   disconnected: 'disconnected',
@@ -1370,6 +1374,19 @@ export default {
   Parameters: 'Parameters',
   'No tool selected': 'No tool selected',
   Server: 'Server',
+
+  // MCP Resource List/Detail
+  'No resources available for this server.':
+    'No resources available for this server.',
+  'Resources for {{serverName}}': 'Resources for {{serverName}}',
+  'No resource selected': 'No resource selected',
+  'Resource Detail': 'Resource Detail',
+  'URI:': 'URI:',
+  'MIME Type:': 'MIME Type:',
+  'Size:': 'Size:',
+  '{{count}} bytes': '{{count}} bytes',
+  'Reference in chat': 'Reference in chat',
+  'MCP resource server': 'MCP resource server',
 
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} invalid tools',
@@ -1411,8 +1428,56 @@ export default {
   // ============================================================================
   'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).':
     'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
+  'Toggle voice dictation input': 'Toggle voice dictation input',
+  'Set the model for voice transcription':
+    'Set the model for voice transcription',
+  'Select Fast Model': 'Select Fast Model',
+  'Select Voice Model': 'Select Voice Model',
+  'Voice Model': 'Voice Model',
+  'Selected voice model is unavailable.':
+    'Selected voice model is unavailable.',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).',
+  'model: {{voiceModel}}': 'model: {{voiceModel}}',
+  'no voice model selected': 'no voice model selected',
+  'Voice dictation disabled.': 'Voice dictation disabled.',
+  'Usage: /voice [hold|tap|off|status]': 'Usage: /voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    'No voice model selected. Run /model --voice to choose one before enabling voice dictation.',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.',
+  'No models are configured.': 'No models are configured.',
+  'Configured models: {{models}}.': 'Configured models: {{models}}.',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.',
+  "Voice model '{{modelName}}' is not configured.":
+    "Voice model '{{modelName}}' is not configured.",
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    "Voice model '{{modelName}}' cannot be used for transcription.",
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.",
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+  'Voice dictation is not supported on {{platform}}.':
+    'Voice dictation is not supported on {{platform}}.',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
+  'Voice: recording': 'Voice: recording',
+  'Voice: transcribing': 'Voice: transcribing',
+  'listening…': 'listening…',
+  'transcribing…': 'transcribing…',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
@@ -1614,6 +1679,10 @@ export default {
   audio: 'audio',
   video: 'video',
   'not set': 'not set',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
   none: 'none',
   unknown: 'unknown',
   // ============================================================================

@@ -23,6 +23,7 @@
 
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import {
@@ -65,8 +66,10 @@ export function resolveMaxConcurrentBackgroundAgents(
     return DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS;
   }
 
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 1) {
+  // Parse through the shared helper so only plain decimal integers are
+  // accepted; Number() alone would let "0x10"/"1e2"/"1.0" slip through.
+  const parsed = parsePositiveIntegerEnv(raw, 0);
+  if (parsed < 1) {
     debugLogger.warn(
       `Invalid ${BACKGROUND_AGENT_CONCURRENCY_ENV}=${JSON.stringify(raw)}, ` +
         `using default (${DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS})`,
@@ -298,6 +301,11 @@ export type BackgroundTaskEntry = AgentTask;
  */
 export type AgentTaskRegistration = TaskRegistration<AgentTask>;
 
+export interface BackgroundTaskRegisterOptions {
+  suppressRegisterCallback?: boolean;
+  preserveNotificationState?: boolean;
+}
+
 export interface NotificationMeta {
   agentId: string;
   status: TaskStatus;
@@ -396,7 +404,10 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  register(registration: AgentTaskRegistration): AgentTask {
+  register(
+    registration: AgentTaskRegistration,
+    options: BackgroundTaskRegisterOptions = {},
+  ): AgentTask {
     if (registration.isBackgrounded && registration.status === 'running') {
       const existing = this.agents.get(registration.agentId);
       const isReplacingRunning =
@@ -413,8 +424,12 @@ export class BackgroundTaskRegistry {
     const entry = registration as AgentTask;
     entry.id = registration.agentId;
     entry.kind = 'agent';
-    entry.outputOffset = 0;
-    entry.notified = false;
+    entry.outputOffset = options.preserveNotificationState
+      ? ((registration as AgentTask).outputOffset ?? 0)
+      : 0;
+    entry.notified = options.preserveNotificationState
+      ? ((registration as AgentTask).notified ?? false)
+      : false;
     entry.pendingMessages = registration.pendingMessages ?? [];
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
@@ -425,7 +440,11 @@ export class BackgroundTaskRegistry {
     // register callback would emit a `task_started` SDK event without a
     // matching completion event, breaking the lifecycle contract for SDK
     // consumers.
-    if (entry.isBackgrounded && this.registerCallback) {
+    if (
+      entry.isBackgrounded &&
+      this.registerCallback &&
+      !options.suppressRegisterCallback
+    ) {
       try {
         this.registerCallback(entry);
       } catch (error) {
