@@ -60,18 +60,15 @@ If the same author has **3+ open PRs in 7 days** with similar patterns:
 
 ### Stage 0b: Core Module Protection (MANDATORY — run after Stage 0, before Stage 1)
 
-**We do not accept community PRs that refactor core infrastructure. Period.**
+**The gate must honestly assess: do I truly understand this PR's full impact?**
 
-Check the PR's changed files. If the PR is a `refactor:` (or large structural change) touching any of these paths, **reject immediately** — do not proceed to Stage 1:
+Before proceeding, check the PR's changed files. For any PR touching core infrastructure (`packages/core/src/**`, auth, providers, models, config, tools, services, or cross-package refactors):
 
-- `packages/core/src/**`
-- `packages/cli/src/config/auth.ts`, `packages/cli/src/ui/auth/**`
-- `packages/cli/src/serve/**`
-- Cross-package changes spanning both `packages/core` and `packages/cli`
+1. **Can I name every downstream consumer that this change affects?** If not, you do not understand the blast radius — escalate to maintainer immediately.
+2. **Is this a `refactor:` or large structural change from a community contributor?** → Reject. Core refactors must be maintainer-initiated. Reply: "Core infrastructure refactors must be maintainer-initiated. Please open an issue to discuss the design first."
+3. **Am I 100% confident this change is safe?** If there is any doubt — "the direction looks correct" is NOT confidence — escalate to maintainer. Do not approve.
 
-Reply: "Core infrastructure refactors must be maintainer-initiated. Please open an issue to discuss the design first."
-
-**Why this is non-negotiable:** "The direction looks correct" is not enough. A community contributor lacks the architectural context to design core refactors — the blast radius, the downstream dependencies, the invariants that must hold. A bad core refactor costs months of breakage. A wrongly rejected one costs a polite comment. The asymmetry is enormous. **When in doubt, reject. Better to wrongly reject a valid PR than to wrongly accept a broken one.**
+**The meta-principle:** "The direction looks correct" is the most dangerous sentence in triage. It means the gate understood the intent but not the impact. A bad core refactor costs months of breakage. A wrongly rejected one costs a polite comment. **When in doubt, escalate. Better to wrongly reject a valid PR than to wrongly accept a broken one.**
 
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
