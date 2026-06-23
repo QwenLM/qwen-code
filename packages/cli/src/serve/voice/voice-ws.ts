@@ -12,6 +12,7 @@ import {
   type DaemonVoiceContext,
 } from './resolve-voice-config.js';
 import {
+  assertVoiceBaseUrlNetworkAllowed,
   resolveVoiceStreamConfig,
   transcribeVoiceAudio,
 } from '../../ui/voice/voice-transcriber.js';
@@ -28,6 +29,7 @@ const debugLogger = createDebugLogger('VOICE_WS');
 // Qwen-ASR caps each audio file at 10 MB / ~5 minutes; guard the batch buffer
 // before WAV-encoding so an overlong stream fails with a clear message.
 const MAX_BATCH_AUDIO_BYTES = 10 * 1024 * 1024;
+const MAX_QUEUED_AUDIO_BYTES = MAX_BATCH_AUDIO_BYTES * 2;
 // Hard cap on a single voice connection so a client that opens the socket and
 // never sends `stop` can't pin an upstream ASR session indefinitely.
 const MAX_CONNECTION_MS = 6 * 60_000;
@@ -69,7 +71,7 @@ export interface VoiceWsDeps {
   transcribe?: (ctx: DaemonVoiceContext, pcm: Uint8Array) => Promise<string>;
 }
 
-function defaultOpenStream(
+async function defaultOpenStream(
   ctx: DaemonVoiceContext,
   callbacks: VoiceStreamCallbacks,
 ): Promise<VoiceStreamSession> {
@@ -78,6 +80,7 @@ function defaultOpenStream(
     settings: ctx.settings,
     voiceModel: ctx.voiceModel,
   });
+  await assertVoiceBaseUrlNetworkAllowed(cfg);
   return openVoiceStreamWithRetry(() =>
     cfg.transport === 'qwen-asr-realtime'
       ? openQwenAsrRealtimeStream(cfg, callbacks)
@@ -183,6 +186,8 @@ export function createVoiceWsConnectionHandler(
     let sessionPromise: Promise<VoiceStreamSession> | undefined;
     const pcmChunks: Uint8Array[] = [];
     let bufferedBytes = 0;
+    let queuedBytes = 0;
+    let pendingOperations = 0;
     // Serialize message handling so async start/push/finalize never interleave.
     let chain: Promise<void> = Promise.resolve();
 
@@ -195,6 +200,10 @@ export function createVoiceWsConnectionHandler(
     // `ensureStarted`) that flips it to 'closed' isn't flow-narrowed away by
     // an earlier guard.
     const isClosed = (): boolean => state === 'closed';
+
+    const releaseSlotWhenIdle = (): void => {
+      if (state === 'closed' && pendingOperations === 0) releaseSlot();
+    };
 
     const sendJson = (obj: unknown): void => {
       if (ws.readyState === ws.OPEN) {
@@ -220,6 +229,7 @@ export function createVoiceWsConnectionHandler(
       sessionPromise = undefined;
       pcmChunks.length = 0;
       bufferedBytes = 0;
+      queuedBytes = 0;
     }
 
     function fail(message: string): void {
@@ -246,8 +256,18 @@ export function createVoiceWsConnectionHandler(
           onInterim: (text) => sendJson({ type: 'interim', text }),
           onError: (error) => fail(errMessage(error)),
         };
-        sessionPromise = openStream(ctx, callbacks);
-        session = await sessionPromise;
+        const opening = openStream(ctx, callbacks);
+        sessionPromise = opening;
+        const opened = await opening;
+        if (state === 'closed') {
+          try {
+            opened.abort();
+          } catch {
+            // best effort
+          }
+          return;
+        }
+        session = opened;
       }
       if (state === 'idle') state = 'active';
     }
@@ -260,8 +280,13 @@ export function createVoiceWsConnectionHandler(
       if (ctx!.streaming) {
         const active =
           session ?? (sessionPromise ? await sessionPromise : undefined);
-        session = undefined;
-        if (active) transcript = await active.finish();
+        if (active) {
+          try {
+            transcript = await active.finish();
+          } finally {
+            session = undefined;
+          }
+        }
       } else if (pcmChunks.length > 0) {
         transcript = await transcribe(ctx!, Buffer.concat(pcmChunks));
       }
@@ -321,20 +346,55 @@ export function createVoiceWsConnectionHandler(
 
     ws.on('message', (data: RawData, isBinary: boolean) => {
       const buf = toBuffer(data);
+      if (!isBinary) {
+        const control = parseControl(buf.toString('utf8'));
+        if (control?.type === 'abort') {
+          cleanup();
+          try {
+            ws.close(1000, 'aborted');
+          } catch {
+            // ignore
+          }
+          releaseSlotWhenIdle();
+          return;
+        }
+      }
+      const queuedSize = isBinary ? buf.byteLength : 0;
+      if (queuedSize > 0) {
+        queuedBytes += queuedSize;
+        if (queuedBytes > MAX_QUEUED_AUDIO_BYTES) {
+          fail('Queued voice audio exceeded the memory limit.');
+          releaseSlotWhenIdle();
+          return;
+        }
+      }
       chain = chain
-        .then(() => handleMessage(buf, isBinary))
+        .then(async () => {
+          pendingOperations++;
+          try {
+            await handleMessage(buf, isBinary);
+          } finally {
+            if (queuedSize > 0) {
+              queuedBytes = Math.max(0, queuedBytes - queuedSize);
+            }
+            pendingOperations--;
+            releaseSlotWhenIdle();
+          }
+        })
         .catch((error: unknown) => {
           debugLogger.debug(`[voice-ws] ${errMessage(error)}`);
           fail(errMessage(error));
+          releaseSlotWhenIdle();
         });
     });
     ws.on('close', () => {
       if (state !== 'closed') cleanup();
-      releaseSlot();
+      releaseSlotWhenIdle();
     });
-    ws.on('error', () => {
+    ws.on('error', (error: Error) => {
+      debugLogger.debug(`[voice-ws] socket error: ${error.message}`);
       if (state !== 'closed') cleanup();
-      releaseSlot();
+      releaseSlotWhenIdle();
     });
   };
 }

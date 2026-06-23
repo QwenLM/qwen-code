@@ -6,7 +6,7 @@
 
 // @vitest-environment node
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createVoiceWsConnectionHandler } from './voice-ws.js';
 import type { DaemonVoiceContext } from './resolve-voice-config.js';
 import type { VoiceStreamSession } from '../../ui/voice/voice-stream-session.js';
@@ -42,6 +42,9 @@ class FakeWs {
   binary(bytes: number[]): void {
     this.emit('message', Buffer.from(bytes), true);
   }
+  binaryBuffer(buffer: Buffer): void {
+    this.emit('message', buffer, true);
+  }
   frames(): Array<Record<string, unknown>> {
     return this.sent
       .filter((s): s is string => s !== 'binary')
@@ -50,6 +53,14 @@ class FakeWs {
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 function streamingCtx(): DaemonVoiceContext {
   return {
@@ -70,6 +81,10 @@ function batchCtx(): DaemonVoiceContext {
 }
 
 describe('createVoiceWsConnectionHandler', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('streams audio to the upstream session and returns the final transcript', async () => {
     const pushed: Uint8Array[] = [];
     let onInterim: ((t: string) => void) | undefined;
@@ -197,6 +212,140 @@ describe('createVoiceWsConnectionHandler', () => {
     await tick();
     expect(session.abort).toHaveBeenCalledOnce();
     expect(ws.closeCode).toBe(1000);
+  });
+
+  it('lets abort preempt a pending streaming start', async () => {
+    const sessionReady = deferred<VoiceStreamSession>();
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => sessionReady.promise,
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await tick();
+    ws.text({ type: 'abort' });
+    await tick();
+
+    expect(ws.closeCode).toBe(1000);
+  });
+
+  it('aborts a streaming session that resolves after the socket closed', async () => {
+    const sessionReady = deferred<VoiceStreamSession>();
+    const session: VoiceStreamSession = {
+      pushAudio: vi.fn(),
+      finish: vi.fn(async () => ''),
+      abort: vi.fn(),
+    };
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => sessionReady.promise,
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await tick();
+    ws.close();
+    sessionReady.resolve(session);
+    await tick();
+
+    expect(session.abort).toHaveBeenCalledOnce();
+  });
+
+  it('aborts the streaming session if finalization times out', async () => {
+    vi.useFakeTimers();
+    const session: VoiceStreamSession = {
+      pushAudio: vi.fn(),
+      finish: vi.fn(() => new Promise<string>(() => {})),
+      abort: vi.fn(),
+    };
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => session,
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await vi.runAllTicks();
+    ws.text({ type: 'stop' });
+    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(ws.frames().at(-1)).toMatchObject({
+      type: 'error',
+      message: 'Voice session exceeded the time limit.',
+    });
+    expect(ws.closeCode).toBe(1011);
+  });
+
+  it('fails oversized batch audio before buffering it', async () => {
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => batchCtx(),
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await tick();
+    ws.binaryBuffer(Buffer.alloc(10 * 1024 * 1024 + 1));
+    await tick();
+
+    expect(ws.frames().at(-1)).toMatchObject({
+      type: 'error',
+      message: 'Recording is too long for transcription (max ~5 minutes).',
+    });
+    expect(ws.closeCode).toBe(1011);
+  });
+
+  it('rejects queued audio while streaming start is pending', async () => {
+    const sessionReady = deferred<VoiceStreamSession>();
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => sessionReady.promise,
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await tick();
+    ws.binaryBuffer(Buffer.alloc(20 * 1024 * 1024 + 1));
+    await tick();
+
+    expect(ws.frames().at(-1)).toMatchObject({
+      type: 'error',
+      message: 'Queued voice audio exceeded the memory limit.',
+    });
+    expect(ws.closeCode).toBe(1011);
+  });
+
+  it('fails and cleans up when the hard timer fires', async () => {
+    vi.useFakeTimers();
+    const session: VoiceStreamSession = {
+      pushAudio: vi.fn(),
+      finish: vi.fn(async () => ''),
+      abort: vi.fn(),
+    };
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => session,
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(ws.frames().at(-1)).toMatchObject({
+      type: 'error',
+      message: 'Voice session exceeded the time limit.',
+    });
+    expect(ws.closeCode).toBe(1011);
   });
 
   it('rejects connections past the concurrency cap and frees slots on close', async () => {

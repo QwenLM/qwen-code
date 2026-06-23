@@ -2999,12 +2999,15 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') return;
+      if (streamingState !== 'idle') {
+        enqueuePrompt(`/model --fast ${modelId}`);
+        return;
+      }
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [sendPrompt, streamingState, reportError],
+    [enqueuePrompt, sendPrompt, streamingState, reportError],
   );
 
   // Persist via the prompt channel (like `/model --fast`): the daemon's command
@@ -3013,12 +3016,15 @@ export function App({
   // the path that actually works there. The daemon's /voice/stream reads it back.
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') return;
+      if (streamingState !== 'idle') {
+        enqueuePrompt(`/model --voice ${modelId}`);
+        return;
+      }
       sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
         reportError(error, t('model.setVoice'));
       });
     },
-    [sendPrompt, streamingState, reportError, t],
+    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
   );
 
   const commands = useMemo(() => {

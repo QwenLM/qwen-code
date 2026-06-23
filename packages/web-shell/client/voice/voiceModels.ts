@@ -15,7 +15,7 @@ export interface VoiceModelOption {
 }
 
 /**
- * Mirror of core's `resolveVoiceTransport` id patterns (voice-model.ts): true
+ * Mirror of the CLI's `resolveVoiceTransport` id patterns (voice-model.ts): true
  * for ids the daemon has an ASR transport for. Kept in sync by hand because the
  * Web Shell can't import the CLI's voice modules.
  */

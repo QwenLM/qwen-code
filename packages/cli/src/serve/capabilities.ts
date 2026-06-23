@@ -259,6 +259,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
+  voiceWsAvailable?: boolean;
 }
 
 /**
@@ -320,6 +321,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  ['voice_transcribe', (toggles) => toggles.voiceWsAvailable !== false],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

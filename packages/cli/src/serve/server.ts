@@ -1898,6 +1898,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
+      voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 

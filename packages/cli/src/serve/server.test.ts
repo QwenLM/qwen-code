@@ -1488,6 +1488,15 @@ describe('createServeApp', () => {
       );
     });
 
+    it('advertises `voice_transcribe` only when the voice WebSocket route is active', () => {
+      expect(
+        getAdvertisedServeFeatures(undefined, { voiceWsAvailable: true }),
+      ).toContain('voice_transcribe');
+      expect(
+        getAdvertisedServeFeatures(undefined, { voiceWsAvailable: false }),
+      ).not.toContain('voice_transcribe');
+    });
+
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
       // Iterate the Map so any future conditional tag added here whose
       // predicate isn't honored by `getAdvertisedServeFeatures` fails
@@ -1621,6 +1630,22 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'voice_transcribe') {
+          expect(predicate({ voiceWsAvailable: true })).toBe(true);
+          expect(predicate({ voiceWsAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(true);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              voiceWsAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              voiceWsAvailable: false,
+            }),
+          ).not.toContain(feature);
           continue;
         }
         // Future conditional tag. Authors must add a branch above with

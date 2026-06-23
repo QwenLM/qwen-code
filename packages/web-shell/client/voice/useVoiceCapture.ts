@@ -118,6 +118,7 @@ export function useVoiceCapture(
 
   const resourcesRef = useRef<CaptureResources>({});
   const mountedRef = useRef(true);
+  const captureGenerationRef = useRef(0);
   // Live status for async WS/worklet callbacks, which would otherwise read a
   // stale closure copy of `status`.
   const statusRef = useRef<VoiceCaptureStatus>('idle');
@@ -154,6 +155,7 @@ export function useVoiceCapture(
   }, []);
 
   const cleanup = useCallback(() => {
+    captureGenerationRef.current++;
     teardownAudio();
     const res = resourcesRef.current;
     if (res.ws) {
@@ -199,6 +201,9 @@ export function useVoiceCapture(
     setErrorMessage(undefined);
     setInterimText('');
     applyStatus('connecting');
+    const generation = ++captureGenerationRef.current;
+    const isStale = () =>
+      !mountedRef.current || captureGenerationRef.current !== generation;
 
     void (async () => {
       try {
@@ -221,12 +226,21 @@ export function useVoiceCapture(
         } catch (err) {
           throw new Error(describeMicError(err));
         }
+        if (isStale()) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         resourcesRef.current.stream = stream;
 
         const context = new AudioContext({ sampleRate: SAMPLE_RATE });
         resourcesRef.current.context = context;
         // Resume in case the browser created it suspended (pre-gesture).
         if (context.state === 'suspended') await context.resume();
+        if (isStale()) {
+          stream.getTracks().forEach((track) => track.stop());
+          void context.close().catch(() => {});
+          return;
+        }
 
         const source = context.createMediaStreamSource(stream);
         const processor = context.createScriptProcessor(FRAME_SIZE, 1, 1);
@@ -251,6 +265,14 @@ export function useVoiceCapture(
         };
 
         ws.onopen = () => {
+          if (isStale()) {
+            try {
+              ws.close();
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
           ws.send(JSON.stringify({ type: 'start' }));
           source.connect(processor);
           processor.connect(sink);
@@ -259,7 +281,7 @@ export function useVoiceCapture(
         };
 
         ws.onmessage = (event: MessageEvent) => {
-          let msg: { type?: string; text?: string };
+          let msg: { type?: string; text?: string; message?: string };
           try {
             msg = JSON.parse(String(event.data));
           } catch {
@@ -270,7 +292,7 @@ export function useVoiceCapture(
           } else if (msg.type === 'final') {
             finishWith(msg.text ?? '');
           } else if (msg.type === 'error') {
-            fail(msg.text ?? 'Voice transcription failed.');
+            fail(msg.message ?? msg.text ?? 'Voice transcription failed.');
           }
         };
 
@@ -283,7 +305,8 @@ export function useVoiceCapture(
           if (
             mountedRef.current &&
             (statusRef.current === 'recording' ||
-              statusRef.current === 'connecting')
+              statusRef.current === 'connecting' ||
+              statusRef.current === 'transcribing')
           ) {
             fail('Voice connection closed unexpectedly.');
           }
