@@ -771,8 +771,13 @@ jobs:
 
       - name: 'Install dependencies'
         if: "steps.prepare.outputs.decision == 'run'"
+        # --ignore-scripts: the pull request controls lifecycle scripts
+        # (postinstall/prepare), so do not execute them in this job. Apply
+        # patch-package explicitly from the trusted local binary so the ink
+        # patch still lands.
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          npm ci --ignore-scripts --prefer-offline --no-audit --progress=false
+          ./node_modules/.bin/patch-package
 
       - name: 'Resolve conflicts'
         if: "steps.prepare.outputs.decision == 'run'"
@@ -805,10 +810,6 @@ jobs:
                 "run_shell_command(git status)",
                 "run_shell_command(ls)",
                 "run_shell_command(mkdir)",
-                "run_shell_command(npm run build)",
-                "run_shell_command(npm run lint)",
-                "run_shell_command(npm run typecheck)",
-                "run_shell_command(npx vitest)",
                 "run_shell_command(pwd)"
               ],
               "sandbox": true
@@ -825,9 +826,8 @@ jobs:
             1. Inspect the current branch and the existing diff against `origin/${{ steps.prepare.outputs.base_ref }}`.
             2. Run `git merge origin/${{ steps.prepare.outputs.base_ref }}`.
             3. Resolve every conflict by understanding both sides. Do not blindly take ours or theirs.
-            4. Keep changes limited to the conflict resolution and any minimal follow-up needed to keep the pull request coherent after the merge.
-            5. Run the narrowest relevant tests for touched code when possible, then run `npm run build`, `npm run typecheck`, and `npm run lint`.
-            6. Re-read the final diff as a reviewer.
+            4. Only modify files that actually conflicted. Do not edit unrelated files: a separate CI step checks the change scope and rejects out-of-scope edits.
+            5. Re-read the final diff as a reviewer. A separate CI step runs build, typecheck, lint, and tests without credentials, so you do not need to run them here.
 
             ## Finish with exactly one outcome
 
@@ -838,11 +838,19 @@ jobs:
       - name: 'Refresh dependencies'
         if: "steps.prepare.outputs.decision == 'run' && steps.resolve_conflicts.outcome == 'success'"
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          npm ci --ignore-scripts --prefer-offline --no-audit --progress=false
+          ./node_modules/.bin/patch-package
 
       - name: 'Verification gate'
         id: 'verify'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        # Refs are passed as env vars and only referenced as "$BASE_REF" /
+        # "$HEAD_REF" inside the script. They must never be inlined as
+        # ${{ ... }}: branch names legally contain `$(...)`/backticks, so textual
+        # interpolation into run: would be a command-injection vector.
+        env:
+          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
+          HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
         run: |-
           set -euo pipefail
 
@@ -860,7 +868,7 @@ jobs:
             exit 1
           fi
 
-          if git diff --check "origin/${{ steps.prepare.outputs.head_ref }}...HEAD"; then
+          if git diff --check "origin/${HEAD_REF}...HEAD"; then
             :
           else
             echo "Diff whitespace/conflict-marker check failed."
@@ -868,15 +876,15 @@ jobs:
             exit 1
           fi
 
-          if git merge-tree --write-tree "origin/${{ steps.prepare.outputs.base_ref }}" HEAD > /dev/null 2>&1; then
+          if git merge-tree --write-tree "origin/${BASE_REF}" HEAD > /dev/null 2>&1; then
             :
           else
-            echo "Branch still has merge conflicts with ${{ steps.prepare.outputs.base_ref }}."
+            echo "Branch still has merge conflicts with ${BASE_REF}."
             echo "outcome=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          if git diff --quiet "origin/${{ steps.prepare.outputs.head_ref }}...HEAD"; then
+          if git diff --quiet "origin/${HEAD_REF}...HEAD"; then
             if [ -s "${WORKDIR}/no-action.md" ]; then
               echo "outcome=noop" >> "$GITHUB_OUTPUT"
               exit 0
@@ -898,6 +906,21 @@ jobs:
             exit 1
           fi
 
+          # Scope guard: merging base into head may only change files that base
+          # itself changed (conflict resolutions live in those same files).
+          # Anything edited outside that set is out of scope — a prompt-injection
+          # symptom — so fail closed and list the offending files.
+          merge_base="$(git merge-base "origin/${BASE_REF}" "origin/${HEAD_REF}")"
+          base_changed="$(git diff --name-only "${merge_base}" "origin/${BASE_REF}" | sort -u)"
+          agent_changed="$(git diff --name-only "origin/${HEAD_REF}" HEAD | sort -u)"
+          out_of_scope="$(comm -23 <(printf '%s\n' "$agent_changed") <(printf '%s\n' "$base_changed"))"
+          if [ -n "$out_of_scope" ]; then
+            echo "Agent modified files outside the conflict set:"
+            printf '%s\n' "$out_of_scope"
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
           if ! npm run build; then
             echo "Build failed after conflict resolution."
             echo "outcome=failed" >> "$GITHUB_OUTPUT"
@@ -914,8 +937,15 @@ jobs:
             exit 1
           fi
 
-          changed_pkgs="$(git diff --name-only "origin/${{ steps.prepare.outputs.base_ref }}...HEAD" | grep -oE '^packages/[^/]+' | sort -u || true)"
+          # Map changed files to their owning workspace. packages/channels is not
+          # itself a workspace (packages/channels/<name> are), so guard on
+          # package.json to avoid `--workspace packages/channels` failing.
+          changed_pkgs="$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep -oE '^packages/(channels/)?[^/]+' | sort -u || true)"
           for package_path in ${changed_pkgs}; do
+            if [ ! -f "${package_path}/package.json" ]; then
+              echo "Skipping ${package_path}: not a workspace."
+              continue
+            fi
             echo "Testing ${package_path}..."
             npm run test --workspace "${package_path}" --if-present
           done
@@ -924,9 +954,11 @@ jobs:
 
       - name: 'Show run artifacts'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        env:
+          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
         run: |-
           git status --short || true
-          git diff "origin/${{ steps.prepare.outputs.base_ref }}...HEAD" > "${WORKDIR}/pr.diff" || true
+          git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pr.diff" || true
           for file in context.md address-summary.md no-action.md failure.md pr.diff; do
             if [ -f "${WORKDIR}/${file}" ]; then
               echo "=============== ${file} ==============="
