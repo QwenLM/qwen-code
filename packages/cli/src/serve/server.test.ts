@@ -86,6 +86,7 @@ import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
   ServeSessionHooksStatus,
+  ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
@@ -172,6 +173,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_supported_commands',
   'session_tasks',
   'session_stats',
+  'session_lsp',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -357,6 +359,7 @@ interface FakeBridgeOpts {
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
+  sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
@@ -537,6 +540,7 @@ interface FakeBridge extends AcpSessionBridge {
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
   sessionTasksCalls: string[];
+  sessionLspCalls: string[];
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
@@ -645,6 +649,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const sessionLspCalls: string[] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
   const sessionHooksCalls: string[] = [];
@@ -818,6 +823,20 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       now: 1_700_000_000_000,
       tasks: [],
     }));
+  const sessionLspImpl =
+    opts.sessionLspImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      enabled: false,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+    }));
   const cancelSessionTaskImpl =
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
@@ -986,6 +1005,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
     sessionTasksCalls,
+    sessionLspCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
     sessionHooksCalls,
@@ -1176,6 +1196,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTasksStatus(sessionId) {
       sessionTasksCalls.push(sessionId);
       return sessionTasksImpl(sessionId);
+    },
+    async getSessionLspStatus(sessionId) {
+      sessionLspCalls.push(sessionId);
+      return sessionLspImpl(sessionId);
     },
     async cancelSessionTask(sessionId, taskId, taskKind) {
       cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
@@ -3902,10 +3926,31 @@ describe('createServeApp', () => {
           },
         ],
       };
+      const lsp: ServeSessionLspStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 1,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'READY',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+          },
+        ],
+      };
       const bridge = fakeBridge({
         sessionContextImpl: async () => context,
         sessionSupportedCommandsImpl: async () => commands,
         sessionTasksImpl: async () => tasks,
+        sessionLspImpl: async () => lsp,
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -3922,6 +3967,9 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/s-1/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const lspRes = await request(app)
+        .get('/session/s-1/lsp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(200);
       expect(contextRes.body).toEqual(context);
@@ -3929,9 +3977,12 @@ describe('createServeApp', () => {
       expect(commandsRes.body).toEqual(commands);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);
+      expect(lspRes.status).toBe(200);
+      expect(lspRes.body).toEqual(lsp);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionTasksCalls).toEqual(['s-1']);
+      expect(bridge.sessionLspCalls).toEqual(['s-1']);
     });
 
     it('returns session context-usage from the bridge', async () => {
@@ -4035,6 +4086,9 @@ describe('createServeApp', () => {
         sessionTasksImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
+        sessionLspImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -4051,6 +4105,9 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/missing/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const lspRes = await request(app)
+        .get('/session/missing/lsp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(404);
       expect(contextRes.body.sessionId).toBe('missing');
@@ -4058,6 +4115,8 @@ describe('createServeApp', () => {
       expect(commandsRes.body.sessionId).toBe('missing');
       expect(tasksRes.status).toBe(404);
       expect(tasksRes.body.sessionId).toBe('missing');
+      expect(lspRes.status).toBe(404);
+      expect(lspRes.body.sessionId).toBe('missing');
     });
 
     it('rejects task cancellation with invalid kind', async () => {
