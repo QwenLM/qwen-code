@@ -223,12 +223,16 @@ describe('qwen serve — capabilities envelope', () => {
     //
     // Conditional tags absent under this suite's spawn flags (no
     // `--require-auth` / `--allow-origin` / deadline env vars /
-    // rate-limit opt-in): `require_auth`, `allow_origin`,
-    // `prompt_absolute_deadline`, `writer_idle_timeout`, `rate_limit`.
+    // rate-limit opt-in, no configured batch ASR model): `require_auth`,
+    // `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`,
+    // `workspace_voice_transcription`, `rate_limit`.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
-    // `workspace_settings` / `workspace_reload` (the CLI serve path
-    // always wires `persistSetting` and the workspace service).
+    // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
+    // `workspace_trust`, `workspace_github_setup`, and
+    // `workspace_reload` (the CLI serve path always wires
+    // `persistSetting`, the workspace service, and route-local
+    // workspace helpers).
     expect(caps.features).toEqual([
       'health',
       'daemon_status',
@@ -276,9 +280,11 @@ describe('qwen serve — capabilities envelope', () => {
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_settings',
+      'workspace_permissions',
       'workspace_voice',
-      'workspace_voice_transcription',
+      'workspace_trust',
       'workspace_init',
+      'workspace_github_setup',
       'workspace_mcp_restart',
       'session_recap',
       'session_btw',
