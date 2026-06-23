@@ -5,10 +5,13 @@
  */
 
 import type { Config } from '../config/config.js';
-import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import {
+  formatMcpResourceContents,
+  summarizeMcpResource,
+} from './mcp-resource-content.js';
 
 export interface ReadMcpResourceToolParams {
   server_name: string;
@@ -31,14 +34,21 @@ class ReadMcpResourceToolInvocation extends BaseToolInvocation<
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    const label = this.getDescription();
     const result = await this.config
       .getToolRegistry()
       .readMcpResource(this.params.server_name, this.params.uri, { signal });
-    const llmContent = safeJsonStringify(result, 2) ?? '';
+    // Share the `@server:uri` injection path's formatter: cap text/blob size,
+    // surface blobs as media parts, and frame the content so the model gets a
+    // clear boundary around untrusted server output instead of a raw JSON dump.
+    const formatted = formatMcpResourceContents(result, label);
 
     return {
-      llmContent,
-      returnDisplay: `Read resource ${this.getDescription()}`,
+      llmContent:
+        formatted.parts.length > 0
+          ? formatted.parts
+          : summarizeMcpResource(formatted),
+      returnDisplay: `Read resource ${label}`,
     };
   }
 }
@@ -54,7 +64,10 @@ export class ReadMcpResourceTool extends BaseDeclarativeTool<
       ReadMcpResourceTool.Name,
       ToolDisplayNames.READ_MCP_RESOURCE,
       'Reads a resource from a configured MCP server by server name and URI.',
-      Kind.Other,
+      // Remote read with no side effects — same class as web_fetch. Using
+      // Kind.Fetch (vs Kind.Other) also keeps it in CONCURRENCY_SAFE_KINDS so
+      // multiple resource reads can run in parallel.
+      Kind.Fetch,
       {
         type: 'object',
         properties: {
