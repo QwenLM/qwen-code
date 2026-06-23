@@ -99,7 +99,13 @@ export function normalizePermissionRules(
     }
     const rule = item.trim();
     if (parseRule(rule).invalid) {
-      if (existingRules.has(rule)) continue;
+      if (existingRules.has(rule)) {
+        if (!seen.has(rule)) {
+          seen.add(rule);
+          result.push(rule);
+        }
+        continue;
+      }
       throw new PermissionRulesValidationError(
         `Malformed permission rule: ${rule}`,
         'invalid_rules',

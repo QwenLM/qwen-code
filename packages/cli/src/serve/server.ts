@@ -780,7 +780,7 @@ export interface ServeAppDeps {
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
-  ) => Promise<void>;
+  ) => Promise<void | import('../config/settings.js').LoadedSettings>;
 }
 
 function resolveDaemonTelemetryRoute(
@@ -2527,7 +2527,9 @@ export function createServeApp(
       boundWorkspace,
       mutate,
       safeBody,
-      persistSetting,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
       broadcastSettingsChanged: (key, value, scope, clientId) => {
         bridge.publishWorkspaceEvent({
           type: 'settings_changed',

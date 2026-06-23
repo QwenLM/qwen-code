@@ -11,17 +11,15 @@ import {
   normalizePermissionRules,
   PermissionRulesValidationError,
   readPermissionRuleSet,
-  type PermissionSettingsScope,
   type QwenPermissionSettings,
 } from '../../config/permission-settings.js';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  loadSettings as defaultLoadSettings,
+  SettingScope,
+  type LoadedSettings,
+} from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
-
-const SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
-  user: SettingScope.User,
-  workspace: SettingScope.Workspace,
-};
 
 export interface WorkspacePermissionsRouteDeps {
   boundWorkspace: string;
@@ -32,7 +30,8 @@ export interface WorkspacePermissionsRouteDeps {
     scope: SettingScope,
     key: string,
     value: unknown,
-  ) => Promise<void>;
+  ) => Promise<LoadedSettings | void>;
+  loadSettings?: (workspace: string) => LoadedSettings;
   invokeWorkspaceCommand: (
     method: string,
     params: Record<string, unknown>,
@@ -58,6 +57,7 @@ export function registerWorkspacePermissionsRoutes(
     mutate,
     safeBody,
     persistSetting,
+    loadSettings = defaultLoadSettings,
     invokeWorkspaceCommand,
     broadcastSettingsChanged,
     parseAndValidateClientId,
@@ -89,14 +89,14 @@ export function registerWorkspacePermissionsRoutes(
       const scope = body['scope'];
       const ruleType = body['ruleType'];
 
-      if (scope !== 'user' && scope !== 'workspace') {
+      if (scope !== 'workspace') {
         res.status(400).json({
-          error: 'scope must be "user" or "workspace"',
+          error: 'scope must be "workspace"',
           code: 'invalid_scope',
         });
         return;
       }
-      const permissionScope: PermissionSettingsScope = scope;
+      const permissionScope = scope;
 
       if (!isPermissionRuleType(ruleType)) {
         res.status(400).json({
@@ -109,12 +109,10 @@ export function registerWorkspacePermissionsRoutes(
       let rules: string[];
       try {
         const settings = loadSettings(boundWorkspace);
-        const scopeSettings =
-          permissionScope === 'workspace'
-            ? settings.workspace.settings
-            : settings.user.settings;
         rules = normalizePermissionRules(body['rules'], {
-          existingRules: readPermissionRuleSet(scopeSettings)[ruleType],
+          existingRules: readPermissionRuleSet(settings.workspace.settings)[
+            ruleType
+          ],
         });
       } catch (err) {
         if (err instanceof PermissionRulesValidationError) {
@@ -181,10 +179,11 @@ export function registerWorkspacePermissionsRoutes(
         return;
       }
 
+      let updatedSettings: LoadedSettings | void;
       try {
-        await persistSetting(
+        updatedSettings = await persistSetting(
           boundWorkspace,
-          SCOPE_MAP[permissionScope],
+          SettingScope.Workspace,
           key,
           rules,
         );
@@ -214,7 +213,11 @@ export function registerWorkspacePermissionsRoutes(
       try {
         res
           .status(200)
-          .json(buildPermissionSettings(loadSettings(boundWorkspace)));
+          .json(
+            buildPermissionSettings(
+              updatedSettings ?? loadSettings(boundWorkspace),
+            ),
+          );
       } catch (err) {
         writeStderrLine(
           `qwen serve: POST /workspace/permissions response error: ${

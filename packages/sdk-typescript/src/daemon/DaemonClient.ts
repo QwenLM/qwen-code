@@ -93,7 +93,6 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonPermissionRuleType,
-  DaemonPermissionScope,
   DaemonWorkspacePermissionsStatus,
 } from './types.js';
 
@@ -1767,7 +1766,7 @@ export class DaemonClient {
   }
 
   async setWorkspacePermissionRules(
-    scope: DaemonPermissionScope,
+    scope: 'workspace',
     ruleType: DaemonPermissionRuleType,
     rules: readonly string[],
     opts?: { clientId?: string },
@@ -1792,7 +1791,7 @@ export class DaemonClient {
    * the GET and POST will be silently overwritten (lost-update / TOCTOU).
    */
   async addWorkspacePermissionRule(
-    scope: DaemonPermissionScope,
+    scope: 'workspace',
     ruleType: DaemonPermissionRuleType,
     rule: string,
     opts?: { clientId?: string },
@@ -1818,7 +1817,7 @@ export class DaemonClient {
    * the GET and POST will be silently overwritten (lost-update / TOCTOU).
    */
   async removeWorkspacePermissionRule(
-    scope: DaemonPermissionScope,
+    scope: 'workspace',
     ruleType: DaemonPermissionRuleType,
     rule: string,
     opts?: { clientId?: string },

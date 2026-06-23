@@ -3412,7 +3412,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/permissions/setRules drops already-stored malformed permission rules', async () => {
+  it('qwen/permissions/setRules preserves already-stored malformed permission rules', async () => {
     const settings = makeCoreSettings();
     settings.setValue(SettingScope.User, 'permissions.allow', [
       'ShellTool(git status',
@@ -3429,7 +3429,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(settings.setValue).toHaveBeenCalledWith(
       'User',
       'permissions.allow',
-      ['ShellTool(npm test)'],
+      ['ShellTool(git status', 'ShellTool(npm test)'],
     );
 
     mockConnectionState.resolve();

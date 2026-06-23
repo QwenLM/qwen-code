@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
+  type LoadedSettings,
   loadSettings,
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -58,6 +59,13 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 
 async function makeHarness(opts?: {
   invokeWorkspaceCommand?: ReturnType<typeof vi.fn>;
+  loadSettings?: (workspace: string) => LoadedSettings;
+  broadcastSettingsChanged?: (
+    key: string,
+    value: unknown,
+    scope: string,
+    clientId: string | undefined,
+  ) => void;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -94,23 +102,33 @@ async function makeHarness(opts?: {
     ) => {
       const settings = loadSettings(targetWorkspace);
       settings.setValue(scope, key, value);
+      return settings;
     },
   );
-
-  registerWorkspacePermissionsRoutes(app, {
-    boundWorkspace: workspace,
-    mutate: () => (_req, _res, next) => next(),
-    safeBody,
-    persistSetting,
-    invokeWorkspaceCommand,
-    broadcastSettingsChanged: (key, value, scope, clientId) => {
+  const broadcastSettingsChanged: (
+    key: string,
+    value: unknown,
+    scope: string,
+    clientId: string | undefined,
+  ) => void =
+    opts?.broadcastSettingsChanged ??
+    ((key, value, scope, clientId) => {
       events.push({
         key,
         value,
         scope,
         ...(clientId !== undefined ? { clientId } : {}),
       });
-    },
+    });
+
+  registerWorkspacePermissionsRoutes(app, {
+    boundWorkspace: workspace,
+    mutate: () => (_req, _res, next) => next(),
+    safeBody,
+    persistSetting,
+    ...(opts?.loadSettings ? { loadSettings: opts.loadSettings } : {}),
+    invokeWorkspaceCommand,
+    broadcastSettingsChanged,
     parseAndValidateClientId: (req: Request, res: Response) => {
       const clientId = req.get('X-Qwen-Client-Id');
       if (clientId === 'unknown-client') {
@@ -209,6 +227,23 @@ describe('workspace permissions routes', () => {
     });
   });
 
+  it('GET returns 500 when loading permission settings fails', async () => {
+    await teardown(h);
+    h = await makeHarness({
+      loadSettings: () => {
+        throw new Error('load failed');
+      },
+    });
+
+    const res = await request(h.app).get('/workspace/permissions');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: 'internal_error',
+      error: 'Failed to load permission rules',
+    });
+  });
+
   it('POST rejects invalid scope ruleType rules and malformed rule syntax', async () => {
     const invalidScope = await request(h.app)
       .post('/workspace/permissions')
@@ -216,27 +251,60 @@ describe('workspace permissions routes', () => {
     expect(invalidScope.status).toBe(400);
     expect(invalidScope.body.code).toBe('invalid_scope');
 
+    const userScope = await request(h.app)
+      .post('/workspace/permissions')
+      .send({ scope: 'user', ruleType: 'allow', rules: [] });
+    expect(userScope.status).toBe(400);
+    expect(userScope.body).toMatchObject({
+      code: 'invalid_scope',
+      error: 'scope must be "workspace"',
+    });
+
     const invalidRuleType = await request(h.app)
       .post('/workspace/permissions')
-      .send({ scope: 'user', ruleType: 'maybe', rules: [] });
+      .send({ scope: 'workspace', ruleType: 'maybe', rules: [] });
     expect(invalidRuleType.status).toBe(400);
     expect(invalidRuleType.body.code).toBe('invalid_rule_type');
 
     const invalidRules = await request(h.app)
       .post('/workspace/permissions')
-      .send({ scope: 'user', ruleType: 'allow', rules: 'Bash(git *)' });
+      .send({ scope: 'workspace', ruleType: 'allow', rules: 'Bash(git *)' });
     expect(invalidRules.status).toBe(400);
     expect(invalidRules.body.code).toBe('invalid_rules');
 
     const malformedRule = await request(h.app)
       .post('/workspace/permissions')
-      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *'] });
+      .send({ scope: 'workspace', ruleType: 'allow', rules: ['Bash(git *'] });
     expect(malformedRule.status).toBe(400);
     expect(malformedRule.body.code).toBe('invalid_rules');
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
-  it('POST drops already-stored malformed rules without blocking valid updates', async () => {
+  it('POST returns 500 when loading existing rules fails', async () => {
+    await teardown(h);
+    h = await makeHarness({
+      loadSettings: () => {
+        throw new Error('load failed');
+      },
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(ls)'],
+      });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: 'internal_error',
+      error: 'Failed to load permission rules',
+    });
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('POST preserves already-stored malformed rules while accepting valid updates', async () => {
     await writeJson(
       path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
       {
@@ -259,29 +327,17 @@ describe('workspace permissions routes', () => {
       h.workspace,
       SettingScope.Workspace,
       'permissions.allow',
-      ['Bash(git log)', 'Bash(ls)'],
+      ['Bash(git log)', 'Bash(rm', 'Bash(ls)'],
     );
     expect(res.body.workspace.rules.allow).toEqual([
       'Bash(git log)',
+      'Bash(rm',
       'Bash(ls)',
     ]);
   });
 
-  it('POST replaces one scoped rule list through a live ACP child and publishes settings_changed', async () => {
-    const acpResponse = {
-      v: 1,
-      user: {
-        path: path.join(h.home, 'settings.json'),
-        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
-      },
-      workspace: {
-        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
-        rules: { allow: [], ask: [], deny: [] },
-      },
-      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
-      isTrusted: true,
-    };
-    const live = vi.fn(async () => acpResponse);
+  it('POST rejects user-scope writes before invoking a live ACP child', async () => {
+    const live = vi.fn(async () => ({}));
     await teardown(h);
     h = await makeHarness({ invokeWorkspaceCommand: live });
 
@@ -294,10 +350,44 @@ describe('workspace permissions routes', () => {
         rules: [' Bash(git status) ', 'Bash(git status)'],
       });
 
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_scope');
+    expect(live).not.toHaveBeenCalled();
+    expect(h.persistSetting).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+  });
+
+  it('POST replaces one workspace rule list through a live ACP child and publishes settings_changed', async () => {
+    const acpResponse = {
+      v: 1,
+      user: {
+        path: path.join(h.home, 'settings.json'),
+        rules: { allow: [], ask: [], deny: [] },
+      },
+      workspace: {
+        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      },
+      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      isTrusted: true,
+    };
+    const live = vi.fn(async () => acpResponse);
+    await teardown(h);
+    h = await makeHarness({ invokeWorkspaceCommand: live });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: [' Bash(git status) ', 'Bash(git status)'],
+      });
+
     expect(res.status).toBe(200);
     expect(res.body).toEqual(acpResponse);
     expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
-      scope: 'user',
+      scope: 'workspace',
       ruleType: 'allow',
       rules: ['Bash(git status)'],
     });
@@ -305,11 +395,54 @@ describe('workspace permissions routes', () => {
     expect(h.events).toEqual([
       {
         key: 'permissions.allow',
-        scope: 'user',
+        scope: 'workspace',
         value: ['Bash(git status)'],
         clientId: 'client-1',
       },
     ]);
+  });
+
+  it('POST still succeeds when live ACP broadcast throws', async () => {
+    const acpResponse = {
+      v: 1,
+      user: {
+        path: path.join(h.home, 'settings.json'),
+        rules: { allow: [], ask: [], deny: [] },
+      },
+      workspace: {
+        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      },
+      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      isTrusted: true,
+    };
+    const live = vi.fn(async () => acpResponse);
+    const broadcastSettingsChanged = vi.fn(() => {
+      throw new Error('broadcast failed');
+    });
+    await teardown(h);
+    h = await makeHarness({
+      invokeWorkspaceCommand: live,
+      broadcastSettingsChanged,
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git status)'],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(acpResponse);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'permissions.allow',
+      ['Bash(git status)'],
+      'workspace',
+      undefined,
+    );
+    expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
   it('POST falls back to daemon settings write when no ACP child is running', async () => {
@@ -340,6 +473,57 @@ describe('workspace permissions routes', () => {
     ]);
   });
 
+  it('POST reuses persisted settings for fallback response', async () => {
+    const loadSettingsForRoute = vi.fn((workspace: string) =>
+      loadSettings(workspace),
+    );
+    await teardown(h);
+    h = await makeHarness({ loadSettings: loadSettingsForRoute });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['Read(.env)'],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.workspace.rules.deny).toEqual(['Read(.env)']);
+    expect(loadSettingsForRoute).toHaveBeenCalledTimes(1);
+  });
+
+  it('POST still succeeds when fallback broadcast throws after persisting', async () => {
+    const broadcastSettingsChanged = vi.fn(() => {
+      throw new Error('broadcast failed');
+    });
+    await teardown(h);
+    h = await makeHarness({ broadcastSettingsChanged });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['Read(.env)'],
+      });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.Workspace,
+      'permissions.deny',
+      ['Read(.env)'],
+    );
+    expect(res.body.workspace.rules.deny).toEqual(['Read(.env)']);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'permissions.deny',
+      ['Read(.env)'],
+      'workspace',
+      undefined,
+    );
+  });
+
   it('POST returns 500 when ACP child throws non-SessionNotFoundError', async () => {
     await teardown(h);
     h = await makeHarness({
@@ -350,7 +534,7 @@ describe('workspace permissions routes', () => {
 
     const res = await request(h.app)
       .post('/workspace/permissions')
-      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *)'] });
+      .send({ scope: 'workspace', ruleType: 'allow', rules: ['Bash(git *)'] });
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('permission_update_failed');
@@ -362,7 +546,7 @@ describe('workspace permissions routes', () => {
 
     const res = await request(h.app)
       .post('/workspace/permissions')
-      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *)'] });
+      .send({ scope: 'workspace', ruleType: 'allow', rules: ['Bash(git *)'] });
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('persist_error');
@@ -372,7 +556,7 @@ describe('workspace permissions routes', () => {
     const res = await request(h.app)
       .post('/workspace/permissions')
       .set('X-Qwen-Client-Id', 'unknown-client')
-      .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *)'] });
+      .send({ scope: 'workspace', ruleType: 'allow', rules: ['Bash(git *)'] });
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_client_id');

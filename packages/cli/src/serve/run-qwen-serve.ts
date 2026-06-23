@@ -1089,6 +1089,7 @@ export async function runQwenServe(
       withSettingsLock(workspace, async () => {
         const fresh = loadSettings(workspace);
         fresh.setValue(scope, key, value);
+        return fresh;
       }),
     installAuthProvider: (req) =>
       withSettingsLock(

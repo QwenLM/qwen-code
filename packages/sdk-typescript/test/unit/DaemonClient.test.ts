@@ -2712,9 +2712,9 @@ describe('DaemonClient', () => {
 
       await expect(
         client.addWorkspacePermissionRule(
-          'user',
+          'workspace',
           'allow',
-          ' ShellTool(git status) ',
+          ' ShellTool(npm test) ',
         ),
       ).resolves.toEqual(permissionsStatus);
 
@@ -2740,14 +2740,35 @@ describe('DaemonClient', () => {
       expect(calls[0]?.method).toBe('GET');
     });
 
+    it('removeWorkspacePermissionRule propagates GET failures without POSTing', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(500, { error: 'failed to load permissions' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+
     it('addWorkspacePermissionRule POSTs when rule is absent', async () => {
       const updatedStatus = {
         ...permissionsStatus,
-        user: {
-          ...permissionsStatus.user,
+        workspace: {
+          ...permissionsStatus.workspace,
           rules: {
-            ...permissionsStatus.user.rules,
-            allow: ['ShellTool(git status)', 'ShellTool(npm run build)'],
+            ...permissionsStatus.workspace.rules,
+            allow: ['ShellTool(npm test)', 'ShellTool(npm run build)'],
           },
         },
       };
@@ -2759,7 +2780,7 @@ describe('DaemonClient', () => {
 
       await expect(
         client.addWorkspacePermissionRule(
-          'user',
+          'workspace',
           'allow',
           'ShellTool(npm run build)',
         ),
@@ -2771,9 +2792,30 @@ describe('DaemonClient', () => {
         url: 'http://daemon/workspace/permissions',
       });
       expect(JSON.parse(calls[1]!.body!)).toEqual({
-        scope: 'user',
+        scope: 'workspace',
         ruleType: 'allow',
-        rules: ['ShellTool(git status)', 'ShellTool(npm run build)'],
+        rules: ['ShellTool(npm test)', 'ShellTool(npm run build)'],
+      });
+    });
+
+    it('addWorkspacePermissionRule propagates GET failures without POSTing', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(500, { error: 'failed to load permissions' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
       });
     });
 
