@@ -182,6 +182,22 @@ describe('runVisionBridge', () => {
     expect(sent).not.toContain('FIFTH');
   });
 
+  it('strips interleaved <think> blocks without eating answer text between them', async () => {
+    mockSideQuery.mockResolvedValue({
+      text: '<think>r1</think>Answer part 1<think>r2</think>Answer part 2',
+    });
+    const result = await runVisionBridge({
+      config,
+      parts: ['q', image()],
+      signal: signal(),
+    });
+    const joined = textOf(result.parts);
+    expect(joined).toContain('Answer part 1');
+    expect(joined).toContain('Answer part 2');
+    expect(joined).not.toContain('r1');
+    expect(joined).not.toContain('r2');
+  });
+
   it('strips nested <think> blocks without leaking inner reasoning', async () => {
     mockSideQuery.mockResolvedValue({
       text: '<think>outer<think>inner secret</think>still secret</think>Visible: a dialog',

@@ -116,10 +116,14 @@ interface PendingDuplicateToolResponses {
 }
 
 function truncateVisionBridgeTranscript(transcript: string): string {
-  if (transcript.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
-    return transcript;
+  // Untrusted vision-model output shown in the terminal: drop ANSI/C0 control
+  // escapes (keep \t, \n) so a crafted image can't inject terminal sequences.
+  // eslint-disable-next-line no-control-regex
+  const safe = transcript.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
+  if (safe.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
+    return safe;
   }
-  return `${transcript
+  return `${safe
     .slice(0, VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT)
     .trimEnd()}\n[Transcript truncated]`;
 }

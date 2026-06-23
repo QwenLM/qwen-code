@@ -155,14 +155,17 @@ const BRIDGE_SYSTEM_INSTRUCTION = [
 ].join(' ');
 
 /**
- * Strip `<think>…</think>` reasoning. Greedy first pass removes balanced and
- * nested blocks (a vision model's answer follows its thinking, so greedily
- * cutting to the last `</think>` won't eat the answer); then an unterminated
- * trailing block, then any orphan close tags.
+ * Strip `<think>…</think>` reasoning. Removes innermost balanced pairs until
+ * stable — handles nested and multiple interleaved blocks without eating answer
+ * text between them — then an unterminated trailing block, then orphan closes.
  */
 function stripThinkTags(text: string): string {
+  let prev: string;
+  do {
+    prev = text;
+    text = text.replace(/<think>(?:(?!<think>)[\s\S])*?<\/think>/gi, '');
+  } while (text !== prev);
   return text
-    .replace(/<think>[\s\S]*<\/think>/gi, '')
     .replace(/<think>[\s\S]*$/i, '')
     .replace(/<\/think>/gi, '')
     .trim();
