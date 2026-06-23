@@ -113,6 +113,10 @@ import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
 import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
 import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
+import {
+  installAlternateScreenExitHandler,
+  shouldUseVirtualViewport,
+} from './ui/utils/terminal-buffer.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -364,7 +368,12 @@ export async function startInteractiveUI(
     );
   };
 
-  const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
+  const useVP = shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+  );
+  const removeAlternateScreenExitHandler =
+    installAlternateScreenExitHandler(useVP);
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>
@@ -410,6 +419,7 @@ export async function startInteractiveUI(
     // operational, preventing garbled terminal output after the app exits.
     disableKittyProtocol();
     instance.unmount();
+    removeAlternateScreenExitHandler();
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });
