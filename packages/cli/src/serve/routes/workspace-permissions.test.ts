@@ -450,6 +450,7 @@ describe('workspace permissions routes', () => {
       isTrusted: true,
     });
     expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
+      cwd: h.workspace,
       scope: 'workspace',
       ruleType: 'allow',
       rules: ['Bash(git status)', 'Bash(git status)'],
@@ -566,6 +567,7 @@ describe('workspace permissions routes', () => {
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('response_build_error');
     expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
+      cwd: h.workspace,
       scope: 'workspace',
       ruleType: 'allow',
       rules: ['Bash(git status)'],

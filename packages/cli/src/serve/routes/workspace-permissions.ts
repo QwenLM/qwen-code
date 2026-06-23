@@ -171,6 +171,7 @@ export function registerWorkspacePermissionsRoutes(
       let updatedThroughLiveChild = false;
       try {
         await invokeWorkspaceCommand('qwen/permissions/setRules', {
+          cwd: boundWorkspace,
           scope: permissionScope,
           ruleType,
           rules,
