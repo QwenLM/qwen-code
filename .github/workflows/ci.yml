@@ -141,14 +141,12 @@ jobs:
       - name: 'Refresh PR refs after cached checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
         run: |-
-          : > "${RUNNER_TEMP}/pr-ref-refresh-gitconfig"
+          github_url="https://github.com:443/${GITHUB_REPOSITORY}.git"
           merge_ref='refs/remotes/pull/${{ github.event.pull_request.number }}/merge'
 
           for attempt in 1 2; do
             echo "Refreshing PR refs from GitHub (attempt ${attempt}/2)"
-            if GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/pr-ref-refresh-gitconfig" \
-              GIT_CONFIG_NOSYSTEM='true' \
-              git fetch --no-tags origin \
+            if git fetch --no-tags "${github_url}" \
                 "+refs/heads/${GITHUB_HEAD_REF}:refs/remotes/origin/${GITHUB_HEAD_REF}" \
                 "+${GITHUB_REF}:${merge_ref}"; then
               git checkout --force "${merge_ref}"

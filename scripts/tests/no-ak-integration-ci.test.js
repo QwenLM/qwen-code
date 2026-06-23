@@ -72,9 +72,8 @@ describe('no-AK integration CI wiring', () => {
     expect(ubuntuJob).toContain(
       "name: 'Refresh PR refs after cached checkout'",
     );
-    expect(ubuntuJob).toContain('GIT_CONFIG_GLOBAL');
-    expect(ubuntuJob).toContain('GIT_CONFIG_NOSYSTEM');
-    expect(ubuntuJob).toContain('git fetch --no-tags origin');
+    expect(ubuntuJob).toContain('https://github.com:443/');
+    expect(ubuntuJob).toContain('git fetch --no-tags "${github_url}"');
     expect(ubuntuJob).toContain('"+${GITHUB_REF}:${merge_ref}"');
     expect(ubuntuJob).toContain('git checkout --force "${merge_ref}"');
     expect(ubuntuJob).toContain(
