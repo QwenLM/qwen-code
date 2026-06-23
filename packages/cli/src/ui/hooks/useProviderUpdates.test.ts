@@ -175,6 +175,80 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.currentModelAffected).toBe(false);
   });
 
+  it('detects newly added built-in models when the template grows', async () => {
+    // Simulate an older install that lacks the last built-in model.
+    const olderTemplate = chinaTemplate.slice(0, -1);
+    const addedModelId = chinaTemplate[chinaTemplate.length - 1]!.id;
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: olderTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    const entry = result.current.providerUpdateRequest?.entries[0];
+    expect(entry?.diff.added).toContain(addedModelId);
+  });
+
+  it('preserves user-added custom models when executing an update', async () => {
+    const customModel = {
+      id: 'my-custom-model',
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      envKey: CODING_PLAN_ENV_KEY,
+      name: '[Coding Plan] my-custom-model',
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, customModel],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    expect(reloaded[AuthType.USE_OPENAI]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'my-custom-model' }),
+      ]),
+    );
+  });
+
   it('executes update when user confirms with "update"', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY

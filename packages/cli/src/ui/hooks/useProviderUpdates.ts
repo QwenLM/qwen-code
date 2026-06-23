@@ -152,7 +152,7 @@ interface PendingUpdate {
   diff: ModelUpdateDiff;
 }
 
-function getInstalledOwnedModelIds(
+function readInstalledOwnedIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
 ): string[] {
@@ -165,14 +165,22 @@ function getInstalledOwnedModelIds(
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
-  const installedIds = ownsFn
+  return ownsFn
     ? allModels.filter(ownsFn).map((m) => m.id)
     : allModels.map((m) => m.id);
+}
+
+function getInstalledOwnedModelIds(
+  settings: LoadedSettings,
+  provider: ProviderConfig,
+): string[] {
   // Only compare built-in model IDs — user-added custom models should not
   // appear as "removed" in the diff since they were never part of the
   // provider's built-in list.
   const builtinIds = new Set(getDefaultModelIds(provider));
-  return installedIds.filter((id) => builtinIds.has(id));
+  return readInstalledOwnedIds(settings, provider).filter((id) =>
+    builtinIds.has(id),
+  );
 }
 
 function findAllPendingUpdates(
@@ -228,10 +236,17 @@ export function useProviderUpdates(
     async (providerCfg: ProviderConfig, baseUrl?: string) => {
       try {
         const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        // An update only refreshes built-in models — user-added custom IDs
+        // must be carried through so they are not deleted by the
+        // prepend-and-remove-owned merge.
+        const defaultIds = getDefaultModelIds(providerCfg);
+        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
+          (id) => !defaultIds.includes(id),
+        );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
-          modelIds: getDefaultModelIds(providerCfg),
+          modelIds: [...defaultIds, ...customIds],
         });
         delete installPlan.env;
         const previousModel = config.getModel();
