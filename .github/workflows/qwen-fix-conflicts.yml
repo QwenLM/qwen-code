@@ -218,6 +218,9 @@ jobs:
           fi
           write_output conflict "$conflict"
 
+          if [ "$conflict" = "unknown" ]; then
+            finish_without_agent failed "Could not determine conflict status for PR #${PR_NUMBER} (git merge-tree failed unexpectedly). Re-run /resolve."
+          fi
           if [ "$conflict" != "true" ]; then
             finish_without_agent skip "PR #${PR_NUMBER} does not currently have merge conflicts with ${base_ref}."
           fi
@@ -301,6 +304,11 @@ jobs:
             - If there is no longer a conflict, do not commit. Write `/tmp/qwen-fix-conflicts/no-action.md` explaining what changed.
             - If you cannot confidently resolve the conflict or verification fails, do not commit. Write `/tmp/qwen-fix-conflicts/failure.md` with the blocker and what you learned.
 
+      - name: 'Refresh dependencies'
+        if: "steps.prepare.outputs.decision == 'run' && steps.resolve_conflicts.outcome == 'success'"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
       - name: 'Verification gate'
         id: 'verify'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
@@ -359,9 +367,21 @@ jobs:
             exit 1
           fi
 
-          npm run build
-          npm run typecheck
-          npm run lint
+          if ! npm run build; then
+            echo "Build failed after conflict resolution."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if ! npm run typecheck; then
+            echo "Typecheck failed after conflict resolution."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if ! npm run lint; then
+            echo "Lint failed after conflict resolution."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           changed_pkgs="$(git diff --name-only "origin/${{ steps.prepare.outputs.base_ref }}...HEAD" | grep -oE '^packages/[^/]+' | sort -u || true)"
           for package_path in ${changed_pkgs}; do
@@ -408,6 +428,36 @@ jobs:
           } > "${WORKDIR}/report.md"
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md"
 
+      - name: 'Report failure'
+        if: "always() && steps.prepare.outputs.decision == 'run' && steps.verify.outputs.outcome != 'fixed' && steps.verify.outputs.outcome != 'noop'"
+        env:
+          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
+        run: |-
+          set -euo pipefail
+
+          append_safe_file() {
+            cleaned="${WORKDIR}/safe-$(basename "$1")"
+            sed 's/<[^>]*>//g' "$1" > "$cleaned"
+            head -c 2000 "$cleaned"
+            echo
+          }
+
+          {
+            echo "<!-- qwen-fix-conflicts-result -->"
+            echo "Qwen Code attempted to resolve merge conflicts but the run did not complete successfully."
+            echo
+            for file in failure.md address-summary.md no-action.md; do
+              if [ -s "${WORKDIR}/${file}" ]; then
+                echo "### ${file}"
+                append_safe_file "${WORKDIR}/${file}"
+                echo
+              fi
+            done
+            echo "Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full logs."
+          } > "${WORKDIR}/report.md"
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md"
+
       - name: 'Push and report'
         if: |-
           ${{ always() &&
@@ -423,31 +473,49 @@ jobs:
           DRY_RUN: '${{ env.DRY_RUN }}'
         run: |-
           set -euo pipefail
+          push_failed=false
+
+          append_safe_file() {
+            cleaned="${WORKDIR}/safe-$(basename "$1")"
+            sed 's/<[^>]*>//g' "$1" > "$cleaned"
+            head -c 2000 "$cleaned"
+            echo
+          }
+
           if [ "$OUTCOME" = "fixed" ] && [ "$DRY_RUN" != "true" ]; then
             if [ -z "${PUSH_TOKEN}" ]; then
               echo "::error::CI_DEV_BOT_PAT is required to push conflict fixes."
               exit 1
             fi
             git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${REPO}.git"
-            git push \
+            if ! git push \
               --force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}" \
-              origin "HEAD:refs/heads/${HEAD_REF}"
+              origin "HEAD:refs/heads/${HEAD_REF}"; then
+              push_failed=true
+              echo "::error::Push rejected; the branch was updated concurrently. Re-run /resolve."
+            fi
           fi
 
           {
             echo "<!-- qwen-fix-conflicts-result -->"
             if [ "$OUTCOME" = "fixed" ]; then
-              if [ "$DRY_RUN" = "true" ]; then
+              if [ "$push_failed" = "true" ]; then
+                echo "Qwen Code resolved the merge conflicts, but the branch update was not pushed because the head branch changed. Re-run /resolve."
+              elif [ "$DRY_RUN" = "true" ]; then
                 echo "Qwen Code resolved the merge conflicts in dry-run mode. No branch update was pushed."
               else
                 echo "Qwen Code resolved the merge conflicts and pushed the branch update."
               fi
               echo
-              cat "${WORKDIR}/address-summary.md"
+              append_safe_file "${WORKDIR}/address-summary.md"
             else
               echo "Qwen Code checked this PR and did not push changes."
               echo
-              cat "${WORKDIR}/no-action.md"
+              append_safe_file "${WORKDIR}/no-action.md"
             fi
           } > "${WORKDIR}/report.md"
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md"
+
+          if [ "$push_failed" = "true" ]; then
+            exit 1
+          fi
