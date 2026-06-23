@@ -75,7 +75,6 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
-  Protocol,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -135,6 +134,7 @@ import {
 } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
+import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -184,6 +184,7 @@ import {
   type ServePreflightKind,
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
+  type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
@@ -1435,17 +1436,8 @@ function readProviderModels(
   const modelProviders = toRecord(
     (settings.merged as Record<string, unknown>)['modelProviders'],
   );
-  const entry = modelProviders[protocol];
-  const entryRecord =
-    typeof entry === 'object' && entry !== null
-      ? (entry as Record<string, unknown>)
-      : undefined;
-  const models = Array.isArray(entry)
-    ? entry
-    : Array.isArray(entryRecord?.['models'])
-      ? (entryRecord['models'] as ProviderModelConfig[])
-      : [];
-  return models.filter(isProviderModelConfig);
+  const models = modelProviders[protocol];
+  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
 }
 
 function findExistingProviderModels(
@@ -1582,7 +1574,7 @@ function readProviderSetupInputs(
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | Protocol
+    | AuthType
     | undefined;
   if (
     protocol &&
@@ -2754,7 +2746,7 @@ class QwenAgent implements Agent {
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
-    const method = methodId as AuthType;
+    const method = z.nativeEnum(AuthType).parse(methodId);
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
@@ -4302,6 +4294,35 @@ class QwenAgent implements Agent {
     return buildSessionTasksStatus(sessionId, session.getConfig());
   }
 
+  private buildSessionLspStatus(sessionId: string): ServeSessionLspStatus {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const snapshot = config.getLspStatusSnapshot();
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      enabled: snapshot.enabled,
+      configuredServers: snapshot.configuredServers,
+      readyServers: snapshot.readyServers,
+      failedServers: snapshot.failedServers,
+      inProgressServers: snapshot.inProgressServers,
+      notStartedServers: snapshot.notStartedServers,
+      ...(snapshot.statusUnavailable ? { statusUnavailable: true } : {}),
+      ...(snapshot.initializationError
+        ? { initializationError: snapshot.initializationError }
+        : {}),
+      servers: snapshot.servers.map((server) => ({
+        name: server.name,
+        status: server.status,
+        languages: server.languages,
+        ...(server.transport ? { transport: server.transport } : {}),
+        ...(server.command ? { command: server.command } : {}),
+        ...(server.error ? { error: server.error } : {}),
+      })),
+    };
+  }
+
   private buildSessionStatsStatus(sessionId: string): ServeSessionStatsStatus {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
@@ -5070,6 +5091,19 @@ class QwenAgent implements Agent {
           );
         }
         return this.buildSessionTasksStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return this.buildSessionLspStatus(sessionId) as unknown as Record<
           string,
           unknown
         >;

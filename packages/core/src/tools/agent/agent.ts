@@ -26,7 +26,6 @@ import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
   PromptConfig,
-  RunConfig,
   ToolConfig,
 } from '../../agents/runtime/agent-types.js';
 import {
@@ -37,6 +36,7 @@ import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content, FunctionDeclaration } from '@google/genai';
 import {
   FORK_AGENT,
+  FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
@@ -1302,7 +1302,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       agentConfig,
       promptConfig,
       {},
-      {} as RunConfig,
+      { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
     );

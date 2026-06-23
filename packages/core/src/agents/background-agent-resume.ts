@@ -36,6 +36,7 @@ import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
 import {
   FORK_AGENT,
+  FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
@@ -48,11 +49,7 @@ import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
 import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from './runtime/agent-core.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type {
-  PromptConfig,
-  RunConfig,
-  ToolConfig,
-} from './runtime/agent-types.js';
+import type { PromptConfig, ToolConfig } from './runtime/agent-types.js';
 import type {
   AgentBootstrapRecordPayload,
   NotificationRecordPayload,
@@ -1168,7 +1165,7 @@ export class BackgroundAgentResumeService {
       agentConfig,
       promptConfig,
       {},
-      {} as RunConfig,
+      { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
     );

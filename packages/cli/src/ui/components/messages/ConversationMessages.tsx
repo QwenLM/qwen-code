@@ -24,6 +24,7 @@ import {
 import { t } from '../../../i18n/index.js';
 import { getCachedStringWidth } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
+import { themeBackgroundMatchesTerminal } from '../../utils/theme-background.js';
 
 const isUtf8 = /utf-?8/i.test(
   process.env['LANG'] || process.env['LC_ALL'] || '',
@@ -212,6 +213,10 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
     width > 0 &&
     !isScreenReaderEnabled &&
     !!theme.background.primary &&
+    // The band paints the theme background behind every user message; only do
+    // so when it matches the terminal, else (e.g. a light theme forced onto a
+    // dark terminal) it renders as bright stripes fighting the surroundings.
+    themeBackgroundMatchesTerminal() &&
     supportsTrueColor();
 
   const fallback = (

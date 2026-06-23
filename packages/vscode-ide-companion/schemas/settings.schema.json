@@ -14,7 +14,7 @@
       "additionalProperties": true
     },
     "modelProviders": {
-      "description": "Model providers configuration grouped by authType. Each authType maps to a ProviderConfig object with protocol and models fields.",
+      "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
       "type": "object",
       "additionalProperties": true
     },
@@ -2783,7 +2783,7 @@
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",
-      "default": 5
+      "default": 4
     }
   },
   "additionalProperties": true

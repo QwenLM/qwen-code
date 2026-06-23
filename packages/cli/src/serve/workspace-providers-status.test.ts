@@ -167,16 +167,13 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         baseUrl: 'https://user:sec ret@stale.example/v1',
       },
       modelProviders: {
-        openai: {
-          protocol: 'openai',
-          models: [
-            {
-              id: 'shared-model',
-              name: 'Shared Current',
-              baseUrl: `https://user:cur'rent@current.example/v1`,
-            },
-          ],
-        },
+        openai: [
+          {
+            id: 'shared-model',
+            name: 'Shared Current',
+            baseUrl: `https://user:cur'rent@current.example/v1`,
+          },
+        ],
       },
     });
 

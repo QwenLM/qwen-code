@@ -12,6 +12,38 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.19.1](https://github.com/QwenLM/qwen-code/releases/tag/v0.19.1) - 2026-06-23
+
+### Added
+
+- cli: match MCP resource completions by name and discover servers ([#5733](https://github.com/QwenLM/qwen-code/pull/5733))
+
+### Changed
+
+- core: revert Protocol enum & model-identity decoupling (#5089) ([#5745](https://github.com/QwenLM/qwen-code/pull/5745))
+
+### Fixed
+
+- cli: skip unusable A2UI configs ([#5685](https://github.com/QwenLM/qwen-code/pull/5685))
+- cli: avoid duplicate ACP write BOM ([#5688](https://github.com/QwenLM/qwen-code/pull/5688))
+- cli: enable /lsp in ACP mode ([#5689](https://github.com/QwenLM/qwen-code/pull/5689))
+- core: require integer inline media byte limit ([#5671](https://github.com/QwenLM/qwen-code/pull/5671))
+- cli: reject invalid session list cursors ([#5709](https://github.com/QwenLM/qwen-code/pull/5709))
+- cli: reject unsupported extension scopes ([#5714](https://github.com/QwenLM/qwen-code/pull/5714))
+- core: reject blank cron prompts ([#5716](https://github.com/QwenLM/qwen-code/pull/5716))
+- cli: validate channel credential types ([#5718](https://github.com/QwenLM/qwen-code/pull/5718))
+- cli: use high-contrast software cursor ([#5720](https://github.com/QwenLM/qwen-code/pull/5720))
+- core: require integer compaction counts ([#5646](https://github.com/QwenLM/qwen-code/pull/5646))
+- core: parse agent & workflow integer env vars strictly ([#5679](https://github.com/QwenLM/qwen-code/pull/5679))
+- serve: validate list maxEntries as a positive integer ([#5719](https://github.com/QwenLM/qwen-code/pull/5719))
+- workflows: validate runId before recursive prune delete (path-traversal dir wipe) ([#5740](https://github.com/QwenLM/qwen-code/pull/5740))
+- triage: never auto-approve cross-repo refactor PRs ([#5744](https://github.com/QwenLM/qwen-code/pull/5744))
+- cli: only paint theme background when it matches the terminal ([#5746](https://github.com/QwenLM/qwen-code/pull/5746))
+
+### Other
+
+- ci: retry merge-ref checkout to fix transient "not our ref" failures ([#5732](https://github.com/QwenLM/qwen-code/pull/5732))
+
 ## [0.19.0](https://github.com/QwenLM/qwen-code/releases/tag/v0.19.0) - 2026-06-23
 
 ### Added

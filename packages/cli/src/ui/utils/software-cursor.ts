@@ -5,8 +5,8 @@
  */
 
 import chalk from 'chalk';
-import { theme } from '../semantic-colors.js';
 import { resolveColor } from '../themes/color-utils.js';
+import { getEffectiveInputBackground } from './theme-background.js';
 
 const LIGHT_CURSOR_BACKGROUND = '#D4D4D4';
 const DARK_CURSOR_BACKGROUND = '#3A3A3A';
@@ -51,7 +51,7 @@ function toHex(color: string): string | undefined {
 }
 
 export function getSoftwareCursorBackground(
-  backgroundColor = theme.background?.primary ?? '',
+  backgroundColor = getEffectiveInputBackground(),
 ): string {
   const hex = backgroundColor ? toHex(backgroundColor) : undefined;
   if (!hex) {

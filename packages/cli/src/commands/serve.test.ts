@@ -41,6 +41,11 @@ describe('serve command args', () => {
     expect(parsed['enable-session-shell']).toBe(false);
   });
 
+  it('parses --experimental-lsp for daemon child opt-in', () => {
+    const parsed = buildParser().strict().parseSync('--experimental-lsp');
+    expect(parsed['experimentalLsp']).toBe(true);
+  });
+
   it('parses --permission-response-timeout-ms as a number', () => {
     const parsed = buildParser().parseSync(
       '--permission-response-timeout-ms 60000',
