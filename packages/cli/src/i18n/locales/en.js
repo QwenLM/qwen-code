@@ -1386,6 +1386,7 @@ export default {
   'Size:': 'Size:',
   '{{count}} bytes': '{{count}} bytes',
   'Reference in chat': 'Reference in chat',
+  'MCP resource server': 'MCP resource server',
 
   // Invalid tool related translations
   '{{count}} invalid tools': '{{count}} invalid tools',

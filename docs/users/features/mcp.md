@@ -190,8 +190,12 @@ syntax — type `@`, then the server name, a colon, and the resource URI:
 summarize @myserver:file:///docs/spec.md and list the open questions
 ```
 
-Typing `@myserver:` shows an autocomplete list of that server's resource
-URIs. On submit, the referenced resource is read and its contents are
+Typing `@myserver:` shows an autocomplete list of that server's resources;
+keep typing to filter, matching (case-insensitively) either the resource URI
+or its friendly name/title. You don't have to know a URI by heart — before
+you reach the colon, typing part of a server name also suggests matching
+servers that expose resources, so you can pick one and drill straight into
+its resource list. On submit, the referenced resource is read and its contents are
 appended to your message (text inline, binary blobs as attachments); the
 `@server:uri` reference is preserved in the prompt so the model knows what
 it is looking at. The `server` prefix must match a configured MCP server —
