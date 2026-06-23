@@ -43,10 +43,13 @@ Commands for adjusting interface appearance and work environment.
 | `/clear`             | Clear terminal screen content                                                                                                                                                     | `/clear` (shortcut: `Ctrl+L`)           |
 | `/context`           | Show context window usage breakdown                                                                                                                                               | `/context`                              |
 | → `detail`           | Show per-item context usage breakdown                                                                                                                                             | `/context detail`                       |
+| `/history`           | Control history display preferences and visibility                                                                                                                               | `/history collapse-on-resume`, `/history expand-on-resume`, `/history expand-now` |
 | `/diff`              | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                                 |
 | `/theme`             | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                                |
 | `/vim`               | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                                  |
+| `/voice`             | Toggle voice dictation input                                                                                                                                                      | `/voice`, `/voice status`               |
 | `/directory`         | Manage multi-directory support workspace                                                                                                                                          | `/dir add ./src,./tests`                |
+| `/cd`                | Move this session to a new working directory                                                                                                                                      | `/cd ../other-project`                  |
 | `/editor`            | Open dialog to select supported editor                                                                                                                                            | `/editor`                               |
 | `/statusline`        | Open interactive [status line](./status-line.md) preset dialog                                                                                                                    | `/statusline`                           |
 | `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch` |
@@ -72,6 +75,7 @@ Commands for managing AI tools and models.
 | Command          | Description                                   | Usage Examples                                |
 | ---------------- | --------------------------------------------- | --------------------------------------------- |
 | `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
+| `/import-config` | Import MCP servers from Claude configs         | `/import-config claude-code`, `/import-config claude-desktop --scope project` |
 | `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
 | `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
 | `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`         |
@@ -81,8 +85,9 @@ Commands for managing AI tools and models.
 | →`auto-edit`     | Automatically approve edits                   | Trusted environment                           |
 | →`auto`          | Classifier-evaluated approval                 | Autonomous sessions with safety guardrails    |
 | →`yolo`          | Automatically approve all                     | Quick prototyping                             |
-| `/model`         | Switch model used in current session          | `/model`                                      |
+| `/model`         | Switch model used in current session          | `/model`, `/model <model-id>` (switch immediately) |
 | `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`             |
+| `/model --voice` | Set the model used for voice transcription    | `/model --voice <model-id>`                   |
 | `/extensions`    | List all active extensions in current session | `/extensions`                                 |
 | `/memory`        | Open the Memory Manager dialog                | `/memory`                                     |
 | `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
