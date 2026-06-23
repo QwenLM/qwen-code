@@ -155,7 +155,7 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
-    it('renders completed tool group as compact overview', () => {
+    it('renders non-collapsible tools individually', () => {
       const toolCalls = [
         createToolCall({ callId: 'tool-1', name: 'first-tool' }),
         createToolCall({ callId: 'tool-2', name: 'second-tool' }),
@@ -168,8 +168,9 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // All-complete groups now show CompactToolGroupDisplay summary
-      expect(frame).toContain('Used 2 tools');
+      // Non-collapsible tools (unknown → 'other') render individually
+      expect(frame).toContain('MockTool[tool-1]');
+      expect(frame).toContain('MockTool[tool-2]');
     });
 
     it('renders tool call awaiting confirmation', () => {
@@ -694,8 +695,8 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // Sibling shown.
-      expect(frame).toContain('read_file');
+      // Sibling shown — read_file is collapsible, renders via summary.
+      expect(frame).toContain('read config.yaml');
       // Subagent hidden — panel owns the live row.
       expect(frame).not.toContain('MockSubagent[task-running]');
     });

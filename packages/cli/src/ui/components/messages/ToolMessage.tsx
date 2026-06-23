@@ -667,14 +667,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  // Use the custom hook to determine the display type
-  const displayRenderer = useResultDisplayRenderer(resultDisplay);
-
-  const isCompleted = status === ToolCallStatus.Success;
-  const shouldCollapse = isCompleted && !forceShowResult;
-  const effectiveDisplayRenderer = shouldCollapse
-    ? { type: 'none' as const }
-    : displayRenderer;
+  const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -795,15 +788,13 @@ const ToolInfo: React.FC<ToolInfo> = ({
       }
     }
   }, [emphasis]);
-  const isDim = status === ToolCallStatus.Success;
   return (
     <Box flexGrow={1}>
       <Text
         wrap="truncate-end"
         strikethrough={status === ToolCallStatus.Canceled}
-        dimColor={isDim}
       >
-        <Text color={nameColor} bold={!isDim}>
+        <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
         </Text>{' '}
         <Text color={theme.text.secondary}>{description}</Text>

@@ -852,9 +852,8 @@ describe('SessionPicker', () => {
       await act(async () => {
         await loadSessionPromise;
       });
-      // Completed tool group renders via CompactToolGroupDisplay semantic summary.
-      // Without a tool registry, 'BashTool' maps to 'other' → "Used 1 tool".
-      expect(lastFrame() ?? '').toContain('Used 1 tool');
+      // 'BashTool' maps to 'other' (non-collapsible) → renders individually.
+      expect(lastFrame() ?? '').toContain('BashTool');
     });
 
     it('Enter inside preview fires onSelect with previewed sessionId', async () => {

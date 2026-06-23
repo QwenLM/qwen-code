@@ -75,21 +75,6 @@ interface HistoryItemDisplayProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   availableTerminalHeightGemini?: number;
-  /**
-   * When the item is a `tool_group`, an optional short LLM-generated label
-   * summarizing the batch. Replaces the generic "Tool × N" line in compact
-   * mode. Computed by the parent from `tool_use_summary` history items.
-   */
-  compactLabel?: string;
-  /**
-   * When the item is a `tool_use_summary`, true if a sibling tool_group has
-   * absorbed this label via its compact-mode header. The standalone `● <label>`
-   * line is suppressed in that case. False for force-expanded groups in
-   * compact mode (they render through the full ToolGroupMessage path and
-   * don't consume compactLabel, so the standalone line is the label's only
-   * path to the screen) and for all tool_use_summary items in full mode.
-   */
-  summaryAbsorbed?: boolean;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
@@ -205,8 +190,6 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   activeShellPtyId,
   embeddedShellFocused,
   availableTerminalHeightGemini,
-  compactLabel,
-  summaryAbsorbed = false,
   sourceCopyIndexOffsets,
   thoughtExpanded,
   thinkingFullText,
@@ -353,24 +336,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryWriteCount={itemForDisplay.memoryWriteCount}
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
-          compactLabel={compactLabel}
         />
       )}
-      {/*
-        `tool_use_summary` as a standalone inline item.
-
-        The label is normally absorbed into the sibling tool_group's header
-        (via `compactLabel` prop to CompactToolGroupDisplay), and
-        `summaryAbsorbed=true` suppresses this block. This applies in both
-        compact mode and unified mode (completed groups always render via
-        CompactToolGroupDisplay).
-
-        When the sibling tool_group is force-expanded (errors, confirmations,
-        user-initiated, focused shell), the full-expand path ignores
-        `compactLabel`, and `MainContent` leaves `summaryAbsorbed=false` —
-        the standalone line below is then the label's only route to the UI.
-      */}
-      {itemForDisplay.type === 'tool_use_summary' && !summaryAbsorbed && (
+      {itemForDisplay.type === 'tool_use_summary' && (
         <Box paddingLeft={1}>
           <Text dimColor>● {itemForDisplay.summary}</Text>
         </Box>

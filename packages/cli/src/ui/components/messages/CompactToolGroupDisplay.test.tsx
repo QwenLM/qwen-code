@@ -111,7 +111,7 @@ describe('<CompactToolGroupDisplay /> — shell timeout plumbing', () => {
 });
 
 describe('<CompactToolGroupDisplay /> — summary label', () => {
-  it('renders semantic summary when no compactLabel is provided', () => {
+  it('renders semantic summary for collapsible tools', () => {
     const tools = [
       toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
       toolCall({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
@@ -121,42 +121,9 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
     const frame = lastFrame()!;
-    expect(frame).toContain('Read 2 files');
-    expect(frame).toContain('searched search pattern');
-  });
-
-  it('replaces header with compactLabel when provided', () => {
-    const tools = [
-      toolCall({ callId: 'c1', name: 'read_file' }),
-      toolCall({ callId: 'c2', name: 'grep' }),
-    ];
-    const { lastFrame } = render(
-      <CompactToolGroupDisplay
-        toolCalls={tools}
-        contentWidth={80}
-        compactLabel="Searched in auth/"
-      />,
-    );
-    const frame = lastFrame()!;
-    expect(frame).toContain('Searched in auth/');
-    expect(frame).toContain('2 tools');
-    // The raw tool name should not appear as the primary header when a
-    // summary is shown.
-    expect(frame).not.toContain('read_file × 2');
-  });
-
-  it('shows tool count suffix only when multiple tools are present', () => {
-    const tools = [toolCall({ callId: 'c1', name: 'read_file' })];
-    const { lastFrame } = render(
-      <CompactToolGroupDisplay
-        toolCalls={tools}
-        contentWidth={80}
-        compactLabel="Read config.json"
-      />,
-    );
-    const frame = lastFrame()!;
-    expect(frame).toContain('Read config.json');
-    expect(frame).not.toContain('tools');
+    // CATEGORY_ORDER: search → read → list → ...
+    expect(frame).toContain('Searched search pattern');
+    expect(frame).toContain('read 2 files');
   });
 
   it('renders nothing for empty tool calls', () => {
@@ -227,18 +194,19 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'Edit', description: 'b.ts' }),
       make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
     ];
+    // CATEGORY_ORDER: search → read → list → command → edit
     expect(buildToolSummary(tools, false)).toBe(
-      'Ran npm test, read a.ts, edited b.ts',
+      'Read a.ts, ran npm test, edited b.ts',
     );
   });
 
-  it('respects CATEGORY_ORDER (command first)', () => {
+  it('respects CATEGORY_ORDER (read before command)', () => {
     const tools = [
       make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
       make({ callId: 'c2', name: 'Shell', description: 'ls' }),
     ];
     const result = buildToolSummary(tools, false);
-    expect(result.startsWith('Ran')).toBe(true);
+    expect(result.startsWith('Read')).toBe(true);
   });
 
   it('unknown tool names fall to other category', () => {
@@ -259,6 +227,6 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
       make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe('Ran npm test, read 2 files');
+    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran npm test');
   });
 });

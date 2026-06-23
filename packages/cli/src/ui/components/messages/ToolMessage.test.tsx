@@ -153,7 +153,7 @@ describe('<ToolMessage />', () => {
     config: mockConfig,
   };
 
-  it('renders basic tool information and collapses result for Success', () => {
+  it('renders basic tool information with result for Success', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
       StreamingState.Idle,
@@ -162,7 +162,7 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓'); // Success indicator
     expect(output).toContain('test-tool');
     expect(output).toContain('A tool for testing');
-    expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+    expect(output).toContain('MockMarkdown:Test result');
   });
 
   it('renders tool results directly below the header row when forced', () => {
@@ -180,7 +180,7 @@ describe('<ToolMessage />', () => {
     expect(resultLine).toBe(headerLine + 1);
   });
 
-  it('hides result output for completed tools', () => {
+  it('shows result output for completed tools (collapse handled at group level)', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
       StreamingState.Idle,
@@ -188,7 +188,7 @@ describe('<ToolMessage />', () => {
     const output = lastFrame();
     expect(output).toContain('✓'); // status indicator still visible
     expect(output).toContain('test-tool'); // tool name still visible
-    expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
+    expect(output).toContain('MockMarkdown:Test result');
   });
 
   it('shows result for Error status in compact mode', () => {
