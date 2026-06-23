@@ -669,6 +669,17 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
 
+  // Collapse text/ANSI output for completed tools to reduce scrollback
+  // noise. Diff, plan, todo, and task results always render — they carry
+  // non-repeatable information the user needs to review inline.
+  const isCompleted =
+    status === ToolCallStatus.Success || status === ToolCallStatus.Canceled;
+  const shouldCollapseResult =
+    !forceShowResult &&
+    isCompleted &&
+    (effectiveDisplayRenderer.type === 'string' ||
+      effectiveDisplayRenderer.type === 'ansi');
+
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
       <Box minHeight={1}>
@@ -693,7 +704,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
-      {effectiveDisplayRenderer.type !== 'none' && (
+      {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">
             {effectiveDisplayRenderer.type === 'todo' && (
