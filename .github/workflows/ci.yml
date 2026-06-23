@@ -92,6 +92,18 @@ jobs:
           & "$env:SystemRoot\System32\whoami.exe"
           & "$env:SystemRoot\System32\whoami.exe" /priv
 
+          # Report machine size so we can tell whether the test suite has enough
+          # headroom. The full suite previously OOM-crashed here; logical CPUs and
+          # total commit (physical RAM + pagefile) drive how high VITEST_MAX_THREADS
+          # can safely go.
+          $computer = Get-CimInstance Win32_ComputerSystem
+          $osInfo = Get-CimInstance Win32_OperatingSystem
+          Write-Host ("LogicalProcessors={0}" -f $computer.NumberOfLogicalProcessors)
+          Write-Host ("TotalPhysicalMemoryGB={0:N1}" -f ($computer.TotalPhysicalMemory / 1GB))
+          Write-Host ("FreePhysicalMemoryGB={0:N1}" -f ($osInfo.FreePhysicalMemory / 1MB))
+          Write-Host ("TotalCommitGB={0:N1}" -f ($osInfo.TotalVirtualMemorySize / 1MB))
+          Write-Host ("FreeCommitGB={0:N1}" -f ($osInfo.FreeVirtualMemory / 1MB))
+
           if ($env:QWEN_CODE_LANG -ne 'en') {
             throw "Expected QWEN_CODE_LANG=en, got '$env:QWEN_CODE_LANG'"
           }
@@ -127,6 +139,16 @@ jobs:
       QWEN_CODE_LANG: 'en'
       LANG: 'en_US.UTF-8'
       LC_ALL: 'en_US.UTF-8'
+      # Cap vitest worker concurrency on this self-hosted runner. packages/core's
+      # vitest config pins threads to min 8 / max 16, and the root `test:ci`
+      # fans every workspace out `--parallel` with v8 coverage enabled. On a hosted
+      # 16 GB runner that survives; on this box the combined footprint exhausts
+      # memory and crashes the process ("Fatal process out of memory: Zone"),
+      # killing the tinypool worker (ERR_IPC_CHANNEL_CLOSED) and failing the job.
+      # vitest resolves VITEST_*_THREADS over the config's poolOptions.threads, so
+      # these override core's pinned values without touching shared config.
+      VITEST_MIN_THREADS: '1'
+      VITEST_MAX_THREADS: '4'
     defaults:
       run:
         shell: 'powershell'
@@ -160,6 +182,18 @@ jobs:
           $ErrorActionPreference = 'Stop'
           & "$env:SystemRoot\System32\whoami.exe"
           & "$env:SystemRoot\System32\whoami.exe" /priv
+
+          # Report machine size so we can tell whether the test suite has enough
+          # headroom. The full suite previously OOM-crashed here; logical CPUs and
+          # total commit (physical RAM + pagefile) drive how high VITEST_MAX_THREADS
+          # can safely go.
+          $computer = Get-CimInstance Win32_ComputerSystem
+          $osInfo = Get-CimInstance Win32_OperatingSystem
+          Write-Host ("LogicalProcessors={0}" -f $computer.NumberOfLogicalProcessors)
+          Write-Host ("TotalPhysicalMemoryGB={0:N1}" -f ($computer.TotalPhysicalMemory / 1GB))
+          Write-Host ("FreePhysicalMemoryGB={0:N1}" -f ($osInfo.FreePhysicalMemory / 1MB))
+          Write-Host ("TotalCommitGB={0:N1}" -f ($osInfo.TotalVirtualMemorySize / 1MB))
+          Write-Host ("FreeCommitGB={0:N1}" -f ($osInfo.FreeVirtualMemory / 1MB))
 
           if ($env:QWEN_CODE_LANG -ne 'en') {
             throw "Expected QWEN_CODE_LANG=en, got '$env:QWEN_CODE_LANG'"
