@@ -98,6 +98,7 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
 
 export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
+  extraArgs?: string[];
 }
 
 /**
@@ -130,7 +131,13 @@ export function createSpawnChannelFactory(
     );
     const child = spawn(
       process.execPath,
-      [...execArgs, ...memoryArgs, cliEntry, '--acp'],
+      [
+        ...execArgs,
+        ...memoryArgs,
+        cliEntry,
+        '--acp',
+        ...(options.extraArgs ?? []),
+      ],
       {
         cwd: workspaceCwd,
         stdio: ['pipe', 'pipe', 'pipe'],

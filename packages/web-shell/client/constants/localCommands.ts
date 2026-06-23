@@ -83,6 +83,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     },
     { name: 'tasks', description: t('local.tasks') },
     { name: 'recap', description: t('local.recap') },
+    { name: 'rewind', description: t('local.rewind') },
     {
       name: 'branch',
       description: t('local.branch'),

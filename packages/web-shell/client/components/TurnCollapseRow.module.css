@@ -1,0 +1,84 @@
+.collapseRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--border-color) 58%, transparent);
+  padding-bottom: 10px;
+  margin-bottom: 5px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.collapseRowClickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.collapseRowClickable:hover .collapseLabel,
+.collapseRowClickable:focus-visible .collapseLabel {
+  color: var(--text-secondary);
+}
+
+.collapseRowClickable:focus-visible {
+  outline: none;
+}
+
+.collapseLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-primary);
+}
+
+.processedLabel {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--processed-label-color);
+}
+
+.hiddenMetrics {
+  display: none;
+}
+
+.summaryMetrics {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--text-dimmed) 72%, transparent);
+}
+
+.collapseIcon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dimmed);
+}
+
+.collapseRowClickable:hover .collapseIcon,
+.collapseRowClickable:focus-visible .collapseIcon {
+  color: var(--text-secondary);
+}
+
+.chevronRight,
+.chevronDown {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+}
+
+.chevronRight {
+  transform: rotate(-45deg);
+}
+
+.chevronDown {
+  transform: rotate(45deg);
+  margin-top: -3px;
+}

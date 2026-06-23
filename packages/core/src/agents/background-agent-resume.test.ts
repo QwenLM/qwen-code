@@ -21,6 +21,7 @@ import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
 import { AgentHeadless } from './runtime/agent-headless.js';
 import {
+  FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   buildChildMessage,
 } from '../tools/agent/fork-subagent.js';
@@ -96,6 +97,7 @@ describe('BackgroundAgentResumeService', () => {
       getMaxSessionTurns: () => -1,
       getMaxToolCalls: () => -1,
       isTrustedFolder: () => true,
+      isInteractive: () => false,
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
       getGeminiClient: () => undefined,
@@ -1350,6 +1352,9 @@ describe('BackgroundAgentResumeService', () => {
         { role: 'user', parts: [{ text: buildChildMessage(launchPrompt) }] },
         { role: 'model', parts: [{ text: 'Working silently' }] },
       ],
+    });
+    expect(createArgs?.[4]).toEqual({
+      max_turns: FORK_DEFAULT_MAX_TURNS,
     });
     expect(createArgs?.[5]).toEqual({
       tools: [{ name: 'Bash' }, { name: 'Read' }],
