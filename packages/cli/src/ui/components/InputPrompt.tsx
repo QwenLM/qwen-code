@@ -74,6 +74,7 @@ import {
   resolveVoiceStreamConfig,
   transcribeVoiceAudio,
 } from '../voice/voice-transcriber.js';
+import { refineVoiceTranscript } from '../voice/voice-refine.js';
 import { openQwenAsrRealtimeStream } from '../voice/qwen-asr-realtime-session.js';
 import { openVoiceStream } from '../voice/voice-stream-session.js';
 import { openVoiceStreamWithRetry } from '../voice/voice-stream-retry.js';
@@ -326,6 +327,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       transcribeVoiceAudio(audio, { config, settings, voiceModel }),
     [config, settings],
   );
+  // Refine the transcript with the fast model before inserting. On by default,
+  // but skipped when the user opted out or no fast model is configured. Memoized
+  // so getFastModel() doesn't re-scan the model registry on every keystroke.
+  const voiceRefineEnabled = useMemo(
+    () =>
+      settings.merged.general?.voice?.refineTranscript !== false &&
+      config.getFastModel() != null,
+    [config, settings.merged.general?.voice?.refineTranscript],
+  );
+  const refineVoice = useCallback(
+    (raw: string, signal: AbortSignal) =>
+      refineVoiceTranscript(config, raw, signal),
+    [config],
+  );
   const voiceMicWarnedStatusRef = useRef<string | null>(null);
   const voiceRecorderRef = useRef<ReturnType<
     typeof createVoiceRecorder
@@ -413,6 +428,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     addItem: uiState.historyManager?.addItem,
     createRecorder: getVoiceRecorder,
     transcribe: transcribeVoice,
+    refine: voiceRefineEnabled ? refineVoice : undefined,
     onSubmit: (text) => voiceSubmitRef.current(text),
     warmup: warmupVoice,
     streaming: voiceStreaming,
@@ -1841,7 +1857,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? t('Voice: recording')
       : voiceInput.status === 'transcribing'
         ? t('Voice: transcribing')
-        : undefined;
+        : voiceInput.status === 'refining'
+          ? t('Voice: refining')
+          : undefined;
 
   const prefixNode = (
     <Text

@@ -1386,8 +1386,10 @@ export default {
     '语音听写需要麦克风访问。macOS 会在你首次录音时弹出授权请求——请同意后重新开始。弹窗打开期间的首次录音可能为空。',
   'Voice: recording': '语音：录音中',
   'Voice: transcribing': '语音：转写中',
+  'Voice: refining': '语音：优化中',
   'listening…': '聆听中…',
   'transcribing…': '转写中…',
+  'refining…': '优化中…',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':

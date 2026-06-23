@@ -833,4 +833,171 @@ describe('use-voice-input', () => {
       vi.useRealTimers();
     }
   });
+
+  it('refines the transcript before inserting and submitting (tap mode)', async () => {
+    buffer = createBuffer();
+    const recorder = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue({
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+      }),
+    };
+    const transcribe = vi.fn().mockResolvedValue('um the diff');
+    const refineDeferred = deferred<string>();
+    const refine = vi.fn(() => refineDeferred.promise);
+    const onSubmit = vi.fn();
+
+    const { result } = renderHook(() =>
+      useVoiceInput({
+        enabled: true,
+        mode: 'tap',
+        voiceModel: 'qwen3-asr-flash',
+        buffer,
+        createRecorder: vi.fn(() => recorder),
+        transcribe,
+        refine,
+        onSubmit,
+      }),
+    );
+
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+    });
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+    });
+
+    // Status parks at 'refining' until the fast model returns, and nothing is
+    // inserted until the refined text is ready.
+    await waitFor(() => {
+      expect(refine).toHaveBeenCalledWith(
+        'um the diff',
+        expect.any(AbortSignal),
+      );
+      expect(result.current.status).toBe('refining');
+    });
+    expect(buffer.insert).not.toHaveBeenCalled();
+
+    await act(async () => {
+      refineDeferred.resolve('the diff');
+      await refineDeferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(buffer.insert).toHaveBeenCalledWith('the diff');
+      expect(onSubmit).toHaveBeenCalledWith('the diff');
+      expect(result.current.status).toBe('idle');
+    });
+  });
+
+  it('drops the refined transcript when cancelled mid-refine', async () => {
+    buffer = createBuffer();
+    const recorder = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue({
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+      }),
+    };
+    const transcribe = vi.fn().mockResolvedValue('hello');
+    const onSubmit = vi.fn();
+    const refineDeferred = deferred<string>();
+    let capturedSignal: AbortSignal | undefined;
+    // Resolve only once the hook aborts the refine on cancel.
+    const refine = vi.fn((_raw: string, signal: AbortSignal) => {
+      capturedSignal = signal;
+      signal.addEventListener('abort', () => refineDeferred.resolve('hello'));
+      return refineDeferred.promise;
+    });
+
+    const { result } = renderHook(() =>
+      useVoiceInput({
+        enabled: true,
+        mode: 'tap',
+        voiceModel: 'qwen3-asr-flash',
+        buffer,
+        createRecorder: vi.fn(() => recorder),
+        transcribe,
+        refine,
+        onSubmit,
+      }),
+    );
+
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+    });
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+    });
+    await waitFor(() => {
+      expect(refine).toHaveBeenCalled();
+      expect(result.current.status).toBe('refining');
+    });
+
+    await act(async () => {
+      result.current.handleKeypress(escapeKey);
+      await refineDeferred.promise;
+    });
+
+    // Cancel must actually abort the in-flight refine, not just drop its result.
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(buffer.insert).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(result.current.status).toBe('idle');
+  });
+
+  it('hold mode: refines without submitting', async () => {
+    vi.useFakeTimers();
+    try {
+      buffer = createBuffer();
+      const recorder = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn().mockResolvedValue({
+          data: new Uint8Array([1, 2, 3]),
+          mimeType: 'audio/wav',
+        }),
+      };
+      const transcribe = vi.fn().mockResolvedValue('um hold text');
+      const refine = vi.fn().mockResolvedValue('hold text');
+      const onSubmit = vi.fn();
+
+      const { result } = renderHook(() =>
+        useVoiceInput({
+          enabled: true,
+          mode: 'hold',
+          voiceModel: 'qwen3-asr-flash',
+          buffer,
+          createRecorder: () => recorder,
+          transcribe,
+          refine,
+          onSubmit,
+        }),
+      );
+
+      await act(async () => {
+        result.current.handleKeypress(voiceKey);
+      });
+      // No further key repeats: the release timer fires and finalizes.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(refine).toHaveBeenCalledWith(
+        'um hold text',
+        expect.any(AbortSignal),
+      );
+      expect(buffer.insert).toHaveBeenCalledWith('hold text');
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(result.current.status).toBe('idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
