@@ -24,6 +24,11 @@ on:
         required: false
         default: false
         type: 'boolean'
+      windows_runner_full_test:
+        description: 'Run npm ci and npm run test:ci on the self-hosted Windows runner'
+        required: false
+        default: false
+        type: 'boolean'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
@@ -84,6 +89,53 @@ jobs:
             throw 'package.json was not checked out'
           }
           git status --short
+
+  windows_runner_full_test:
+    name: 'Windows Runner Full Test'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.windows_runner_full_test == true }}"
+    runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
+          fetch-depth: 1
+
+      - name: 'Verify runner tools'
+        run: |-
+          set -euo pipefail
+          echo "RUNNER_NAME=${RUNNER_NAME}"
+          echo "RUNNER_OS=${RUNNER_OS}"
+          echo "RUNNER_ARCH=${RUNNER_ARCH}"
+          echo "RUNNER_TEMP=${RUNNER_TEMP}"
+          echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE}"
+
+          command -v bash
+          bash --version | head -1
+          command -v git
+          git --version
+          command -v node
+          node --version
+          command -v npm
+          npm --version
+          command -v qwen
+          qwen --version
+
+      - name: 'Configure npm for rate limiting'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Run tests and generate reports'
+        env:
+          NO_COLOR: true
+        run: 'npm run test:ci'
 
   classify_pr:
     name: 'Classify PR'
@@ -149,7 +201,7 @@ jobs:
   lint:
     name: 'Lint'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true) }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.windows_runner_smoke == true || inputs.windows_runner_full_test == true)) }}"
     runs-on: "${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]') }}"
     steps:
       # On PRs github.ref is the merge ref (refs/pull/N/merge), so the required
@@ -248,7 +300,7 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    if: "${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true) }}"
+    if: "${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && (inputs.windows_runner_smoke == true || inputs.windows_runner_full_test == true)) }}"
     runs-on: '${{ fromJSON(matrix.runner) }}'
     permissions:
       contents: 'read'
@@ -404,7 +456,7 @@ jobs:
   codeql:
     name: 'CodeQL'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.windows_runner_smoke == true) }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.windows_runner_smoke == true || inputs.windows_runner_full_test == true)) }}"
     runs-on: 'ubuntu-latest'
     permissions:
       actions: 'read'
