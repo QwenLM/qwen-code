@@ -29,7 +29,7 @@ import {
   StrictMissingCredentialsError,
   StrictMissingModelIdError,
 } from '../models/modelConfigErrors.js';
-import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
+import { PROVIDER_SOURCED_FIELDS } from '../models/modelsConfig.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -52,21 +52,12 @@ export interface ContentGenerator {
   useSummarizedThinking(): boolean;
 }
 
-export type AuthType = string;
-
-export const AuthType = {
-  USE_OPENAI: 'openai',
-  QWEN_OAUTH: 'qwen-oauth',
-  USE_GEMINI: 'gemini',
-  USE_VERTEX_AI: 'vertex-ai',
-  USE_ANTHROPIC: 'anthropic',
-} as const;
-
-export enum Protocol {
-  OPENAI = 'openai',
+export enum AuthType {
+  USE_OPENAI = 'openai',
   QWEN_OAUTH = 'qwen-oauth',
-  GEMINI = 'gemini',
-  ANTHROPIC = 'anthropic',
+  USE_GEMINI = 'gemini',
+  USE_VERTEX_AI = 'vertex-ai',
+  USE_ANTHROPIC = 'anthropic',
 }
 
 /**
@@ -87,7 +78,6 @@ export type ContentGeneratorConfig = {
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
-  protocol?: Protocol;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
@@ -355,20 +345,20 @@ export async function createContentGenerator(
     throw new Error(validation.errors.map((e) => e.message).join('\n'));
   }
 
-  const protocol = generatorConfig.protocol;
-  if (!protocol) {
-    throw new Error('ContentGeneratorConfig must have a protocol');
+  const authType = generatorConfig.authType;
+  if (!authType) {
+    throw new Error('ContentGeneratorConfig must have an authType');
   }
 
   let baseGenerator: ContentGenerator;
 
   try {
-    if (protocol === Protocol.OPENAI) {
+    if (authType === AuthType.USE_OPENAI) {
       const { createOpenAIContentGenerator } = await import(
         './openaiContentGenerator/index.js'
       );
       baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
-    } else if (protocol === Protocol.QWEN_OAUTH) {
+    } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(
         '../qwen/qwenOAuth2.js'
       );
@@ -392,19 +382,22 @@ export async function createContentGenerator(
         }
         throw new Error(error instanceof Error ? error.message : String(error));
       }
-    } else if (protocol === Protocol.ANTHROPIC) {
+    } else if (authType === AuthType.USE_ANTHROPIC) {
       const { createAnthropicContentGenerator } = await import(
         './anthropicContentGenerator/index.js'
       );
       baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
-    } else if (protocol === Protocol.GEMINI) {
+    } else if (
+      authType === AuthType.USE_GEMINI ||
+      authType === AuthType.USE_VERTEX_AI
+    ) {
       const { createGeminiContentGenerator } = await import(
         './geminiContentGenerator/index.js'
       );
       baseGenerator = createGeminiContentGenerator(generatorConfig, config);
     } else {
       throw new Error(
-        `Error creating contentGenerator: Unknown protocol: ${protocol}`,
+        `Error creating contentGenerator: Unsupported authType: ${authType}`,
       );
     }
   } catch (error) {
@@ -412,7 +405,7 @@ export async function createContentGenerator(
     if (moduleNotFoundError) {
       throw new Error(
         `Qwen Code was updated in the background and needs to be restarted.\n` +
-          `Please exit and restart Qwen Code to use the '${protocol}' provider.`,
+          `Please exit and restart Qwen Code to use the '${authType}' provider.`,
         { cause: moduleNotFoundError },
       );
     }

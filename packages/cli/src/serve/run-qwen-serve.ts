@@ -43,12 +43,10 @@ import {
   getDefaultModelIds,
   resolveTelemetrySettings,
   shutdownTelemetry,
-} from '@qwen-code/qwen-code-core';
-import type {
-  Protocol,
-  ProviderSetupInputs,
-  TelemetryRuntimeConfig,
-  TelemetrySettings,
+  type AuthType,
+  type ProviderSetupInputs,
+  type TelemetryRuntimeConfig,
+  type TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
@@ -389,7 +387,7 @@ function buildProviderSetupInputs(
   req: ServeAuthProviderInstallRequest,
   provider: NonNullable<ReturnType<typeof findProviderById>>,
 ): ProviderSetupInputs {
-  const protocol = (req.protocol ?? provider.protocol) as Protocol;
+  const protocol = (req.protocol ?? provider.protocol) as AuthType;
   const baseUrl = resolveBaseUrl(provider, req.baseUrl);
   return {
     ...(provider.protocolOptions ? { protocol } : {}),

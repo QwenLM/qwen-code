@@ -21,9 +21,6 @@ describe('Migration Framework Integration', () => {
         model: 'gemini',
         disableAutoUpdate: true,
         disableLoadingPhrases: false,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result = runMigrations(v1Settings, 'user');
@@ -59,9 +56,6 @@ describe('Migration Framework Integration', () => {
         $version: 2,
         ui: { theme: 'light' },
         general: { disableAutoUpdate: false },
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result = runMigrations(v2Settings, 'user');
@@ -101,9 +95,6 @@ describe('Migration Framework Integration', () => {
       const v1Settings = {
         theme: 'dark',
         disableAutoUpdate: true,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result1 = runMigrations(v1Settings, 'user');
@@ -182,9 +173,6 @@ describe('Migration Framework Integration', () => {
         theme: 'dark',
         disableAutoUpdate: true,
         disableLoadingPhrases: true,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result = scheduler.migrate(v1Settings);
@@ -240,9 +228,6 @@ describe('Migration Framework Integration', () => {
       const cleanV2Settings = {
         $version: 2,
         ui: { theme: 'dark' },
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       // needsMigration should report that migration is needed
@@ -324,9 +309,6 @@ describe('Migration Framework Integration', () => {
       const oldVersionSettings = {
         $version: SETTINGS_VERSION - 1,
         general: { disableAutoUpdate: true },
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       // needsMigration should return true for old version
@@ -348,9 +330,6 @@ describe('Migration Framework Integration', () => {
         $version: 'invalid',
         theme: 'dark',
         disableAutoUpdate: true,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       // Should detect migration needed based on V1 shape

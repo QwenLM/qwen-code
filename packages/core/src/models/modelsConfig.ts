@@ -7,16 +7,12 @@
 import process from 'node:process';
 
 import { AuthType } from '../core/contentGenerator.js';
-import type {
-  ContentGeneratorConfig,
-  Protocol,
-} from '../core/contentGenerator.js';
+import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
-import { authTypeToProtocol } from '../providers/install.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -260,13 +256,8 @@ export class ModelsConfig {
    * - Runtime model option (if active) is included before registry models of the same authType.
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
-    const hasExplicitAuthTypes = !!authTypes && authTypes.length > 0;
-    const inputAuthTypes = hasExplicitAuthTypes
-      ? authTypes!
-      : this.modelRegistry.getAuthTypes();
-
-    // Get runtime model option
-    const runtimeOption = this.getRuntimeModelOption();
+    const inputAuthTypes =
+      authTypes && authTypes.length > 0 ? authTypes : Object.values(AuthType);
 
     // De-duplicate while preserving the original order.
     const seen = new Set<AuthType>();
@@ -276,21 +267,6 @@ export class ModelsConfig {
         seen.add(authType);
         uniqueAuthTypes.push(authType);
       }
-    }
-
-    // A runtime model (e.g. an OPENAI_*-derived env/CLI override) can use an
-    // authType that has no registry models, so `modelRegistry.getAuthTypes()`
-    // omits it. Without this, the active runtime model — which may be the
-    // *current* model — would be dropped from the default listing. Only inject
-    // when no explicit authType filter was requested so callers asking for a
-    // specific authType still get exactly that set.
-    if (
-      !hasExplicitAuthTypes &&
-      runtimeOption &&
-      !seen.has(runtimeOption.authType)
-    ) {
-      seen.add(runtimeOption.authType);
-      uniqueAuthTypes.push(runtimeOption.authType);
     }
 
     // Force qwen-oauth to the front (if requested / defaulted in).
@@ -303,6 +279,9 @@ export class ModelsConfig {
         orderedAuthTypes.push(authType);
       }
     }
+
+    // Get runtime model option
+    const runtimeOption = this.getRuntimeModelOption();
 
     const allModels: AvailableModel[] = [];
     for (const authType of orderedAuthTypes) {
@@ -589,22 +568,7 @@ export class ModelsConfig {
    * Get generation config for ContentGenerator creation
    */
   getGenerationConfig(): Partial<ContentGeneratorConfig> {
-    if (!this.currentAuthType) return this._generationConfig;
-    return {
-      ...this._generationConfig,
-      protocol: this.getProtocol(this.currentAuthType),
-    };
-  }
-
-  /**
-   * Resolve the Protocol for a given authType.
-   * Two-tier lookup: ModelRegistry first, static fallback second.
-   */
-  getProtocol(authType: string): Protocol {
-    return (
-      this.modelRegistry.getProtocolForAuthType(authType as AuthType) ??
-      authTypeToProtocol(authType as AuthType)
-    );
+    return this._generationConfig;
   }
 
   /**
