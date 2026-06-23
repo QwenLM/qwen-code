@@ -1232,6 +1232,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             originator,
           );
         },
+        // Reverse tool channel (issue #5626, Phase 2): forward the optional
+        // client-hosted-MCP sender lookup so `BridgeClient.extMethod` can
+        // answer `qwen/control/client_mcp/message` from the child by reaching
+        // the per-WS-connection `ClientMcpRegistrar`. Omitted callers (tests,
+        // Mode A) never host a client MCP server, so the method stays
+        // unreachable.
+        opts.clientMcpSender,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 

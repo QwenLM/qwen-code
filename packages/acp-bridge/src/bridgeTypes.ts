@@ -201,6 +201,19 @@ export interface BridgeHeartbeatState {
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 
 /**
+ * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
+ * stamps this boolean on a client-hosted (extension) MCP server's
+ * runtime-MCP-add config. The `qwen --acp` child reads it in its
+ * `workspaceMcpRuntimeAdd` handler to (1) KEEP `type: 'sdk'` instead of
+ * stripping it and (2) let the session `McpClientManager` bind that server's
+ * `sendSdkMcpMessage` to the `qwen/control/client_mcp/message` ext-method.
+ * Defined here — the single contract package both the parent provider
+ * (`cli/src/serve/acp-http`) and the child handler (`cli/src/acp-integration`)
+ * import — so a rename can't silently break the handshake.
+ */
+export const CLIENT_MCP_OVER_WS_CONFIG_FLAG = '__clientMcpOverWs';
+
+/**
  * One queued mid-turn message. `originatorClientId` is the trusted client id
  * that pushed it (from `resolveTrustedClientId`), carried so the drain's SSE
  * echo can be routed/filtered to that client only — a peer attached to the

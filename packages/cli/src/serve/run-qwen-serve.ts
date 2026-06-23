@@ -62,6 +62,7 @@ import {
   getActiveSseCount,
   resolveBridgeFsFactory,
 } from './server.js';
+import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import { initDaemonLogger, type DaemonLogger } from './daemon-logger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
@@ -78,6 +79,10 @@ import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
+// Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
+// `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
+// the daemon WS. Off by default while the contract settles.
+const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
@@ -495,6 +500,14 @@ export async function runQwenServe(
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
+    // Reverse tool channel (issue #5626, Phase 2). Opt-in via env until the
+    // public contract settles — the WS `mcp_register` / `mcp_message` frames
+    // and the child↔parent `client_mcp/message` round-trip stay dormant
+    // otherwise. An explicit `clientMcpOverWs` in `optsIn` (embedded callers)
+    // still wins.
+    clientMcpOverWs:
+      optsIn.clientMcpOverWs ??
+      process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV] === '1',
   };
 
   // Catch the `--hostname localhost:4170` / `127.0.0.1:4170`
@@ -906,9 +919,19 @@ export async function runQwenServe(
   // implementation.
   const statusProvider = createDaemonStatusProvider();
 
+  // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
+  // between the bridge (which answers the ACP child's `client_mcp/message`
+  // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
+  // (which registers a per-connection `ClientMcpRegistrar`'s sender on
+  // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
+  const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
+      // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
+      // connection that hosts a named client MCP server (#5626).
+      clientMcpSender: clientMcpSenderRegistry.lookup,
       maxSessions: opts.maxSessions,
       ...(opts.maxPendingPromptsPerSession !== undefined
         ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
@@ -1075,6 +1098,9 @@ export async function runQwenServe(
     fsFactory,
     daemonLog,
     workspace: workspaceService,
+    // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
+    // so the WS provider and the child-answering bridge share one sender map.
+    clientMcpSenderRegistry,
     persistDisabledTools: persistDisabledToolsFn,
     persistSetting: (workspace, scope, key, value) =>
       withSettingsLock(workspace, async () => {

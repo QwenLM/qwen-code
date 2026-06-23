@@ -75,7 +75,9 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
+  SendSdkMcpMessage,
 } from '@qwen-code/qwen-code-core';
+import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
   RequestError,
@@ -207,6 +209,7 @@ import {
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '../serve/status.js';
+import { CLIENT_MCP_OVER_WS_CONFIG_FLAG } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   collectContextData,
   formatContextUsageText,
@@ -2286,17 +2289,69 @@ async function resolveQwenMemoryPaths(params: {
   };
 }
 
+/**
+ * Reverse tool channel (issue #5626, Phase 2). Deliver one JSON-RPC MCP frame
+ * for a client-hosted (extension) MCP server UP to the parent serve process
+ * over the `qwen/control/client_mcp/message` ext-method, returning the
+ * client-hosted server's correlated reply. Shared by the bootstrap
+ * (workspace-level) sender in `runAcpAgent` and the per-session sender
+ * (`buildClientMcpSender`).
+ *
+ * The parent's `BridgeClient.extMethod` wraps the reply in `{ payload }`
+ * (notifications resolve with a synthetic ack in the same envelope). A missing
+ * `connection` (frame arrived before the ACP connection was wired) or a missing
+ * `payload` (contract break / older parent) surfaces as a transport error so
+ * the agent's MCP client fails fast instead of hanging.
+ */
+async function deliverClientMcpMessage(
+  connection: AgentSideConnection | undefined,
+  serverName: string,
+  message: JSONRPCMessage,
+): Promise<JSONRPCMessage> {
+  if (!connection) {
+    throw new Error(
+      `client MCP server '${serverName}' has no ACP connection yet`,
+    );
+  }
+  const response = await connection.extMethod(
+    SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+    { server: serverName, payload: message },
+  );
+  const payload = (response as { payload?: unknown })['payload'];
+  if (payload === undefined || payload === null) {
+    throw new Error(
+      `client_mcp/message returned no payload for server '${serverName}'`,
+    );
+  }
+  return payload as JSONRPCMessage;
+}
+
 export async function runAcpAgent(
   config: Config,
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
+  // Reverse tool channel (issue #5626, Phase 2). Runtime-MCP-add targets the
+  // BOOTSTRAP (workspace-level) config's `McpClientManager` — `this.config` in
+  // the `workspaceMcpRuntimeAdd` handler — so a client-hosted MCP server's SDK
+  // callback must be bound HERE, not only on per-session configs. The ACP
+  // `connection` doesn't exist until `new AgentSideConnection` runs below, so
+  // the sender is late-bound: it reads the connection lazily when the agent
+  // first drives the client-hosted server. Filled synchronously by the
+  // `AgentSideConnection` callback before any MCP frame can flow.
+  let acpConnection: AgentSideConnection | undefined;
+  const bootstrapClientMcpSender: SendSdkMcpMessage = (serverName, message) =>
+    deliverClientMcpMessage(acpConnection, serverName, message);
+
   await config.initialize({
     skipGeminiInitialization: true,
     // Bootstrap skips MCP discovery — each session runs its own
     // pool-routed discovery, so bootstrap-level spawns would be
     // redundant subprocess leaks (W119).
     skipMcpDiscovery: true,
+    // Bind the workspace-level manager's SDK callback so a runtime-added
+    // client-hosted MCP server (#5626) round-trips over the parent WS.
+    sendSdkMcpMessage: bootstrapClientMcpSender,
   });
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
@@ -2311,6 +2366,7 @@ export async function runAcpAgent(
   const stream = ndJsonStream(stdout, stdin);
   let agentInstance: QwenAgent | undefined;
   const connection = new AgentSideConnection((conn) => {
+    acpConnection = conn;
     agentInstance = new QwenAgent(config, settings, argv, conn);
     return agentInstance;
   }, stream);
@@ -6068,8 +6124,21 @@ class QwenAgent implements Agent {
             oauth: _oauth,
             headers: _headers,
             type: _type,
+            // Reverse tool channel marker (issue #5626, Phase 2). The parent
+            // serve process stamps this on a client-hosted (extension) MCP
+            // server's runtime config; it never reaches the transport itself.
+            [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: clientMcpOverWs,
             ...safeConfig
           } = config as Record<string, unknown>;
+          // Client-hosted MCP servers (#5626) MUST keep `type: 'sdk'` so the
+          // manager binds an `SdkControlClientTransport` whose `sendMcpMessage`
+          // routes back over the daemon WS via `sendSdkMcpMessage` — which the
+          // session manager wires to the `client_mcp/message` ext-method. For
+          // every other runtime server the type stays stripped (no SDK process
+          // backs them). Trust/creds/filters/cwd remain stripped regardless.
+          if (clientMcpOverWs === true) {
+            (safeConfig as Record<string, unknown>)['type'] = 'sdk';
+          }
           const result = await manager.addRuntimeMcpServer(
             name,
             safeConfig as MCPServerConfig,
@@ -6919,6 +6988,23 @@ class QwenAgent implements Agent {
 
   // --- private helpers ---
 
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Build the session
+   * `McpClientManager`'s `sendSdkMcpMessage` callback. Client-hosted
+   * (extension) MCP servers are registered SDK-type, so the manager routes
+   * their JSON-RPC through this callback. We forward each frame UP to the
+   * parent serve process via the `qwen/control/client_mcp/message` ext-method;
+   * the parent's `BridgeClient.extMethod` hands it to the per-WS-connection
+   * `ClientMcpRegistrar`, which carries it down the daemon WS to the extension
+   * and returns the correlated response (the `payload` field). All SDK-type
+   * servers in this session share one callback — the `serverName` argument
+   * routes to the right client-hosted server in the parent.
+   */
+  private buildClientMcpSender(): SendSdkMcpMessage {
+    return (serverName: string, message: JSONRPCMessage) =>
+      deliverClientMcpMessage(this.connection, serverName, message);
+  }
+
   private async newSessionConfig(
     cwd: string,
     mcpServers: McpServer[],
@@ -7063,7 +7149,14 @@ class QwenAgent implements Agent {
           });
       });
     }
-    await config.initialize();
+    await config.initialize({
+      // Reverse tool channel (issue #5626, Phase 2): bind the session
+      // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
+      // client-hosted (extension) MCP server added at runtime reaches the
+      // daemon WS. Servers that aren't client-hosted never use this callback
+      // (the daemon only adds SDK-type runtime servers for client MCP).
+      sendSdkMcpMessage: this.buildClientMcpSender(),
+    });
     // Same reasoning as the top-level runAcpAgent path: ACP feeds session
     // messages to the model immediately, so we cannot return a Config whose
     // MCP discovery is still in flight.

@@ -67,6 +67,10 @@ import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import {
+  ClientMcpSenderRegistry,
+  createClientMcpServerProvider,
+} from './acp-http/client-mcp-sender-registry.js';
+import {
   buildDaemonStatusResponse,
   parseDaemonStatusDetail,
 } from './daemon-status.js';
@@ -761,6 +765,17 @@ export interface ServeAppDeps {
     key: string,
     value: unknown,
   ) => Promise<void>;
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
+   * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+   * child's `client_mcp/message` ext-method. `runQwenServe` constructs ONE and
+   * passes the SAME instance here AND to its `createAcpSessionBridge` call (as
+   * `clientMcpSender: registry.lookup`) so the bridge that answers the child
+   * and the WS provider that registers senders agree. When omitted (the
+   * standalone `createServeApp` path with no injected bridge), `createServeApp`
+   * builds its own registry and wires it into the bridge it creates.
+   */
+  clientMcpSenderRegistry?: ClientMcpSenderRegistry;
 }
 
 function resolveDaemonTelemetryRoute(
@@ -1066,6 +1081,16 @@ export function createServeApp(
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
     opts.enableSessionShell === true && tokenConfigured;
+  // Reverse tool channel (issue #5626, Phase 2). Process-scoped registry that
+  // bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+  // child's `client_mcp/message` ext-method. Prefer the registry `runQwenServe`
+  // already wired into its injected bridge (`deps.clientMcpSenderRegistry`) so
+  // the bridge that answers the child and the WS provider share ONE map.
+  // Standalone `createServeApp` (no injected bridge) builds its own and wires
+  // it into the bridge it creates below. Inert until a WS client sends
+  // `mcp_register` (gated by `clientMcpOverWs`).
+  const clientMcpSenderRegistry =
+    deps.clientMcpSenderRegistry ?? new ClientMcpSenderRegistry();
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
@@ -1081,6 +1106,9 @@ export function createServeApp(
       // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
       // readTextFile pick up trust / TOCTOU / audit.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      // Reverse tool channel: answer the child's `client_mcp/message`
+      // ext-method by reaching the WS connection that hosts the named server.
+      clientMcpSender: clientMcpSenderRegistry.lookup,
     });
 
   // Allow same-origin requests from the demo page. Browsers send an
@@ -4706,6 +4734,21 @@ export function createServeApp(
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
+    // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
+    // on `mcp_register` it records the WS registrar's sender in the shared
+    // registry and adds an SDK-type runtime MCP server in the ACP child
+    // (originator = the connection id). Only meaningful when
+    // `clientMcpOverWs` is on; the WS layer never builds a provider otherwise.
+    ...(opts.clientMcpOverWs === true
+      ? {
+          clientMcpProviderFactory: (connectionId: string) =>
+            createClientMcpServerProvider(
+              clientMcpSenderRegistry,
+              bridge,
+              connectionId,
+            ),
+        }
+      : {}),
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;

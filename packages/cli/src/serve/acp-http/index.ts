@@ -96,8 +96,23 @@ export interface MountAcpHttpOptions {
    * server whose discovery + tool calls round-trip over the WS. When omitted,
    * `mcp_register` is rejected with a structured `not_wired` error (the WS
    * framing + correlation still work, but no agent-visible server is created).
+   *
+   * Single shared instance — used by the round-trip test, which injects one
+   * provider for the whole server. Production wires the per-connection
+   * {@link clientMcpProviderFactory} instead (so each WS connection gets its
+   * own runtime-MCP originator id). When both are set the factory wins.
    */
   clientMcpProvider?: ClientMcpServerProvider;
+  /**
+   * Per-WS-connection provider factory (issue #5626, production wiring). Called
+   * once per connection (lazily, on the first client-MCP frame) with the
+   * connection's stable id, so runtime-MCP mutations the provider performs are
+   * attributed to that connection. Takes precedence over
+   * {@link clientMcpProvider}.
+   */
+  clientMcpProviderFactory?: (
+    connectionId: string,
+  ) => ClientMcpServerProvider;
 }
 
 export interface AcpHttpHandle {
@@ -652,9 +667,18 @@ export function mountAcpHttp(
               return;
             }
             if (!clientMcp) {
+              // Prefer the per-connection factory (production) so the
+              // provider's runtime-MCP mutations are attributed to THIS
+              // connection; fall back to the single shared provider (tests).
+              // `connRef` is set above once `initialized` is true.
+              const provider = opts.clientMcpProviderFactory
+                ? opts.clientMcpProviderFactory(
+                    connRef?.connectionId ?? 'ws-unknown',
+                  )
+                : opts.clientMcpProvider;
               clientMcp = new ClientMcpWsConnection(
                 (frame) => ws.send(JSON.stringify(frame)),
-                opts.clientMcpProvider,
+                provider,
               );
             }
 
