@@ -5,7 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthType, Protocol } from '../../core/contentGenerator.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { ModelProvidersConfig } from '../../models/types.js';
 import {
   applyProviderInstallPlan,
@@ -99,21 +99,18 @@ describe('applyProviderInstallPlan', () => {
 
   it('persists env, auth selection, selected model, and merged model providers', async () => {
     const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [
-          {
-            id: 'old-owned',
-            envKey: 'TEST_API_KEY',
-            generationConfig: { contextWindowSize: 123 },
-          },
-          {
-            id: 'preserved',
-            envKey: 'OTHER_API_KEY',
-            generationConfig: { contextWindowSize: 456 },
-          },
-        ],
-      },
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'old-owned',
+          envKey: 'TEST_API_KEY',
+          generationConfig: { contextWindowSize: 123 },
+        },
+        {
+          id: 'preserved',
+          envKey: 'OTHER_API_KEY',
+          generationConfig: { contextWindowSize: 456 },
+        },
+      ],
     });
     const reloadModelProviders = vi.fn();
     const syncAuthState = vi.fn();
@@ -146,17 +143,14 @@ describe('applyProviderInstallPlan', () => {
       'sk-test',
     );
     expect(process.env['TEST_API_KEY']).toBe('sk-test');
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', {
-      protocol: Protocol.OPENAI,
-      models: [
-        { id: 'new-model', envKey: 'TEST_API_KEY' },
-        {
-          id: 'preserved',
-          envKey: 'OTHER_API_KEY',
-          generationConfig: { contextWindowSize: 456 },
-        },
-      ],
-    });
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'new-model', envKey: 'TEST_API_KEY' },
+      {
+        id: 'preserved',
+        envKey: 'OTHER_API_KEY',
+        generationConfig: { contextWindowSize: 456 },
+      },
+    ]);
     expect(adapter.setValue).toHaveBeenCalledWith(
       'security.auth.selectedType',
       AuthType.USE_OPENAI,
@@ -167,17 +161,14 @@ describe('applyProviderInstallPlan', () => {
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', '');
     expect(adapter.persist).toHaveBeenCalled();
     expect(reloadModelProviders).toHaveBeenCalledWith({
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [
-          { id: 'new-model', envKey: 'TEST_API_KEY' },
-          {
-            id: 'preserved',
-            envKey: 'OTHER_API_KEY',
-            generationConfig: { contextWindowSize: 456 },
-          },
-        ],
-      },
+      [AuthType.USE_OPENAI]: [
+        { id: 'new-model', envKey: 'TEST_API_KEY' },
+        {
+          id: 'preserved',
+          envKey: 'OTHER_API_KEY',
+          generationConfig: { contextWindowSize: 456 },
+        },
+      ],
     });
     expect(syncAuthState).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
@@ -212,13 +203,10 @@ describe('applyProviderInstallPlan', () => {
 
   it('uses patch ownsModel for merge filtering', async () => {
     const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [
-          { id: 'old-a', envKey: 'A' },
-          { id: 'old-b', envKey: 'B' },
-        ],
-      },
+      [AuthType.USE_OPENAI]: [
+        { id: 'old-a', envKey: 'A' },
+        { id: 'old-b', envKey: 'B' },
+      ],
     });
     const plan: ProviderInstallPlan = {
       providerId: 'test-provider',
@@ -235,28 +223,22 @@ describe('applyProviderInstallPlan', () => {
 
     await applyProviderInstallPlan(plan, { settings: adapter });
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', {
-      protocol: Protocol.OPENAI,
-      models: [
-        { id: 'new-a', envKey: 'A' },
-        { id: 'old-b', envKey: 'B' },
-      ],
-    });
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'new-a', envKey: 'A' },
+      { id: 'old-b', envKey: 'B' },
+    ]);
   });
 
   it('falls back to id+baseUrl identity when ownsModel is omitted', async () => {
     const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [
-          // Same id, different baseUrl → should be preserved (different identity)
-          { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
-          // Same id+baseUrl as incoming → should be removed
-          { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
-          // Different id, same baseUrl as incoming → should be preserved
-          { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
-        ],
-      },
+      [AuthType.USE_OPENAI]: [
+        // Same id, different baseUrl → should be preserved (different identity)
+        { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
+        // Same id+baseUrl as incoming → should be removed
+        { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+        // Different id, same baseUrl as incoming → should be preserved
+        { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
+      ],
     });
     const plan: ProviderInstallPlan = {
       providerId: 'test-provider',
@@ -273,46 +255,40 @@ describe('applyProviderInstallPlan', () => {
 
     await applyProviderInstallPlan(plan, { settings: adapter });
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', {
-      protocol: Protocol.OPENAI,
-      models: [
-        { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
-        { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
-        { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
-      ],
-    });
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+      { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
+      { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
+    ]);
   });
 
   it('preserves existing custom provider models and selects the installed endpoint', async () => {
     const baseUrl = 'http://new.example/v1';
     const otherBaseUrl = 'http://192.168.100.100:8000/v1';
-    const envKey = generateCustomEnvKey(Protocol.OPENAI, baseUrl);
-    const otherEnvKey = generateCustomEnvKey(Protocol.OPENAI, otherBaseUrl);
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+    const otherEnvKey = generateCustomEnvKey(AuthType.USE_OPENAI, otherBaseUrl);
     const syncAuthState = vi.fn();
     const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [
-          // Same model id, different baseUrl: keep both and select the one just
-          // installed.
-          {
-            id: 'model-b',
-            name: 'model-b',
-            baseUrl: otherBaseUrl,
-            envKey: otherEnvKey,
-          },
-          { id: 'model-a', name: 'model-a', baseUrl, envKey },
-          {
-            id: 'shared-model',
-            name: 'shared-model',
-            baseUrl: otherBaseUrl,
-            envKey: otherEnvKey,
-          },
-        ],
-      },
+      [AuthType.USE_OPENAI]: [
+        // Same model id, different baseUrl: keep both and select the one just
+        // installed.
+        {
+          id: 'model-b',
+          name: 'model-b',
+          baseUrl: otherBaseUrl,
+          envKey: otherEnvKey,
+        },
+        { id: 'model-a', name: 'model-a', baseUrl, envKey },
+        {
+          id: 'shared-model',
+          name: 'shared-model',
+          baseUrl: otherBaseUrl,
+          envKey: otherEnvKey,
+        },
+      ],
     });
     const plan = buildInstallPlan(customProvider, {
-      protocol: Protocol.OPENAI,
+      protocol: AuthType.USE_OPENAI,
       baseUrl,
       apiKey: 'sk-new',
       modelIds: ['model-b'],
@@ -331,25 +307,22 @@ describe('applyProviderInstallPlan', () => {
       delete process.env[envKey];
     }
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', {
-      protocol: Protocol.OPENAI,
-      models: [
-        { id: 'model-b', name: 'model-b', baseUrl, envKey },
-        {
-          id: 'model-b',
-          name: 'model-b',
-          baseUrl: otherBaseUrl,
-          envKey: otherEnvKey,
-        },
-        { id: 'model-a', name: 'model-a', baseUrl, envKey },
-        {
-          id: 'shared-model',
-          name: 'shared-model',
-          baseUrl: otherBaseUrl,
-          envKey: otherEnvKey,
-        },
-      ],
-    });
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'model-b', name: 'model-b', baseUrl, envKey },
+      {
+        id: 'model-b',
+        name: 'model-b',
+        baseUrl: otherBaseUrl,
+        envKey: otherEnvKey,
+      },
+      { id: 'model-a', name: 'model-a', baseUrl, envKey },
+      {
+        id: 'shared-model',
+        name: 'shared-model',
+        baseUrl: otherBaseUrl,
+        envKey: otherEnvKey,
+      },
+    ]);
     expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'model-b');
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', baseUrl);
     expect(syncAuthState).toHaveBeenCalledWith(
@@ -395,13 +368,10 @@ describe('applyProviderInstallPlan', () => {
 
   it('appends models with append merge strategy', async () => {
     const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [
-          { id: 'existing-1', envKey: 'A' },
-          { id: 'existing-2', envKey: 'B' },
-        ],
-      },
+      [AuthType.USE_OPENAI]: [
+        { id: 'existing-1', envKey: 'A' },
+        { id: 'existing-2', envKey: 'B' },
+      ],
     });
     const plan: ProviderInstallPlan = {
       providerId: 'test-provider',
@@ -417,26 +387,20 @@ describe('applyProviderInstallPlan', () => {
 
     await applyProviderInstallPlan(plan, { settings: adapter });
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', {
-      protocol: Protocol.OPENAI,
-      models: [
-        { id: 'existing-1', envKey: 'A' },
-        { id: 'existing-2', envKey: 'B' },
-        { id: 'new-model', envKey: 'C' },
-      ],
-    });
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'existing-1', envKey: 'A' },
+      { id: 'existing-2', envKey: 'B' },
+      { id: 'new-model', envKey: 'C' },
+    ]);
   });
 
   it('replaces owned models with replace-owned strategy (appends new at end)', async () => {
     const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [
-          { id: 'owned-1', envKey: 'A' },
-          { id: 'unrelated', envKey: 'B' },
-          { id: 'owned-2', envKey: 'A' },
-        ],
-      },
+      [AuthType.USE_OPENAI]: [
+        { id: 'owned-1', envKey: 'A' },
+        { id: 'unrelated', envKey: 'B' },
+        { id: 'owned-2', envKey: 'A' },
+      ],
     });
     const plan: ProviderInstallPlan = {
       providerId: 'test-provider',
@@ -453,13 +417,10 @@ describe('applyProviderInstallPlan', () => {
 
     await applyProviderInstallPlan(plan, { settings: adapter });
 
-    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', {
-      protocol: Protocol.OPENAI,
-      models: [
-        { id: 'unrelated', envKey: 'B' },
-        { id: 'new-a', envKey: 'A' },
-      ],
-    });
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'unrelated', envKey: 'B' },
+      { id: 'new-a', envKey: 'A' },
+    ]);
   });
 
   it('rolls back process.env on error', async () => {
@@ -507,10 +468,7 @@ describe('applyProviderInstallPlan', () => {
 
   it('restores runtime model providers when refreshAuth rejects after reloadModelProviders ran', async () => {
     const previousProviders = {
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [{ id: 'previous', envKey: 'OLD_KEY' }],
-      },
+      [AuthType.USE_OPENAI]: [{ id: 'previous', envKey: 'OLD_KEY' }],
     };
     const adapter = createAdapter(previousProviders);
     const reloadModelProviders = vi.fn();
@@ -634,10 +592,7 @@ describe('applyProviderInstallPlan', () => {
   it('continues throw + env rollback when reloadModelProviders rollback itself throws', async () => {
     process.env['TEST_API_KEY'] = 'before';
     const previousProviders = {
-      [AuthType.USE_OPENAI]: {
-        protocol: Protocol.OPENAI,
-        models: [{ id: 'previous', envKey: 'OLD' }],
-      },
+      [AuthType.USE_OPENAI]: [{ id: 'previous', envKey: 'OLD' }],
     };
     const adapter = createAdapter(previousProviders);
     let reloadCalls = 0;
@@ -669,40 +624,5 @@ describe('applyProviderInstallPlan', () => {
     // be rolled back, and the broken rollback reload must not mask anything.
     expect(reloadModelProviders).toHaveBeenCalledTimes(2);
     expect(process.env['TEST_API_KEY']).toBe('before');
-  });
-});
-
-describe('v4-format backward compat', () => {
-  it('should convert v4 array-format to v5 ProviderConfig when applying patch', async () => {
-    const adapter = createAdapter({
-      [AuthType.USE_OPENAI]: [
-        { id: 'old-model', envKey: 'OLD_KEY' },
-      ] as unknown as ModelProvidersConfig[string],
-    });
-
-    const plan: ProviderInstallPlan = {
-      providerId: 'test-provider',
-      authType: AuthType.USE_OPENAI,
-      env: { TEST_API_KEY: 'sk-new' },
-      modelProviders: [
-        {
-          authType: AuthType.USE_OPENAI,
-          models: [{ id: 'new-model', envKey: 'TEST_API_KEY' }],
-          mergeStrategy: 'append',
-        },
-      ],
-    };
-
-    await applyProviderInstallPlan(plan, { settings: adapter });
-
-    expect(adapter.setValue).toHaveBeenCalledWith(
-      'modelProviders.openai',
-      expect.objectContaining({
-        protocol: Protocol.OPENAI,
-        models: expect.arrayContaining([
-          expect.objectContaining({ id: 'new-model' }),
-        ]),
-      }),
-    );
   });
 });

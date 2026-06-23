@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { WEB_SHELL_THEMES, type WebShellTheme } from '../../themeContext';
 
@@ -34,64 +33,24 @@ export function ThemeDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  const handleSelect = useCallback(() => {
-    const theme = themes[selectedIdx];
-    if (theme) {
-      onSelect(theme.id);
-      onClose();
-    }
-  }, [onClose, onSelect, selectedIdx, themes]);
-
-  useDelayedGlobalKeyDown(
-    (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key === 'ArrowDown' || event.key === 'j') {
-        event.preventDefault();
-        setSelectedIdx((index) => Math.min(index + 1, themes.length - 1));
-        return;
-      }
-      if (event.key === 'ArrowUp' || event.key === 'k') {
-        event.preventDefault();
-        setSelectedIdx((index) => Math.max(index - 1, 0));
-        return;
-      }
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        handleSelect();
-      }
-    },
-    [handleSelect, onClose, themes.length],
-  );
-
   return (
-    <div className={dp('resume-picker')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>{t('theme.title')}</span>
-        <span className={dp('resume-picker-count')}>
-          {t('theme.current', { theme: currentTheme })}
-        </span>
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-list')} ref={listRef}>
-        {themes.map((theme, index) => (
-          <div
+    <div
+      className={dp('resume-picker-list', 'resume-picker-list-compact')}
+      ref={listRef}
+      role="listbox"
+    >
+      {themes.map((theme, index) => {
+        const selected = theme.id === currentTheme;
+        return (
+          <button
             key={theme.id}
+            type="button"
+            role="option"
+            aria-selected={selected}
             className={dp(
               'resume-picker-item',
-              index === selectedIdx ? 'selected' : undefined,
+              'resume-picker-session-item',
+              index === selectedIdx || selected ? 'selected' : undefined,
             )}
             onClick={() => {
               onSelect(theme.id);
@@ -100,28 +59,19 @@ export function ThemeDialog({
             onMouseEnter={() => setSelectedIdx(index)}
           >
             <div className={dp('resume-picker-item-row')}>
-              <span className={dp('resume-picker-item-prefix')}>
-                {index === selectedIdx ? '›' : ' '}
-              </span>
               <span className={dp('resume-picker-item-title')}>
                 {theme.label}
               </span>
-              {theme.id === currentTheme && (
+              {selected && (
                 <span className={dp('resume-picker-item-check')}> ✓</span>
               )}
             </div>
             <div className={dp('resume-picker-item-meta')}>
               {theme.description}
             </div>
-          </div>
-        ))}
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-footer')}>
-        {t('dialog.footer.navSelectCancel')}
-      </div>
+          </button>
+        );
+      })}
     </div>
   );
 }

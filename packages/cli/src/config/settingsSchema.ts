@@ -15,6 +15,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
@@ -298,7 +299,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {} as ModelProvidersConfig,
     description:
-      'Model providers configuration grouped by authType. Each authType maps to a ProviderConfig object with protocol and models fields.',
+      'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },
@@ -1581,8 +1582,20 @@ const SETTINGS_SCHEMA = {
             category: 'Context',
             requiresRestart: true,
             default: true,
-            description: 'Respect .qwenignore files when searching',
+            description:
+              'Respect .qwenignore and configured custom ignore files when searching',
             showInDialog: true,
+          },
+          customIgnoreFiles: {
+            type: 'array',
+            label: 'Custom Ignore Files',
+            category: 'Context',
+            requiresRestart: true,
+            default: [...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES] as string[],
+            description:
+              'Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.',
+            showInDialog: false,
+            items: { type: 'string' },
           },
           enableRecursiveFileSearch: {
             type: 'boolean',

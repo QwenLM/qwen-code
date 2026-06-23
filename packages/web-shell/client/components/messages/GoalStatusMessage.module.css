@@ -1,7 +1,6 @@
 .message {
   display: flex;
   gap: 6px;
-  margin: 0 0 8px 14px;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;

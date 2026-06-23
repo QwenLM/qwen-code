@@ -90,10 +90,16 @@ interface RegisterA2uiActionRoutesOptions {
 
 /** Exported for unit testing. */
 export function usableServerConfig(cfg?: McpServerConfigLike): boolean {
-  return (
-    !!cfg &&
-    (typeof cfg.command === 'string' || typeof cfg.httpUrl === 'string')
-  );
+  if (!cfg) return false;
+  if (typeof cfg.httpUrl === 'string') {
+    try {
+      const parsed = new URL(cfg.httpUrl);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+  return typeof cfg.command === 'string' && cfg.command.trim().length > 0;
 }
 
 /**

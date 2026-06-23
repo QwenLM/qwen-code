@@ -66,7 +66,6 @@ import type {
   AgentParams,
   ApprovalMode,
   Config,
-  ConversationRecord,
   DeviceAuthorizationData,
   HookConfig,
   McpBudgetEvent,
@@ -75,7 +74,7 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
-  Protocol,
+  ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -135,6 +134,7 @@ import {
 } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
+import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -146,6 +146,7 @@ import { HistoryReplayer } from './session/HistoryReplayer.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
+  sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import {
   updateOutputLanguageFile,
@@ -183,6 +184,7 @@ import {
   type ServePreflightKind,
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
+  type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
@@ -243,25 +245,6 @@ function hasFailedDisplayStatus(
     (display as { status?: unknown }).status === 'failed'
   );
 }
-
-function sanitizeProviderBaseUrl(baseUrl: string): string {
-  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
-  if (!scheme) {
-    return baseUrl;
-  }
-
-  const authorityStart = scheme[0].length;
-  const rest = baseUrl.slice(authorityStart);
-  const authorityEnd = rest.search(/[/?#]/);
-  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
-  const at = authority.lastIndexOf('@');
-  if (at === -1) {
-    return baseUrl;
-  }
-
-  return `${baseUrl.slice(0, authorityStart)}${authority.slice(at + 1)}${rest.slice(authority.length)}`;
-}
-
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
  * a side-effect-free presence check. Mirrors `AUTH_ENV_MAPPINGS` from
@@ -1453,17 +1436,8 @@ function readProviderModels(
   const modelProviders = toRecord(
     (settings.merged as Record<string, unknown>)['modelProviders'],
   );
-  const entry = modelProviders[protocol];
-  const entryRecord =
-    typeof entry === 'object' && entry !== null
-      ? (entry as Record<string, unknown>)
-      : undefined;
-  const models = Array.isArray(entry)
-    ? entry
-    : Array.isArray(entryRecord?.['models'])
-      ? (entryRecord['models'] as ProviderModelConfig[])
-      : [];
-  return models.filter(isProviderModelConfig);
+  const models = modelProviders[protocol];
+  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
 }
 
 function findExistingProviderModels(
@@ -1600,7 +1574,7 @@ function readProviderSetupInputs(
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | Protocol
+    | AuthType
     | undefined;
   if (
     protocol &&
@@ -2554,6 +2528,26 @@ function normalizeAcpSessionListSize(value: unknown): number | undefined {
   return Math.min(Math.max(value, 1), MAX_ACP_SESSION_PAGE_SIZE);
 }
 
+function parseAcpSessionListCursor(
+  value: string | null | undefined,
+): number | undefined {
+  if (value == null || value === '') return undefined;
+  const trimmed = value.trim();
+  const parsedCursor = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsedCursor) ||
+    parsedCursor < 0 ||
+    parsedCursor > Number.MAX_SAFE_INTEGER
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid cursor: "${value}" is not a valid numeric cursor`,
+    );
+  }
+  return parsedCursor;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
@@ -2752,7 +2746,7 @@ class QwenAgent implements Agent {
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
-    const method = methodId as AuthType;
+    const method = z.nativeEnum(AuthType).parse(methodId);
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
@@ -2829,10 +2823,7 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    const session = await this.createAndStoreSession(
-      config,
-      sessionData?.conversation,
-    );
+    const session = await this.createAndStoreSession(config, sessionData);
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2871,7 +2862,11 @@ class QwenAgent implements Agent {
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    const session = await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(
+      config,
+      config.getResumedSessionData(),
+      { replayHistory: false },
+    );
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2913,17 +2908,7 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    let numericCursor: number | undefined;
-    if (params.cursor != null && params.cursor !== '') {
-      const parsedCursor = Number(params.cursor);
-      if (!Number.isFinite(parsedCursor)) {
-        throw RequestError.invalidParams(
-          undefined,
-          `Invalid cursor: "${params.cursor}" is not a valid numeric cursor`,
-        );
-      }
-      numericCursor = parsedCursor;
-    }
+    const numericCursor = parseAcpSessionListCursor(params.cursor);
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends
@@ -4310,6 +4295,35 @@ class QwenAgent implements Agent {
     return buildSessionTasksStatus(sessionId, session.getConfig());
   }
 
+  private buildSessionLspStatus(sessionId: string): ServeSessionLspStatus {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const snapshot = config.getLspStatusSnapshot();
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      enabled: snapshot.enabled,
+      configuredServers: snapshot.configuredServers,
+      readyServers: snapshot.readyServers,
+      failedServers: snapshot.failedServers,
+      inProgressServers: snapshot.inProgressServers,
+      notStartedServers: snapshot.notStartedServers,
+      ...(snapshot.statusUnavailable ? { statusUnavailable: true } : {}),
+      ...(snapshot.initializationError
+        ? { initializationError: snapshot.initializationError }
+        : {}),
+      servers: snapshot.servers.map((server) => ({
+        name: server.name,
+        status: server.status,
+        languages: server.languages,
+        ...(server.transport ? { transport: server.transport } : {}),
+        ...(server.command ? { command: server.command } : {}),
+        ...(server.error ? { error: server.error } : {}),
+      })),
+    };
+  }
+
   private buildSessionStatsStatus(sessionId: string): ServeSessionStatsStatus {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
@@ -5082,6 +5096,19 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return this.buildSessionLspStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
       case SERVE_STATUS_EXT_METHODS.sessionStats: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -5112,6 +5139,7 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
+        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -5121,6 +5149,7 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
+            .filter(({ idx }) => idx < rewindableTurnCount)
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
               return {
@@ -6298,10 +6327,13 @@ class QwenAgent implements Agent {
           );
         }
 
+        const rewindFiles = params['rewindFiles'] !== false;
         const historyBeforeRewind = session.captureHistorySnapshot();
         let rewindResult;
         try {
-          rewindResult = session.rewindToTurn(turnIndex as number);
+          rewindResult = session.rewindToTurn(turnIndex as number, {
+            rewindFiles,
+          });
         } catch (err) {
           if (err instanceof RequestError) {
             const msg = err.message;
@@ -6321,7 +6353,6 @@ class QwenAgent implements Agent {
 
         let filesChanged: string[] = [];
         let filesFailed: string[] = [];
-        const rewindFiles = params['rewindFiles'] !== false;
         if (rewindFiles && promptId) {
           const fhs = session.getConfig().getFileHistoryService();
           try {
@@ -7132,7 +7163,8 @@ class QwenAgent implements Agent {
 
   private async createAndStoreSession(
     config: Config,
-    conversation?: ConversationRecord,
+    sessionData?: ResumedSessionData,
+    options: { replayHistory?: boolean } = {},
   ): Promise<Session> {
     const sessionId = config.getSessionId();
     const geminiClient = config.getGeminiClient();
@@ -7156,8 +7188,14 @@ class QwenAgent implements Agent {
       await session.sendAvailableCommandsUpdate();
     }, 0);
 
-    if (conversation && conversation.messages) {
-      await session.replayHistory(conversation.messages);
+    if (sessionData?.fileHistorySnapshots?.length) {
+      config
+        .getFileHistoryService()
+        .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+    }
+
+    if (options.replayHistory !== false && sessionData?.conversation.messages) {
+      await session.replayHistory(sessionData.conversation.messages);
     }
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages

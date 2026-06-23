@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import { z } from 'zod';
 
 /**
  * ACP model IDs are represented as `${modelId}(${authType})` in the ACP protocol.
@@ -17,6 +18,74 @@ import type { AuthType } from '@qwen-code/qwen-code-core';
  */
 export function formatAcpModelId(modelId: string, authType: AuthType): string {
   return `${modelId}(${authType})`;
+}
+
+export function sanitizeProviderBaseUrl(baseUrl: string): string {
+  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
+  if (!scheme) {
+    return baseUrl;
+  }
+
+  const authorityStart = scheme[0].length;
+  const stripAt = (at: number) =>
+    `${baseUrl.slice(0, authorityStart)}${baseUrl.slice(at + 1)}`;
+  const authorityEnd = findAuthorityEnd(baseUrl, authorityStart);
+  const authorityAt = baseUrl
+    .slice(authorityStart, authorityEnd)
+    .lastIndexOf('@');
+  const authorityAtIndex =
+    authorityAt === -1 ? -1 : authorityStart + authorityAt;
+
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.username || parsed.password) {
+      return authorityAtIndex >= authorityStart
+        ? stripAt(authorityAtIndex)
+        : baseUrl;
+    }
+    return baseUrl;
+  } catch {
+    if (authorityAtIndex >= authorityStart) {
+      return stripAt(authorityAtIndex);
+    }
+
+    const fallbackAt = findUnescapedUserInfoFallbackAt(
+      baseUrl,
+      authorityStart,
+      authorityEnd,
+    );
+    return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
+  }
+}
+
+function findUnescapedUserInfoFallbackAt(
+  baseUrl: string,
+  authorityStart: number,
+  authorityEnd: number,
+): number {
+  const at = baseUrl.lastIndexOf('@');
+  if (at < authorityStart || authorityEnd >= at) {
+    return -1;
+  }
+
+  const colon = baseUrl.indexOf(':', authorityStart);
+  if (colon === -1 || colon > authorityEnd) {
+    return -1;
+  }
+
+  const portCandidate = baseUrl.slice(colon + 1, authorityEnd);
+  return /^\d+$/.test(portCandidate) ? -1 : at;
+}
+
+function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
+  const slash = baseUrl.indexOf('/', authorityStart);
+  const query = baseUrl.indexOf('?', authorityStart);
+  const hash = baseUrl.indexOf('#', authorityStart);
+  let end = baseUrl.length;
+  if (slash !== -1) end = Math.min(end, slash);
+  if (query !== -1) end = Math.min(end, query);
+  if (hash !== -1) end = Math.min(end, hash);
+  return end;
 }
 
 /**
@@ -44,8 +113,8 @@ export function parseAcpBaseModelId(value: string): string {
  *   where snapshotId is in format `$runtime|${authType}|${modelId}`
  * - Plain model ID - Returns as-is with no authType
  *
- * If the string ends with `(...)` and `...` is non-empty, returns both;
- * otherwise (empty parens or no trailing parens) returns the trimmed input as `modelId` only.
+ * If the string ends with `(...)` and `...` is a valid `AuthType`, returns both;
+ * otherwise returns the trimmed input as `modelId` only.
  */
 export function parseAcpModelOption(input: string): {
   modelId: string;
@@ -57,8 +126,9 @@ export function parseAcpModelOption(input: string): {
   if (openIdx >= 0 && closeIdx === trimmed.length - 1 && openIdx < closeIdx) {
     const maybeModelId = trimmed.slice(0, openIdx);
     const maybeAuthType = trimmed.slice(openIdx + 1, closeIdx);
-    if (maybeAuthType) {
-      return { modelId: maybeModelId, authType: maybeAuthType as AuthType };
+    const parsedAuthType = z.nativeEnum(AuthType).safeParse(maybeAuthType);
+    if (parsedAuthType.success) {
+      return { modelId: maybeModelId, authType: parsedAuthType.data };
     }
   }
   return { modelId: trimmed };

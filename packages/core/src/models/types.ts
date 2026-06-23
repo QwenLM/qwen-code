@@ -8,7 +8,6 @@ import type {
   AuthType,
   ContentGeneratorConfig,
   InputModalities,
-  Protocol,
 } from '../core/contentGenerator.js';
 import type { ConfigSources } from '../utils/configResolver.js';
 
@@ -61,27 +60,17 @@ export interface ModelConfig {
   capabilities?: ModelCapabilities;
   /** Generation configuration (sampling parameters) */
   generationConfig?: ModelGenerationConfig;
-}
-
-/**
- * Provider configuration for modelProviders
- */
-export interface ProviderConfig {
-  /** Protocol to use for this provider (required) */
-  protocol: Protocol;
-  /** Models available from this provider */
-  models: ModelConfig[];
-  /** Default base URL for this provider */
-  baseUrl?: string;
-  /** Environment variable name to read API key from */
-  envKey?: string;
+  /** When true, this model only appears in the fast model selector, not the main model list */
+  fastOnly?: boolean;
+  /** When true, this model only appears in the voice model selector, not the main model list */
+  voiceOnly?: boolean;
 }
 
 /**
  * Model providers configuration grouped by authType
  */
 export type ModelProvidersConfig = {
-  [authType: string]: ProviderConfig;
+  [authType: string]: ModelConfig[];
 };
 
 /**
@@ -116,6 +105,11 @@ export interface AvailableModel {
   modalities?: InputModalities;
   baseUrl?: string;
   envKey?: string;
+
+  /** When true, this model only appears in the fast model selector */
+  fastOnly?: boolean;
+  /** When true, this model only appears in the voice model selector */
+  voiceOnly?: boolean;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;

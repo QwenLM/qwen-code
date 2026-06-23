@@ -192,6 +192,8 @@ export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
+export * from './services/visionBridge/vision-bridge-service.js';
+export * from './services/visionBridge/image-part-utils.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
@@ -400,6 +402,11 @@ export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  QwenIgnoreParser,
+} from './utils/qwenIgnoreParser.js';
+export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';

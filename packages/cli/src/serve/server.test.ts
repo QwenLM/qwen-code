@@ -86,6 +86,7 @@ import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
   ServeSessionHooksStatus,
+  ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
@@ -101,6 +102,7 @@ import type {
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
+import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -118,6 +120,14 @@ function fakeDaemonLog(): DaemonLogger {
     getDaemonId: () => 'test-daemon',
     flush: vi.fn(async () => {}),
   };
+}
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
 }
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -163,6 +173,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_supported_commands',
   'session_tasks',
   'session_stats',
+  'session_lsp',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -348,6 +359,7 @@ interface FakeBridgeOpts {
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
+  sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
@@ -528,6 +540,7 @@ interface FakeBridge extends AcpSessionBridge {
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
   sessionTasksCalls: string[];
+  sessionLspCalls: string[];
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
@@ -636,6 +649,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const sessionLspCalls: string[] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
   const sessionHooksCalls: string[] = [];
@@ -809,6 +823,20 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       now: 1_700_000_000_000,
       tasks: [],
     }));
+  const sessionLspImpl =
+    opts.sessionLspImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      enabled: false,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+    }));
   const cancelSessionTaskImpl =
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
@@ -977,6 +1005,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
     sessionTasksCalls,
+    sessionLspCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
     sessionHooksCalls,
@@ -1167,6 +1196,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTasksStatus(sessionId) {
       sessionTasksCalls.push(sessionId);
       return sessionTasksImpl(sessionId);
+    },
+    async getSessionLspStatus(sessionId) {
+      sessionLspCalls.push(sessionId);
+      return sessionLspImpl(sessionId);
     },
     async cancelSessionTask(sessionId, taskId, taskKind) {
       cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
@@ -2197,7 +2230,16 @@ describe('createServeApp', () => {
       expect(res.body.servers[2].disabledReason).toBe('budget');
     });
 
-    it('returns workspace skills and providers status from the bridge', async () => {
+    it('returns workspace skills from the bridge and providers from daemon-local settings', async () => {
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-providers-'),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      const previousSystemSettings =
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      const previousSystemDefaults =
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
       const skills: ServeWorkspaceSkillsStatus = {
         v: 1,
         workspaceCwd: WS_BOUND,
@@ -2213,54 +2255,55 @@ describe('createServeApp', () => {
           },
         ],
       };
-      const providers: ServeWorkspaceProvidersStatus = {
-        v: 1,
-        workspaceCwd: WS_BOUND,
-        initialized: true,
-        current: { authType: 'qwen', modelId: 'qwen3(qwen)' },
-        providers: [
-          {
-            kind: 'model_provider',
-            status: 'ok',
-            authType: 'qwen',
-            current: true,
-            models: [
-              {
-                modelId: 'qwen3(qwen)',
-                baseModelId: 'qwen3',
-                name: 'Qwen 3',
-                description: null,
-                contextLimit: 4096,
-                isCurrent: true,
-                isRuntime: false,
-              },
-            ],
-          },
-        ],
-      };
-      const bridge = fakeBridge({
-        workspaceSkillsImpl: async () => skills,
-        workspaceProvidersImpl: async () => providers,
-      });
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      try {
+        process.env['QWEN_HOME'] = path.join(tempHome, 'home');
+        process.env['QWEN_RUNTIME_DIR'] = path.join(tempHome, 'runtime');
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+          tempHome,
+          'system-settings.json',
+        );
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+          tempHome,
+          'system-defaults.json',
+        );
+        resetHomeEnvBootstrapForTesting();
 
-      const skillsRes = await request(app)
-        .get('/workspace/skills')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      const providersRes = await request(app)
-        .get('/workspace/providers')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const bridge = fakeBridge({
+          workspaceSkillsImpl: async () => skills,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      expect(skillsRes.status).toBe(200);
-      expect(skillsRes.body).toEqual(skills);
-      expect(providersRes.status).toBe(200);
-      expect(providersRes.body).toEqual(providers);
-      expect(bridge.workspaceSkillsCalls).toBe(1);
-      expect(bridge.workspaceProvidersCalls).toBe(1);
+        const skillsRes = await request(app)
+          .get('/workspace/skills')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const providersRes = await request(app)
+          .get('/workspace/providers')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(skillsRes.status).toBe(200);
+        expect(skillsRes.body).toEqual(skills);
+        expect(providersRes.status).toBe(200);
+        expect(providersRes.body).toMatchObject({
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          acpChannelLive: false,
+        });
+        expect(providersRes.body.providers.length).toBeGreaterThan(0);
+        expect(bridge.workspaceSkillsCalls).toBe(1);
+        expect(bridge.workspaceProvidersCalls).toBe(0);
+      } finally {
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('QWEN_RUNTIME_DIR', previousRuntimeDir);
+        restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', previousSystemSettings);
+        restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', previousSystemDefaults);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+      }
     });
 
     it('returns workspace tools status from the bridge', async () => {
@@ -2655,7 +2698,8 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(202);
-        expect(res.body).toEqual({ accepted: true });
+        expect(res.body).toMatchObject({ accepted: true });
+        expect(res.body.operationId).toEqual(expect.any(String));
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
@@ -2679,9 +2723,194 @@ describe('createServeApp', () => {
         expect(requestSettingError).toContain(
           'requires interactive configuration',
         );
+
+        const poll = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(poll.status).toBe(200);
+        expect(poll.body).toMatchObject({
+          v: 1,
+          operationId: res.body.operationId,
+          operation: 'install',
+          status: 'succeeded',
+          source: 'https://example.com/installed-ext',
+          result: {
+            status: 'installed',
+            source: 'https://example.com/installed-ext',
+            name: 'installed-ext',
+            version: '1.2.3',
+            refreshed: 1,
+            failed: 0,
+          },
+        });
       } finally {
         restore();
       }
+    });
+
+    it('reports queued and running extension operation states', async () => {
+      let releaseInstall: (() => void) | undefined;
+      const installBlocker = new Promise<void>((resolve) => {
+        releaseInstall = resolve;
+      });
+      const restore = mockExtensionManagerMethods({
+        installExtension: async () => {
+          await installBlocker;
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const first = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/first-ext', consent: true });
+        expect(first.status).toBe(202);
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(
+              `/workspace/extensions/operations/${encodeURIComponent(
+                first.body.operationId as string,
+              )}`,
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('running');
+        });
+
+        const second = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/second-ext', consent: true });
+        expect(second.status).toBe(202);
+
+        const queued = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              second.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(queued.status).toBe(200);
+        expect(queued.body).toMatchObject({
+          operationId: second.body.operationId,
+          operation: 'install',
+          status: 'queued',
+          source: 'https://example.com/second-ext',
+        });
+
+        releaseInstall!();
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.length).toBeGreaterThanOrEqual(2);
+        });
+      } finally {
+        releaseInstall?.();
+        restore();
+      }
+    });
+
+    it('evicts the oldest terminal extension operations', async () => {
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const operationIds: string[] = [];
+
+        for (let i = 0; i < 101; i += 1) {
+          const res = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source: `https://example.com/installed-ext-${i}`,
+              consent: true,
+            });
+          expect(res.status).toBe(202);
+          operationIds.push(res.body.operationId as string);
+          await vi.waitFor(async () => {
+            const poll = await request(app)
+              .get(
+                `/workspace/extensions/operations/${encodeURIComponent(
+                  res.body.operationId as string,
+                )}`,
+              )
+              .set('Host', `127.0.0.1:${tokenOpts.port}`)
+              .set('Authorization', 'Bearer secret');
+            expect(poll.body.status).toBe('succeeded');
+          });
+        }
+
+        const evicted = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              operationIds[0]!,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(evicted.status).toBe(404);
+
+        const retained = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              operationIds.at(-1)!,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(retained.status).toBe(200);
+        expect(retained.body.status).toBe('succeeded');
+      } finally {
+        restore();
+      }
+    });
+
+    it('returns 404 for unknown extension operation ids', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/workspace/extensions/operations/missing-operation')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        code: 'extension_operation_not_found',
+      });
     });
 
     it('broadcasts a failed extension install with redacted error details', async () => {
@@ -2710,6 +2939,7 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(202);
+        expect(res.body.operationId).toEqual(expect.any(String));
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'failed',
@@ -2720,6 +2950,24 @@ describe('createServeApp', () => {
           });
         });
         expect(bridge.extensionEvents.at(-1)?.error).not.toContain('token');
+
+        const poll = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(poll.status).toBe(200);
+        expect(poll.body).toMatchObject({
+          operationId: res.body.operationId,
+          operation: 'install',
+          status: 'failed',
+          source: 'https://example.com/private-ext',
+          error: 'https://***REDACTED***@example.com/private-ext failed',
+        });
+        expect(poll.body.error).not.toContain('token');
       } finally {
         restore();
       }
@@ -2754,6 +3002,7 @@ describe('createServeApp', () => {
           });
 
         expect(res.status).toBe(202);
+        expect(res.body.operationId).toEqual(expect.any(String));
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
@@ -2763,6 +3012,27 @@ describe('createServeApp', () => {
             failed: 1,
             error: 'refresh broke',
           });
+        });
+
+        const poll = await request(app)
+          .get(
+            `/workspace/extensions/operations/${encodeURIComponent(
+              res.body.operationId as string,
+            )}`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(poll.status).toBe(200);
+        expect(poll.body).toMatchObject({
+          operationId: res.body.operationId,
+          operation: 'install',
+          status: 'succeeded_with_refresh_error',
+          result: {
+            status: 'installed',
+            refreshed: 0,
+            failed: 1,
+            error: 'refresh broke',
+          },
         });
       } finally {
         restore();
@@ -3883,10 +4153,31 @@ describe('createServeApp', () => {
           },
         ],
       };
+      const lsp: ServeSessionLspStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 1,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'READY',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+          },
+        ],
+      };
       const bridge = fakeBridge({
         sessionContextImpl: async () => context,
         sessionSupportedCommandsImpl: async () => commands,
         sessionTasksImpl: async () => tasks,
+        sessionLspImpl: async () => lsp,
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -3903,6 +4194,9 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/s-1/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const lspRes = await request(app)
+        .get('/session/s-1/lsp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(200);
       expect(contextRes.body).toEqual(context);
@@ -3910,9 +4204,12 @@ describe('createServeApp', () => {
       expect(commandsRes.body).toEqual(commands);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);
+      expect(lspRes.status).toBe(200);
+      expect(lspRes.body).toEqual(lsp);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionTasksCalls).toEqual(['s-1']);
+      expect(bridge.sessionLspCalls).toEqual(['s-1']);
     });
 
     it('returns session context-usage from the bridge', async () => {
@@ -4016,6 +4313,9 @@ describe('createServeApp', () => {
         sessionTasksImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
+        sessionLspImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -4032,6 +4332,9 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/missing/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const lspRes = await request(app)
+        .get('/session/missing/lsp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(404);
       expect(contextRes.body.sessionId).toBe('missing');
@@ -4039,6 +4342,8 @@ describe('createServeApp', () => {
       expect(commandsRes.body.sessionId).toBe('missing');
       expect(tasksRes.status).toBe(404);
       expect(tasksRes.body.sessionId).toBe('missing');
+      expect(lspRes.status).toBe(404);
+      expect(lspRes.body.sessionId).toBe('missing');
     });
 
     it('rejects task cancellation with invalid kind', async () => {
@@ -5449,7 +5754,34 @@ describe('createServeApp', () => {
       expect(cursoredIds).not.toContain('live-only');
     });
 
-    it('400 invalid_cursor when cursor is not a valid number', async () => {
+    it.each(['abc', '-1', 'Infinity', '9007199254740992', '   '])(
+      '400 invalid_cursor when cursor is not valid: %s',
+      async (cursor) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=${encodeURIComponent(cursor)}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_cursor');
+      },
+    );
+
+    it('accepts fractional mtime cursor values', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '1970-01-01T00:16:39.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('1970-01-01T00:16:39.000Z'),
+      });
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -5457,10 +5789,36 @@ describe('createServeApp', () => {
         { bridge, boundWorkspace: WS_BOUND },
       );
       const res = await request(app)
-        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=abc`)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=1000123.456`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('invalid_cursor');
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(1);
+      expect(res.body.sessions[0].sessionId).toBe(id);
+    });
+
+    it('passes fractional cursor values to SessionService without truncating', async () => {
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items: [],
+          nextCursor: undefined,
+          hasMore: false,
+        });
+
+      try {
+        await listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, {
+          cursor: '1000123.456',
+        });
+
+        expect(listSessionsSpy).toHaveBeenCalledWith({
+          cursor: 1000123.456,
+          size: 20,
+        });
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
     });
 
     it('excludes live sessions from subsequent pages to prevent cross-page duplicates', async () => {
@@ -10502,6 +10860,37 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       { fsFactory: sentinel as any },
     );
     expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
+  });
+
+  it('passes custom ignore files through resolveBridgeFsFactory', async () => {
+    const { resolveBridgeFsFactory } = await import('./server.js');
+    const tmp = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-fs-ignore-'),
+    );
+    try {
+      await fsp.writeFile(path.join(tmp, '.cursorignore'), 'secret.txt\n');
+      await fsp.writeFile(path.join(tmp, '.agentignore'), 'agent.txt\n');
+      await fsp.writeFile(path.join(tmp, 'secret.txt'), 'secret');
+      await fsp.writeFile(path.join(tmp, 'agent.txt'), 'agent');
+
+      const factory = resolveBridgeFsFactory({
+        boundWorkspace: tmp,
+        trusted: true,
+        customIgnoreFiles: ['.cursorignore'],
+      });
+      const fs = factory.forRequest({ route: 'TEST /op' });
+      const root = await fs.resolve('.', 'list');
+      const entries = await fs.list(root, { includeIgnored: true });
+
+      expect(
+        entries.find((entry) => entry.name === 'secret.txt')?.ignored,
+      ).toBe(true);
+      expect(entries.find((entry) => entry.name === 'agent.txt')?.ignored).toBe(
+        false,
+      );
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it('default fsFactory is built with trusted=false (writes refused)', async () => {

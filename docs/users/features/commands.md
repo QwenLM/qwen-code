@@ -38,20 +38,22 @@ These commands help you save, restore, and summarize work progress.
 
 Commands for adjusting interface appearance and work environment.
 
-| Command              | Description                                                                                                                                                                       | Usage Examples                                  |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `/clear`             | Clear terminal screen content                                                                                                                                                     | `/clear`, `/reset`, `/new` (shortcut: `Ctrl+L`) |
-| `/cd`                | Move this session to a new working directory                                                                                                                                      | `/cd ../other-project`                          |
-| `/context`           | Show context window usage breakdown                                                                                                                                               | `/context`                                      |
-| → `detail`           | Show per-item context usage breakdown                                                                                                                                             | `/context detail`                               |
-| `/diff`              | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                                         |
-| `/theme`             | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                                        |
-| `/vim`               | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                                          |
-| `/directory`         | Manage multi-directory support workspace                                                                                                                                          | `/dir add ./src,./tests`                        |
-| `/editor`            | Open dialog to select supported editor                                                                                                                                            | `/editor`                                       |
-| `/statusline`        | Open interactive [status line](./status-line.md) preset dialog                                                                                                                    | `/statusline`                                   |
-| `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch`         |
-| `/terminal-setup`    | Configure terminal keybindings for multiline input                                                                                                                                | `/terminal-setup`                               |
+| Command              | Description                                                                                                                                                                       | Usage Examples                                                                    |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `/clear`             | Clear terminal screen content                                                                                                                                                     | `/clear`, `/reset`, `/new` (shortcut: `Ctrl+L`)                                   |
+| `/context`           | Show context window usage breakdown                                                                                                                                               | `/context`                                                                        |
+| → `detail`           | Show per-item context usage breakdown                                                                                                                                             | `/context detail`                                                                 |
+| `/history`           | Control history display preferences and visibility                                                                                                                                | `/history collapse-on-resume`, `/history expand-on-resume`, `/history expand-now` |
+| `/diff`              | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                                                                           |
+| `/theme`             | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                                                                          |
+| `/vim`               | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                                                                            |
+| `/voice`             | Toggle voice dictation input                                                                                                                                                      | `/voice`, `/voice status`                                                         |
+| `/directory`         | Manage multi-directory support workspace                                                                                                                                          | `/dir add ./src,./tests`                                                          |
+| `/cd`                | Move this session to a new working directory                                                                                                                                      | `/cd ../other-project`                                                            |
+| `/editor`            | Open dialog to select supported editor                                                                                                                                            | `/editor`                                                                         |
+| `/statusline`        | Open interactive [status line](./status-line.md) preset dialog                                                                                                                    | `/statusline`                                                                     |
+| `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch`                                           |
+| `/terminal-setup`    | Configure terminal keybindings for multiline input                                                                                                                                | `/terminal-setup`                                                                 |
 
 ### 1.3 Language Settings
 
@@ -70,39 +72,40 @@ Commands specifically for controlling interface and output language.
 
 Commands for managing AI tools and models.
 
-| Command          | Description                                   | Usage Examples                                |
-| ---------------- | --------------------------------------------- | --------------------------------------------- |
-| `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
-| `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
-| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
-| `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`         |
-| `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
-| →`plan`          | Analysis only, no execution                   | Secure review                                 |
-| →`default`       | Require approval for edits                    | Daily use                                     |
-| →`auto-edit`     | Automatically approve edits                   | Trusted environment                           |
-| →`auto`          | Classifier-evaluated approval                 | Autonomous sessions with safety guardrails    |
-| →`yolo`          | Automatically approve all                     | Quick prototyping                             |
-| `/model`         | Switch model used in current session          | `/model`                                      |
-| `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`             |
-| `/extensions`    | Manage extensions                             | `/extensions list`, `/extensions manage`      |
-| → `list`         | List installed extensions                     | `/extensions list`                            |
-| → `manage`       | Manage installed extensions (interactive)     | `/extensions manage`                          |
-| → `explore`      | Open extensions page in browser               | `/extensions explore`                         |
-| → `install`      | Install an extension from a git repo or path  | `/extensions install <repo-or-path>`          |
-| `/import-config` | Import MCP servers from Claude configs        | `/import-config`                              |
-| `/memory`        | Open the Memory Manager dialog                | `/memory`                                     |
-| `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
-| `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |
-| `/dream`         | Manually run auto-memory consolidation        | `/dream`                                      |
-| `/hooks`         | Manage Qwen Code hooks                        | `/hooks`, `/hooks list`                       |
-| `/permissions`   | Manage permission rules                       | `/permissions`                                |
-| `/agents`        | Manage subagents                              | `/agents manage`, `/agents create`            |
-| `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena status`               |
-| `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`            |
-| `/tasks`         | List background tasks                         | `/tasks`                                      |
-| `/workflows`     | Inspect workflow runs                         | `/workflows`, `/workflows <runId>`            |
-| `/lsp`           | Show LSP server status                        | `/lsp`                                        |
-| `/trust`         | Manage folder trust settings                  | `/trust`                                      |
+| Command          | Description                                   | Usage Examples                                                                |
+| ---------------- | --------------------------------------------- | ----------------------------------------------------------------------------- |
+| `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                                                           |
+| `/import-config` | Import MCP servers from Claude configs        | `/import-config claude-code`, `/import-config claude-desktop --scope project` |
+| `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                                                       |
+| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                                                   |
+| `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`                                         |
+| `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project`                                 |
+| →`plan`          | Analysis only, no execution                   | Secure review                                                                 |
+| →`default`       | Require approval for edits                    | Daily use                                                                     |
+| →`auto-edit`     | Automatically approve edits                   | Trusted environment                                                           |
+| →`auto`          | Classifier-evaluated approval                 | Autonomous sessions with safety guardrails                                    |
+| →`yolo`          | Automatically approve all                     | Quick prototyping                                                             |
+| `/model`         | Switch model used in current session          | `/model`, `/model <model-id>` (switch immediately)                            |
+| `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`                                             |
+| `/model --voice` | Set the model used for voice transcription    | `/model --voice <model-id>`                                                   |
+| `/extensions`    | Manage extensions                             | `/extensions list`, `/extensions manage`                                      |
+| → `list`         | List installed extensions                     | `/extensions list`                                                            |
+| → `manage`       | Manage installed extensions (interactive)     | `/extensions manage`                                                          |
+| → `explore`      | Open extensions page in browser               | `/extensions explore`                                                         |
+| → `install`      | Install an extension from a git repo or path  | `/extensions install <repo-or-path>`                                          |
+| `/memory`        | Open the Memory Manager dialog                | `/memory`                                                                     |
+| `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`                                            |
+| `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                                                             |
+| `/dream`         | Manually run auto-memory consolidation        | `/dream`                                                                      |
+| `/hooks`         | Manage Qwen Code hooks                        | `/hooks`, `/hooks list`                                                       |
+| `/permissions`   | Manage permission rules                       | `/permissions`                                                                |
+| `/agents`        | Manage subagents                              | `/agents manage`, `/agents create`                                            |
+| `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena status`                                               |
+| `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`                                            |
+| `/tasks`         | List background tasks                         | `/tasks`                                                                      |
+| `/workflows`     | Inspect workflow runs                         | `/workflows`, `/workflows <runId>`                                            |
+| `/lsp`           | Show LSP server status                        | `/lsp`                                                                        |
+| `/trust`         | Manage folder trust settings                  | `/trust`                                                                      |
 
 ### 1.5 Built-in Skills
 

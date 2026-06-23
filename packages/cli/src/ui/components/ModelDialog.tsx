@@ -228,7 +228,9 @@ export function ModelDialog({
       (m) =>
         !m.isRuntimeModel &&
         (m.authType !== AuthType.QWEN_OAUTH ||
-          authType === AuthType.QWEN_OAUTH),
+          authType === AuthType.QWEN_OAUTH) &&
+        (isFastModelMode || !m.fastOnly) &&
+        (isVoiceModelMode || !m.voiceOnly),
     );
 
     // Group registry models by authType
@@ -241,8 +243,8 @@ export function ModelDialog({
       modelsByAuthTypeMap.get(authType)!.push(model);
     }
 
-    // Fixed order: qwen-oauth first, then built-in authTypes, then custom authTypes
-    const builtinAuthTypeOrder: AuthType[] = [
+    // Fixed order: qwen-oauth first, then others in a stable order
+    const authTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
       AuthType.USE_OPENAI,
       AuthType.USE_ANTHROPIC,
@@ -250,22 +252,11 @@ export function ModelDialog({
       AuthType.USE_VERTEX_AI,
     ];
 
-    // Get all available authTypes
+    // Filter to only include authTypes that have registry models and maintain order
     const availableAuthTypes = new Set(modelsByAuthTypeMap.keys());
-
-    // Build ordered list: built-in authTypes first (in fixed order), then custom authTypes
-    const orderedAuthTypes: AuthType[] = [];
-    for (const authType of builtinAuthTypeOrder) {
-      if (availableAuthTypes.has(authType)) {
-        orderedAuthTypes.push(authType);
-      }
-    }
-    // Add custom authTypes (not in builtin list)
-    for (const authType of availableAuthTypes) {
-      if (!builtinAuthTypeOrder.includes(authType)) {
-        orderedAuthTypes.push(authType);
-      }
-    }
+    const orderedAuthTypes = authTypeOrder.filter((t) =>
+      availableAuthTypes.has(t),
+    );
 
     // Build ordered list: runtime models first, then registry models grouped by authType
     const result: Array<{
@@ -293,7 +284,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [authType, config]);
+  }, [authType, config, isFastModelMode, isVoiceModelMode]);
 
   const MODEL_OPTIONS = useMemo(
     () =>

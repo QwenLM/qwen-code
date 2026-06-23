@@ -59,7 +59,11 @@ async function getMcpServersFromConfig(
 async function createMinimalConfig(): Promise<Config> {
   const settings = loadSettings();
   const cwd = process.cwd();
-  const fileService = new FileDiscoveryService(cwd);
+  const fileFiltering = settings.merged.context?.fileFiltering;
+  const fileService = new FileDiscoveryService(
+    cwd,
+    fileFiltering?.customIgnoreFiles,
+  );
   const mcpServers = await getMcpServersFromConfig();
 
   const config = new Config({
@@ -71,6 +75,7 @@ async function createMinimalConfig(): Promise<Config> {
     pendingMcpServers: getPendingGatedMcpServers(mcpServers, cwd),
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
+    ...(fileFiltering !== undefined ? { fileFiltering } : {}),
   });
 
   await config.initialize();

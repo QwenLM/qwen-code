@@ -44,7 +44,7 @@ jobs:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' }}"
     # Gate runs on ECS for in-repo PRs too, else a busy hosted pool delays it and blocks the ECS-bound jobs. The kill-switch is read here, so flipping it reverts everything to hosted.
-    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
@@ -101,126 +101,50 @@ jobs:
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
 
-  lint:
-    name: 'Lint'
-    needs: 'classify_pr'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
-    runs-on: "${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]') }}"
-    steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          ref: '${{ github.event.inputs.branch_ref || github.ref }}'
-          fetch-depth: 0
-
-      # Self-hosted reuses the machine's Node (nodejs.org unreachable via proxy); linters are pre-installed on PATH so scripts/lint.js skips downloading them.
-      - name: 'Set up Node.js 22.x (hosted)'
-        if: "${{ runner.environment == 'github-hosted' }}"
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version: '22.x'
-          cache: 'npm'
-
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          if ! command -v node >/dev/null 2>&1; then
-            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set MAINTAINER_ECS_RUNNER_DISABLED='true' to route PRs back to hosted runners."
-            exit 1
-          fi
-          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
-          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
-            echo "::warning::Expected Node 22.x but found $(node -v); lint results may diverge from local development."
-          fi
-
-      - name: 'Install dependencies and run prepare'
-        run: 'npm ci --prefer-offline --no-audit --progress=false'
-
-      - name: 'Check lockfile'
-        run: 'npm run check:lockfile'
-
-      - name: 'Check desktop workspace isolation'
-        run: 'npm run check:desktop-isolation'
-
-      - name: 'Install linters'
-        run: 'node scripts/lint.js --setup'
-
-      - name: 'Run ESLint'
-        run: 'node scripts/lint.js --eslint'
-
-      - name: 'Run actionlint'
-        run: 'node scripts/lint.js --actionlint'
-
-      - name: 'Run shellcheck'
-        run: 'node scripts/lint.js --shellcheck'
-
-      - name: 'Run yamllint'
-        run: 'node scripts/lint.js --yamllint'
-
-      - name: 'Run Prettier'
-        run: 'node scripts/lint.js --prettier'
-
-      - name: 'Run sensitive keyword linter'
-        run: 'node scripts/lint.js --sensitive-keywords'
-
-      - name: 'Run i18n check'
-        run: 'npm run check-i18n'
-
-      - name: 'Generate settings schema'
-        run: 'npm run generate:settings-schema'
-
-      - name: 'Check settings schema is up-to-date'
-        run: |
-          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
-            echo "❌ Error: settings.schema.json is out of date!"
-            echo "   Please run: npm run generate:settings-schema"
-            echo "   Then commit the updated schema file."
-            git diff packages/vscode-ide-companion/schemas/settings.schema.json
-            exit 1
-          fi
-          echo "✅ Settings schema is up-to-date"
-
   #
   # Test: Node
   #
   test:
-    name: 'Test (${{ matrix.os }}, Node ${{ matrix.node-version }})'
+    name: 'Test (ubuntu-latest, Node 22.x)'
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     if: '${{ !cancelled() }}'
-    runs-on: '${{ fromJSON(matrix.runner) }}'
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       checks: 'write'
       pull-requests: 'write'
-    strategy:
-      fail-fast: false # So we can see all test failures
-      matrix:
-        include:
-          - os: 'macos-latest'
-            runner: '["macos-latest"]'
-            node-version: '22.x'
-            upload-coverage: 'false'
-          - os: 'ubuntu-latest'
-            runner: "${{ needs.classify_pr.outputs.ubuntu_runner || '[\"ubuntu-latest\"]' }}"
-            node-version: '22.x'
-            upload-coverage: 'true'
-          - os: 'windows-latest'
-            runner: '["windows-2022"]'
-            node-version: '22.x'
-            upload-coverage: 'false'
     steps:
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # The merge queue (integration_cli on merge_group) validates the merged
+      # result. Non-PR events keep github.ref.
       - name: 'Checkout'
+        id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          fetch-depth: 0
+
+      - name: 'Verify PR checkout includes head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
+        run: |-
+          if ! git merge-base --is-ancestor '${{ github.event.pull_request.head.sha }}' HEAD; then
+            echo "::error::Checked out ref does not contain PR head ${{ github.event.pull_request.head.sha }}."
+            git log --oneline --decorate -5
+            exit 1
+          fi
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
-      - name: 'Set up Node.js ${{ matrix.node-version }} (hosted)'
+      - name: 'Set up Node.js 22.x (hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
-          node-version: '${{ matrix.node-version }}'
+          node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org/'
@@ -229,7 +153,7 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         run: |-
           if ! command -v node >/dev/null 2>&1; then
-            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node ${{ matrix.node-version }} or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route PRs back to hosted runners."
+            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route PRs back to hosted runners."
             exit 1
           fi
           echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
@@ -250,18 +174,79 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Check lockfile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run check:lockfile'
+
+      - name: 'Check desktop workspace isolation'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run check:desktop-isolation'
+
+      - name: 'Install linters'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'node scripts/lint.js --setup'
+
+      - name: 'Run ESLint'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'node scripts/lint.js --eslint'
+
+      - name: 'Run actionlint'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'node scripts/lint.js --actionlint'
+
+      - name: 'Run shellcheck'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'node scripts/lint.js --shellcheck'
+
+      - name: 'Run yamllint'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'node scripts/lint.js --yamllint'
+
+      - name: 'Run Prettier'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'node scripts/lint.js --prettier'
+
+      - name: 'Run sensitive keyword linter'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'node scripts/lint.js --sensitive-keywords'
+
+      - name: 'Run i18n check'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run check-i18n'
+
+      - name: 'Generate settings schema'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run generate:settings-schema'
+
+      - name: 'Check settings schema is up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
+            echo "Error: settings.schema.json is out of date."
+            echo "Please run: npm run generate:settings-schema"
+            echo "Then commit the updated schema file."
+            git diff packages/vscode-ide-companion/schemas/settings.schema.json
+            exit 1
+          fi
+          echo "Settings schema is up-to-date"
+
       - name: 'Run tests and generate reports'
+        id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
         run: 'npm run test:ci'
 
+      - name: 'Run no-AK integration smoke tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
+        run: 'npm run test:integration:no-ak:sandbox:none'
+
       - name: 'Publish Test Report (for non-forks)'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: 'dorny/test-reporter@dc3a92680fcc15842eef52e8c4606ea7ce6bd3f3' # ratchet:dorny/test-reporter@v2
         with:
-          name: 'Test Results (${{ matrix.os }}, Node ${{ matrix.node-version }})'
+          name: 'Test Results (ubuntu-latest, Node 22.x)'
           path: 'packages/*/junit.xml'
           reporter: 'java-junit'
           fail-on-error: 'false'
@@ -271,16 +256,70 @@ jobs:
           ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'test-results-fork-${{ matrix.node-version }}-${{ matrix.os }}'
+          name: 'test-results-fork-22.x-ubuntu-latest'
           path: 'packages/*/junit.xml'
 
       - name: 'Upload coverage reports'
-        if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && matrix.upload-coverage == 'true' }}
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'coverage-reports-${{ matrix.node-version }}-${{ matrix.os }}'
+          name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
+
+  test_platforms:
+    name: 'Test (${{ matrix.os }}, Node ${{ matrix.node-version }})'
+    needs: 'classify_pr'
+    if: '${{ !cancelled() }}'
+    runs-on: '${{ fromJSON(matrix.runner) }}'
+    permissions:
+      contents: 'read'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: 'macos-latest'
+            runner: '["macos-latest"]'
+            node-version: '22.x'
+          - os: 'windows-latest'
+            runner: '["windows-2022"]'
+            node-version: '22.x'
+    steps:
+      # See the Ubuntu gate's checkout: on PRs use the immutable refs/pull/N/head
+      # to avoid merge-ref rebuild lag; other events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+
+      - name: 'Set up Node.js ${{ matrix.node-version }}'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '${{ matrix.node-version }}'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Run tests and generate reports'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          NO_COLOR: true
+        run: 'npm run test:ci'
 
   post_coverage_comment:
     name: 'Post Coverage Comment'
@@ -288,9 +327,10 @@ jobs:
     needs:
       - 'classify_pr'
       - 'test'
+    # !cancelled() not always(): don't let a cancelled run hold the concurrency slot here.
     if: |-
       ${{
-        always() &&
+        !cancelled() &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository
@@ -347,44 +387,6 @@ jobs:
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
-
-  # Fast PR-safe integration coverage. This job intentionally runs only the
-  # no-AK subset that uses local fakes or no model transport, so fork PRs get
-  # daemon/SSE smoke coverage without repository secrets.
-  integration_no_ak:
-    name: 'Integration Tests (No-AK Smoke)'
-    needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name == 'pull_request' && needs.classify_pr.outputs.skip_ci != 'true' }}"
-    runs-on: 'ubuntu-latest'
-    permissions:
-      contents: 'read'
-    steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
-
-      - name: 'Configure npm for rate limiting'
-        run: |-
-          npm config set fetch-retry-mintimeout 20000
-          npm config set fetch-retry-maxtimeout 120000
-          npm config set fetch-retries 5
-          npm config set fetch-timeout 300000
-
-      - name: 'Install Dependencies'
-        env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
-        run: |-
-          npm ci --no-audit --progress=false
-
-      - name: 'Run no-AK integration smoke tests'
-        run: |-
-          npm run test:integration:no-ak:sandbox:none
 
   # Integration tests run only in the merge queue, not on every PR push.
   # They are the suite that previously ran *only* in the nightly Release

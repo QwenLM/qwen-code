@@ -4,6 +4,7 @@ import { EditorState } from '@codemirror/state';
 import type { CommandInfo } from '../adapters/types';
 import { getTranslator } from '../i18n';
 import {
+  getSlashCommandCompletionResult,
   getSlashCommandArgumentHint,
   slashCompletionSource,
 } from './slashCompletion';
@@ -63,6 +64,153 @@ describe('getSlashCommandArgumentHint', () => {
     expect(getSlashCommandArgumentHint('/学生信息', commands, 'zh-CN')).toBe(
       '<姓名>',
     );
+  });
+});
+
+describe('getSlashCommandCompletionResult', () => {
+  it('returns top-level command items for the custom slash panel', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'clear',
+        description: 'Clear the screen',
+        source: 'builtin-command',
+      },
+      {
+        name: 'demo:ping',
+        description: 'Project command',
+        source: 'skill-dir-command',
+      },
+    ];
+
+    const result = getSlashCommandCompletionResult(
+      '/',
+      1,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+
+    expect(result?.kind).toBe('command');
+    expect(result?.from).toBe(0);
+    expect(result?.to).toBe(1);
+    expect(result?.items.map((item) => item.label)).toEqual([
+      '/demo:ping',
+      '/clear',
+    ]);
+    expect(result?.items.map((item) => item.section)).toEqual([
+      'Custom commands',
+      'System commands',
+    ]);
+  });
+
+  it('returns explicit subcommands after accepting a parent command', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'agents',
+        description: 'Manage agents',
+        argumentHint: 'manage|create',
+      },
+    ];
+
+    const result = getSlashCommandCompletionResult(
+      '/agents ',
+      8,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+
+    expect(result?.kind).toBe('subcommand');
+    expect(result?.from).toBe(0);
+    expect(result?.to).toBe(8);
+    expect(result?.items.map((item) => item.apply)).toEqual([
+      '/agents manage ',
+      '/agents create ',
+    ]);
+  });
+
+  it('returns command-provided subcommands when no built-in tree exists', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'custom',
+        description: 'Custom command',
+        subcommands: ['one', 'two'],
+      },
+    ];
+
+    const result = getSlashCommandCompletionResult(
+      '/custom t',
+      9,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+
+    expect(result?.items.map((item) => item.label)).toEqual(['two']);
+    expect(result?.items[0]?.apply).toBe('/custom two ');
+  });
+
+  it('returns dynamic skills for /skills', () => {
+    const commands: CommandInfo[] = [
+      { name: 'skills', description: 'Run a skill' },
+    ];
+
+    const result = getSlashCommandCompletionResult(
+      '/skills re',
+      10,
+      commands,
+      [{ name: 'review', description: 'Review current code' }],
+      'en',
+      getTranslator('en'),
+    );
+
+    expect(result?.items).toEqual([
+      {
+        id: '/skills review',
+        label: 'review',
+        detail: 'Review current code',
+        apply: '/skills review ',
+        type: 'skill',
+      },
+    ]);
+  });
+
+  it('honors panel category order and filtered commands', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'clear',
+        description: 'Clear the screen',
+        source: 'builtin-command',
+      },
+      {
+        name: 'hidden',
+        description: 'Hidden command',
+        source: 'skill-dir-command',
+      },
+      {
+        name: 'demo:ping',
+        description: 'Project command',
+        source: 'skill-dir-command',
+      },
+    ].filter((command) => command.name !== 'hidden');
+
+    const result = getSlashCommandCompletionResult(
+      '/',
+      1,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+      ['system', 'custom', 'skill'],
+    );
+
+    expect(result?.items.map((item) => item.label)).toEqual([
+      '/clear',
+      '/demo:ping',
+    ]);
   });
 });
 
