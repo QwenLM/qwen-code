@@ -43,6 +43,7 @@ import {
   STATUS_SCHEMA_VERSION,
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
+  type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
 } from './status.js';
 import {
@@ -3766,6 +3767,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionStatus<ServeSessionTasksStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
+      );
+    },
+
+    async getSessionLspStatus(sessionId) {
+      return requestSessionStatus<ServeSessionLspStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       );
     },
 

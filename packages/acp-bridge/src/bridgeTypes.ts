@@ -20,6 +20,7 @@ import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
+  ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceExtensionsStatus,
@@ -462,6 +463,9 @@ export interface AcpSessionBridge {
 
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+
+  /** Read sanitized LSP server status for a live session. */
+  getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
   /** Cancel a background task in a live session. */
   cancelSessionTask(

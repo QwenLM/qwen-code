@@ -24,7 +24,7 @@ import type {
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
 import { DefaultDark } from '../ui/themes/default.js';
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import { getWorkspaceTrustStatus } from './trustedFolders.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
@@ -811,7 +811,14 @@ function findEnvFile(
   userLevelPaths: Set<string> = getUserLevelEnvPaths(),
 ): string | null {
   const homeDir = homedir();
-  const isTrusted = isWorkspaceTrusted(settings).isTrusted;
+  const trustState = getWorkspaceTrustStatus(settings, startDir).effective
+    .state;
+  const isTrusted =
+    trustState === 'trusted'
+      ? true
+      : trustState === 'untrusted'
+        ? false
+        : undefined;
 
   const globalQwenDir = Storage.getGlobalQwenDir();
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
@@ -897,9 +904,12 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
  * 4. settings.env (no-override mode)
  * 5. defaults
  */
-export function loadEnvironment(settings: Settings): void {
+export function loadEnvironment(
+  settings: Settings,
+  workspaceCwd: string = process.cwd(),
+): void {
   const userLevelPaths = getUserLevelEnvPaths();
-  const envFilePath = findEnvFile(settings, process.cwd(), userLevelPaths);
+  const envFilePath = findEnvFile(settings, workspaceCwd, userLevelPaths);
 
   // Cloud Shell environment variable handling
   if (process.env['CLOUD_SHELL'] === 'true') {
@@ -1435,8 +1445,11 @@ export function loadSettings(
     systemSettings,
     userSettings,
   );
-  const isTrusted =
-    isWorkspaceTrusted(initialTrustCheckSettings as Settings).isTrusted ?? true;
+  const trustState = getWorkspaceTrustStatus(
+    initialTrustCheckSettings as Settings,
+    workspaceDir,
+  ).effective.state;
+  const isTrusted = trustState === 'untrusted' ? false : true;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(
@@ -1450,7 +1463,7 @@ export function loadSettings(
   // loadEnviroment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
   if (!opts.skipLoadEnvironment) {
-    loadEnvironment(tempMergedSettings);
+    loadEnvironment(tempMergedSettings, workspaceDir);
   }
 
   // Create LoadedSettings first

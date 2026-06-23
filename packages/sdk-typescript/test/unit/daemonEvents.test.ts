@@ -53,6 +53,26 @@ describe('daemon event schema', () => {
     expect(isDaemonEventType(event, 'permission_request')).toBe(false);
   });
 
+  it('recognizes trust_change_requested as known daemon event', () => {
+    const event: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'trust_change_requested',
+      data: {
+        workspaceCwd: '/work',
+        desiredState: 'untrusted',
+        reason: 'remote user request',
+      },
+      originatorClientId: 'client-1',
+    };
+
+    const known = asKnownDaemonEvent(event);
+
+    expect(known).toBe(event);
+    expect(known?.type).toBe('trust_change_requested');
+    expect(isDaemonEventType(event, 'trust_change_requested')).toBe(true);
+  });
+
   it('leaves malformed or unknown events on the raw DaemonEvent path', () => {
     expect(
       asKnownDaemonEvent({

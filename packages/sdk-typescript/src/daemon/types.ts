@@ -1066,6 +1066,107 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
+export type DaemonVoiceMode = 'hold' | 'tap';
+
+export type DaemonVoiceTransport =
+  | 'qwen-asr-chat'
+  | 'qwen-asr-realtime'
+  | 'dashscope-task-realtime';
+
+export interface DaemonVoiceModelDescriptor {
+  id: string;
+  transport: DaemonVoiceTransport;
+}
+
+export interface DaemonWorkspaceVoiceStatus {
+  v: 1;
+  workspaceCwd: string;
+  enabled: boolean;
+  mode: DaemonVoiceMode;
+  language: string;
+  voiceModel: string | null;
+  availableVoiceModels: DaemonVoiceModelDescriptor[];
+}
+
+export interface DaemonWorkspaceVoiceUpdate {
+  enabled?: boolean;
+  mode?: DaemonVoiceMode;
+  language?: string;
+  voiceModel?: string;
+}
+
+export type DaemonVoiceAudioInput = Blob | ArrayBuffer | Uint8Array;
+
+export interface DaemonWorkspaceVoiceTranscribeOptions {
+  mimeType: string;
+  voiceModel?: string;
+  clientId?: string;
+}
+
+export interface DaemonWorkspaceVoiceTranscriptionResult {
+  v: 1;
+  text: string;
+  model: string;
+  transport: DaemonVoiceTransport;
+}
+
+export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
+
+export type DaemonWorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
+
+export type DaemonWorkspaceTrustLevel =
+  | 'TRUST_FOLDER'
+  | 'TRUST_PARENT'
+  | 'DO_NOT_TRUST';
+
+export interface DaemonWorkspaceTrustStatus {
+  v: 1;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  effective: {
+    state: DaemonWorkspaceTrustState;
+    source: DaemonWorkspaceTrustSource;
+  };
+  explicitTrustLevel: DaemonWorkspaceTrustLevel | null;
+  requiresDaemonRestartForChanges: true;
+}
+
+export type DaemonWorkspaceTrustDesiredState = 'trusted' | 'untrusted';
+
+export interface DaemonWorkspaceTrustChangeRequest {
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  reason?: string;
+}
+
+export interface DaemonWorkspaceTrustChangeResult {
+  accepted: true;
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  requiresOperatorAction: true;
+}
+
+export type DaemonPermissionScope = 'user' | 'workspace';
+
+export type DaemonPermissionRuleType = 'allow' | 'ask' | 'deny';
+
+export interface DaemonPermissionRuleSet {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+export interface DaemonWorkspacePermissionScopeState {
+  path: string;
+  rules: DaemonPermissionRuleSet;
+}
+
+export interface DaemonWorkspacePermissionsStatus {
+  v: 1;
+  user: DaemonWorkspacePermissionScopeState;
+  workspace: DaemonWorkspacePermissionScopeState;
+  merged: DaemonPermissionRuleSet;
+  isTrusted: boolean;
+}
+
 /**
  * Result body of `POST /workspace/init`.
  *
@@ -1085,6 +1186,30 @@ export interface DaemonSettingUpdateResult {
 export interface DaemonInitWorkspaceResult {
   path: string;
   action: 'created' | 'overwrote' | 'noop';
+}
+
+export interface DaemonLspServerStatus {
+  name: string;
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+  languages: string[];
+  transport?: string;
+  command?: string;
+  error?: string;
+}
+
+export interface DaemonSessionLspStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  enabled: boolean;
+  configuredServers: number;
+  readyServers: number;
+  failedServers: number;
+  inProgressServers: number;
+  notStartedServers: number;
+  statusUnavailable?: true;
+  initializationError?: string;
+  servers: DaemonLspServerStatus[];
 }
 
 export interface DaemonGithubSetupRequest {

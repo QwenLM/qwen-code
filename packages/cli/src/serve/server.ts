@@ -56,14 +56,17 @@ import {
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
 } from './auth/device-flow.js';
-import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
+import {
+  mapDomainErrorToErrorKind,
+  type DaemonStatusProvider,
+} from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { isServeDebugMode } from './debug-mode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
-import { isWorkspaceTrusted } from '../config/trustedFolders.js';
+import { getWorkspaceTrustStatus } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
 import {
@@ -128,12 +131,18 @@ import {
 import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
 import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
 import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
+import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
+import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
+import {
+  registerWorkspaceVoiceRoutes,
+  type WorkspaceVoiceRouteDeps,
+} from './routes/workspace-voice.js';
 import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
 import {
   createRateLimiter,
@@ -749,6 +758,7 @@ export interface ServeAppDeps {
    * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
+  statusProvider?: DaemonStatusProvider;
   workspace?: DaemonWorkspaceService;
   persistDisabledTools?: (
     workspace: string,
@@ -762,6 +772,7 @@ export interface ServeAppDeps {
     key: string,
     value: unknown,
   ) => Promise<void>;
+  voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
 function resolveDaemonTelemetryRoute(
@@ -870,6 +881,23 @@ function resolveDaemonTelemetryRoute(
   if (path === '/workspace/settings') {
     if (req.method === 'GET') return { route: 'GET /workspace/settings' };
     if (req.method === 'POST') return { route: 'POST /workspace/settings' };
+  }
+  if (path === '/workspace/trust') {
+    if (req.method === 'GET') return { route: 'GET /workspace/trust' };
+  }
+  if (req.method === 'POST' && path === '/workspace/trust/request') {
+    return { route: 'POST /workspace/trust/request' };
+  }
+  if (path === '/workspace/permissions') {
+    if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
+    if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
+  }
+  if (path === '/workspace/voice') {
+    if (req.method === 'GET') return { route: 'GET /workspace/voice' };
+    if (req.method === 'POST') return { route: 'POST /workspace/voice' };
+  }
+  if (req.method === 'POST' && path === '/workspace/voice/transcribe') {
+    return { route: 'POST /workspace/voice/transcribe' };
   }
   return undefined;
 }
@@ -1004,6 +1032,7 @@ function advertisedMaxPendingPromptsPerSession(
  *   - `GET  /session/:id/context`
  *   - `GET  /session/:id/supported-commands`
  *   - `GET  /session/:id/tasks`
+ *   - `GET  /session/:id/lsp`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/heartbeat`
@@ -1070,6 +1099,7 @@ export function createServeApp(
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
     opts.enableSessionShell === true && tokenConfigured;
+  const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
@@ -1081,7 +1111,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
-      statusProvider: createDaemonStatusProvider(),
+      statusProvider,
       // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
       // readTextFile pick up trust / TOCTOU / audit.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
@@ -1207,7 +1237,7 @@ export function createServeApp(
     createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
-      statusProvider: createDaemonStatusProvider(),
+      statusProvider,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
@@ -1216,6 +1246,7 @@ export function createServeApp(
             'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
           );
         }),
+      ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -1271,9 +1302,11 @@ export function createServeApp(
   const createExtensionManager = () =>
     new ExtensionManager({
       workspaceDir: boundWorkspace,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(boundWorkspace).merged,
-      ),
+      isWorkspaceTrusted:
+        getWorkspaceTrustStatus(
+          loadSettings(boundWorkspace).merged,
+          boundWorkspace,
+        ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -2505,6 +2538,27 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+  registerWorkspaceTrustRoutes(app, {
+    boundWorkspace,
+    workspace,
+    mutate,
+    safeBody,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
+
+  const broadcastSettingsChanged = (
+    key: string,
+    value: unknown,
+    scope: string,
+    clientId: string | undefined,
+  ) => {
+    bridge.publishWorkspaceEvent({
+      type: 'settings_changed',
+      data: { key, value, scope },
+      ...(clientId ? { originatorClientId: clientId } : {}),
+    });
+  };
 
   if (deps.persistSetting) {
     const persistSetting = deps.persistSetting;
@@ -2513,17 +2567,33 @@ export function createServeApp(
       mutate,
       safeBody,
       persistSetting,
-      broadcastSettingsChanged: (key, value, scope, clientId) => {
-        bridge.publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: { key, value, scope },
-          ...(clientId ? { originatorClientId: clientId } : {}),
-        });
-      },
+      broadcastSettingsChanged,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, bridge),
+    });
+    registerWorkspacePermissionsRoutes(app, {
+      boundWorkspace,
+      mutate,
+      safeBody,
+      persistSetting,
+      invokeWorkspaceCommand: (method, params) =>
+        bridge.invokeWorkspaceCommand(method, params),
+      broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, bridge),
     });
   }
+  registerWorkspaceVoiceRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    transcribe: deps.voiceTranscriber,
+    broadcastSettingsChanged,
+    parseClientId: parseClientIdHeader,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
 
   // A2UI action inbound (the upstream half of A2UI-over-MCP): user
   // interactions from web clients are proxied to the UI MCP server's
@@ -3076,6 +3146,19 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/tasks',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/lsp', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.getSessionLspStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/lsp',
         sessionId,
       });
     }

@@ -49,6 +49,20 @@ describe('serve command args', () => {
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
   });
 
+  it('parses --experimental-lsp for daemon child opt-in', () => {
+    const parsed = buildParser().parseSync('--experimental-lsp');
+    expect(parsed['experimentalLsp']).toBe(true);
+  });
+
+  it('registers --experimental-lsp as an explicit serve option', () => {
+    const options = (
+      buildParser() as Argv & {
+        getOptions(): { key: Record<string, boolean> };
+      }
+    ).getOptions();
+    expect(options.key['experimental-lsp']).toBe(true);
+  });
+
   it('parses --web (default true) and --no-web', () => {
     expect(buildParser().parseSync('')['web']).toBe(true);
     expect(buildParser().parseSync('--no-web')['web']).toBe(false);

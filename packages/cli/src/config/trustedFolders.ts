@@ -57,6 +57,22 @@ export interface TrustResult {
   source: 'ide' | 'file' | undefined;
 }
 
+export type WorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
+
+export type WorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
+
+export interface WorkspaceTrustStatus {
+  v: 1;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  effective: {
+    state: WorkspaceTrustState;
+    source: WorkspaceTrustSource;
+  };
+  explicitTrustLevel: TrustLevel | null;
+  requiresDaemonRestartForChanges: true;
+}
+
 export class LoadedTrustedFolders {
   constructor(
     readonly user: TrustedFoldersFile,
@@ -247,9 +263,51 @@ export function isFolderTrustEnabled(settings: Settings): boolean {
   return folderTrustSetting;
 }
 
-function getWorkspaceTrustFromLocalConfig(
+function getExplicitTrustLevel(
+  trustConfig: Record<string, TrustLevel>,
+  workspaceCwd: string,
+): TrustLevel | null {
+  const normalizedWorkspace = path.normalize(workspaceCwd);
+  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
+    if (path.normalize(rulePath) === normalizedWorkspace) {
+      return trustLevel;
+    }
+  }
+  return null;
+}
+
+export function getWorkspaceTrustStatus(
+  settings: Settings,
+  workspaceCwd: string,
   trustConfig?: Record<string, TrustLevel>,
-): TrustResult {
+): WorkspaceTrustStatus {
+  if (!isFolderTrustEnabled(settings)) {
+    return {
+      v: 1,
+      workspaceCwd,
+      folderTrustEnabled: false,
+      effective: { state: 'trusted', source: 'disabled' },
+      explicitTrustLevel: null,
+      requiresDaemonRestartForChanges: true,
+    };
+  }
+
+  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  if (ideTrust !== undefined) {
+    return {
+      v: 1,
+      workspaceCwd,
+      folderTrustEnabled: true,
+      effective: {
+        state: ideTrust ? 'trusted' : 'untrusted',
+        source: 'ide',
+      },
+      explicitTrustLevel: null,
+      requiresDaemonRestartForChanges: true,
+    };
+  }
+
+  // Fall back to the local user configuration
   const folders = loadTrustedFolders();
 
   if (trustConfig) {
@@ -265,10 +323,44 @@ function getWorkspaceTrustFromLocalConfig(
     );
   }
 
-  const isTrusted = folders.isPathTrusted(process.cwd());
+  const isTrusted = folders.isPathTrusted(workspaceCwd);
+  const state: WorkspaceTrustState =
+    isTrusted === true
+      ? 'trusted'
+      : isTrusted === false
+        ? 'untrusted'
+        : 'unknown';
   return {
-    isTrusted,
-    source: isTrusted !== undefined ? 'file' : undefined,
+    v: 1,
+    workspaceCwd,
+    folderTrustEnabled: true,
+    effective: {
+      state,
+      source: isTrusted === undefined ? 'none' : 'file',
+    },
+    explicitTrustLevel: getExplicitTrustLevel(
+      folders.user.config,
+      workspaceCwd,
+    ),
+    requiresDaemonRestartForChanges: true,
+  };
+}
+
+function trustStatusToResult(status: WorkspaceTrustStatus): TrustResult {
+  if (status.effective.source === 'disabled') {
+    return { isTrusted: true, source: undefined };
+  }
+  return {
+    isTrusted:
+      status.effective.state === 'trusted'
+        ? true
+        : status.effective.state === 'untrusted'
+          ? false
+          : undefined,
+    source:
+      status.effective.source === 'file' || status.effective.source === 'ide'
+        ? status.effective.source
+        : undefined,
   };
 }
 
@@ -276,15 +368,7 @@ export function isWorkspaceTrusted(
   settings: Settings,
   trustConfig?: Record<string, TrustLevel>,
 ): TrustResult {
-  if (!isFolderTrustEnabled(settings)) {
-    return { isTrusted: true, source: undefined };
-  }
-
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (ideTrust !== undefined) {
-    return { isTrusted: ideTrust, source: 'ide' };
-  }
-
-  // Fall back to the local user configuration
-  return getWorkspaceTrustFromLocalConfig(trustConfig);
+  return trustStatusToResult(
+    getWorkspaceTrustStatus(settings, process.cwd(), trustConfig),
+  );
 }

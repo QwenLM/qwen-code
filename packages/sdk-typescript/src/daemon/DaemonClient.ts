@@ -32,6 +32,7 @@ import type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
+  DaemonSessionLspStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
   DaemonSessionTaskStatus,
@@ -90,8 +91,19 @@ import type {
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
   DaemonWorkspaceHooksStatus,
+  DaemonPermissionRuleType,
+  DaemonPermissionScope,
   DaemonWorkspaceSettingsStatus,
+  DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
+  DaemonVoiceAudioInput,
+  DaemonWorkspaceVoiceStatus,
+  DaemonWorkspaceVoiceTranscribeOptions,
+  DaemonWorkspaceVoiceTranscriptionResult,
+  DaemonWorkspaceVoiceUpdate,
+  DaemonWorkspaceTrustChangeRequest,
+  DaemonWorkspaceTrustChangeResult,
+  DaemonWorkspaceTrustStatus,
 } from './types.js';
 
 /**
@@ -156,6 +168,14 @@ const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
+
+function normalizePermissionRuleInput(rule: string): string {
+  const trimmed = rule.trim();
+  if (!trimmed) {
+    throw new Error('rule must be a non-empty string');
+  }
+  return trimmed;
+}
 
 export function normalizePendingPromptLimit(
   value: number | null | undefined,
@@ -1340,6 +1360,22 @@ export class DaemonClient {
     );
   }
 
+  async sessionLspStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionLspStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/lsp`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/lsp');
+        }
+        return (await res.json()) as DaemonSessionLspStatus;
+      },
+    );
+  }
+
   async sessionTaskCancel(
     sessionId: string,
     taskId: string,
@@ -1729,6 +1765,140 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSettingUpdateResult;
       },
+    );
+  }
+
+  async workspaceVoice(clientId?: string): Promise<DaemonWorkspaceVoiceStatus> {
+    return await this.jsonRequest<DaemonWorkspaceVoiceStatus>(
+      '/workspace/voice',
+      'GET /workspace/voice',
+      { clientId },
+    );
+  }
+
+  async setWorkspaceVoice(
+    update: DaemonWorkspaceVoiceUpdate,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceVoiceStatus> {
+    return await this.jsonRequest<DaemonWorkspaceVoiceStatus>(
+      '/workspace/voice',
+      'POST /workspace/voice',
+      { method: 'POST', body: update, clientId },
+    );
+  }
+
+  async transcribeWorkspaceVoice(
+    audio: DaemonVoiceAudioInput,
+    opts: DaemonWorkspaceVoiceTranscribeOptions,
+  ): Promise<DaemonWorkspaceVoiceTranscriptionResult> {
+    const query = opts.voiceModel
+      ? `?${new URLSearchParams({ voiceModel: opts.voiceModel }).toString()}`
+      : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/voice/transcribe${query}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': opts.mimeType }, opts.clientId),
+        body: audio as BodyInit,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/voice/transcribe');
+        }
+        return (await res.json()) as DaemonWorkspaceVoiceTranscriptionResult;
+      },
+    );
+  }
+
+  async workspaceTrust(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceTrustStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/trust`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/trust');
+        }
+        return (await res.json()) as DaemonWorkspaceTrustStatus;
+      },
+    );
+  }
+
+  async requestWorkspaceTrustChange(
+    request: DaemonWorkspaceTrustChangeRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceTrustChangeResult> {
+    return await this.jsonRequest<DaemonWorkspaceTrustChangeResult>(
+      '/workspace/trust/request',
+      'POST /workspace/trust/request',
+      { method: 'POST', body: request, clientId },
+    );
+  }
+
+  async workspacePermissions(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspacePermissionsStatus> {
+    return await this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'GET /workspace/permissions',
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async setWorkspacePermissionRules(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rules: string[],
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    return await this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'POST /workspace/permissions',
+      {
+        method: 'POST',
+        body: { scope, ruleType, rules },
+        clientId: opts?.clientId,
+      },
+    );
+  }
+
+  async addWorkspacePermissionRule(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalized = normalizePermissionRuleInput(rule);
+    const current = await this.workspacePermissions(opts);
+    const rules = current[scope].rules[ruleType];
+    if (rules.includes(normalized)) return current;
+    return await this.setWorkspacePermissionRules(
+      scope,
+      ruleType,
+      [...rules, normalized],
+      opts,
+    );
+  }
+
+  async removeWorkspacePermissionRule(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalized = normalizePermissionRuleInput(rule);
+    const current = await this.workspacePermissions(opts);
+    const rules = current[scope].rules[ruleType];
+    if (!rules.includes(normalized)) return current;
+    return await this.setWorkspacePermissionRules(
+      scope,
+      ruleType,
+      rules.filter((item) => item !== normalized),
+      opts,
     );
   }
 

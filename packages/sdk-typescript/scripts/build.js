@@ -27,7 +27,9 @@ const rootDir = join(__dirname, '..');
 // `mid_turn_message_injected` event type/guard/registration, ~150 bytes).
 // Bumped from 119KB to 122KB for the workspace extension management surface
 // (install/update/enable/disable/uninstall/refresh/check update endpoints).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 122 * 1024;
+// Bumped from 122KB to 126KB for daemon workspace voice, trust, permissions,
+// and session LSP helper APIs.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 126 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });

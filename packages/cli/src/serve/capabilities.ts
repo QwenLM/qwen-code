@@ -81,6 +81,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
   session_stats: { since: 'v1' },
+  session_lsp_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
@@ -130,6 +131,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_settings: { since: 'v1' },
+  workspace_permissions: { since: 'v1' },
+  workspace_voice: { since: 'v1' },
+  workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
+  // Inspect bound workspace trust and request local operator action.
+  // Remote clients cannot directly write trustedFolders.json.
+  workspace_trust: { since: 'v1' },
   // `POST /workspace/init` scaffolds an empty
   // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
@@ -309,6 +316,11 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  [
+    'workspace_permissions',
+    (toggles) => toggles.persistSettingAvailable === true,
+  ],
+  ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,

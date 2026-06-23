@@ -35,6 +35,12 @@ import {
   MAX_READ_BYTES,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
+import {
+  isPermissionRuleType,
+  normalizePermissionRules,
+  PermissionRulesValidationError,
+} from '../../config/permission-settings.js';
+import { WorkspaceVoiceError } from '../../services/voice-service.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
@@ -49,6 +55,7 @@ import {
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
+  WorkspaceVoiceSettingsUpdate,
 } from '../workspace-service/types.js';
 import type { AcpConnection } from './connectionRegistry.js';
 import {
@@ -87,6 +94,12 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/env`,
   `${QWEN_METHOD_NS}workspace/preflight`,
   `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/trust`,
+  `${QWEN_METHOD_NS}workspace/trust/request`,
+  `${QWEN_METHOD_NS}workspace/permissions`,
+  `${QWEN_METHOD_NS}workspace/permissions/set`,
+  `${QWEN_METHOD_NS}workspace/voice`,
+  `${QWEN_METHOD_NS}workspace/voice/set`,
   `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
   // Wave 1: session extensions
@@ -96,6 +109,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/lsp_status`,
   // Wave 1: memory
   `${QWEN_METHOD_NS}workspace/memory`,
   `${QWEN_METHOD_NS}workspace/memory/write`,
@@ -156,6 +170,8 @@ const CONN_ROUTED_METHODS = new Set<string>([
 // shared module to avoid churning the 2987-line server.ts near merge; a
 // follow-up may lift all three to a `serve/limits.ts`.)
 const MAX_NAME_LENGTH = 256;
+const MAX_TRUST_REASON_LENGTH = 1024;
+const MAX_VOICE_LANGUAGE_LENGTH = 1024;
 const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
 const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 const MAX_FILE_LINE_LIMIT = 2000;
@@ -282,6 +298,16 @@ function toRpcError(err: unknown): {
       code: RPC.INTERNAL_ERROR,
       message: err.message,
       data: { errorKind: 'memory_write_timeout' },
+    };
+  }
+  if (err instanceof WorkspaceVoiceError) {
+    return {
+      code:
+        err.status >= 400 && err.status < 500
+          ? RPC.INVALID_PARAMS
+          : RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: err.code },
     };
   }
   if (err instanceof TooManyActiveDeviceFlowsError) {
@@ -1225,6 +1251,216 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}workspace/trust`: {
+          const result = await this.workspace.getWorkspaceTrustStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/trust/request`: {
+          const desiredState = params['desiredState'];
+          if (desiredState !== 'trusted' && desiredState !== 'untrusted') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`desiredState` must be "trusted" or "untrusted"',
+                ),
+              );
+            }
+            return;
+          }
+          const reason = params['reason'];
+          if (
+            reason !== undefined &&
+            (typeof reason !== 'string' ||
+              reason.length > MAX_TRUST_REASON_LENGTH)
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`reason\` must be a string up to ${MAX_TRUST_REASON_LENGTH} chars`,
+                ),
+              );
+            }
+            return;
+          }
+          const ctx = this.wsCtx(conn, method);
+          const status = await this.workspace.getWorkspaceTrustStatus(ctx);
+          if (!status.folderTrustEnabled) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_REQUEST,
+                  'Folder trust is disabled for this workspace',
+                ),
+              );
+            }
+            return;
+          }
+          const result = await this.workspace.requestWorkspaceTrustChange(ctx, {
+            desiredState,
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/permissions`: {
+          const result = await this.workspace.getWorkspacePermissionsStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/permissions/set`: {
+          const scope = params['scope'];
+          if (scope !== 'user' && scope !== 'workspace') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "user" or "workspace"',
+                ),
+              );
+            }
+            return;
+          }
+
+          const ruleType = params['ruleType'];
+          if (!isPermissionRuleType(ruleType)) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`ruleType` must be "allow", "ask", or "deny"',
+                ),
+              );
+            }
+            return;
+          }
+
+          let rules: string[];
+          try {
+            rules = normalizePermissionRules(params['rules']);
+          } catch (err) {
+            if (err instanceof PermissionRulesValidationError) {
+              if (id !== undefined) {
+                conn.sendConn(error(id, RPC.INVALID_PARAMS, err.message));
+              }
+              return;
+            }
+            throw err;
+          }
+
+          const result = await this.workspace.setWorkspacePermissionRules(
+            this.wsCtx(conn, method),
+            { scope, ruleType, rules },
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/voice`: {
+          const result = await this.workspace.getWorkspaceVoiceStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/voice/set`: {
+          const update: WorkspaceVoiceSettingsUpdate = {};
+          const enabled = params['enabled'];
+          if (enabled !== undefined) {
+            if (typeof enabled !== 'boolean') {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`enabled` must be a boolean'),
+                );
+              }
+              return;
+            }
+            update.enabled = enabled;
+          }
+
+          const mode = params['mode'];
+          if (mode !== undefined) {
+            if (mode !== 'hold' && mode !== 'tap') {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`mode` must be either "hold" or "tap"',
+                  ),
+                );
+              }
+              return;
+            }
+            update.mode = mode;
+          }
+
+          const language = params['language'];
+          if (language !== undefined) {
+            if (typeof language !== 'string') {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`language` must be a string'),
+                );
+              }
+              return;
+            }
+            const trimmed = language.trim();
+            if (trimmed.length > MAX_VOICE_LANGUAGE_LENGTH) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    `\`language\` exceeds the ${MAX_VOICE_LANGUAGE_LENGTH}-character limit`,
+                  ),
+                );
+              }
+              return;
+            }
+            update.language = trimmed;
+          }
+
+          const voiceModel = params['voiceModel'];
+          if (voiceModel !== undefined) {
+            if (typeof voiceModel !== 'string' || !voiceModel.trim()) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`voiceModel` must be a non-empty string',
+                  ),
+                );
+              }
+              return;
+            }
+            update.voiceModel = voiceModel.trim();
+          }
+
+          const result = await this.workspace.setWorkspaceVoiceSettings(
+            this.wsCtx(conn, method),
+            update,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
         case `${QWEN_METHOD_NS}workspace/set_tool_enabled`: {
           const toolName = String(params['toolName'] ?? '');
           if (!toolName || toolName.length > MAX_NAME_LENGTH) {
@@ -1403,6 +1639,14 @@ export class AcpDispatcher {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionTasksStatus(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/lsp_status`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionLspStatus(sessionId);
           this.replyConn(conn, id, result as unknown);
           return;
         }

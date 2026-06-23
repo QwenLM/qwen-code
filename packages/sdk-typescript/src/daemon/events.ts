@@ -71,6 +71,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'approval_mode_changed',
   'tool_toggled',
   'settings_changed',
+  'trust_change_requested',
   'workspace_initialized',
   'github_setup_completed',
   'mcp_server_restarted',
@@ -583,6 +584,14 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonTrustChangeRequestedData {
+  workspaceCwd: string;
+  desiredState: 'trusted' | 'untrusted';
+  reason?: string;
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 /**
  * Workspace-scoped: fan-outs to every active session SSE bus when
  * `POST /workspace/init` is invoked. The `action` field discriminates
@@ -885,6 +894,10 @@ export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
   Record<string, unknown>
 >;
+export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
+  'trust_change_requested',
+  DaemonTrustChangeRequestedData
+>;
 export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
   'workspace_initialized',
   DaemonWorkspaceInitializedData
@@ -1023,6 +1036,7 @@ export type DaemonMcpGuardrailEvent =
 export type DaemonWorkspaceMutationEvent =
   | DaemonMemoryChangedEvent
   | DaemonAgentChangedEvent
+  | DaemonTrustChangeRequestedEvent
   | DaemonExtensionsChangedEvent;
 
 /**
@@ -1496,6 +1510,10 @@ export function asKnownDaemonEvent(
             Record<string, unknown>
           >)
         : undefined;
+    case 'trust_change_requested':
+      return isTrustChangeRequestedData(event.data)
+        ? (event as DaemonTrustChangeRequestedEvent)
+        : undefined;
     case 'workspace_initialized':
       return isWorkspaceInitializedData(event.data)
         ? (event as DaemonWorkspaceInitializedEvent)
@@ -1876,6 +1894,8 @@ export function reduceDaemonSessionEvent(
         lastToolToggle: mergeOriginator(event.data, event),
       };
     case 'settings_changed':
+      return base;
+    case 'trust_change_requested':
       return base;
     case 'workspace_initialized':
       // Workspace-scoped fan-out. Non-terminal — just records that a
@@ -2592,6 +2612,18 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
     isRecord(value) &&
     isNonEmptyString(value['toolName']) &&
     typeof value['enabled'] === 'boolean'
+  );
+}
+
+function isTrustChangeRequestedData(
+  value: unknown,
+): value is DaemonTrustChangeRequestedData {
+  if (!isRecord(value)) return false;
+  const desiredState = value['desiredState'];
+  return (
+    isNonEmptyString(value['workspaceCwd']) &&
+    (desiredState === 'trusted' || desiredState === 'untrusted') &&
+    (value['reason'] === undefined || typeof value['reason'] === 'string')
   );
 }
 

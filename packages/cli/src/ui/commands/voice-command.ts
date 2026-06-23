@@ -4,45 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { CommandKind, type SlashCommand } from './types.js';
 import { getVoiceUnavailableReason } from '../voice/voice-availability.js';
-
-type VoiceMode = 'hold' | 'tap';
-
-function getVoiceModel(settings: {
-  merged?: { voiceModel?: unknown };
-}): string | undefined {
-  const value = settings.merged?.voiceModel;
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function isVoiceEnabled(settings: {
-  merged?: { general?: { voice?: { enabled?: unknown } } };
-}): boolean {
-  return settings.merged?.general?.voice?.enabled === true;
-}
-
-function getVoiceMode(settings: {
-  merged?: { general?: { voice?: { mode?: unknown } } };
-}): VoiceMode {
-  return settings.merged?.general?.voice?.mode === 'tap' ? 'tap' : 'hold';
-}
-
-function getVoiceScope(settings: {
-  isTrusted?: boolean;
-  workspace?: { settings?: { general?: { voice?: { enabled?: unknown } } } };
-}): SettingScope {
-  return settings.isTrusted === true &&
-    typeof settings.workspace?.settings?.general?.voice?.enabled === 'boolean'
-    ? SettingScope.Workspace
-    : SettingScope.User;
-}
+import {
+  getVoiceSettingsScope,
+  isVoiceEnabled,
+  readVoiceMode,
+  readVoiceModel,
+  type VoiceMode,
+} from '../../services/voice-settings.js';
 
 export const voiceCommand: SlashCommand = {
   name: 'voice',
@@ -57,7 +28,7 @@ export const voiceCommand: SlashCommand = {
     const command = args.trim().toLowerCase();
 
     if (command === 'status') {
-      const voiceModel = getVoiceModel(settings);
+      const voiceModel = readVoiceModel(settings);
       const status = isVoiceEnabled(settings) ? 'enabled' : 'disabled';
       const modelText = voiceModel
         ? t('model: {{voiceModel}}', { voiceModel })
@@ -69,7 +40,7 @@ export const voiceCommand: SlashCommand = {
           'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).',
           {
             status,
-            mode: getVoiceMode(settings),
+            mode: readVoiceMode(settings),
             modelText,
           },
         ),
@@ -78,7 +49,7 @@ export const voiceCommand: SlashCommand = {
 
     if (command === 'off') {
       settings.setValue(
-        getVoiceScope(settings),
+        getVoiceSettingsScope(settings),
         'general.voice.enabled',
         false,
       );
@@ -99,7 +70,7 @@ export const voiceCommand: SlashCommand = {
 
     if (command === '' && isVoiceEnabled(settings)) {
       settings.setValue(
-        getVoiceScope(settings),
+        getVoiceSettingsScope(settings),
         'general.voice.enabled',
         false,
       );
@@ -110,7 +81,7 @@ export const voiceCommand: SlashCommand = {
       };
     }
 
-    const voiceModel = getVoiceModel(settings);
+    const voiceModel = readVoiceModel(settings);
     if (!voiceModel) {
       return {
         type: 'message',
@@ -130,13 +101,13 @@ export const voiceCommand: SlashCommand = {
       };
     }
 
-    const scope = getVoiceScope(settings);
+    const scope = getVoiceSettingsScope(settings);
     const mode: VoiceMode =
       command === 'tap'
         ? 'tap'
         : command === 'hold'
           ? 'hold'
-          : getVoiceMode(settings);
+          : readVoiceMode(settings);
     settings.setValue(scope, 'general.voice.mode', mode);
     settings.setValue(scope, 'general.voice.enabled', true);
     return {

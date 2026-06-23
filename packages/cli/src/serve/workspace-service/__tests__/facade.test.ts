@@ -21,11 +21,47 @@ vi.mock('@qwen-code/qwen-code-core', () => {
       this.code = code;
     }
   }
-  return { SkillError };
+  class FatalConfigError extends Error {}
+  const noopLogger = {
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  };
+  return {
+    SkillError,
+    FatalConfigError,
+    ApprovalMode: {
+      DEFAULT: 'default',
+      AUTO_EDIT: 'autoEdit',
+      YOLO: 'yolo',
+    },
+    DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
+    DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 100_000,
+    DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 100_000,
+    DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 2000,
+    DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 100_000,
+    QWEN_DIR: '.qwen',
+    Storage: {
+      getGlobalQwenDir: () => '/tmp/.qwen',
+      getGlobalSettingsPath: () => '/tmp/.qwen/settings.json',
+    },
+    atomicWriteFileSync: vi.fn(),
+    createDebugLogger: () => noopLogger,
+    getErrorMessage: (error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+    ideContextStore: {
+      get: () => undefined,
+    },
+    isWithinRoot: (location: string, root: string) =>
+      location === root || location.startsWith(`${root}/`),
+    stripRuntimeSnapshotPrefix: (value: string) => value,
+  };
 });
 
 const { createDaemonWorkspaceService } = await import('../index.js');
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { WorkspaceVoiceError } from '../../../services/voice-service.js';
 import type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
@@ -73,6 +109,26 @@ function makeCtx(
 // ---------------------------------------------------------------------------
 
 describe('createDaemonWorkspaceService', () => {
+  describe('workspace voice', () => {
+    it('reports missing voice settings persistence as a structured voice error', async () => {
+      const svc = createDaemonWorkspaceService(makeDeps());
+
+      let caught: unknown;
+      try {
+        await svc.setWorkspaceVoiceSettings(makeCtx(), { enabled: false });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(WorkspaceVoiceError);
+      expect(caught).toMatchObject({
+        name: 'WorkspaceVoiceError',
+        status: 501,
+        code: 'not_implemented',
+      });
+    });
+  });
+
   describe('status methods', () => {
     it('getWorkspaceMcpStatus delegates to queryWorkspaceStatus with correct method', async () => {
       const queryWorkspaceStatus = vi
@@ -386,6 +442,35 @@ describe('createDaemonWorkspaceService', () => {
         svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
       ).rejects.toThrow('disk full');
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('requestWorkspaceTrustChange', () => {
+    it('publishes trust_change_requested with originatorClientId', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ boundWorkspace: '/my/workspace', publishWorkspaceEvent }),
+      );
+
+      const result = await svc.requestWorkspaceTrustChange(
+        makeCtx({ originatorClientId: 'c-42' }),
+        { desiredState: 'untrusted', reason: 'remote user request' },
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'trust_change_requested',
+        data: {
+          workspaceCwd: '/my/workspace',
+          desiredState: 'untrusted',
+          reason: 'remote user request',
+        },
+        originatorClientId: 'c-42',
+      });
+      expect(result).toEqual({
+        accepted: true,
+        desiredState: 'untrusted',
+        requiresOperatorAction: true,
+      });
     });
   });
 

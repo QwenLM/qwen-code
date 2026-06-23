@@ -105,6 +105,7 @@ interface ServeArgs {
   'rate-limit-mutation'?: number;
   'rate-limit-read'?: number;
   'rate-limit-window-ms'?: number;
+  experimentalLsp?: boolean;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -212,6 +213,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'one workspace at boot, multiplexing N sessions onto that child via ' +
           "the agent's native `newSession()`). Stage 2 native in-process mode " +
           'is not yet implemented; this flag will become opt-in then.',
+      })
+      .option('experimental-lsp', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Forward the experimental LSP opt-in to spawned ACP children.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -514,6 +521,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitMutation !== undefined ? { rateLimitMutation } : {}),
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
+        ...(argv.experimentalLsp === true ? { experimentalLsp: true } : {}),
       });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).

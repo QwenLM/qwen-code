@@ -43,6 +43,24 @@ import {
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
+import { loadSettings, SettingScope } from '../../config/settings.js';
+import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  buildPermissionSettings,
+  type PermissionSettingsScope,
+} from '../../config/permission-settings.js';
+import {
+  buildWorkspaceVoiceStatus,
+  validateWorkspaceVoiceConfig,
+  validateWorkspaceVoiceModel,
+  WorkspaceVoiceError,
+} from '../../services/voice-service.js';
+import {
+  getVoiceSettingsScope,
+  isVoiceEnabled,
+  readVoiceModel,
+} from '../../services/voice-settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 import type {
@@ -50,6 +68,9 @@ import type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
   RestartMcpServerResult,
+  WorkspaceTrustChangeRequest,
+  WorkspacePermissionRulesUpdate,
+  WorkspaceVoiceSettingsUpdate,
 } from './types.js';
 
 // Re-export types for consumers.
@@ -58,9 +79,43 @@ export type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
   RestartMcpServerResult,
+  WorkspaceTrustChangeRequest,
+  WorkspaceTrustChangeResult,
+  WorkspaceTrustDesiredState,
+  WorkspacePermissionRulesUpdate,
+  WorkspaceVoiceSettingsUpdate,
   EnvReloadResult,
   ReloadResponse,
 } from './types.js';
+
+const PERMISSION_SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
+  user: SettingScope.User,
+  workspace: SettingScope.Workspace,
+};
+
+function validateResultingVoiceState(
+  settings: ReturnType<typeof loadSettings>,
+  update: WorkspaceVoiceSettingsUpdate,
+): void {
+  const nextEnabled = update.enabled ?? isVoiceEnabled(settings);
+  const nextVoiceModel = update.voiceModel ?? readVoiceModel(settings);
+  if (update.voiceModel) {
+    validateWorkspaceVoiceModel(settings, update.voiceModel);
+  }
+  if (!nextEnabled) return;
+  if (!nextVoiceModel) {
+    throw new WorkspaceVoiceError(
+      400,
+      'voice_model_required',
+      'A valid voiceModel is required before enabling voice.',
+    );
+  }
+  validateWorkspaceVoiceConfig(settings, nextVoiceModel);
+}
+
+function scopeToWire(scope: SettingScope): 'user' | 'workspace' {
+  return scope === SettingScope.Workspace ? 'workspace' : 'user';
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -137,6 +192,7 @@ export function createDaemonWorkspaceService(
     statusProvider,
     isChannelLive,
     persistDisabledTools,
+    persistSetting,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
     refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
@@ -267,7 +323,165 @@ export function createDaemonWorkspaceService(
       );
     },
 
+    async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
+      return getWorkspaceTrustStatus(
+        loadSettings(boundWorkspace).merged,
+        boundWorkspace,
+      );
+    },
+
+    async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
+      return buildPermissionSettings(loadSettings(boundWorkspace));
+    },
+
+    async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
+      return buildWorkspaceVoiceStatus(
+        boundWorkspace,
+        loadSettings(boundWorkspace),
+      );
+    },
+
     // -- Mutations --
+
+    async requestWorkspaceTrustChange(
+      ctx: WorkspaceRequestContext,
+      request: WorkspaceTrustChangeRequest,
+    ) {
+      publishWorkspaceEvent({
+        type: 'trust_change_requested',
+        data: {
+          workspaceCwd: boundWorkspace,
+          desiredState: request.desiredState,
+          ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        },
+        originatorClientId: ctx.originatorClientId,
+      });
+      return {
+        accepted: true,
+        desiredState: request.desiredState,
+        requiresOperatorAction: true,
+      };
+    },
+
+    async setWorkspacePermissionRules(
+      ctx: WorkspaceRequestContext,
+      request: WorkspacePermissionRulesUpdate,
+    ) {
+      const key = `permissions.${request.ruleType}`;
+      try {
+        const result = await invokeWorkspaceCommand(
+          'qwen/permissions/setRules',
+          {
+            scope: request.scope,
+            ruleType: request.ruleType,
+            rules: request.rules,
+          },
+        );
+        publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: { key, value: request.rules, scope: request.scope },
+          originatorClientId: ctx.originatorClientId,
+        });
+        return result as ReturnType<typeof buildPermissionSettings>;
+      } catch (err) {
+        if (!(err instanceof SessionNotFoundError)) {
+          throw err;
+        }
+      }
+
+      if (!persistSetting) {
+        throw new Error(
+          'setWorkspacePermissionRules requires persistSetting in DaemonWorkspaceServiceDeps',
+        );
+      }
+
+      await persistSetting(
+        boundWorkspace,
+        PERMISSION_SCOPE_MAP[request.scope],
+        key,
+        request.rules,
+      );
+      publishWorkspaceEvent({
+        type: 'settings_changed',
+        data: { key, value: request.rules, scope: request.scope },
+        originatorClientId: ctx.originatorClientId,
+      });
+      return buildPermissionSettings(loadSettings(boundWorkspace));
+    },
+
+    async setWorkspaceVoiceSettings(
+      ctx: WorkspaceRequestContext,
+      request: WorkspaceVoiceSettingsUpdate,
+    ) {
+      if (!persistSetting) {
+        throw new WorkspaceVoiceError(
+          501,
+          'not_implemented',
+          'Workspace voice settings persistence is not available',
+        );
+      }
+
+      const settings = loadSettings(boundWorkspace);
+      validateResultingVoiceState(settings, request);
+      const voiceSettingsScope = getVoiceSettingsScope(settings);
+      const writes: Array<{
+        scope: SettingScope;
+        key: string;
+        value: unknown;
+      }> = [];
+
+      if (request.voiceModel !== undefined) {
+        writes.push({
+          scope: getPersistScopeForModelSelection(settings),
+          key: 'voiceModel',
+          value: request.voiceModel,
+        });
+      }
+      if (request.mode !== undefined) {
+        writes.push({
+          scope: voiceSettingsScope,
+          key: 'general.voice.mode',
+          value: request.mode,
+        });
+      }
+      if (request.language !== undefined) {
+        writes.push({
+          scope: voiceSettingsScope,
+          key: 'general.voice.language',
+          value: request.language,
+        });
+      }
+      if (request.enabled !== undefined) {
+        writes.push({
+          scope: voiceSettingsScope,
+          key: 'general.voice.enabled',
+          value: request.enabled,
+        });
+      }
+
+      for (const write of writes) {
+        await persistSetting(
+          boundWorkspace,
+          write.scope,
+          write.key,
+          write.value,
+        );
+        publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key: write.key,
+            value: write.value,
+            scope: scopeToWire(write.scope),
+          },
+          originatorClientId: ctx.originatorClientId,
+        });
+      }
+
+      return buildWorkspaceVoiceStatus(
+        boundWorkspace,
+        loadSettings(boundWorkspace),
+      );
+    },
 
     async setWorkspaceToolEnabled(
       ctx: WorkspaceRequestContext,

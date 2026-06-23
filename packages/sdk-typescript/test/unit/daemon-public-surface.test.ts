@@ -21,6 +21,12 @@ import type {
   DaemonControlEvent,
   DaemonEvent,
   DaemonEventEnvelope,
+  DaemonGithubSetupCompletedData,
+  DaemonGithubSetupCompletedEvent,
+  DaemonGithubSetupGitignoreResult,
+  DaemonGithubSetupRequest,
+  DaemonGithubSetupResult,
+  DaemonGithubSetupWorkflowResult,
   DaemonKnownEventType,
   DaemonModelSwitchedData,
   DaemonModelSwitchedEvent,
@@ -31,6 +37,8 @@ import type {
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,
   DaemonPermissionResolvedEvent,
+  DaemonLspServerStatus,
+  DaemonSessionLspStatus,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
@@ -44,6 +52,23 @@ import type {
   DaemonStreamErrorData,
   DaemonStreamErrorEvent,
   DaemonStreamLifecycleEvent,
+  DaemonTrustChangeRequestedData,
+  DaemonTrustChangeRequestedEvent,
+  DaemonWorkspaceTrustChangeRequest,
+  DaemonWorkspaceTrustChangeResult,
+  DaemonWorkspaceTrustDesiredState,
+  DaemonWorkspaceTrustLevel,
+  DaemonWorkspaceTrustSource,
+  DaemonWorkspaceTrustState,
+  DaemonWorkspaceTrustStatus,
+  DaemonVoiceAudioInput,
+  DaemonVoiceMode,
+  DaemonVoiceModelDescriptor,
+  DaemonVoiceTransport,
+  DaemonWorkspaceVoiceStatus,
+  DaemonWorkspaceVoiceTranscribeOptions,
+  DaemonWorkspaceVoiceTranscriptionResult,
+  DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
 
@@ -114,6 +139,31 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonClientEvictedData>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
+    expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
+    expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    expectTypeOf<DaemonTrustChangeRequestedData>().not.toBeNever();
+    expectTypeOf<DaemonTrustChangeRequestedEvent>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceTrustChangeRequest>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceTrustChangeResult>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceTrustDesiredState>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceTrustLevel>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceTrustSource>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceTrustState>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceTrustStatus>().not.toBeNever();
+    expectTypeOf<DaemonVoiceAudioInput>().not.toBeNever();
+    expectTypeOf<DaemonVoiceMode>().not.toBeNever();
+    expectTypeOf<DaemonVoiceModelDescriptor>().not.toBeNever();
+    expectTypeOf<DaemonVoiceTransport>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceVoiceStatus>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceVoiceTranscribeOptions>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceVoiceTranscriptionResult>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceVoiceUpdate>().not.toBeNever();
+    expectTypeOf<DaemonGithubSetupCompletedData>().not.toBeNever();
+    expectTypeOf<DaemonGithubSetupCompletedEvent>().not.toBeNever();
+    expectTypeOf<DaemonGithubSetupGitignoreResult>().not.toBeNever();
+    expectTypeOf<DaemonGithubSetupRequest>().not.toBeNever();
+    expectTypeOf<DaemonGithubSetupResult>().not.toBeNever();
+    expectTypeOf<DaemonGithubSetupWorkflowResult>().not.toBeNever();
     // #4175 follow-up: the recap result type lives under the daemon
     // sub-barrel and is re-exported at the top-level. Without this
     // assertion a future barrel reshuffle could silently drop the

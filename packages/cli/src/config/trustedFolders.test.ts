@@ -30,6 +30,7 @@ import {
   saveTrustedFolders,
   TrustLevel,
   isWorkspaceTrusted,
+  getWorkspaceTrustStatus,
   resetTrustedFoldersForTesting,
 } from './trustedFolders.js';
 import type { Settings } from './settings.js';
@@ -548,6 +549,82 @@ describe('isWorkspaceTrusted', () => {
     expect(isWorkspaceTrusted(mockSettings)).toEqual({
       isTrusted: true,
       source: 'file',
+    });
+  });
+});
+
+describe('getWorkspaceTrustStatus', () => {
+  const mockRules: Record<string, TrustLevel> = {};
+  const mockSettings: Settings = {
+    security: {
+      folderTrust: {
+        enabled: true,
+      },
+    },
+  };
+
+  beforeEach(() => {
+    resetTrustedFoldersForTesting();
+    vi.spyOn(fs, 'readFileSync').mockImplementation((p) => {
+      if (p === getTrustedFoldersPath()) {
+        return JSON.stringify(mockRules);
+      }
+      return '{}';
+    });
+    vi.spyOn(fs, 'existsSync').mockImplementation(
+      (p) => p === getTrustedFoldersPath(),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    Object.keys(mockRules).forEach((key) => delete mockRules[key]);
+  });
+
+  it('uses explicit workspace path instead of process cwd', () => {
+    vi.spyOn(process, 'cwd').mockReturnValue('/home/user/other');
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/projectA'),
+    ).toMatchObject({
+      workspaceCwd: '/home/user/projectA',
+      folderTrustEnabled: true,
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: TrustLevel.TRUST_FOLDER,
+    });
+  });
+
+  it('reports disabled folder trust as trusted disabled source', () => {
+    expect(
+      getWorkspaceTrustStatus(
+        { security: { folderTrust: { enabled: false } } },
+        '/home/user/projectA',
+      ),
+    ).toEqual({
+      v: 1,
+      workspaceCwd: '/home/user/projectA',
+      folderTrustEnabled: false,
+      effective: { state: 'trusted', source: 'disabled' },
+      explicitTrustLevel: null,
+      requiresDaemonRestartForChanges: true,
+    });
+  });
+
+  it('distinguishes unknown from explicit do not trust', () => {
+    mockRules['/home/user/untrusted'] = TrustLevel.DO_NOT_TRUST;
+
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/untrusted'),
+    ).toMatchObject({
+      effective: { state: 'untrusted', source: 'file' },
+      explicitTrustLevel: TrustLevel.DO_NOT_TRUST,
+    });
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/unknown'),
+    ).toMatchObject({
+      effective: { state: 'unknown', source: 'none' },
+      explicitTrustLevel: null,
     });
   });
 });

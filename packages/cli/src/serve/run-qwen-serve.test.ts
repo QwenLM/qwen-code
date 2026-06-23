@@ -8,6 +8,19 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+const mockCreateSpawnChannelFactory = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/acp-bridge/spawnChannel')>();
+  return {
+    ...actual,
+    createSpawnChannelFactory: mockCreateSpawnChannelFactory.mockImplementation(
+      actual.createSpawnChannelFactory,
+    ),
+  };
+});
+
 import {
   extractContextFilename,
   InvalidPolicyConfigError,
@@ -263,6 +276,69 @@ describe('runQwenServe daemon logger wiring', () => {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
       }
     }
+  });
+});
+
+describe('runQwenServe LSP opt-in propagation', () => {
+  let tmpDir: string | undefined;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = undefined;
+    }
+    mockCreateSpawnChannelFactory.mockClear();
+  });
+
+  function fakeBridge(): HttpAcpBridge {
+    return {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HttpAcpBridge;
+  }
+
+  it('passes --experimental-lsp to spawned ACP children only when opted in', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-lsp-')),
+    );
+
+    const disabledHandle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+      },
+      { bridge: fakeBridge() },
+    );
+    await disabledHandle.close();
+    expect(mockCreateSpawnChannelFactory).toHaveBeenLastCalledWith({
+      onDiagnosticLine: expect.any(Function),
+    });
+
+    const enabledHandle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        experimentalLsp: true,
+      },
+      { bridge: fakeBridge() },
+    );
+    await enabledHandle.close();
+
+    expect(mockCreateSpawnChannelFactory).toHaveBeenLastCalledWith({
+      onDiagnosticLine: expect.any(Function),
+      extraArgs: ['--experimental-lsp'],
+    });
   });
 });
 

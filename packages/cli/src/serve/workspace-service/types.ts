@@ -24,6 +24,15 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
+import type { WorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import type {
+  PermissionRuleType,
+  PermissionSettingsScope,
+  QwenPermissionSettings,
+} from '../../config/permission-settings.js';
+import type { SettingScope , EnvReloadResult } from '../../config/settings.js';
+import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
+import type { VoiceMode } from '../../services/voice-settings.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -124,7 +133,40 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceExtensionsStatus>;
 
+  /** Trust status for the bound workspace. */
+  getWorkspaceTrustStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceTrustStatus>;
+
+  /** Permission settings for the bound workspace. */
+  getWorkspacePermissionsStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<QwenPermissionSettings>;
+
+  /** Voice settings and selectable transcription models for the workspace. */
+  getWorkspaceVoiceStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceVoiceStatus>;
+
   // -- Workspace mutations --
+
+  /** Request that the local operator change workspace trust. */
+  requestWorkspaceTrustChange(
+    ctx: WorkspaceRequestContext,
+    request: WorkspaceTrustChangeRequest,
+  ): Promise<WorkspaceTrustChangeResult>;
+
+  /** Replace one permission rule list. */
+  setWorkspacePermissionRules(
+    ctx: WorkspaceRequestContext,
+    request: WorkspacePermissionRulesUpdate,
+  ): Promise<QwenPermissionSettings>;
+
+  /** Persist workspace voice settings. */
+  setWorkspaceVoiceSettings(
+    ctx: WorkspaceRequestContext,
+    request: WorkspaceVoiceSettingsUpdate,
+  ): Promise<WorkspaceVoiceStatus>;
 
   /** Toggle a tool enabled/disabled in workspace settings. */
   setWorkspaceToolEnabled(
@@ -158,7 +200,6 @@ export interface DaemonWorkspaceService {
 
 // -- Result types for workspace mutations --
 
-import type { EnvReloadResult } from '../../config/settings.js';
 export type { EnvReloadResult };
 
 export interface ReloadResponse {
@@ -168,6 +209,32 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+}
+
+export type WorkspaceTrustDesiredState = 'trusted' | 'untrusted';
+
+export interface WorkspaceTrustChangeRequest {
+  desiredState: WorkspaceTrustDesiredState;
+  reason?: string;
+}
+
+export interface WorkspaceTrustChangeResult {
+  accepted: true;
+  desiredState: WorkspaceTrustDesiredState;
+  requiresOperatorAction: true;
+}
+
+export interface WorkspacePermissionRulesUpdate {
+  scope: PermissionSettingsScope;
+  ruleType: PermissionRuleType;
+  rules: string[];
+}
+
+export interface WorkspaceVoiceSettingsUpdate {
+  enabled?: boolean;
+  mode?: VoiceMode;
+  language?: string;
+  voiceModel?: string;
 }
 
 /** Discriminated union for MCP server restart outcomes. */
@@ -226,6 +293,13 @@ export interface DaemonWorkspaceServiceDeps {
     workspace: string,
     toolName: string,
     enabled: boolean,
+  ) => Promise<void>;
+
+  persistSetting?: (
+    workspace: string,
+    scope: SettingScope,
+    key: string,
+    value: unknown,
   ) => Promise<void>;
 
   /** Reload daemon-side process.env from .env / settings.env. */

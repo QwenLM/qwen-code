@@ -15,6 +15,7 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import { getWorkspaceTrustStatus } from '../config/trustedFolders.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import {
   canonicalizeWorkspace,
@@ -420,10 +421,11 @@ export interface RunQwenServeDeps {
    * `untrusted_workspace` when this is false. Defaults to true:
    * the daemon binds at boot to a workspace the operator
    * explicitly chose, and the trust dialog flow that ungates write
-   * permissions in the interactive CLI is not yet replicated for
-   * the daemon. Tests pin this to false to assert the gate is
-   * actually wired through `runQwenServe → createServeApp →
-   * fsFactory`.
+   * permissions in the interactive CLI is not replicated by the
+   * daemon. Defaults to the bound workspace's folder-trust status;
+   * unknown/untrusted both disable mutating filesystem intents.
+   * Tests can pin this to assert the gate is wired through
+   * `runQwenServe → createServeApp → fsFactory`.
    */
   trustedWorkspace?: boolean;
   /**
@@ -863,7 +865,12 @@ export async function runQwenServe(
   // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
   // through `BridgeFileSystem` for ACP-side writeTextFile / readTextFile
   // calls. See `bridge-file-system-adapter.ts` for the translation layer.
-  const trustedWorkspace = deps.trustedWorkspace ?? true;
+  const trustedWorkspace =
+    deps.trustedWorkspace ??
+    (bootSettings
+      ? getWorkspaceTrustStatus(bootSettings.merged, boundWorkspace).effective
+          .state === 'trusted'
+      : false);
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,
     injected: deps.fsFactory,
@@ -877,6 +884,9 @@ export async function runQwenServe(
     daemonLog.raw(line, level);
   const channelFactory = createSpawnChannelFactory({
     onDiagnosticLine: diagnosticSink,
+    ...(opts.experimentalLsp === true
+      ? { extraArgs: ['--experimental-lsp'] }
+      : {}),
   });
 
   const persistDisabledToolsFn = (
@@ -992,6 +1002,11 @@ export async function runQwenServe(
     // sessions during the cold-spawn window).
     isChannelLive: () => bridge.isChannelLive(),
     persistDisabledTools: persistDisabledToolsFn,
+    persistSetting: (workspace, scope, key, value) =>
+      withSettingsLock(workspace, async () => {
+        const fresh = loadSettings(workspace);
+        fresh.setValue(scope, key, value);
+      }),
     reloadDaemonEnv: (workspace) =>
       withSettingsLock(workspace, async () => {
         const fresh = loadSettings(workspace, { skipLoadEnvironment: true });

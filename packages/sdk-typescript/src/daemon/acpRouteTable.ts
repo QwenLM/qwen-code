@@ -296,6 +296,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ sessionId: segs[0] }),
     },
   },
+  // GET /session/:id/lsp → _qwen/session/lsp_status
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/lsp$/,
+    mapping: {
+      method: '_qwen/session/lsp_status',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
 
   // ---- Granular workspace routes (_qwen/workspace/*) ---------------------
 
@@ -350,6 +359,60 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/workspace\/init\/?$/,
     mapping: {
       method: '_qwen/workspace/init',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // GET /workspace/trust → _qwen/workspace/trust
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/trust\/?$/,
+    mapping: {
+      method: '_qwen/workspace/trust',
+      extractParams: () => ({}),
+    },
+  },
+  // POST /workspace/trust/request → _qwen/workspace/trust/request
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/trust\/request\/?$/,
+    mapping: {
+      method: '_qwen/workspace/trust/request',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // GET /workspace/permissions → _qwen/workspace/permissions
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/permissions\/?$/,
+    mapping: {
+      method: '_qwen/workspace/permissions',
+      extractParams: () => ({}),
+    },
+  },
+  // POST /workspace/permissions → _qwen/workspace/permissions/set
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/permissions\/?$/,
+    mapping: {
+      method: '_qwen/workspace/permissions/set',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // GET /workspace/voice → _qwen/workspace/voice
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/voice\/?$/,
+    mapping: {
+      method: '_qwen/workspace/voice',
+      extractParams: () => ({}),
+    },
+  },
+  // POST /workspace/voice → _qwen/workspace/voice/set
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/voice\/?$/,
+    mapping: {
+      method: '_qwen/workspace/voice/set',
       extractParams: (_s, body) => (isRecord(body) ? body : {}),
     },
   },

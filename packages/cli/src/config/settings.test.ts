@@ -27,11 +27,40 @@ vi.mock('node:os', async (importOriginal) => {
   };
 });
 
-// Mock trustedFolders
-vi.mock('./trustedFolders.js', () => ({
+const trustedFoldersMock = vi.hoisted(() => ({
   isWorkspaceTrusted: vi
     .fn()
     .mockReturnValue({ isTrusted: true, source: 'file' }),
+}));
+
+// Mock trustedFolders
+vi.mock('./trustedFolders.js', () => ({
+  isWorkspaceTrusted: trustedFoldersMock.isWorkspaceTrusted,
+  getWorkspaceTrustStatus: vi.fn((settings, workspaceCwd: string) => {
+    const result = trustedFoldersMock.isWorkspaceTrusted(settings);
+    const state =
+      result.isTrusted === true
+        ? 'trusted'
+        : result.isTrusted === false
+          ? 'untrusted'
+          : 'unknown';
+    return {
+      v: 1,
+      workspaceCwd,
+      folderTrustEnabled: true,
+      effective: {
+        state,
+        source:
+          result.source === 'ide' || result.source === 'file'
+            ? result.source
+            : state === 'unknown'
+              ? 'none'
+              : 'file',
+      },
+      explicitTrustLevel: null,
+      requiresDaemonRestartForChanges: true,
+    };
+  }),
 }));
 
 // NOW import everything else, including the (now effectively re-exported) settings.js
@@ -3551,6 +3580,36 @@ describe('Settings Loading and Merging', () => {
       loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
       expect(process.env['TESTTEST']).toEqual('1234');
+    });
+
+    it('loads .env from loadSettings workspaceDir instead of process cwd', () => {
+      delete process.env['WORKSPACE_DIR_ENV'];
+      const otherCwd = '/mock/other-cwd';
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(otherCwd);
+      const workspaceEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+      const cwdEnvPath = path.join(otherCwd, '.env');
+
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [USER_SETTINGS_PATH, workspaceEnvPath, cwdEnvPath].includes(
+          p.toString(),
+        ),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === workspaceEnvPath) return 'WORKSPACE_DIR_ENV=from_workspace';
+          if (p === cwdEnvPath) return 'WORKSPACE_DIR_ENV=from_cwd';
+          return '{}';
+        },
+      );
+
+      try {
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['WORKSPACE_DIR_ENV']).toEqual('from_workspace');
+      } finally {
+        cwdSpy.mockRestore();
+        delete process.env['WORKSPACE_DIR_ENV'];
+      }
     });
 
     it('does not load project .env files from untrusted workspaces', () => {
