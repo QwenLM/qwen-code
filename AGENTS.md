@@ -21,19 +21,21 @@ simplify.
 
 _Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
 
-### Core Infrastructure Is Maintainer-Only
-
-**Non-maintainer PRs touching core infrastructure are rejected. No
-exceptions, no evaluation, no judgment.**
+### Core Infrastructure Is Maintainer-Only (two-tier rule)
 
 Core modules — `packages/core/src/**`, auth, providers, models, config, tools,
-services — are the architectural backbone. The gate cannot assess the blast
-radius of changes to these modules. "The direction looks correct" is not
-confidence; it is how bad refactors get approved (see PR #5089: 75 files
-across core/auth/providers/models, approved by gate, design was wrong).
+services — are the architectural backbone. PRs touching them face a two-tier
+gate:
 
-Core refactors must be maintainer-initiated, with design discussion in an
-issue before any PR is opened. **This is not a guideline. It is a wall.**
+1. **Large-scope changes (10+ files or 500+ lines in core) → hard block.**
+   No evaluation, no exceptions. Core refactors must be maintainer-initiated.
+2. **Small-scope changes → gate may evaluate, but must be 100% confident.**
+   Any doubt at all → escalate to maintainer. "The direction looks correct"
+   is not confidence. The gate must name every downstream consumer; if it
+   cannot, escalate.
+
+**When in doubt, escalate. Better to wrongly escalate than to wrongly
+approve.**
 
 ## Common Commands
 

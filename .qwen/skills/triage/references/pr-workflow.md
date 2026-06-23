@@ -58,22 +58,15 @@ If the same author has **3+ open PRs in 7 days** with similar patterns:
 - Mostly noise → close the batch with a single explanation.
 - A few have value → extract those, close the rest.
 
-### Stage 0b: Core Module Protection (HARD BLOCK — no exceptions, no judgment)
+### Stage 0b: Core Module Protection (two-tier check)
 
-**If the PR author is NOT a maintainer AND the PR touches core infrastructure → reject immediately. Do NOT evaluate. Do NOT proceed to Stage 1. No exceptions.**
+Core infrastructure: `packages/core/src/**`, auth, providers, models, config, tools, services, cross-package changes.
 
-Core infrastructure paths:
+**Tier 1 — Large-scope changes to core → HARD BLOCK.** If the PR touches 10+ files or 500+ lines in core paths → reject immediately. No evaluation, no Stage 1. Reply: "This change touches core infrastructure at scale. Core refactors must be maintainer-initiated — please open an issue to discuss the design first." Then **stop**. This is a wall, not a guideline.
 
-- `packages/core/src/**`
-- `packages/cli/src/config/auth.ts`, `packages/cli/src/ui/auth/**`
-- `packages/cli/src/serve/**`
-- Any PR spanning both `packages/core` and `packages/cli`
+**Tier 2 — Small-scope changes to core → evaluate with 100% confidence.** If the PR touches fewer files but still hits core paths, you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
 
-Check the author: `gh pr view "$PR_NUMBER" --json author --jq '.author.login'`. If the author is not a maintainer, and any changed file matches the paths above → request changes with: "Core infrastructure changes must be maintainer-initiated. Please open an issue to discuss the design first." Then **stop**.
-
-**Do NOT try to evaluate whether the change "looks correct" or "seems safe."** You will be wrong. The gate cannot assess the blast radius of core refactors — that requires architectural context no PR review provides. "The direction looks correct" has caused real damage (see PR #5089: 75 files, core/auth/providers/models, approved by gate, design was wrong).
-
-**This rule is not a guideline. It is a wall. Do not think around it.**
+**Why two tiers:** A one-line bugfix in `packages/core/src/providers/install.ts` with a clear reproduction is different from a 75-file refactor of the provider system. The gate can handle the former; the latter requires maintainer architectural context. But for any core change, **when in doubt, escalate. Better to wrongly escalate than to wrongly approve.**
 
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
