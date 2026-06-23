@@ -127,6 +127,7 @@ import {
 } from './fs/index.js';
 import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
 import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
+import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
@@ -835,6 +836,9 @@ function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
+  }
+  if (req.method === 'POST' && path === '/workspace/setup-github') {
+    return { route: 'POST /workspace/setup-github' };
   }
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
@@ -2489,6 +2493,13 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
   });
   registerWorkspaceFileWriteRoutes(app, {
+    bridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  registerWorkspaceSetupGithubRoutes(app, {
+    boundWorkspace,
     bridge,
     mutate,
     parseClientId: parseClientIdHeader,

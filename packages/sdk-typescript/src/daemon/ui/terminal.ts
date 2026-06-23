@@ -118,6 +118,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `init ${event.action} ${event.path}`,
         '36',
       );
+    case 'workspace.github.setup.completed':
+      return terminalLine(
+        'github',
+        `setup ${event.releaseTag} (${event.workflows.length} workflows)`,
+        '36',
+      );
     case 'workspace.mcp.budget_warning':
       return terminalLine(
         'mcp',

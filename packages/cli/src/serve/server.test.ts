@@ -186,6 +186,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_approval_mode_control',
   'workspace_tool_toggle',
   'workspace_init',
+  'workspace_github_setup',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -232,6 +233,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   ...EXPECTED_STAGE1_FEATURES.filter(
     (f) =>
       f !== 'workspace_init' &&
+      f !== 'workspace_github_setup' &&
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
       f !== 'session_btw' &&
@@ -247,6 +249,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   ),
   'workspace_settings',
   'workspace_init',
+  'workspace_github_setup',
   'workspace_mcp_restart',
   'session_recap',
   'session_btw',
@@ -9155,6 +9158,7 @@ describe('runQwenServe', () => {
     // in the body — proof the override actually drives the request.
     const sentinelMessage = 'sentinel-from-fake-factory';
     const fsFactory: WorkspaceFileSystemFactory = {
+      assertCanWrite: () => {},
       forRequest: () => ({
         resolve: async () => {
           throw new FsError('parse_error', sentinelMessage);

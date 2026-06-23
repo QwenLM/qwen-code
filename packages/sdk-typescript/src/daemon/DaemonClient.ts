@@ -64,6 +64,8 @@ import type {
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  DaemonGithubSetupRequest,
+  DaemonGithubSetupResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonReloadResponse,
@@ -1930,6 +1932,17 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonInitWorkspaceResult;
       },
+    );
+  }
+
+  async setupGithub(
+    params: DaemonGithubSetupRequest,
+    clientId?: string,
+  ): Promise<DaemonGithubSetupResult> {
+    return await this.jsonRequest<DaemonGithubSetupResult>(
+      '/workspace/setup-github',
+      'POST /workspace/setup-github',
+      { method: 'POST', body: params, clientId },
     );
   }
 

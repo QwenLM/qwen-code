@@ -406,6 +406,7 @@ describe('createBridgeFileSystemAdapter', () => {
     it('passes sessionId into the audit context for both read and write', async () => {
       const calls: Array<{ route: string; sessionId?: string }> = [];
       const fakeFactory: WorkspaceFileSystemFactory = {
+        assertCanWrite: () => {},
         forRequest: (ctx) => {
           calls.push({
             route: ctx.route,
@@ -457,6 +458,7 @@ describe('createBridgeFileSystemAdapter', () => {
     it('omits sessionId from audit context when ACP request lacks one', async () => {
       const calls: Array<{ route: string; sessionId?: string }> = [];
       const fakeFactory: WorkspaceFileSystemFactory = {
+        assertCanWrite: () => {},
         forRequest: (ctx) => {
           calls.push({
             route: ctx.route,

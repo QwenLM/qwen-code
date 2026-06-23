@@ -48,6 +48,7 @@ export type DaemonUiEventType =
   | 'workspace.tool.toggled'
   | 'workspace.settings.changed'
   | 'workspace.initialized'
+  | 'workspace.github.setup.completed'
   | 'workspace.mcp.budget_warning'
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
@@ -398,6 +399,16 @@ export interface DaemonUiWorkspaceInitializedEvent extends DaemonUiEventBase {
   action: 'created' | 'overwrote' | 'noop';
 }
 
+export interface DaemonUiGithubSetupCompletedEvent extends DaemonUiEventBase {
+  type: 'workspace.github.setup.completed';
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: unknown[];
+  gitignore: unknown;
+  warnings: string[];
+}
+
 export interface DaemonUiMcpBudgetWarningEvent extends DaemonUiEventBase {
   type: 'workspace.mcp.budget_warning';
   liveCount: number;
@@ -527,6 +538,7 @@ export type DaemonUiEvent =
   | DaemonUiWorkspaceToolToggledEvent
   | DaemonUiWorkspaceSettingsChangedEvent
   | DaemonUiWorkspaceInitializedEvent
+  | DaemonUiGithubSetupCompletedEvent
   | DaemonUiMcpBudgetWarningEvent
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent

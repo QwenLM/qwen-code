@@ -247,6 +247,7 @@ export interface WorkspaceFileSystem {
  */
 export interface WorkspaceFileSystemFactory {
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
+  assertCanWrite(): void;
 }
 
 export interface CreateWorkspaceFileSystemFactoryDeps {
@@ -306,6 +307,9 @@ export function createWorkspaceFileSystemFactory(
   const pathLocks = new PathMutexRegistry();
 
   return {
+    assertCanWrite() {
+      assertTrustedForIntent(deps.trusted, 'write');
+    },
     forRequest(ctx) {
       return new WorkspaceFileSystemImpl({
         boundWorkspace,

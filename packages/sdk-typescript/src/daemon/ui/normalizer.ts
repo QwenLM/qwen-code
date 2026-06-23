@@ -255,6 +255,9 @@ export function normalizeDaemonEvent(
     case 'workspace_initialized':
       return normalizeWorkspaceInitialized(event, base);
 
+    case 'github_setup_completed':
+      return normalizeGithubSetupCompleted(event, base);
+
     case 'mcp_budget_warning':
       return normalizeMcpBudgetWarning(event, base);
 
@@ -1119,6 +1122,41 @@ function normalizeWorkspaceInitialized(
     );
   }
   return [{ ...base, type: 'workspace.initialized', path, action }];
+}
+
+function normalizeGithubSetupCompleted(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const releaseTag = getString(event.data, 'releaseTag');
+  const readmeUrl = getString(event.data, 'readmeUrl');
+  if (!releaseTag || !readmeUrl || !isRecord(event.data)) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed github_setup_completed payload',
+    );
+  }
+  const workflows = event.data['workflows'];
+  const warnings = event.data['warnings'];
+  return [
+    {
+      ...base,
+      type: 'workspace.github.setup.completed',
+      releaseTag,
+      readmeUrl,
+      ...(typeof event.data['secretsUrl'] === 'string'
+        ? { secretsUrl: event.data['secretsUrl'] }
+        : {}),
+      workflows: Array.isArray(workflows) ? workflows : [],
+      gitignore: event.data['gitignore'],
+      warnings: Array.isArray(warnings)
+        ? warnings.filter(
+            (warning): warning is string => typeof warning === 'string',
+          )
+        : [],
+    },
+  ];
 }
 
 function normalizeMcpBudgetWarning(

@@ -2008,6 +2008,31 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes github_setup_completed', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('github_setup_completed', {
+        releaseTag: 'v1.2.3',
+        readmeUrl:
+          'https://github.com/QwenLM/qwen-code-action/blob/v1.2.3/README.md#quick-start',
+        workflows: [
+          {
+            path: '.github/workflows/qwen-dispatch.yml',
+            status: 'written',
+            sizeBytes: 12,
+          },
+        ],
+        gitignore: { path: '.gitignore', status: 'updated' },
+        warnings: [],
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.github.setup.completed',
+        releaseTag: 'v1.2.3',
+      }),
+    ]);
+  });
+
   it('normalizes mcp_budget_warning with mode enum', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('mcp_budget_warning', {

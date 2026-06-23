@@ -72,6 +72,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'tool_toggled',
   'settings_changed',
   'workspace_initialized',
+  'github_setup_completed',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
   'settings_reloaded',
@@ -605,6 +606,28 @@ export interface DaemonWorkspaceInitializedData {
   [key: string]: unknown;
 }
 
+export interface DaemonGithubSetupCompletedData {
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: Array<{
+    sourcePath?: string;
+    path: string;
+    status: 'written' | 'failed';
+    sizeBytes?: number;
+    error?: string;
+  }>;
+  gitignore: {
+    path: '.gitignore';
+    status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped';
+    added?: string[];
+    error?: string;
+  };
+  warnings: string[];
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 /**
  * Workspace-scoped: fired when
  * `POST /workspace/mcp/:server/restart` successfully reconnected and
@@ -866,6 +889,10 @@ export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
   'workspace_initialized',
   DaemonWorkspaceInitializedData
 >;
+export type DaemonGithubSetupCompletedEvent = DaemonEventEnvelope<
+  'github_setup_completed',
+  DaemonGithubSetupCompletedData
+>;
 export type DaemonMcpServerRestartedEvent = DaemonEventEnvelope<
   'mcp_server_restarted',
   DaemonMcpServerRestartedData
@@ -963,6 +990,7 @@ export type DaemonControlEvent =
   | DaemonToolToggledEvent
   | DaemonSettingsChangedEvent
   | DaemonWorkspaceInitializedEvent
+  | DaemonGithubSetupCompletedEvent
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
   | DaemonSettingsReloadedEvent
@@ -1472,6 +1500,10 @@ export function asKnownDaemonEvent(
       return isWorkspaceInitializedData(event.data)
         ? (event as DaemonWorkspaceInitializedEvent)
         : undefined;
+    case 'github_setup_completed':
+      return isGithubSetupCompletedData(event.data)
+        ? (event as DaemonGithubSetupCompletedEvent)
+        : undefined;
     case 'mcp_server_restarted':
       return isMcpServerRestartedData(event.data)
         ? (event as DaemonMcpServerRestartedEvent)
@@ -1853,6 +1885,8 @@ export function reduceDaemonSessionEvent(
         workspaceInitCount: base.workspaceInitCount + 1,
         lastWorkspaceInit: mergeOriginator(event.data, event),
       };
+    case 'github_setup_completed':
+      return base;
     case 'mcp_server_restarted':
       return {
         ...base,
@@ -2568,6 +2602,45 @@ function isWorkspaceInitializedData(
   if (!isNonEmptyString(value['path'])) return false;
   const action = value['action'];
   return action === 'created' || action === 'overwrote' || action === 'noop';
+}
+
+function isGithubSetupCompletedData(
+  value: unknown,
+): value is DaemonGithubSetupCompletedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['releaseTag'])) return false;
+  if (!isNonEmptyString(value['readmeUrl'])) return false;
+  if (!Array.isArray(value['workflows'])) return false;
+  if (!value['workflows'].every(isGithubSetupWorkflowResult)) return false;
+  if (!isGithubSetupGitignoreResult(value['gitignore'])) return false;
+  return (
+    Array.isArray(value['warnings']) &&
+    value['warnings'].every((warning) => typeof warning === 'string')
+  );
+}
+
+function isGithubSetupWorkflowResult(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['path'])) return false;
+  const status = value['status'];
+  if (status !== 'written' && status !== 'failed') return false;
+  if (value['sizeBytes'] !== undefined && !isFiniteNumber(value['sizeBytes'])) {
+    return false;
+  }
+  return value['error'] === undefined || typeof value['error'] === 'string';
+}
+
+function isGithubSetupGitignoreResult(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value['path'] !== '.gitignore') return false;
+  const status = value['status'];
+  return (
+    status === 'created' ||
+    status === 'updated' ||
+    status === 'unchanged' ||
+    status === 'failed' ||
+    status === 'skipped'
+  );
 }
 
 function isMcpServerRestartedData(

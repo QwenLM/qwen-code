@@ -337,6 +337,7 @@ const fakeWorkspace = {
 
 function makeGlobFsFactory(glob: WorkspaceFileSystem['glob']) {
   return {
+    assertCanWrite: () => {},
     forRequest: () =>
       ({
         glob,
@@ -352,6 +353,7 @@ function makeFileFsFactory(
   overrides: Partial<Record<keyof WorkspaceFileSystem, unknown>>,
 ) {
   return {
+    assertCanWrite: () => {},
     forRequest: () =>
       ({
         resolve: vi.fn(async (input: string) => resolvedPath(`/ws/${input}`)),

@@ -49,6 +49,10 @@ describe('setupGithubCommand', async () => {
     if (scratchDir) await fs.rm(scratchDir, { recursive: true });
   });
 
+  it('remains interactive-only', () => {
+    expect(setupGithubCommand.supportedModes).toEqual(['interactive']);
+  });
+
   it('returns a tool action to download github workflows and handles paths', async () => {
     const fakeRepoOwner = 'fake';
     const fakeRepoName = 'repo';

@@ -10,15 +10,20 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('GIT');
 
+interface GitCommandOptions {
+  cwd?: string;
+}
+
 /**
  * Checks if a directory is within a git repository hosted on GitHub.
  * @returns true if the directory is in a git repository with a github.com remote, false otherwise
  */
-export const isGitHubRepository = (): boolean => {
+export const isGitHubRepository = (opts: GitCommandOptions = {}): boolean => {
   try {
     const remotes = (
       execSync('git remote -v', {
         encoding: 'utf-8',
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
       }) || ''
     ).trim();
 
@@ -53,10 +58,11 @@ function isGitHubRemoteUrl(remoteUrl: string): boolean {
  * @returns the path to the root of the git repo.
  * @throws error if the exec command fails.
  */
-export const getGitRepoRoot = (): string => {
+export const getGitRepoRoot = (opts: GitCommandOptions = {}): string => {
   const gitRepoRoot = (
     execSync('git rev-parse --show-toplevel', {
       encoding: 'utf-8',
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
     }) || ''
   ).trim();
 
@@ -117,9 +123,13 @@ export const getLatestGitHubRelease = async (
  * @returns the owner and repository of the github repo.
  * @throws error if the exec command fails.
  */
-export function getGitHubRepoInfo(): { owner: string; repo: string } {
+export function getGitHubRepoInfo(opts: GitCommandOptions = {}): {
+  owner: string;
+  repo: string;
+} {
   const remoteUrl = execSync('git remote get-url origin', {
     encoding: 'utf-8',
+    ...(opts.cwd ? { cwd: opts.cwd } : {}),
   }).trim();
 
   // Handle SCP-style SSH URLs (git@github.com:owner/repo.git)

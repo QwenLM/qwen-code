@@ -1693,6 +1693,39 @@ describe('PR 21 — auth device-flow events', () => {
       expect(asKnownDaemonEvent(malformed)).toBeUndefined();
     });
 
+    it('github_setup_completed: accepts workflow summary and gitignore warning', () => {
+      const known = asKnownDaemonEvent({
+        id: 11,
+        v: 1,
+        type: 'github_setup_completed',
+        data: {
+          releaseTag: 'v1.2.3',
+          readmeUrl:
+            'https://github.com/QwenLM/qwen-code-action/blob/v1.2.3/README.md#quick-start',
+          workflows: [
+            {
+              path: '.github/workflows/qwen-dispatch.yml',
+              status: 'written',
+              sizeBytes: 12,
+            },
+          ],
+          gitignore: { path: '.gitignore', status: 'failed' },
+          warnings: ['Could not update .gitignore'],
+        },
+      });
+
+      expect(known?.type).toBe('github_setup_completed');
+      expect(known?.data.gitignore.status).toBe('failed');
+      expect(
+        asKnownDaemonEvent({
+          id: 12,
+          v: 1,
+          type: 'github_setup_completed',
+          data: { releaseTag: 'v1.2.3' },
+        }),
+      ).toBeUndefined();
+    });
+
     it('mcp_server_restarted: counter + last snapshot + envelope originator merge', () => {
       const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         id: 11,

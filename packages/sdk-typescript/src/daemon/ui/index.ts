@@ -104,6 +104,7 @@ export type {
   DaemonUiWorkspaceToolToggledEvent,
   DaemonUiWorkspaceSettingsChangedEvent,
   DaemonUiWorkspaceInitializedEvent,
+  DaemonUiGithubSetupCompletedEvent,
   DaemonUiMcpBudgetWarningEvent,
   DaemonUiMcpChildRefusedEvent,
   DaemonUiMcpServerRestartedEvent,

@@ -2060,6 +2060,64 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setupGithub', () => {
+    it('posts consent to /workspace/setup-github', async () => {
+      const body = {
+        kind: 'github_setup',
+        workspaceCwd: '/work',
+        gitRepoRoot: '/work',
+        releaseTag: 'v1.2.3',
+        readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+        workflows: [],
+        gitignore: { path: '.gitignore', status: 'unchanged' },
+        warnings: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.setupGithub({ consent: true });
+
+      expect(result).toEqual(body);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/setup-github');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ consent: true });
+    });
+
+    it('forwards client id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          kind: 'github_setup',
+          workspaceCwd: '/work',
+          gitRepoRoot: '/work',
+          releaseTag: 'v1.2.3',
+          readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+          workflows: [],
+          gitignore: { path: '.gitignore', status: 'unchanged' },
+          warnings: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.setupGithub({ consent: true }, 'client-1');
+
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws DaemonHttpError for setup failures', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(502, {
+          code: 'github_release_lookup_failed',
+          error: 'Unable to look up release',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setupGithub({ consent: true }),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+  });
+
   describe('MCP restart timeout coupling (#4330)', () => {
     it('SDK default timeout equals server deadline + client headroom', async () => {
       const { MCP_RESTART_SERVER_DEADLINE_MS, MCP_RESTART_CLIENT_HEADROOM_MS } =

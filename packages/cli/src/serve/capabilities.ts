@@ -138,6 +138,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the file, the caller should follow up with
   // `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
+  // `POST /workspace/setup-github` installs the fixed
+  // qwen-code-action workflow set into the bound workspace after
+  // explicit consent. The route reuses the interactive `/setup-github`
+  // release lookup, workflow download, and `.gitignore` update logic.
+  workspace_github_setup: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
