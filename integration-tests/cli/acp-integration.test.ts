@@ -478,17 +478,14 @@ function setupAcpTest(
     rig.setup('acp set config option', {
       settings: {
         modelProviders: {
-          openai: {
-            protocol: 'openai',
-            models: [
-              {
-                id: 'e2e-set-config-option-model',
-                name: 'E2E Set Config Option Model',
-                baseUrl: 'https://api.openai.com/v1',
-                envKey: 'OPENAI_API_KEY',
-              },
-            ],
-          },
+          openai: [
+            {
+              id: 'e2e-set-config-option-model',
+              name: 'E2E Set Config Option Model',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
         },
       },
     });
