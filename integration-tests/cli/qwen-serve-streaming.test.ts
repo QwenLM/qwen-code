@@ -126,6 +126,7 @@ beforeAll(async () => {
       env: {
         ...process.env,
         HOME: homeDir,
+        QWEN_HOME: path.join(homeDir, '.qwen'),
         OPENAI_API_KEY: 'fake-key',
         OPENAI_BASE_URL: fakeServer.baseUrl,
         OPENAI_MODEL: 'fake-model',
