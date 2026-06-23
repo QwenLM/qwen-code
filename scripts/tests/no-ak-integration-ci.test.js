@@ -62,40 +62,40 @@ describe('no-AK integration CI wiring', () => {
     expect(platformJob).not.toContain(NO_AK_SCRIPT);
   });
 
-  it('fetches fresh Ubuntu PR merge refs before running checks', () => {
+  it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
+    const platformJob = getWorkflowJob(workflow, 'test_platforms');
 
+    // On PRs both gates check out refs/pull/N/head, which is published the
+    // instant the branch is pushed, instead of the merge ref that GitHub
+    // rebuilds asynchronously and can serve stale for minutes.
+    for (const job of [ubuntuJob, platformJob]) {
+      expect(job).toContain(
+        "format('refs/pull/{0}/head', github.event.pull_request.number)",
+      );
+    }
+
+    // The brittle merge-ref retry/refresh machinery is gone: in particular the
+    // direct GitHub fetch (the self-hosted proxy times it out) and the forced
+    // merge-ref checkout no longer exist.
     expect(ubuntuJob).not.toContain(
-      "name: 'Refresh PR refs after cached checkout'",
+      "name: 'Fetch current PR merge ref from GitHub'",
     );
-    expect(ubuntuJob).not.toContain('https://github.com:443/');
-    expect(ubuntuJob).not.toContain('git fetch --no-tags "${github_url}"');
+    expect(ubuntuJob).not.toContain('https://x-access-token:${GITHUB_TOKEN}');
+    expect(ubuntuJob).not.toContain('git checkout --force "${merge_ref}"');
+    expect(ubuntuJob).not.toContain(
+      "name: 'Back off for stale merge ref to refresh'",
+    );
+
+    // The cheap sanity guard stays: fail loud if HEAD lacks the PR head.
     expect(ubuntuJob).toContain(
       "name: 'Verify PR checkout includes head commit'",
     );
-    expect(ubuntuJob).toContain("id: 'verify_pr_checkout'");
-    expect(ubuntuJob).toContain('continue-on-error: true');
     expect(ubuntuJob).toContain('git merge-base --is-ancestor');
     expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
-    expect(ubuntuJob).toContain(
-      "name: 'Back off for stale merge ref to refresh'",
-    );
-    expect(ubuntuJob).toContain(
-      "name: 'Fetch current PR merge ref from GitHub'",
-    );
-    expect(ubuntuJob).toContain('timeout-minutes: 2');
-    expect(ubuntuJob).toContain('https://x-access-token:${GITHUB_TOKEN}');
-    expect(ubuntuJob).toContain('git fetch --no-tags --no-recurse-submodules');
-    expect(ubuntuJob).toContain('git checkout --force "${merge_ref}"');
-    expect(ubuntuJob).toContain(
-      "steps.verify_pr_checkout.outcome == 'failure'",
-    );
-    expect(ubuntuJob).toContain(
-      "name: 'Verify PR checkout includes head commit after refresh'",
-    );
   });
 });
