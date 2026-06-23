@@ -20,7 +20,11 @@ const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const nodeRequire = createRequire(import.meta.url);
 
-export function preparePackage({ rootDir = defaultRootDir } = {}) {
+export function preparePackage({
+  rootDir = defaultRootDir,
+  requireNativeAudioCapture = process.env
+    .QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1',
+} = {}) {
   const distDir = path.join(rootDir, 'dist');
 
   verifyBundleArtifacts(rootDir, distDir);
@@ -30,6 +34,7 @@ export function preparePackage({ rootDir = defaultRootDir } = {}) {
   const bundleNativeAudioCapture = copyNativeAudioCapturePackage(
     rootDir,
     distDir,
+    { required: requireNativeAudioCapture },
   );
   writeDistPackageJson(rootDir, distDir, { bundleNativeAudioCapture });
   printPackageStructure(distDir);
@@ -135,7 +140,7 @@ function copyExtensionExamples(rootDir, distDir) {
   }
 }
 
-function copyNativeAudioCapturePackage(rootDir, distDir) {
+function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
   console.log('Copying native audio capture package...');
 
   const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
@@ -153,10 +158,15 @@ function copyNativeAudioCapturePackage(rootDir, distDir) {
 
   for (const requiredPath of requiredPaths) {
     if (!fs.existsSync(requiredPath)) {
-      throw new Error(
-        `Required audio capture artifact missing: ${requiredPath}. ` +
-          'Cannot publish package without native voice capture.',
-      );
+      const message = `audio capture package artifact not found at ${requiredPath}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return false;
     }
   }
 

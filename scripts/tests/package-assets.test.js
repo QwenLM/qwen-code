@@ -83,6 +83,20 @@ describe('package asset scripts', () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+          'prebuilds',
+          'darwin-arm64',
+          '@qwen-code+audio-capture.node',
+        ),
+      ),
+    ).toBe(true);
     const distAudioPackageJson = JSON.parse(
       readFileSync(
         path.join(
@@ -132,7 +146,7 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('fails packaging when audio-capture artifacts are missing', () => {
+  it('omits bundledDependencies when audio-capture artifacts are missing', () => {
     const rootDir = createFixtureRoot();
     rmSync(path.join(rootDir, 'packages', 'audio-capture', 'prebuilds'), {
       recursive: true,
@@ -141,9 +155,12 @@ describe('package asset scripts', () => {
     createBundleArtifacts(rootDir);
     stubConsole();
 
-    expect(() => preparePackage({ rootDir })).toThrow(
-      /Required audio capture artifact missing:/,
+    preparePackage({ rootDir });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
     );
+    expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(
       existsSync(
         path.join(
@@ -155,6 +172,20 @@ describe('package asset scripts', () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  it('fails packaging when required audio-capture artifacts are missing', () => {
+    const rootDir = createFixtureRoot();
+    rmSync(path.join(rootDir, 'packages', 'audio-capture', 'prebuilds'), {
+      recursive: true,
+      force: true,
+    });
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: true }),
+    ).toThrow(/Required audio capture package artifact not found at/);
   });
 
   function createFixtureRoot() {

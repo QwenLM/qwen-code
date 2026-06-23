@@ -400,6 +400,8 @@ jobs:
           path: 'packages/audio-capture/prebuilds'
 
       - name: 'Build Bundle and Prepare Package'
+        env:
+          QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: |-
           npm run bundle
           npm run prepare:package
