@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { Protocol } from '../../core/contentGenerator.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const CUSTOM_API_KEY_ENV_PREFIX = 'QWEN_CUSTOM_API_KEY_';
@@ -76,7 +76,7 @@ function stripTrailingSlashes(value: string): string {
 }
 
 export function generateCustomEnvKey(
-  protocol: Protocol,
+  protocol: AuthType,
   baseUrl: string,
 ): string {
   // Strip trailing slashes before hashing so callers that differ only in
@@ -99,8 +99,12 @@ export const customProvider: ProviderConfig = {
   label: 'Custom Provider',
   description:
     'Manually connect a local server, proxy, or unsupported provider',
-  protocol: Protocol.OPENAI,
-  protocolOptions: [Protocol.OPENAI, Protocol.ANTHROPIC, Protocol.GEMINI],
+  protocol: AuthType.USE_OPENAI,
+  protocolOptions: [
+    AuthType.USE_OPENAI,
+    AuthType.USE_ANTHROPIC,
+    AuthType.USE_GEMINI,
+  ],
   baseUrl: undefined,
   envKey: generateCustomEnvKey,
   models: undefined,

@@ -75,7 +75,6 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
-  Protocol,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -135,6 +134,7 @@ import {
 } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
+import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -1435,17 +1435,8 @@ function readProviderModels(
   const modelProviders = toRecord(
     (settings.merged as Record<string, unknown>)['modelProviders'],
   );
-  const entry = modelProviders[protocol];
-  const entryRecord =
-    typeof entry === 'object' && entry !== null
-      ? (entry as Record<string, unknown>)
-      : undefined;
-  const models = Array.isArray(entry)
-    ? entry
-    : Array.isArray(entryRecord?.['models'])
-      ? (entryRecord['models'] as ProviderModelConfig[])
-      : [];
-  return models.filter(isProviderModelConfig);
+  const models = modelProviders[protocol];
+  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
 }
 
 function findExistingProviderModels(
@@ -1582,7 +1573,7 @@ function readProviderSetupInputs(
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | Protocol
+    | AuthType
     | undefined;
   if (
     protocol &&
@@ -2754,7 +2745,7 @@ class QwenAgent implements Agent {
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
-    const method = methodId as AuthType;
+    const method = z.nativeEnum(AuthType).parse(methodId);
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
