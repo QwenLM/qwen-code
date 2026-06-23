@@ -269,6 +269,8 @@ export function parseServeFastPathArgs(
     return { kind: 'fallback' };
   }
 
+  // Keep this lightweight mirror in sync with commands/serve.ts; unsupported
+  // flags intentionally fall back to the full yargs parser.
   const options: ServeOptions = {
     hostname: '127.0.0.1',
     mode: 'http-bridge',
