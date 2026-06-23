@@ -11,7 +11,7 @@ import {
   getExtensionDescription,
   type Extension,
 } from '@qwen-code/qwen-code-core';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   requestConsentOrFail,
   requestConsentNonInteractive,
@@ -38,6 +38,35 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
   });
   await extensionManager.refreshCache();
   return extensionManager;
+}
+
+const EXTENSION_COMMAND_SCOPES = [SettingScope.User, SettingScope.Workspace];
+
+function extensionCommandScopesList(): string {
+  return EXTENSION_COMMAND_SCOPES.map((s) => s.toLowerCase()).join(', ');
+}
+
+export function resolveExtensionCommandScope(
+  scope: string | undefined,
+): SettingScope {
+  if (!scope) {
+    return SettingScope.User;
+  }
+
+  const normalized = scope.toLowerCase();
+  const matched = EXTENSION_COMMAND_SCOPES.find(
+    (candidate) => candidate.toLowerCase() === normalized,
+  );
+  if (matched) {
+    return matched;
+  }
+
+  throw new Error(
+    t('Invalid scope: {{scope}}. Please use one of {{scopes}}.', {
+      scope,
+      scopes: extensionCommandScopesList(),
+    }),
+  );
 }
 
 export function extensionToOutputString(

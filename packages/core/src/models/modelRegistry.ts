@@ -151,6 +151,8 @@ export class ModelRegistry {
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
       envKey: model.envKey,
+      fastOnly: model.fastOnly,
+      voiceOnly: model.voiceOnly,
     }));
   }
 
@@ -262,6 +264,11 @@ export class ModelRegistry {
     if (!config.id) {
       throw new Error(
         `Model config in authType '${authType}' missing required field: id`,
+      );
+    }
+    if (config.fastOnly && config.voiceOnly) {
+      debugLogger.warn(
+        `Model "${config.id}" in authType "${authType}" has both fastOnly and voiceOnly set. It will be unreachable in all model selectors.`,
       );
     }
   }

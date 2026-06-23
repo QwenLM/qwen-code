@@ -52,6 +52,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { resolveWebShellDir } from './web-shell-static.js';
 import { parseAllowOriginPatterns } from './auth.js';
@@ -866,11 +867,14 @@ export async function runQwenServe(
   // through `BridgeFileSystem` for ACP-side writeTextFile / readTextFile
   // calls. See `bridge-file-system-adapter.ts` for the translation layer.
   const trustedWorkspace = deps.trustedWorkspace ?? true;
+  const customIgnoreFiles =
+    bootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,
     injected: deps.fsFactory,
     trusted: trustedWorkspace,
     emit: deps.fsAuditEmit,
+    ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
   });
 
   // Create a spawn channel factory that tees child-stderr diagnostics
@@ -907,6 +911,8 @@ export async function runQwenServe(
   // service so both answer env/preflight cells from the same daemon-local
   // implementation.
   const statusProvider = createDaemonStatusProvider();
+  const workspaceProvidersStatusProvider =
+    createWorkspaceProvidersStatusProvider();
 
   const bridge =
     deps.bridge ??
@@ -989,6 +995,7 @@ export async function runQwenServe(
     contextFilename: contextFilenameForInit ?? 'QWEN.md',
     // Daemon-host status provider for env + preflight cells.
     statusProvider,
+    workspaceProvidersStatusProvider,
     // Channel liveness check — proxied through the bridge's live-channel
     // probe (not session count: a channel can be live with zero attached
     // sessions during the cold-spawn window).

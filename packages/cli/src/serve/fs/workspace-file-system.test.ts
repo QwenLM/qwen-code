@@ -254,6 +254,36 @@ describe('WorkspaceFileSystem - list', () => {
     expect(log?.ignored).toBe(true);
   });
 
+  it('uses configured custom ignore files in the default ignore loader', async () => {
+    const scratch = await fsp.mkdtemp(
+      path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
+    );
+    try {
+      const wsDir = path.join(scratch, 'ws');
+      await fsp.mkdir(wsDir);
+      await fsp.writeFile(path.join(wsDir, '.cursorignore'), 'secret.txt\n');
+      await fsp.writeFile(path.join(wsDir, '.agentignore'), 'agent.txt\n');
+      await fsp.writeFile(path.join(wsDir, 'secret.txt'), 'secret');
+      await fsp.writeFile(path.join(wsDir, 'agent.txt'), 'agent');
+
+      const workspace = canonicalizeWorkspace(wsDir);
+      const factory = createWorkspaceFileSystemFactory({
+        boundWorkspace: workspace,
+        trusted: true,
+        emit: () => undefined,
+        customIgnoreFiles: ['.cursorignore'],
+      });
+      const workspaceFs = factory.forRequest({ route: 'TEST /op' });
+      const r = await workspaceFs.resolve('.', 'list');
+      const entries = await workspaceFs.list(r, { includeIgnored: true });
+
+      expect(entries.find((e) => e.name === 'secret.txt')?.ignored).toBe(true);
+      expect(entries.find((e) => e.name === 'agent.txt')?.ignored).toBe(false);
+    } finally {
+      await fsp.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('stops collecting entries once maxEntries is reached', async () => {
     const r = await h.fs.resolve('.', 'list');
     const entries = await h.fs.list(r, {
@@ -261,6 +291,25 @@ describe('WorkspaceFileSystem - list', () => {
       maxEntries: 2,
     });
     expect(entries).toHaveLength(2);
+  });
+
+  it('rejects a non-positive-integer maxEntries with parse_error', async () => {
+    const r = await h.fs.resolve('.', 'list');
+    // Infinity/NaN make `entries.length >= maxEntries` silently never break;
+    // floats / 0 / negatives are equally meaningless. Reject them up front,
+    // matching how readText() guards its `limit` / `line`.
+    for (const bad of [
+      Infinity,
+      NaN,
+      0,
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      const err = await h.fs.list(r, { maxEntries: bad }).catch((e) => e);
+      expect(isFsError(err)).toBe(true);
+      expect(String(err)).toContain('maxEntries');
+    }
   });
 });
 

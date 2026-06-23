@@ -83,6 +83,17 @@ export interface FullscreenOverlayBaseProps {
 
   /** Optional error banner — rendered between header and children */
   error?: OverlayErrorBannerProps
+
+  /**
+   * Docked / embedded mode — render inline filling the parent container instead of
+   * taking over the viewport via a modal Dialog portal. Used to show the preview in a
+   * resizable side panel while the main UI stays visible and interactive.
+   *
+   * In this mode the component does NOT register a dismissible layer, does NOT hide the
+   * macOS traffic lights, and does NOT trap focus. Closing is driven entirely by the
+   * header close button (onClose).
+   */
+  embedded?: boolean
 }
 
 export function handleFullscreenEscapeWithStack(): boolean {
@@ -105,6 +116,7 @@ export function FullscreenOverlayBase({
   headerActions,
   copyContent,
   error,
+  embedded = false,
 }: FullscreenOverlayBaseProps) {
   const { onSetTrafficLightsVisible } = usePlatform()
 
@@ -114,7 +126,8 @@ export function FullscreenOverlayBase({
   const overlayIdRef = useRef(`fullscreen-overlay-${Math.random().toString(36).slice(2)}`)
 
   useEffect(() => {
-    if (!isOpen) return
+    // Docked mode is a persistent side panel, not a dismissible modal layer.
+    if (!isOpen || embedded) return
 
     const bridge = getDismissibleLayerBridge()
     if (!bridge) return
@@ -125,20 +138,83 @@ export function FullscreenOverlayBase({
       priority: 100,
       close: onClose,
     })
-  }, [isOpen, onClose])
+  }, [isOpen, onClose, embedded])
 
   // Hide macOS traffic lights when overlay opens, restore when it closes
-  // This prevents accidental clicks on window controls behind the fullscreen overlay
+  // This prevents accidental clicks on window controls behind the fullscreen overlay.
+  // Docked mode leaves the window chrome alone since it never covers it.
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || embedded) return
 
     onSetTrafficLightsVisible?.(false)
     return () => onSetTrafficLightsVisible?.(true)
-  }, [isOpen, onSetTrafficLightsVisible])
+  }, [isOpen, onSetTrafficLightsVisible, embedded])
 
   // Content padding clears the floating header at rest (when present).
   // Without a header, just the fade zone inset.
   const contentPaddingTop = hasHeader ? HEADER_HEIGHT + FADE_SIZE : FADE_SIZE
+
+  // Shared inner layout (masked scroll area + floating header) — identical structure for
+  // both fullscreen (inside Dialog.Content) and docked (inline) modes.
+  const overlayBody = (
+    <>
+      {/* Full-area masked scroll container — covers the entire surface including behind the header.
+          The CSS mask gradient fades content at both edges (starting from y=0).
+          Content padding clears the header at rest. */}
+      <div
+        className="absolute inset-0"
+        style={{ maskImage: FADE_MASK, WebkitMaskImage: FADE_MASK }}
+      >
+        <div
+          className="h-full overflow-y-auto"
+          style={{ paddingTop: contentPaddingTop, paddingBottom: FADE_SIZE, scrollPaddingTop: contentPaddingTop }}
+        >
+          {/* Centering wrapper — error + content move together as a unit. */}
+          <div className="min-h-full flex flex-col justify-center">
+            {error && (
+              <div className="px-6 pb-4">
+                <OverlayErrorBanner label={error.label} message={error.message} />
+              </div>
+            )}
+            {children}
+          </div>
+        </div>
+      </div>
+
+      {/* Floating header — rendered after the scroll area so it's visually on top (DOM order). */}
+      {hasHeader && (
+        <div className="absolute top-0 left-0 right-0 z-10">
+          <FullscreenOverlayBaseHeader
+            onClose={onClose}
+            typeBadge={typeBadge}
+            filePath={filePath}
+            title={title}
+            onTitleClick={onTitleClick}
+            subtitle={subtitle}
+            headerActions={headerActions}
+            copyContent={copyContent}
+          />
+        </div>
+      )}
+    </>
+  )
+
+  // Docked / embedded mode — render inline filling the parent container (e.g. a resizable
+  // side panel) without a modal portal, so the rest of the app stays visible and usable.
+  if (embedded) {
+    if (!isOpen) return null
+    return (
+      <div
+        className={cn(
+          'relative h-full w-full overflow-hidden outline-none',
+          'bg-foreground-3 fullscreen-overlay-background',
+          className
+        )}
+      >
+        {overlayBody}
+      </div>
+    )
+  }
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -162,47 +238,7 @@ export function FullscreenOverlayBase({
           {/* Visually hidden title for accessibility - required by Radix Dialog */}
           <Dialog.Title className="sr-only">{accessibleTitle}</Dialog.Title>
 
-          {/* Full-viewport masked scroll area — covers the entire dialog including behind the header.
-              The CSS mask gradient fades content at both edges (starting from y=0).
-              Content padding clears the header at rest. */}
-          <div
-            className="absolute inset-0"
-            style={{ maskImage: FADE_MASK, WebkitMaskImage: FADE_MASK }}
-          >
-            <div
-              className="h-full overflow-y-auto"
-              style={{ paddingTop: contentPaddingTop, paddingBottom: FADE_SIZE, scrollPaddingTop: contentPaddingTop }}
-            >
-              {/* Centering wrapper — error + content move together as a unit.
-                  min-h-full ensures centering when content is small; content can grow beyond. */}
-              <div className="min-h-full flex flex-col justify-center">
-                {/* Error banner — inside centering flow, above content */}
-                {error && (
-                  <div className="px-6 pb-4">
-                    <OverlayErrorBanner label={error.label} message={error.message} />
-                  </div>
-                )}
-                {children}
-              </div>
-            </div>
-          </div>
-
-          {/* Floating header — rendered after scroll area so it's visually on top (DOM order).
-              Positioned absolutely at the top of the viewport, above the scroll content. */}
-          {hasHeader && (
-            <div className="absolute top-0 left-0 right-0 z-10">
-              <FullscreenOverlayBaseHeader
-                onClose={onClose}
-                typeBadge={typeBadge}
-                filePath={filePath}
-                title={title}
-                onTitleClick={onTitleClick}
-                subtitle={subtitle}
-                headerActions={headerActions}
-                copyContent={copyContent}
-              />
-            </div>
-          )}
+          {overlayBody}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

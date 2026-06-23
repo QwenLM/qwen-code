@@ -63,6 +63,7 @@ import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { isServeDebugMode } from './debug-mode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
@@ -208,12 +209,16 @@ export function resolveBridgeFsFactory(input: {
   injected?: WorkspaceFileSystemFactory;
   trusted: boolean;
   emit?: (event: BridgeEvent) => void;
+  customIgnoreFiles?: string[];
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
     boundWorkspace: input.boundWorkspace,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
+    ...(input.customIgnoreFiles !== undefined
+      ? { customIgnoreFiles: input.customIgnoreFiles }
+      : {}),
   });
 }
 
@@ -237,6 +242,21 @@ export class InvalidCursorError extends Error {
   }
 }
 
+function parseSessionCursor(cursor: string): number | undefined {
+  if (cursor === '') return undefined;
+  const trimmed = cursor.trim();
+  const parsed = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    parsed > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new InvalidCursorError(cursor);
+  }
+  return parsed;
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -250,12 +270,8 @@ export async function listWorkspaceSessionsForResponse(
   const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
 
   let numericCursor: number | undefined;
-  if (options?.cursor) {
-    const parsed = Number(options.cursor);
-    if (!Number.isFinite(parsed)) {
-      throw new InvalidCursorError(options.cursor);
-    }
-    numericCursor = parsed;
+  if (options?.cursor != null) {
+    numericCursor = parseSessionCursor(options.cursor);
   }
   const isFirstPage = numericCursor === undefined;
 
@@ -1207,6 +1223,8 @@ export function createServeApp(
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider: createDaemonStatusProvider(),
+      workspaceProvidersStatusProvider:
+        createWorkspaceProvidersStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??

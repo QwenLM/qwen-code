@@ -101,6 +101,7 @@ import type {
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
+import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -118,6 +119,14 @@ function fakeDaemonLog(): DaemonLogger {
     getDaemonId: () => 'test-daemon',
     flush: vi.fn(async () => {}),
   };
+}
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
 }
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -2197,7 +2206,16 @@ describe('createServeApp', () => {
       expect(res.body.servers[2].disabledReason).toBe('budget');
     });
 
-    it('returns workspace skills and providers status from the bridge', async () => {
+    it('returns workspace skills from the bridge and providers from daemon-local settings', async () => {
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-providers-'),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      const previousSystemSettings =
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      const previousSystemDefaults =
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
       const skills: ServeWorkspaceSkillsStatus = {
         v: 1,
         workspaceCwd: WS_BOUND,
@@ -2213,54 +2231,55 @@ describe('createServeApp', () => {
           },
         ],
       };
-      const providers: ServeWorkspaceProvidersStatus = {
-        v: 1,
-        workspaceCwd: WS_BOUND,
-        initialized: true,
-        current: { authType: 'qwen', modelId: 'qwen3(qwen)' },
-        providers: [
-          {
-            kind: 'model_provider',
-            status: 'ok',
-            authType: 'qwen',
-            current: true,
-            models: [
-              {
-                modelId: 'qwen3(qwen)',
-                baseModelId: 'qwen3',
-                name: 'Qwen 3',
-                description: null,
-                contextLimit: 4096,
-                isCurrent: true,
-                isRuntime: false,
-              },
-            ],
-          },
-        ],
-      };
-      const bridge = fakeBridge({
-        workspaceSkillsImpl: async () => skills,
-        workspaceProvidersImpl: async () => providers,
-      });
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      try {
+        process.env['QWEN_HOME'] = path.join(tempHome, 'home');
+        process.env['QWEN_RUNTIME_DIR'] = path.join(tempHome, 'runtime');
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+          tempHome,
+          'system-settings.json',
+        );
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+          tempHome,
+          'system-defaults.json',
+        );
+        resetHomeEnvBootstrapForTesting();
 
-      const skillsRes = await request(app)
-        .get('/workspace/skills')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      const providersRes = await request(app)
-        .get('/workspace/providers')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const bridge = fakeBridge({
+          workspaceSkillsImpl: async () => skills,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      expect(skillsRes.status).toBe(200);
-      expect(skillsRes.body).toEqual(skills);
-      expect(providersRes.status).toBe(200);
-      expect(providersRes.body).toEqual(providers);
-      expect(bridge.workspaceSkillsCalls).toBe(1);
-      expect(bridge.workspaceProvidersCalls).toBe(1);
+        const skillsRes = await request(app)
+          .get('/workspace/skills')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const providersRes = await request(app)
+          .get('/workspace/providers')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(skillsRes.status).toBe(200);
+        expect(skillsRes.body).toEqual(skills);
+        expect(providersRes.status).toBe(200);
+        expect(providersRes.body).toMatchObject({
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          acpChannelLive: false,
+        });
+        expect(providersRes.body.providers.length).toBeGreaterThan(0);
+        expect(bridge.workspaceSkillsCalls).toBe(1);
+        expect(bridge.workspaceProvidersCalls).toBe(0);
+      } finally {
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv('QWEN_RUNTIME_DIR', previousRuntimeDir);
+        restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', previousSystemSettings);
+        restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', previousSystemDefaults);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+      }
     });
 
     it('returns workspace tools status from the bridge', async () => {
@@ -5449,7 +5468,34 @@ describe('createServeApp', () => {
       expect(cursoredIds).not.toContain('live-only');
     });
 
-    it('400 invalid_cursor when cursor is not a valid number', async () => {
+    it.each(['abc', '-1', 'Infinity', '9007199254740992', '   '])(
+      '400 invalid_cursor when cursor is not valid: %s',
+      async (cursor) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=${encodeURIComponent(cursor)}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_cursor');
+      },
+    );
+
+    it('accepts fractional mtime cursor values', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '1970-01-01T00:16:39.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('1970-01-01T00:16:39.000Z'),
+      });
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -5457,10 +5503,36 @@ describe('createServeApp', () => {
         { bridge, boundWorkspace: WS_BOUND },
       );
       const res = await request(app)
-        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=abc`)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=1000123.456`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('invalid_cursor');
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(1);
+      expect(res.body.sessions[0].sessionId).toBe(id);
+    });
+
+    it('passes fractional cursor values to SessionService without truncating', async () => {
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items: [],
+          nextCursor: undefined,
+          hasMore: false,
+        });
+
+      try {
+        await listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, {
+          cursor: '1000123.456',
+        });
+
+        expect(listSessionsSpy).toHaveBeenCalledWith({
+          cursor: 1000123.456,
+          size: 20,
+        });
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
     });
 
     it('excludes live sessions from subsequent pages to prevent cross-page duplicates', async () => {
@@ -10502,6 +10574,37 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       { fsFactory: sentinel as any },
     );
     expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
+  });
+
+  it('passes custom ignore files through resolveBridgeFsFactory', async () => {
+    const { resolveBridgeFsFactory } = await import('./server.js');
+    const tmp = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-fs-ignore-'),
+    );
+    try {
+      await fsp.writeFile(path.join(tmp, '.cursorignore'), 'secret.txt\n');
+      await fsp.writeFile(path.join(tmp, '.agentignore'), 'agent.txt\n');
+      await fsp.writeFile(path.join(tmp, 'secret.txt'), 'secret');
+      await fsp.writeFile(path.join(tmp, 'agent.txt'), 'agent');
+
+      const factory = resolveBridgeFsFactory({
+        boundWorkspace: tmp,
+        trusted: true,
+        customIgnoreFiles: ['.cursorignore'],
+      });
+      const fs = factory.forRequest({ route: 'TEST /op' });
+      const root = await fs.resolve('.', 'list');
+      const entries = await fs.list(root, { includeIgnored: true });
+
+      expect(
+        entries.find((entry) => entry.name === 'secret.txt')?.ignored,
+      ).toBe(true);
+      expect(entries.find((entry) => entry.name === 'agent.txt')?.ignored).toBe(
+        false,
+      );
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it('default fsFactory is built with trusted=false (writes refused)', async () => {

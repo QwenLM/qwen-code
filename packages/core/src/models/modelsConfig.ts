@@ -260,10 +260,13 @@ export class ModelsConfig {
    * - Runtime model option (if active) is included before registry models of the same authType.
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
-    const inputAuthTypes =
-      authTypes && authTypes.length > 0
-        ? authTypes
-        : this.modelRegistry.getAuthTypes();
+    const hasExplicitAuthTypes = !!authTypes && authTypes.length > 0;
+    const inputAuthTypes = hasExplicitAuthTypes
+      ? authTypes!
+      : this.modelRegistry.getAuthTypes();
+
+    // Get runtime model option
+    const runtimeOption = this.getRuntimeModelOption();
 
     // De-duplicate while preserving the original order.
     const seen = new Set<AuthType>();
@@ -273,6 +276,21 @@ export class ModelsConfig {
         seen.add(authType);
         uniqueAuthTypes.push(authType);
       }
+    }
+
+    // A runtime model (e.g. an OPENAI_*-derived env/CLI override) can use an
+    // authType that has no registry models, so `modelRegistry.getAuthTypes()`
+    // omits it. Without this, the active runtime model — which may be the
+    // *current* model — would be dropped from the default listing. Only inject
+    // when no explicit authType filter was requested so callers asking for a
+    // specific authType still get exactly that set.
+    if (
+      !hasExplicitAuthTypes &&
+      runtimeOption &&
+      !seen.has(runtimeOption.authType)
+    ) {
+      seen.add(runtimeOption.authType);
+      uniqueAuthTypes.push(runtimeOption.authType);
     }
 
     // Force qwen-oauth to the front (if requested / defaulted in).
@@ -285,9 +303,6 @@ export class ModelsConfig {
         orderedAuthTypes.push(authType);
       }
     }
-
-    // Get runtime model option
-    const runtimeOption = this.getRuntimeModelOption();
 
     const allModels: AvailableModel[] = [];
     for (const authType of orderedAuthTypes) {

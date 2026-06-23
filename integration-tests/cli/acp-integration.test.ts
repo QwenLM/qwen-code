@@ -5,7 +5,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
@@ -101,12 +102,30 @@ function setupAcpTest(
   const acpFlag =
     options?.useNewFlag !== false ? '--acp' : '--experimental-acp';
 
+  // Isolate this agent's GLOBAL (User-scope) qwen config dir via QWEN_HOME.
+  // `globalSetup` does not sandbox HOME, so every integration test shares the
+  // real `$HOME/.qwen`, and `vitest.config.ts` runs test files with
+  // `fileParallelism: true` (up to 4 at once). The ACP `authenticate` /
+  // `setModel` handlers persist `security.auth.selectedType` (and `model.name`)
+  // to User scope, so a concurrent test (e.g. `system-control`'s
+  // `setModel('qwen3-...')`) can clobber the persisted auth type in the window
+  // between this agent's `authenticate({ methodId: 'openai' })` and its
+  // `session/new`. When that happens the new session config resolves a
+  // non-openai auth, the openai runtime model is never captured, and it drops
+  // out of `availableModels` — flaking `expect(openaiModel).toBeDefined()` in
+  // the `set_config_option` test (acp-integration.test.ts:516). A per-agent
+  // QWEN_HOME redirects `getGlobalQwenDir()` so the authenticate -> session/new
+  // round-trip reads back exactly what this agent wrote.
+  const qwenHome = join(rig.testDir!, '.qwen-home');
+  mkdirSync(qwenHome, { recursive: true });
+
   const agent = spawn(
     'node',
     [rig.bundlePath, acpFlag, '--no-chat-recording'],
     {
       cwd: rig.testDir!,
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, QWEN_HOME: qwenHome },
     },
   );
 
@@ -448,7 +467,31 @@ function setupAcpTest(
 
   it('supports session/set_config_option for mode and model', async () => {
     const rig = new TestRig();
-    rig.setup('acp set config option');
+    // Inject a deterministic openai provider model so `availableModels` always
+    // contains a settable openai entry. The previous version relied on the
+    // env-driven OPENAI_MODEL being captured as a runtime-model snapshot and
+    // enumerated, which is environment-sensitive and flaked in CI (the openai
+    // model could be absent from `availableModels`, failing the assertion
+    // below). A registry model configured via `modelProviders` is always
+    // enumerated and switchable without inference, making this test
+    // deterministic regardless of how the ambient openai credentials resolve.
+    rig.setup('acp set config option', {
+      settings: {
+        modelProviders: {
+          openai: {
+            protocol: 'openai',
+            models: [
+              {
+                id: 'e2e-set-config-option-model',
+                name: 'E2E Set Config Option Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        },
+      },
+    });
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -509,9 +552,10 @@ function setupAcpTest(
       expect(modelOption!.currentValue).toBeTruthy();
 
       // Test: Set model using set_config_option
-      // Use openai model to avoid auth issues
+      // Target the deterministic openai provider model injected via settings
+      // above (avoids auth issues and is always present in `availableModels`).
       const openaiModel = newSession.models.availableModels.find((model) =>
-        model.modelId.includes('openai'),
+        model.modelId.includes('e2e-set-config-option-model'),
       );
       expect(openaiModel).toBeDefined();
 

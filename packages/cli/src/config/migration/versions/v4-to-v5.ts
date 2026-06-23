@@ -42,6 +42,9 @@ export class V4ToV5Migration implements SettingsMigration {
     if (s['$version'] !== 4 && s['$version'] !== undefined) {
       return false;
     }
+    if (s['$version'] === 4) {
+      return true;
+    }
     const modelProviders = s['modelProviders'];
     if (typeof modelProviders !== 'object' || modelProviders === null) {
       return false;

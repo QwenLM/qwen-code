@@ -1120,3 +1120,57 @@ describe('getProtocolForAuthType', () => {
     );
   });
 });
+
+describe('fastOnly and voiceOnly flags', () => {
+  it('should propagate fastOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          { id: 'gpt-4o', name: 'GPT-4o' },
+          { id: 'gpt-4o-mini', name: 'GPT-4o Mini', fastOnly: true },
+        ],
+      },
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.fastOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'gpt-4o-mini')?.fastOnly).toBe(true);
+  });
+
+  it('should propagate voiceOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          { id: 'gpt-4o', name: 'GPT-4o' },
+          { id: 'whisper-1', name: 'Whisper', voiceOnly: true },
+        ],
+      },
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.voiceOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
+  });
+
+  it('should warn when both fastOnly and voiceOnly are set', () => {
+    const config: ModelProvidersConfig = {
+      openai: {
+        protocol: Protocol.OPENAI,
+        models: [
+          {
+            id: 'unreachable-model',
+            fastOnly: true,
+            voiceOnly: true,
+          },
+        ],
+      },
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models).toHaveLength(1);
+    expect(models[0].fastOnly).toBe(true);
+    expect(models[0].voiceOnly).toBe(true);
+  });
+});

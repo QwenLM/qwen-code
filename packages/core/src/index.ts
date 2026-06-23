@@ -401,6 +401,11 @@ export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  QwenIgnoreParser,
+} from './utils/qwenIgnoreParser.js';
+export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';
