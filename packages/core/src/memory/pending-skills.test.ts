@@ -1,3 +1,8 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -68,6 +73,30 @@ describe('pendingSkills', () => {
     expect(pending.map((p) => p.name)).toEqual(['auto-skill-new-one']);
     await expect(fs.access(editedFile)).resolves.toBeUndefined(); // stays live
     await expect(fs.access(newFile)).rejects.toThrow(); // moved to pending
+  });
+
+  it('parses an empty description as empty, not the next YAML line', async () => {
+    const dir = path.join(root, '.qwen', 'skills', 'auto-skill-empty');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'SKILL.md'),
+      '---\ndescription:\nsource: auto-skill\n---\nbody\n',
+      'utf-8',
+    );
+    const pending = await stageSkillDirs([path.join(dir, 'SKILL.md')], root);
+    expect(pending[0].description).toBe('');
+  });
+
+  it('namespaces staged dirs by taskId so same-named batches do not collide', async () => {
+    const fileA = await makeSkill(root, 'dup');
+    const [pa] = await stageSkillDirs([fileA], root, new Set(), 'task-A');
+    // A later run creates a same-named skill while the first is still deferred.
+    const fileB = await makeSkill(root, 'dup');
+    const [pb] = await stageSkillDirs([fileB], root, new Set(), 'task-B');
+    expect(pa.stagedManifestPath).not.toBe(pb.stagedManifestPath);
+    // Both staged copies survive — batch B did not clobber batch A.
+    await expect(fs.access(pa.stagedManifestPath)).resolves.toBeUndefined();
+    await expect(fs.access(pb.stagedManifestPath)).resolves.toBeUndefined();
   });
 
   it('accept moves a staged dir back into skills root', async () => {

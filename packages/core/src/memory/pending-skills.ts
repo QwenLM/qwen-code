@@ -29,7 +29,9 @@ export interface PendingSkill {
 function parseDescription(content: string): string {
   const fm = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(content);
   if (!fm) return '';
-  const m = /^description:\s*(.+)\s*$/m.exec(fm[1]);
+  // `[ \t]*` (not `\s*`) so an empty `description:` value doesn't let the
+  // capture spill onto the next YAML line; `.*?` keeps it on the same line.
+  const m = /^description:[ \t]*(.*?)[ \t]*$/m.exec(fm[1]);
   return m ? m[1].trim() : '';
 }
 
@@ -50,6 +52,7 @@ export async function stageSkillDirs(
   touchedFiles: string[],
   projectRoot: string,
   preExistingDirNames: ReadonlySet<string> = new Set(),
+  taskId = '',
 ): Promise<PendingSkill[]> {
   const skillsRoot = getProjectSkillsRoot(projectRoot);
   const pendingRoot = getPendingSkillsRoot(projectRoot);
@@ -85,8 +88,10 @@ export async function stageSkillDirs(
       );
       continue;
     }
-    const stagedDir = path.join(pendingRoot, dirName);
-    await fs.mkdir(pendingRoot, { recursive: true });
+    // Namespace the staged copy under the task id so a later review run that
+    // creates a same-named skill can't clobber a still-deferred earlier batch.
+    const stagedDir = path.join(pendingRoot, taskId, dirName);
+    await fs.mkdir(path.dirname(stagedDir), { recursive: true });
     await fs.rm(stagedDir, { recursive: true, force: true });
     await fs.rename(skillDir, stagedDir);
     debugLogger.debug(`Staged "${dirName}" for confirmation.`);

@@ -19,7 +19,10 @@ export interface SkillReviewDialogProps {
   skills: PendingSkillView[];
   onAccept: (skillName: string) => void;
   onReject: (skillName: string) => void;
+  /** Worked through the batch (or nothing to show) — close without deferring. */
   onClose: () => void;
+  /** Esc ("decide later") — defer the whole batch so it isn't auto-reopened. */
+  onDismiss: () => void;
 }
 
 export const SkillReviewDialog = ({
@@ -27,6 +30,7 @@ export const SkillReviewDialog = ({
   onAccept,
   onReject,
   onClose,
+  onDismiss,
 }: SkillReviewDialogProps) => {
   // Snapshot the skills on mount. `onAccept`/`onReject` trigger a
   // subscription refresh in the parent that shrinks the live `skills` prop;
@@ -37,7 +41,7 @@ export const SkillReviewDialog = ({
 
   useKeypress(
     (key) => {
-      if (key.name === 'escape') onClose();
+      if (key.name === 'escape') onDismiss();
     },
     { isActive: true },
   );

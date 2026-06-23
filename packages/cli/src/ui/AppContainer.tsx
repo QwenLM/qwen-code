@@ -1184,16 +1184,23 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
   const [skillReviewPending, setSkillReviewPending] =
     useState<UIState['skillReviewPending']>(null);
-  // Tracks the pending batch the user dismissed via Esc ("decide later") so
-  // the idle effect doesn't immediately reopen the dialog on the next idle
-  // transition. Auto-open resumes when a new batch (different taskId) arrives.
-  const skillReviewDismissedTaskIdRef = useRef<string | null>(null);
-  const closeSkillReviewDialog = useCallback(() => {
+  // Batches the user dismissed via Esc ("decide later"), so the idle effect
+  // doesn't immediately reopen them. A Set (not a single value) so dismissing
+  // batch B can't accidentally re-arm a still-dismissed batch A.
+  const skillReviewDismissedTaskIdsRef = useRef<Set<string>>(new Set());
+  // Esc: defer the current batch — record it and close.
+  const dismissSkillReviewDialog = useCallback(() => {
     if (skillReviewPending) {
-      skillReviewDismissedTaskIdRef.current = skillReviewPending.taskId;
+      skillReviewDismissedTaskIdsRef.current.add(skillReviewPending.taskId);
     }
     setIsSkillReviewDialogOpen(false);
   }, [skillReviewPending]);
+  // Worked through the batch (keep/discard/all): close WITHOUT marking it
+  // dismissed, so if some accepts failed the unresolved skills can reopen.
+  const closeSkillReviewDialog = useCallback(
+    () => setIsSkillReviewDialogOpen(false),
+    [],
+  );
   const acceptPendingSkill = useCallback(
     (skillName: string) => {
       if (!skillReviewPending) return;
@@ -1615,7 +1622,7 @@ export const AppContainer = (props: AppContainerProps) => {
       skillReviewPending &&
       skillReviewPending.skills.length > 0 &&
       streamingState === StreamingState.Idle &&
-      skillReviewPending.taskId !== skillReviewDismissedTaskIdRef.current
+      !skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
     ) {
       setIsSkillReviewDialogOpen(true);
     }
@@ -3759,6 +3766,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
       closeSkillReviewDialog,
       acceptPendingSkill,
       rejectPendingSkill,
@@ -3848,6 +3856,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
       closeSkillReviewDialog,
       acceptPendingSkill,
       rejectPendingSkill,

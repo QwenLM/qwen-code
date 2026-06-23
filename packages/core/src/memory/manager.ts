@@ -246,6 +246,11 @@ function makeTaskRecord(
   };
 }
 
+// INVARIANT: mutates `record` in place. `resolvePendingSkill`'s concurrency
+// safety (concurrent Keep-all/Discard-all each removing only their own entry)
+// relies on this — it re-reads `record.metadata.pendingSkills` after its await
+// and expects to see writes from sibling calls. A refactor to immutable
+// record updates would reintroduce the "all-but-one left behind" race.
 function updateRecord(
   record: MemoryTaskRecord,
   patch: Partial<
@@ -908,6 +913,7 @@ export class MemoryManager {
           result.touchedSkillFiles,
           params.projectRoot,
           preExistingSkillDirs,
+          record.id,
         );
         this.update(record, {
           status: 'completed',

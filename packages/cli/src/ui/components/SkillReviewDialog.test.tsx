@@ -51,6 +51,7 @@ describe('SkillReviewDialog', () => {
         onAccept={vi.fn()}
         onReject={vi.fn()}
         onClose={vi.fn()}
+        onDismiss={vi.fn()}
       />,
     );
     expect(lastFrame()).toContain('auto-skill-alpha');
@@ -65,6 +66,7 @@ describe('SkillReviewDialog', () => {
         onAccept={vi.fn()}
         onReject={vi.fn()}
         onClose={vi.fn()}
+        onDismiss={vi.fn()}
       />,
     );
     const values = (captured.items ?? []).map((i) => i.value);
@@ -80,6 +82,7 @@ describe('SkillReviewDialog', () => {
         onAccept={onAccept}
         onReject={vi.fn()}
         onClose={onClose}
+        onDismiss={vi.fn()}
       />,
     );
     captured.onSelect!('keep');
@@ -97,6 +100,7 @@ describe('SkillReviewDialog', () => {
         onAccept={onAccept}
         onReject={vi.fn()}
         onClose={onClose}
+        onDismiss={vi.fn()}
       />,
     );
     captured.onSelect!('keep');
@@ -114,6 +118,7 @@ describe('SkillReviewDialog', () => {
         onAccept={onAccept}
         onReject={vi.fn()}
         onClose={onClose}
+        onDismiss={vi.fn()}
       />,
     );
     captured.onSelect!('keepAll');
@@ -132,6 +137,7 @@ describe('SkillReviewDialog', () => {
         onAccept={vi.fn()}
         onReject={onReject}
         onClose={onClose}
+        onDismiss={vi.fn()}
       />,
     );
     captured.onSelect!('discardAll');
@@ -149,6 +155,7 @@ describe('SkillReviewDialog', () => {
         onAccept={vi.fn()}
         onReject={vi.fn()}
         onClose={onClose}
+        onDismiss={vi.fn()}
       />,
     );
     expect(lastFrame()).toBe('');

@@ -553,6 +553,7 @@ export const DialogManager = ({
         onAccept={uiActions.acceptPendingSkill}
         onReject={uiActions.rejectPendingSkill}
         onClose={uiActions.closeSkillReviewDialog}
+        onDismiss={uiActions.dismissSkillReviewDialog}
       />
     );
   }
