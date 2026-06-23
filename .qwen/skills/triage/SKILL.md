@@ -38,6 +38,11 @@ gh label list --repo "$REPO" --limit 200
   or `gh api -F body=@FILE` when the response ID is needed. Never `--body @FILE`
   or `gh api -f body=@FILE` — those post the path literally.
 - Drafts: skip
+- **Approval guardrail**: never auto-approve a cross-repository (fork) PR whose
+  title is a `refactor` type (starts with `refactor` — `refactor:`,
+  `refactor(scope):`, `refactor(scope)!:`, case-insensitive). Review it as usual,
+  but escalate to the maintainer in place of approval. See `references/pr-workflow.md`
+  Stage 3 for the deterministic check.
 
 ## Duplicate Guard
 
