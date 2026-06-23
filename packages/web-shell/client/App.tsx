@@ -32,7 +32,6 @@ import type {
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
-import { VoiceButton } from './voice/VoiceButton';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -3795,26 +3794,6 @@ export function App({
                         : t('editor.placeholder')
                   }
                 />
-                <div
-                  style={{
-                    position: 'absolute',
-                    right: 10,
-                    bottom: 10,
-                    zIndex: 5,
-                  }}
-                >
-                  <VoiceButton
-                    disabled={isDisabled}
-                    onInsert={(text) => {
-                      const handle = editorRef.current;
-                      if (!handle) return;
-                      const existing = handle.getText();
-                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
-                      handle.insertText(`${sep}${text} `);
-                      handle.focus();
-                    }}
-                  />
-                </div>
               </div>
               {CustomFooter ? (
                 <CustomFooter
