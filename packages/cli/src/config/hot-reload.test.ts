@@ -300,6 +300,32 @@ describe('registerMcpHotReload', () => {
     }
   });
 
+  it('surfaces a user-visible LogError when reconcile throws', async () => {
+    const fc = makeFakeConfig(cwd, { settingsMcp: {}, gating: {} });
+    fc.reinitializeMcpServers.mockRejectedValueOnce(
+      new Error('reconcile boom'),
+    );
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.LogError, spy);
+    try {
+      merged.mcpServers = { a: { command: 'a' } };
+      // The listener swallows the reconcile error (one bad reload must not crash
+      // the watcher) but must NOT do so silently.
+      await listener([]);
+
+      expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
+      expect(spy).toHaveBeenCalledOnce();
+      // Concise, user-facing message — not a raw stack.
+      expect(String(spy.mock.calls[0][0])).toMatch(
+        /Failed to reload MCP server settings/,
+      );
+    } finally {
+      appEvents.off(AppEvent.LogError, spy);
+    }
+  });
+
   // Regression for review issue #6: a previously *rejected* gated server is
   // still listed in `pending` (rejected ⇒ `!== 'approved'`), so a name-diff of
   // the pending set would treat a subsequent config edit as "not newly pending"

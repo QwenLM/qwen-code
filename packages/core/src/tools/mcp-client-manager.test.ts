@@ -1588,6 +1588,7 @@ describe('McpClientManager', () => {
     );
 
     const removePromptsByServer = vi.fn();
+    const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
     const toolRegistryStub = {
       removeMcpToolsByServer,
@@ -1599,7 +1600,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
-      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getResourceRegistry: () => ({ removeResourcesByServer }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1624,15 +1625,66 @@ describe('McpClientManager', () => {
     // still-connected server is disconnected and reconnected.
     removeMcpToolsByServer.mockClear();
     removePromptsByServer.mockClear();
+    removeResourcesByServer.mockClear();
     args = ['--flag'];
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(1);
     expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
-    // The OLD config's tools/prompts MUST be purged before rediscovery, so a
-    // changed server that drops/renames tools doesn't leave stale entries
-    // registered against the now-closed client (Codex adversarial-review #2).
+    // The OLD config's tools/prompts/resources MUST be purged before
+    // rediscovery, so a changed server that drops/renames entries doesn't leave
+    // stale ones registered against the now-closed client.
     expect(removeMcpToolsByServer).toHaveBeenCalledWith('foo');
     expect(removePromptsByServer).toHaveBeenCalledWith('foo');
+    expect(removeResourcesByServer).toHaveBeenCalledWith('foo');
+  });
+
+  it('reconnects a still-connected server when only a discovery filter (includeTools) changes', async () => {
+    // trust / includeTools / excludeTools are excluded from connectionIdOf
+    // (transport identity), but they ARE applied during discover() and baked
+    // into the registered tools. The single-session reconcile must therefore
+    // reconnect when they change — otherwise the edit is silently ignored until
+    // a manual reconnect/restart.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const mockedMcpClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn().mockReturnValue(MCPServerStatus.CONNECTED),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    let includeTools: string[] | undefined = undefined;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      // command/args/env unchanged across passes → transport fingerprint stays
+      // identical; only the per-session filter changes.
+      getMcpServers: () => ({ foo: { command: 'node', includeTools } }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = mkManager({ config: mockConfig });
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(1);
+
+    // Identical config → no churn.
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(1);
+    expect(mockedMcpClient.disconnect).not.toHaveBeenCalled();
+
+    // Change ONLY includeTools — connectionIdOf is unchanged, but the
+    // discovery-aware key differs → reconnect so discover() re-applies it.
+    includeTools = ['allowed_tool'];
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(1);
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
   });
 
   it('reconnects a server first connected via the bulk path when its config later changes', async () => {
@@ -1655,6 +1707,7 @@ describe('McpClientManager', () => {
     );
 
     const removePromptsByServer = vi.fn();
+    const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
     const toolRegistryStub = {
       removeMcpToolsByServer,
@@ -1666,7 +1719,7 @@ describe('McpClientManager', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
-      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getResourceRegistry: () => ({ removeResourcesByServer }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -1692,6 +1745,7 @@ describe('McpClientManager', () => {
     expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
     expect(removeMcpToolsByServer).toHaveBeenCalledWith('foo');
     expect(removePromptsByServer).toHaveBeenCalledWith('foo');
+    expect(removeResourcesByServer).toHaveBeenCalledWith('foo');
   });
 
   it('discoverAllMcpToolsIncremental records `failed` outcome for swallowed connect errors', async () => {
@@ -2578,6 +2632,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     );
 
     const removePromptsByServer = vi.fn();
+    const removeResourcesByServer = vi.fn();
     const removeMcpToolsByServer = vi.fn();
     let args: string[] = [];
     const mockConfig = {
@@ -2586,7 +2641,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer }) as unknown as PromptRegistry,
-      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getResourceRegistry: () => ({ removeResourcesByServer }),
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
@@ -2610,6 +2665,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
     expect(removeMcpToolsByServer).toHaveBeenCalledWith('foo');
     expect(removePromptsByServer).toHaveBeenCalledWith('foo');
+    expect(removeResourcesByServer).toHaveBeenCalledWith('foo');
   });
 
   it('readBudgetFromEnv downgrades enforce-without-budget to off (wenshao S4)', async () => {

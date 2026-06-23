@@ -391,16 +391,18 @@ export class McpClientManager {
   private serverDiscoveryPromises: Map<string, Promise<void>> = new Map();
 
   /**
-   * Per connected server, the `connectionIdOf` fingerprint of the config it
-   * was last connected with. Single-session path only — pool mode tracks
-   * fingerprints via `pooledConnections[].id` and its own `desiredIds` diff.
-   * Lets `discoverAllMcpToolsIncremental` detect an in-place config change
-   * (command / url / env / headers / oauth) to an already-connected server and
-   * reconnect it, instead of leaving it on the stale config. Set on successful
-   * connect; cleared on every teardown path so a stale fingerprint can't mask
-   * a later change.
+   * Per connected server, the single-session "connected config key" of the
+   * config it was last connected with — see {@link singleSessionConnectedKeyOf}.
+   * Single-session path only; pool mode tracks transport identity via
+   * `pooledConnections[].id` and its own `desiredIds` diff.
+   * Lets `discoverAllMcpToolsIncremental` detect an in-place config change to an
+   * already-connected server and reconnect it, instead of leaving it on the
+   * stale config. Unlike the transport-only `connectionIdOf`, this key also
+   * covers the discovery-time filters (trust / includeTools / excludeTools) so
+   * editing those re-applies them. Set on successful connect; cleared on every
+   * teardown path so a stale key can't mask a later change.
    */
-  private readonly connectionFingerprints = new Map<string, ConnectionId>();
+  private readonly connectedConfigKeys = new Map<string, string>();
 
   /**
    * Budget bookkeeping. Slots are reserved synchronously by server name
@@ -1121,7 +1123,10 @@ export class McpClientManager {
             // so a bulk connect (this path is reached via legacy blocking boot
             // + extension reload) that omitted this would silently drop a
             // subsequent edit — same invariant the per-server path upholds.
-            this.connectionFingerprints.set(name, connectionIdOf(name, config));
+            this.connectedConfigKeys.set(
+              name,
+              this.singleSessionConnectedKeyOf(name, config),
+            );
             this.eventEmitter?.emit('mcp-client-update', this.clients);
           } catch (error) {
             // zombie slot leak.
@@ -1358,11 +1363,7 @@ export class McpClientManager {
         // `addRuntimeMcpServer`'s replace branch. Same-config reconnects
         // (`/mcp reconnect`, health monitor, OAuth) simply re-register the
         // identical set immediately after.
-        this.toolRegistry.removeMcpToolsByServer(serverName);
-        this.cliConfig.getPromptRegistry().removePromptsByServer(serverName);
-        this.cliConfig
-          .getResourceRegistry()
-          .removeResourcesByServer(serverName);
+        this.purgeServerRegistries(serverName);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
       }
     }
@@ -1388,12 +1389,13 @@ export class McpClientManager {
     try {
       await client.connect();
       await client.discover(cliConfig);
-      // Record the fingerprint of the config this client is now connected
-      // with, so the incremental reconcile can detect a later in-place config
-      // change and reconnect (mirrors the pool path's `conn.id` tracking).
-      this.connectionFingerprints.set(
+      // Record the connected-config key of the config this client is now
+      // connected with, so the incremental reconcile can detect a later
+      // in-place config change and reconnect (mirrors the pool path's `conn.id`
+      // tracking, plus the discovery filters — see singleSessionConnectedKeyOf).
+      this.connectedConfigKeys.set(
         serverName,
-        connectionIdOf(serverName, serverConfig),
+        this.singleSessionConnectedKeyOf(serverName, serverConfig),
       );
       // a server that
       // was refused at a previous discovery pass and is now
@@ -1451,7 +1453,7 @@ export class McpClientManager {
         }
         this.releaseSlotName(serverName);
         this.clients.delete(serverName);
-        this.connectionFingerprints.delete(serverName);
+        this.connectedConfigKeys.delete(serverName);
       }
       // Log the error but don't throw: callers expect best-effort discovery.
       debugLogger.error(
@@ -1843,7 +1845,7 @@ export class McpClientManager {
 
     await Promise.all(disconnectionPromises);
     this.clients.clear();
-    this.connectionFingerprints.clear();
+    this.connectedConfigKeys.clear();
     this.consecutiveFailures.clear();
     this.isReconnecting.clear();
     this.serverDiscoveryPromises.clear();
@@ -1890,7 +1892,7 @@ export class McpClientManager {
         );
       } finally {
         this.clients.delete(serverName);
-        this.connectionFingerprints.delete(serverName);
+        this.connectedConfigKeys.delete(serverName);
         this.consecutiveFailures.delete(serverName);
         this.isReconnecting.delete(serverName);
         this.serverDiscoveryPromises.delete(serverName);
@@ -2213,21 +2215,22 @@ export class McpClientManager {
           serversToUpdate.push(name);
         } else {
           // Still-connected server: detect an in-place config change
-          // (command / url / env / headers / oauth) by comparing the
-          // fingerprint it was connected with against the desired one. This
-          // is the single-session equivalent of the pool path's `desiredIds`
-          // diff — without it, editing a live server's config at runtime
-          // would leave it running on the stale config. `connectionFingerprints`
-          // is set on every successful connect, so a CONNECTED client without
-          // a recorded fingerprint is not expected; guard against `undefined`
-          // anyway to avoid a spurious reconnect of a healthy server.
+          // (command / url / env / headers / oauth, plus the discovery filters
+          // trust / includeTools / excludeTools) by comparing the connected-
+          // config key it was connected with against the desired one. This is
+          // the single-session equivalent of the pool path's `desiredIds` diff
+          // — without it, editing a live server's config at runtime would leave
+          // it running on the stale config. `connectedConfigKeys` is set on
+          // every successful connect, so a CONNECTED client without a recorded
+          // key is not expected; guard against `undefined` anyway to avoid a
+          // spurious reconnect of a healthy server.
           // `discoverMcpToolsForServerInternal` disconnects the stale client
           // before reconnecting with the freshly-read config, so pushing the
           // name is sufficient — no explicit teardown needed here.
-          const currentId = this.connectionFingerprints.get(name);
+          const currentKey = this.connectedConfigKeys.get(name);
           if (
-            currentId !== undefined &&
-            currentId !== connectionIdOf(name, servers[name])
+            currentKey !== undefined &&
+            currentKey !== this.singleSessionConnectedKeyOf(name, servers[name])
           ) {
             serversToUpdate.push(name);
           }
@@ -2364,10 +2367,12 @@ export class McpClientManager {
             );
           }
         }
-        // Drop any tools that registered during the disconnect window. No-op
-        // if the server hadn't reached `discover()` yet, so it's safe to
-        // always call.
-        this.toolRegistry.removeMcpToolsByServer(serverName);
+        // Drop any tools/prompts/resources that registered during the
+        // disconnect window. No-op if the server hadn't reached `discover()`
+        // yet, so it's safe to always call. A server that registered prompts /
+        // resources but stalled `tools/list` past the timeout would otherwise
+        // leak them bound to the closed transport.
+        this.purgeServerRegistries(serverName);
         // Prevent the discovery `finally` block's `startHealthCheck` from
         // resurrecting this server: without removing the client entry,
         // `performHealthCheck` would observe `status !== CONNECTED` for
@@ -2380,7 +2385,7 @@ export class McpClientManager {
         // absent, so the trailing `finally`-block call becomes a no-op.
         this.stopHealthCheck(serverName);
         this.clients.delete(serverName);
-        this.connectionFingerprints.delete(serverName);
+        this.connectedConfigKeys.delete(serverName);
         // Release the budget slot ONLY if THIS in-flight
         // discoverMcpToolsForServerInternal call freshly reserved
         // it. `freshReservations.has(serverName)` distinguishes:
@@ -2469,6 +2474,43 @@ export class McpClientManager {
   }
 
   /**
+   * The single-session reconnect key for a server config. `connectionIdOf` is
+   * intentionally transport-only (it excludes the per-session discovery filters
+   * so the shared pool can reuse a transport across sessions with different
+   * filters). But the single-session reconcile must ALSO reconnect when only a
+   * discovery filter changes — `trust`, `includeTools`, `excludeTools` are
+   * applied during `discover()` and baked into the registered tools, so a
+   * config edit to them otherwise never takes effect mid-session. Append a
+   * stable hash of those fields (arrays sorted so order alone doesn't churn).
+   */
+  private singleSessionConnectedKeyOf(
+    serverName: string,
+    config: MCPServerConfig,
+  ): string {
+    const discovery = JSON.stringify({
+      trust: config.trust ?? null,
+      includeTools: [...(config.includeTools ?? [])].sort(),
+      excludeTools: [...(config.excludeTools ?? [])].sort(),
+    });
+    return `${connectionIdOf(serverName, config)}|${discovery}`;
+  }
+
+  /**
+   * Purge a server's entries from all three registries (tools + prompts +
+   * resources). Every teardown path must clean all three atomically — a missed
+   * registry leaves stale entries bound to a closed client (selectable by the
+   * model, or surfaced by `listMcpResources`). Centralized here so adding a
+   * future registry is one edit, not a hunt across teardown sites. Callers keep
+   * their own transport disconnect / map deletes / health-check / status /
+   * budget handling — only the registry purge is shared.
+   */
+  private purgeServerRegistries(serverName: string): void {
+    this.toolRegistry.removeMcpToolsByServer(serverName);
+    this.cliConfig.getPromptRegistry().removePromptsByServer(serverName);
+    this.cliConfig.getResourceRegistry().removeResourcesByServer(serverName);
+  }
+
+  /**
    * Removes a server and its tools
    */
   private async removeServer(serverName: string): Promise<void> {
@@ -2485,7 +2527,7 @@ export class McpClientManager {
       this.stopHealthCheck(serverName);
       this.consecutiveFailures.delete(serverName);
     }
-    this.connectionFingerprints.delete(serverName);
+    this.connectedConfigKeys.delete(serverName);
 
     // server gone from config (or disabled mid-session) releases
     // the budget slot too — operator intent is "this server should not
@@ -2499,13 +2541,11 @@ export class McpClientManager {
     // last-pass startup refusal record.
     this.dropRefusalEntry(serverName);
 
-    // Remove tools for this server from registry
-    this.toolRegistry.removeMcpToolsByServer(serverName);
-    // Also drop its prompts and resources. Unlike `ToolRegistry.disconnectServer`,
-    // this config-driven removal path never cleaned up the prompt/resource
-    // registries, so a removed/changed server leaked them across a hot-reload.
-    this.cliConfig.getPromptRegistry().removePromptsByServer(serverName);
-    this.cliConfig.getResourceRegistry().removeResourcesByServer(serverName);
+    // Remove tools, prompts and resources for this server. Unlike
+    // `ToolRegistry.disconnectServer`, this config-driven removal path never
+    // cleaned up the prompt/resource registries, so a removed/changed server
+    // leaked them across a hot-reload.
+    this.purgeServerRegistries(serverName);
 
     // The server has been removed from configuration, so drop it from the
     // global status registry too — the health pill should no longer count it.
@@ -2737,11 +2777,11 @@ export class McpClientManager {
         // Record the fingerprint of the config this client connected with so a
         // later `discoverAllMcpToolsIncremental` can detect an in-place config
         // change. The reconcile guard skips a still-connected server whose
-        // fingerprint is `undefined`; without this, a server first brought up
-        // by a lazy resource read would silently ignore a subsequent edit.
-        this.connectionFingerprints.set(
+        // key is `undefined`; without this, a server first brought up by a lazy
+        // resource read would silently ignore a subsequent edit.
+        this.connectedConfigKeys.set(
           serverName,
-          connectionIdOf(serverName, serverConfig),
+          this.singleSessionConnectedKeyOf(serverName, serverConfig),
         );
         // start
         // the health monitor on a successful lazy spawn. Pre-fix
@@ -2913,9 +2953,7 @@ export class McpClientManager {
         /* best effort */
       }
       this.pooledConnections.delete(name);
-      this.toolRegistry.removeMcpToolsByServer(name);
-      this.cliConfig.getPromptRegistry().removePromptsByServer(name);
-      this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
+      this.purgeServerRegistries(name);
       this.stopHealthCheck(name);
     }
     const existingClient = this.clients.get(name);
@@ -2927,10 +2965,8 @@ export class McpClientManager {
         /* best effort */
       }
       this.clients.delete(name);
-      this.connectionFingerprints.delete(name);
-      this.toolRegistry.removeMcpToolsByServer(name);
-      this.cliConfig.getPromptRegistry().removePromptsByServer(name);
-      this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
+      this.connectedConfigKeys.delete(name);
+      this.purgeServerRegistries(name);
       // Do NOT releaseSlotName here — the budget slot carries over to
       // the new entry being spawned. Releasing + not re-reserving would
       // leave the running server unaccounted in the budget.
@@ -2977,7 +3013,10 @@ export class McpClientManager {
         this.eventEmitter?.emit('mcp-client-update', this.clients);
         await client.connect();
         await client.discover(this.cliConfig);
-        this.connectionFingerprints.set(name, connectionIdOf(name, config));
+        this.connectedConfigKeys.set(
+          name,
+          this.singleSessionConnectedKeyOf(name, config),
+        );
         this.eventEmitter?.emit('mcp-client-update', this.clients);
         toolCount = this.toolRegistry.getToolsByServer(name).length;
       }
@@ -2991,9 +3030,7 @@ export class McpClientManager {
       }
       // Clean up any partial state (including tools/prompts/resources from a
       // partial discover) so a failed runtime add leaves nothing behind.
-      this.toolRegistry.removeMcpToolsByServer(name);
-      this.cliConfig.getPromptRegistry().removePromptsByServer(name);
-      this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
+      this.purgeServerRegistries(name);
       this.pooledConnections.delete(name);
       removeMCPServerStatus(name);
       const failedClient = this.clients.get(name);
@@ -3005,7 +3042,7 @@ export class McpClientManager {
         }
       }
       this.clients.delete(name);
-      this.connectionFingerprints.delete(name);
+      this.connectedConfigKeys.delete(name);
       this.stopHealthCheck(name);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
 
@@ -3084,14 +3121,12 @@ export class McpClientManager {
 
     // Cleanup: tool registry, prompts, resources, status, health check,
     // diagnostics (mirrors removeServer)
-    this.toolRegistry.removeMcpToolsByServer(name);
-    this.cliConfig.getPromptRegistry().removePromptsByServer(name);
-    this.cliConfig.getResourceRegistry().removeResourcesByServer(name);
+    this.purgeServerRegistries(name);
     removeMCPServerStatus(name);
     this.stopHealthCheck(name);
     this.consecutiveFailures.delete(name);
     this.isReconnecting.delete(name);
-    this.connectionFingerprints.delete(name);
+    this.connectedConfigKeys.delete(name);
     this.dropRefusalEntry(name);
 
     // Release budget slot

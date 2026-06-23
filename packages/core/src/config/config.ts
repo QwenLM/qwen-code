@@ -1286,6 +1286,13 @@ export class Config {
    */
   private mcpReconcileInProgress = false;
   private mcpReconcilePending = false;
+  /**
+   * The in-flight reconcile (pass 1 + its coalesced drain loop), exposed so a
+   * call arriving mid-flight can await the same work instead of returning
+   * before its coalesced change has actually been applied. Cleared when the
+   * loop settles.
+   */
+  private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -3611,53 +3618,68 @@ export class Config {
       return;
     }
     if (this.mcpReconcileInProgress) {
-      // Coalesce: a pass is already running and will re-check after it
-      // finishes. Mark that the desired state advanced so it runs again.
+      // Coalesce: a pass is already running. Mark that the desired state
+      // advanced so its drain loop runs again with the latest config, and
+      // await that in-flight pass — NOT a resolved promise — so this caller
+      // does not proceed (e.g. the hot-reload listener emitting approval events
+      // and logging "complete") before its coalesced change is actually
+      // reconciled, and so it observes a shared reconcile failure.
       this.mcpReconcilePending = true;
       this.debugLogger.debug(
         '[mcp-hot-reload] reconcile already in flight — coalescing into a follow-up pass',
       );
-      return;
+      return this.mcpReconcilePromise ?? Promise.resolve();
     }
     this.mcpReconcileInProgress = true;
-    try {
-      const registry = this.getToolRegistry();
-      this.debugLogger.debug(
-        '[mcp-hot-reload] running incremental reconcile (pass 1)',
-      );
-      await registry.getMcpClientManager().discoverAllMcpToolsIncremental(this);
-      // Drain any change that arrived while this pass was in flight. The pool
-      // path returns the in-flight promise rather than queuing, so awaiting is
-      // not enough — re-run once more to pick up the latest config.
-      let pass = 1;
-      while (this.mcpReconcilePending) {
-        this.mcpReconcilePending = false;
-        pass += 1;
+    const registry = this.getToolRegistry();
+    // Run pass 1 + its drain loop as a single promise, assigned BEFORE the
+    // first await so a coalesced caller arriving mid-flight can await it.
+    const runReconcile = (async () => {
+      try {
         this.debugLogger.debug(
-          `[mcp-hot-reload] running coalesced incremental reconcile (pass ${pass})`,
+          '[mcp-hot-reload] running incremental reconcile (pass 1)',
         );
         await registry
           .getMcpClientManager()
           .discoverAllMcpToolsIncremental(this);
+        // Drain any change that arrived while this pass was in flight. The pool
+        // path returns the in-flight promise rather than queuing, so awaiting
+        // is not enough — re-run once more to pick up the latest config.
+        let pass = 1;
+        while (this.mcpReconcilePending) {
+          this.mcpReconcilePending = false;
+          pass += 1;
+          this.debugLogger.debug(
+            `[mcp-hot-reload] running coalesced incremental reconcile (pass ${pass})`,
+          );
+          await registry
+            .getMcpClientManager()
+            .discoverAllMcpToolsIncremental(this);
+        }
+        this.debugLogger.debug(
+          `[mcp-hot-reload] reconcile complete after ${pass} pass(es); live servers=[${Object.keys(
+            this.getMcpServers() ?? {},
+          ).join(', ')}]`,
+        );
+      } catch (err) {
+        this.debugLogger.error(
+          `[mcp-hot-reload] reconcile failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+        throw err;
+      } finally {
+        this.mcpReconcileInProgress = false;
+        // Clear the coalesce flag too: if a pass threw, a pending follow-up
+        // would otherwise stay stuck `true` and make the next (unrelated)
+        // reconcile run an extra no-op drain pass. The next real settings
+        // change re-triggers reconcile anyway.
+        this.mcpReconcilePending = false;
+        this.mcpReconcilePromise = undefined;
       }
-      this.debugLogger.debug(
-        `[mcp-hot-reload] reconcile complete after ${pass} pass(es); live servers=[${Object.keys(
-          this.getMcpServers() ?? {},
-        ).join(', ')}]`,
-      );
-    } catch (err) {
-      this.debugLogger.error(
-        `[mcp-hot-reload] reconcile failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-      );
-      throw err;
-    } finally {
-      this.mcpReconcileInProgress = false;
-      // Clear the coalesce flag too: if pass 1 threw, a pending follow-up
-      // request would otherwise stay stuck `true` and make the next
-      // (unrelated) reconcile run an extra no-op drain pass. The next real
-      // settings change re-triggers reconcile anyway.
-      this.mcpReconcilePending = false;
-    }
+    })();
+    this.mcpReconcilePromise = runReconcile;
+    // Propagate failure to this caller (and, via the shared promise, to any
+    // coalesced callers). Existing callers rely on the throw.
+    await runReconcile;
   }
 
   /**

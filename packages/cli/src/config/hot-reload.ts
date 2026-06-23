@@ -186,10 +186,19 @@ export function registerMcpHotReload(
         `reinitializeMcpServers resolved; final statuses=[${finalStatuses}]`,
       );
     } catch (err) {
+      // Keep the full stack on the debug channel for diagnosis…
       debugLogger.error(
         `reinitializeMcpServers threw: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
+      );
+      // …but also surface a concise, user-visible notice. `debugLogger.error`
+      // only shows under `--debug`, so a failed settings edit would otherwise
+      // silently do nothing with no indication anything went wrong. `LogError`
+      // is the same channel the CLI already renders to the user.
+      appEvents.emit(
+        AppEvent.LogError,
+        'Failed to reload MCP server settings; existing MCP state may be unchanged. Run with --debug for details.',
       );
     }
 

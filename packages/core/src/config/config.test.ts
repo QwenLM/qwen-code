@@ -696,7 +696,9 @@ describe('Server Config (config.ts)', () => {
       const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
       reject(new Error('reconcile boom'));
       await expect(first).rejects.toThrow('reconcile boom');
-      await second; // coalesced call resolves immediately (early return)
+      // The coalesced caller awaits the shared in-flight pass, so it observes
+      // the SAME failure rather than resolving before its change was applied.
+      await expect(second).rejects.toThrow('reconcile boom');
 
       // The throw must have cleared the pending flag too. A subsequent
       // unrelated reconcile must run EXACTLY ONE pass — not an extra stale
@@ -704,6 +706,46 @@ describe('Server Config (config.ts)', () => {
       manager.discoverAllMcpToolsIncremental.mockClear();
       await config.reinitializeMcpServers({ a: srvA });
       expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+    });
+
+    it('a coalesced reconcile awaits the in-flight pass + its drain (does not resolve early)', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until released; the second call lands mid-flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      let secondResolved = false;
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config
+        .reinitializeMcpServers({ a: srvA, b: srvB })
+        .then(() => {
+          secondResolved = true;
+        });
+
+      // While pass 1 is still in flight the coalesced caller must NOT have
+      // resolved — it is chained onto the shared in-flight reconcile, so its
+      // change has not been applied yet.
+      await Promise.resolve();
+      expect(secondResolved).toBe(false);
+
+      release();
+      await Promise.all([first, second]);
+      expect(secondResolved).toBe(true);
+      // pass 1 + exactly one drain (for the coalesced change) = 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
     });
 
     it('admission-list setters and getMcpGating round-trip', () => {
