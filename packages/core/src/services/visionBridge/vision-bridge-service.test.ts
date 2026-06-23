@@ -305,6 +305,39 @@ describe('runVisionBridge', () => {
     expect(result.error).toBeUndefined();
   });
 
+  it('classifies a timeout (user did not cancel) as a failed result with a safe reason', async () => {
+    // Control the bridge's internal timeout signal so we can fire it (the user
+    // signal stays un-aborted — this is the timeout-only path, not a cancel).
+    const timeoutCtl = new AbortController();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(timeoutCtl.signal);
+    mockSideQuery.mockImplementation(
+      (_config: unknown, opts: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          opts.abortSignal.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        }),
+    );
+    try {
+      const pending = runVisionBridge({
+        config,
+        parts: ['look', image()],
+        signal: signal(), // user never cancels
+      });
+      timeoutCtl.abort(); // fire the 30s timeout
+      const result = await pending;
+      expect(result.status).toBe('failed');
+      expect(result.error).toMatch(/timed out/);
+      // The timeout reason is safe to surface to the primary model.
+      expect(textOf(result.parts)).toMatch(/timed out/);
+      expect(result.egressOccurred).toBe(true);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it('bounds bridge output and skips output-language preference injection', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
 

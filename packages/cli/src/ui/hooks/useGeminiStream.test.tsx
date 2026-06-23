@@ -503,6 +503,35 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('strips terminal control/escape characters from the transcript notice', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        // Untrusted image transcript with an ANSI (C0 ESC) and a C1 CSI control.
+        transcript: 'clean\u001b[31mRED\u009b2Ktext',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      const notice = mockAddItem.mock.calls.find(
+        (c) =>
+          c[0]?.type === MessageType.INFO &&
+          String(c[0]?.text).includes('Converted'),
+      );
+      const text = String(notice?.[0]?.text ?? '');
+      expect(text).toContain('clean'); // clean text preserved
+      expect(text).toContain('RED');
+      expect(text).not.toContain('\u001b'); // ESC stripped
+      expect(text).not.toContain('\u009b'); // C1 CSI stripped
+    });
+
     it('does not query bridge config for text-only messages', async () => {
       Object.assign(mockConfig, {
         getEffectiveInputModalities: vi.fn(() => ({})),

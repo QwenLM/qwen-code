@@ -108,6 +108,10 @@ const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
 const VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT = 2048;
+// Untrusted vision-model output is shown in the terminal; strip ANSI/C0+C1
+// control escapes (keep \t, \n) so a crafted image can't inject sequences.
+// eslint-disable-next-line no-control-regex
+const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
@@ -116,10 +120,7 @@ interface PendingDuplicateToolResponses {
 }
 
 function truncateVisionBridgeTranscript(transcript: string): string {
-  // Untrusted vision-model output shown in the terminal: drop ANSI/C0 control
-  // escapes (keep \t, \n) so a crafted image can't inject terminal sequences.
-  // eslint-disable-next-line no-control-regex
-  const safe = transcript.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
+  const safe = transcript.replace(TERMINAL_CONTROL_CHARS, '');
   if (safe.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
     return safe;
   }
