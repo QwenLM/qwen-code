@@ -371,10 +371,10 @@ export interface QueryOptions {
    * If specified, only matching core tools are registered for the session.
    * This is separate from `permissions.allow`, which auto-approves matching
    * tool calls but does not restrict tool registration.
+   * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
+   * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
+   * tool registration, not invocation.
    * @example ['read_file', 'edit', 'run_shell_command']
-   * // Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to
-   * // single tools. Specifiers like 'Bash(git *)' are stripped; `coreTools`
-   * // restricts tool registration, not invocation.
    */
   coreTools?: string[];
 

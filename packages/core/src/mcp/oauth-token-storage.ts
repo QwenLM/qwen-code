@@ -114,12 +114,12 @@ export class MCPOAuthTokenStorage implements TokenStorage {
     const tokenFile = this.getTokenFilePath();
 
     try {
-      warnPlaintextTokenStorage(tokenFile);
       await atomicWriteFile(tokenFile, JSON.stringify(tokenArray, null, 2), {
         mode: 0o600,
         forceMode: true,
         noFollow: true,
       });
+      warnPlaintextTokenStorage(tokenFile);
     } catch (error) {
       debugLogger.error(
         `Failed to save MCP OAuth token: ${getErrorMessage(error)}`,
@@ -195,12 +195,12 @@ export class MCPOAuthTokenStorage implements TokenStorage {
           // Remove file if no tokens left
           await fs.unlink(tokenFile);
         } else {
-          warnPlaintextTokenStorage(tokenFile);
           await atomicWriteFile(
             tokenFile,
             JSON.stringify(tokenArray, null, 2),
             { mode: 0o600, forceMode: true, noFollow: true },
           );
+          warnPlaintextTokenStorage(tokenFile);
         }
       } catch (error) {
         debugLogger.error(

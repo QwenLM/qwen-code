@@ -83,8 +83,10 @@ export function getMcpOAuthDialogInstruction(
   mcpServerName: string,
 ): string {
   return [
-    `Open the /mcp dialog in Qwen Code to ${action}`,
+    `In interactive Qwen Code sessions, open the /mcp dialog to ${action}`,
     `with MCP server '${mcpServerName}'.`,
+    `For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-*`,
+    `or settings.json, then ${action} once in an interactive session before connecting.`,
   ].join(' ');
 }
 

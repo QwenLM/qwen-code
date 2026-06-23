@@ -247,6 +247,26 @@ describe('MCPOAuthTokenStorage', () => {
           expect.stringContaining('Failed to save MCP OAuth token'),
         );
       });
+
+      it('should warn on a successful retry after a plaintext write fails', async () => {
+        vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
+        vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile)
+          .mockRejectedValueOnce(new Error('Disk full'))
+          .mockResolvedValueOnce(undefined);
+
+        await expect(
+          tokenStorage.saveToken('test-server', mockToken),
+        ).rejects.toThrow('Disk full');
+
+        expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+        expect(stderrWriteSpy).not.toHaveBeenCalled();
+
+        await tokenStorage.saveToken('test-server', mockToken);
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+        expect(stderrWriteSpy).toHaveBeenCalledTimes(1);
+      });
     });
 
     describe('getCredentials', () => {

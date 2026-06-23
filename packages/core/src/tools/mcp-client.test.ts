@@ -94,13 +94,13 @@ describe('mcp-client', () => {
   describe('getMcpOAuthDialogInstruction', () => {
     it('builds an authenticate instruction for the named MCP server', () => {
       expect(getMcpOAuthDialogInstruction('authenticate', 'foo')).toBe(
-        "Open the /mcp dialog in Qwen Code to authenticate with MCP server 'foo'.",
+        "In interactive Qwen Code sessions, open the /mcp dialog to authenticate with MCP server 'foo'. For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-* or settings.json, then authenticate once in an interactive session before connecting.",
       );
     });
 
     it('builds a re-authenticate instruction for the named MCP server', () => {
       expect(getMcpOAuthDialogInstruction('re-authenticate', 'foo')).toBe(
-        "Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'foo'.",
+        "In interactive Qwen Code sessions, open the /mcp dialog to re-authenticate with MCP server 'foo'. For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-* or settings.json, then re-authenticate once in an interactive session before connecting.",
       );
     });
   });
@@ -145,7 +145,8 @@ describe('mcp-client', () => {
           workspaceContext,
         ),
       ).rejects.toThrow(
-        "Stored OAuth token for SSE server 'sse-server' was rejected. Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'sse-server'.",
+        "Stored OAuth token for SSE server 'sse-server' was rejected. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
       );
     });
 
@@ -186,7 +187,8 @@ describe('mcp-client', () => {
           workspaceContext,
         ),
       ).rejects.toThrow(
-        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'sse-server'.",
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
       );
     });
 
@@ -220,10 +222,12 @@ describe('mcp-client', () => {
           workspaceContext,
         ),
       ).rejects.toThrow(
-        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'sse-server'.",
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
       );
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. Open the /mcp dialog in Qwen Code to re-authenticate with MCP server 'sse-server'.",
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
       );
     });
 
@@ -253,7 +257,8 @@ describe('mcp-client', () => {
           workspaceContext,
         ),
       ).rejects.toThrow(
-        "401 error received for SSE server 'sse-server' without OAuth configuration. Open the /mcp dialog in Qwen Code to authenticate with MCP server 'sse-server'.",
+        "401 error received for SSE server 'sse-server' without OAuth configuration. " +
+          getMcpOAuthDialogInstruction('authenticate', 'sse-server'),
       );
     });
   });
@@ -1658,7 +1663,7 @@ describe('mcp-client', () => {
             false,
           ),
         ).rejects.toThrow(
-          "Open the /mcp dialog in Qwen Code to authenticate with MCP server 'oauth-test-server'.",
+          getMcpOAuthDialogInstruction('authenticate', 'oauth-test-server'),
         );
         expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
           enabled: true,
