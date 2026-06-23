@@ -813,19 +813,14 @@ function findEnvFile(
   const homeDir = homedir();
   const trustState = getWorkspaceTrustStatus(settings, startDir).effective
     .state;
-  const isTrusted =
-    trustState === 'trusted'
-      ? true
-      : trustState === 'untrusted'
-        ? false
-        : undefined;
+  const isTrusted = trustState === 'trusted';
 
   const globalQwenDir = Storage.getGlobalQwenDir();
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
   const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
 
   const canUseEnvFile = (filePath: string): boolean =>
-    isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
+    isTrusted || userLevelPaths.has(path.normalize(filePath));
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
   // ~/.qwen/.env (only when QWEN_HOME redirects), then ~/.env.
@@ -1449,7 +1444,7 @@ export function loadSettings(
     initialTrustCheckSettings as Settings,
     workspaceDir,
   ).effective.state;
-  const isTrusted = trustState === 'untrusted' ? false : true;
+  const isTrusted = trustState === 'trusted';
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

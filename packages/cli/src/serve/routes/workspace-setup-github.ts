@@ -80,7 +80,7 @@ async function handleSetupGithub(
     applyReadHeaders(res);
     res.status(200).json(result);
   } catch (error) {
-    sendSetupGithubError(res, error);
+    sendSetupGithubError(res, error, deps.boundWorkspace);
   }
 }
 
@@ -177,22 +177,26 @@ async function ensureDirectoryWithoutSymlink(
   root: string,
   segments: string[],
 ): Promise<void> {
+  await assertDirectoryWithoutSymlink(root, 'Repository root');
   let current = root;
+  const checkedSegments: string[] = [];
   for (const segment of segments) {
     current = path.join(current, segment);
+    checkedSegments.push(segment);
+    const label = `Workspace path "${checkedSegments.join('/')}"`;
     try {
       const stat = await fsp.lstat(current);
       if (stat.isSymbolicLink()) {
         throw new SetupGithubError(
           'github_setup_invalid_workspace',
-          `${current} must not be a symlink.`,
+          `${label} must not be a symlink.`,
           400,
         );
       }
       if (!stat.isDirectory()) {
         throw new SetupGithubError(
           'github_setup_invalid_workspace',
-          `${current} must be a directory.`,
+          `${label} must be a directory.`,
           400,
         );
       }
@@ -210,14 +214,14 @@ async function ensureDirectoryWithoutSymlink(
       if (postStat.isSymbolicLink()) {
         throw new SetupGithubError(
           'github_setup_invalid_workspace',
-          `${current} must not be a symlink.`,
+          `${label} must not be a symlink.`,
           400,
         );
       }
       if (!postStat.isDirectory()) {
         throw new SetupGithubError(
           'github_setup_invalid_workspace',
-          `${current} must be a directory.`,
+          `${label} must be a directory.`,
           400,
         );
       }
@@ -225,11 +229,43 @@ async function ensureDirectoryWithoutSymlink(
   }
 }
 
-function sendSetupGithubError(res: Response, error: unknown): void {
+async function assertDirectoryWithoutSymlink(
+  target: string,
+  label: string,
+): Promise<void> {
+  const stat = await fsp.lstat(target);
+  if (stat.isSymbolicLink()) {
+    throw new SetupGithubError(
+      'github_setup_invalid_workspace',
+      `${label} must not be a symlink.`,
+      400,
+    );
+  }
+  if (!stat.isDirectory()) {
+    throw new SetupGithubError(
+      'github_setup_invalid_workspace',
+      `${label} must be a directory.`,
+      400,
+    );
+  }
+}
+
+function sanitizeSetupGithubMessage(
+  message: string,
+  boundWorkspace: string,
+): string {
+  return message.split(boundWorkspace).join('<workspace>');
+}
+
+function sendSetupGithubError(
+  res: Response,
+  error: unknown,
+  boundWorkspace: string,
+): void {
   applyReadHeaders(res);
   if (error instanceof SetupGithubError) {
     res.status(error.status).json({
-      error: error.message,
+      error: sanitizeSetupGithubMessage(error.message, boundWorkspace),
       code: error.code,
       status: error.status,
       ...(error.partial
@@ -239,7 +275,7 @@ function sendSetupGithubError(res: Response, error: unknown): void {
     return;
   }
   res.status(500).json({
-    error: error instanceof Error ? error.message : String(error),
+    error: 'An internal error occurred during GitHub setup.',
     code: 'github_setup_failed',
     status: 500,
   });

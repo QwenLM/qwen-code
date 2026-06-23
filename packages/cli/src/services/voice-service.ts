@@ -171,6 +171,27 @@ export function listAvailableVoiceModels(
     );
 }
 
+export function hasConfiguredBatchVoiceTranscriptionModel(
+  settings: LoadedSettings,
+): boolean {
+  for (const model of listAvailableVoiceModels(settings)) {
+    if (model.transport !== 'qwen-asr-chat') {
+      continue;
+    }
+    try {
+      validateWorkspaceVoiceConfig(settings, model.id);
+      return true;
+    } catch (err) {
+      debugLogger.debug(
+        `Skipping unavailable batch voice model '${model.id}': ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return false;
+}
+
 export function buildWorkspaceVoiceStatus(
   workspaceCwd: string,
   settings: LoadedSettings,

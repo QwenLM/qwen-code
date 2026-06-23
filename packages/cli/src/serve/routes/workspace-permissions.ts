@@ -13,25 +13,14 @@ import {
   type PermissionSettingsScope,
   type QwenPermissionSettings,
 } from '../../config/permission-settings.js';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
-
-const SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
-  user: SettingScope.User,
-  workspace: SettingScope.Workspace,
-};
 
 export interface WorkspacePermissionsRouteDeps {
   boundWorkspace: string;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
-  persistSetting?: (
-    workspace: string,
-    scope: SettingScope,
-    key: string,
-    value: unknown,
-  ) => Promise<void>;
   invokeWorkspaceCommand: (
     method: string,
     params: Record<string, unknown>,
@@ -56,7 +45,6 @@ export function registerWorkspacePermissionsRoutes(
     boundWorkspace,
     mutate,
     safeBody,
-    persistSetting,
     invokeWorkspaceCommand,
     broadcastSettingsChanged,
     parseAndValidateClientId,
@@ -84,14 +72,6 @@ export function registerWorkspacePermissionsRoutes(
     '/workspace/permissions',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
-      if (!persistSetting) {
-        res.status(501).json({
-          error: 'Workspace permission settings persistence is not available',
-          code: 'not_implemented',
-        });
-        return;
-      }
-
       const body = safeBody(req);
       const scope = body['scope'];
       const ruleType = body['ruleType'];
@@ -132,7 +112,6 @@ export function registerWorkspacePermissionsRoutes(
 
       const key = `permissions.${ruleType}`;
       let liveResponse: unknown;
-      let updatedThroughLiveChild = false;
       try {
         liveResponse = await invokeWorkspaceCommand(
           'qwen/permissions/setRules',
@@ -142,52 +121,24 @@ export function registerWorkspacePermissionsRoutes(
             rules,
           },
         );
-        updatedThroughLiveChild = true;
       } catch (err) {
-        if (!(err instanceof SessionNotFoundError)) {
-          writeStderrLine(
-            `qwen serve: POST /workspace/permissions ACP error (key=${key}, scope=${permissionScope}, workspace=${boundWorkspace}): ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          res.status(500).json({
-            error: 'Failed to update permission rules',
-            code: 'permission_update_failed',
+        if (err instanceof SessionNotFoundError) {
+          res.status(409).json({
+            error:
+              'A live ACP session is required to update active permission rules.',
+            code: 'permission_session_required',
           });
           return;
         }
-      }
 
-      if (updatedThroughLiveChild) {
-        try {
-          broadcastSettingsChanged(key, rules, permissionScope, clientId);
-        } catch (err) {
-          writeStderrLine(
-            `qwen serve: POST /workspace/permissions broadcast error (key=${key}, scope=${permissionScope}): ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-        res.status(200).json(liveResponse as QwenPermissionSettings);
-        return;
-      }
-
-      try {
-        await persistSetting(
-          boundWorkspace,
-          SCOPE_MAP[permissionScope],
-          key,
-          rules,
-        );
-      } catch (err) {
         writeStderrLine(
-          `qwen serve: POST /workspace/permissions persist error (key=${key}, scope=${permissionScope}, workspace=${boundWorkspace}): ${
+          `qwen serve: POST /workspace/permissions ACP error (key=${key}, scope=${permissionScope}, workspace=${boundWorkspace}): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
         res.status(500).json({
-          error: 'Failed to persist permission rules',
-          code: 'persist_error',
+          error: 'Failed to update permission rules',
+          code: 'permission_update_failed',
         });
         return;
       }
@@ -201,10 +152,7 @@ export function registerWorkspacePermissionsRoutes(
           }`,
         );
       }
-
-      res
-        .status(200)
-        .json(buildPermissionSettings(loadSettings(boundWorkspace)));
+      res.status(200).json(liveResponse as QwenPermissionSettings);
     },
   );
 }

@@ -220,7 +220,7 @@ export interface WorkspaceTrustChangeRequest {
 }
 
 export interface WorkspaceTrustChangeResult {
-  accepted: true;
+  accepted: boolean;
   desiredState: WorkspaceTrustDesiredState;
   requiresOperatorAction: true;
 }

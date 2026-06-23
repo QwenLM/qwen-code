@@ -18,6 +18,14 @@ import {
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { BridgeEvent } from '../event-bus.js';
 import type { ServeOptions } from '../types.js';
+import {
+  resetHomeEnvBootstrapForTesting,
+  SETTINGS_DIRECTORY_NAME,
+} from '../../config/settings.js';
+import {
+  resetTrustedFoldersForTesting,
+  TRUSTED_FOLDERS_FILENAME,
+} from '../../config/trustedFolders.js';
 
 const setupGithubMocks = vi.hoisted(() => {
   class MockSetupGithubError extends Error {
@@ -58,6 +66,10 @@ const baseOpts: ServeOptions = {
   mode: 'http-bridge',
 };
 
+const originalQwenHome = process.env['QWEN_HOME'];
+const originalTrustedFoldersPath =
+  process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+
 interface Harness {
   workspace: string;
   scratch: string;
@@ -79,7 +91,16 @@ async function makeHarness(
     ),
   );
   const wsDir = path.join(scratch, 'ws');
+  const home = path.join(scratch, 'home');
+  await fsp.mkdir(home, { recursive: true });
   await fsp.mkdir(wsDir);
+  process.env['QWEN_HOME'] = home;
+  process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
+    home,
+    TRUSTED_FOLDERS_FILENAME,
+  );
+  resetHomeEnvBootstrapForTesting();
+  resetTrustedFoldersForTesting();
   const workspace = canonicalizeWorkspace(wsDir);
   const events: BridgeEvent[] = [];
   const bridgeEvents: BridgeEvent[] = [];
@@ -104,6 +125,23 @@ async function makeHarness(
 
 async function teardown(h: Harness): Promise<void> {
   await fsp.rm(h.scratch, { recursive: true, force: true });
+  if (originalQwenHome === undefined) {
+    delete process.env['QWEN_HOME'];
+  } else {
+    process.env['QWEN_HOME'] = originalQwenHome;
+  }
+  if (originalTrustedFoldersPath === undefined) {
+    delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+  } else {
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = originalTrustedFoldersPath;
+  }
+  resetHomeEnvBootstrapForTesting();
+  resetTrustedFoldersForTesting();
+}
+
+async function writeJson(file: string, value: unknown): Promise<void> {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  await fsp.writeFile(file, JSON.stringify(value, null, 2), 'utf8');
 }
 
 function setupResult() {
@@ -263,6 +301,103 @@ describe('POST /workspace/setup-github', () => {
     } finally {
       mkdirSpy.mockRestore();
     }
+  });
+
+  it('rejects a symlinked repository root before creating workflow directories', async () => {
+    const realRoot = path.join(h.scratch, 'real-root');
+    const linkRoot = path.join(h.scratch, 'link-root');
+    await fsp.mkdir(realRoot, { recursive: true });
+    await fsp.symlink(realRoot, linkRoot, 'dir');
+    setupGithubMocks.setupGithub.mockImplementationOnce(
+      async (opts: {
+        fileOps: {
+          ensureWorkflowDirectory(gitRepoRoot: string): Promise<void>;
+        };
+      }) => {
+        await opts.fileOps.ensureWorkflowDirectory(linkRoot);
+        return setupResult();
+      },
+    );
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('github_setup_invalid_workspace');
+    expect(JSON.stringify(res.body)).not.toContain(linkRoot);
+    expect(JSON.stringify(res.body)).not.toContain(realRoot);
+    await expect(
+      fsp.access(path.join(realRoot, '.github')),
+    ).rejects.toBeDefined();
+  });
+
+  it('does not use workspace proxy settings before trust is established', async () => {
+    await writeJson(path.join(h.scratch, 'home', 'settings.json'), {
+      proxy: 'http://user-proxy.example:8080',
+      security: { folderTrust: { enabled: true } },
+    });
+    await writeJson(
+      path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+      {
+        proxy: 'http://workspace-proxy.example:8080',
+      },
+    );
+    setupGithubMocks.setupGithub.mockResolvedValueOnce(setupResult());
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(200);
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy: 'http://user-proxy.example:8080',
+      }),
+    );
+  });
+
+  it('redacts setup-github filesystem paths from client errors', async () => {
+    setupGithubMocks.setupGithub.mockRejectedValueOnce(
+      new setupGithubMocks.SetupGithubError(
+        'github_setup_invalid_workspace',
+        `${h.workspace}/.github must not be a symlink.`,
+        400,
+      ),
+    );
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('github_setup_invalid_workspace');
+    expect(JSON.stringify(res.body)).not.toContain(h.workspace);
+  });
+
+  it('uses a generic setup-github message for unexpected errors', async () => {
+    setupGithubMocks.setupGithub.mockRejectedValueOnce(
+      new Error(`${h.workspace}/internal dependency failed`),
+    );
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      error: 'An internal error occurred during GitHub setup.',
+      code: 'github_setup_failed',
+      status: 500,
+    });
   });
 
   it('maps release lookup failure to 502', async () => {

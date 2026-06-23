@@ -144,6 +144,7 @@ import {
   registerWorkspaceVoiceRoutes,
   type WorkspaceVoiceRouteDeps,
 } from './routes/workspace-voice.js';
+import { hasConfiguredBatchVoiceTranscriptionModel } from '../services/voice-service.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
   createRateLimiter,
@@ -160,6 +161,23 @@ import {
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
   return activeSseCount;
+}
+
+function isWorkspaceVoiceTranscriptionAvailable(
+  boundWorkspace: string,
+): boolean {
+  try {
+    return hasConfiguredBatchVoiceTranscriptionModel(
+      loadSettings(boundWorkspace),
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: workspace voice transcription capability check failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return false;
+  }
 }
 
 /**
@@ -2042,7 +2060,8 @@ export function createServeApp(
         ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
         : {}),
       persistSettingAvailable: deps.persistSetting !== undefined,
-      voiceTranscriptionAvailable: true,
+      voiceTranscriptionAvailable:
+        isWorkspaceVoiceTranscriptionAvailable(boundWorkspace),
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
@@ -2746,7 +2765,6 @@ export function createServeApp(
     boundWorkspace,
     mutate,
     safeBody,
-    persistSetting: deps.persistSetting,
     invokeWorkspaceCommand: (method, params) =>
       bridge.invokeWorkspaceCommand(method, params),
     broadcastSettingsChanged,

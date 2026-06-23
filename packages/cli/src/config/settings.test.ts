@@ -3701,6 +3701,49 @@ describe('Settings Loading and Merging', () => {
       cwdSpy.mockRestore();
     });
 
+    it('does not load project .env files when workspace trust is unknown', () => {
+      delete process.env['PROJECT_ENV_VAR'];
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValue(MOCK_WORKSPACE_DIR);
+
+      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: undefined,
+        source: undefined,
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
+      );
+      const userSettingsContent: Settings = {
+        ui: {
+          theme: 'dark',
+        },
+        security: {
+          folderTrust: {
+            enabled: true,
+          },
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
+          return '{}';
+        },
+      );
+
+      try {
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    });
+
     describe('settings.env field', () => {
       const originalEnv = { ...process.env };
 
@@ -3750,7 +3793,9 @@ describe('Settings Loading and Merging', () => {
       });
 
       it('should allow .env file to override settings.env values', () => {
-        const geminiEnvPath = path.resolve(path.join(QWEN_DIR, '.env'));
+        const geminiEnvPath = path.resolve(
+          path.join(MOCK_WORKSPACE_DIR, QWEN_DIR, '.env'),
+        );
         const userSettingsContent: Settings = {
           env: {
             ENV_OVERRIDE_TEST: 'from_settings',
@@ -3784,7 +3829,9 @@ describe('Settings Loading and Merging', () => {
       it('should not override existing system environment variables', () => {
         process.env['SYSTEM_ENV_VAR'] = 'system_value';
 
-        const geminiEnvPath = path.resolve(path.join(QWEN_DIR, '.env'));
+        const geminiEnvPath = path.resolve(
+          path.join(MOCK_WORKSPACE_DIR, QWEN_DIR, '.env'),
+        );
         const userSettingsContent: Settings = {
           env: {
             SYSTEM_ENV_VAR: 'from_settings',

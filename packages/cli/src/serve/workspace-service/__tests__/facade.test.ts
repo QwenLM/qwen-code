@@ -196,17 +196,17 @@ describe('createDaemonWorkspaceService', () => {
 
         expect(persistSettings).toHaveBeenCalledWith('/workspace', [
           {
-            scope: SettingScope.User,
+            scope: SettingScope.Workspace,
             key: 'general.voice.mode',
             value: 'tap',
           },
           {
-            scope: SettingScope.User,
+            scope: SettingScope.Workspace,
             key: 'general.voice.language',
             value: 'english',
           },
           {
-            scope: SettingScope.User,
+            scope: SettingScope.Workspace,
             key: 'general.voice.enabled',
             value: false,
           },
@@ -217,7 +217,7 @@ describe('createDaemonWorkspaceService', () => {
           data: {
             key: 'general.voice.enabled',
             value: false,
-            scope: 'user',
+            scope: 'workspace',
           },
           originatorClientId: 'voice-client',
         });
@@ -320,7 +320,7 @@ describe('createDaemonWorkspaceService', () => {
       expect(result).toBe(acpResult);
     });
 
-    it('falls back to persistSetting when ACP has no session', async () => {
+    it('rejects permission updates when ACP has no live session', async () => {
       await withIsolatedQwenHome(async () => {
         const invokeWorkspaceCommand = vi
           .fn()
@@ -335,27 +335,15 @@ describe('createDaemonWorkspaceService', () => {
           }),
         );
 
-        const result = await svc.setWorkspacePermissionRules(
-          makeCtx({ originatorClientId: 'perm-client' }),
-          { scope: 'user', ruleType: 'deny', rules: ['Shell(rm -rf *)'] },
-        );
+        await expect(
+          svc.setWorkspacePermissionRules(
+            makeCtx({ originatorClientId: 'perm-client' }),
+            { scope: 'user', ruleType: 'deny', rules: ['Shell(rm -rf *)'] },
+          ),
+        ).rejects.toThrow('live ACP session');
 
-        expect(persistSetting).toHaveBeenCalledWith(
-          '/workspace',
-          SettingScope.User,
-          'permissions.deny',
-          ['Shell(rm -rf *)'],
-        );
-        expect(publishWorkspaceEvent).toHaveBeenCalledWith({
-          type: 'settings_changed',
-          data: {
-            key: 'permissions.deny',
-            value: ['Shell(rm -rf *)'],
-            scope: 'user',
-          },
-          originatorClientId: 'perm-client',
-        });
-        expect(result.v).toBe(1);
+        expect(persistSetting).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
       });
     });
 
@@ -758,7 +746,7 @@ describe('createDaemonWorkspaceService', () => {
         originatorClientId: 'c-42',
       });
       expect(result).toEqual({
-        accepted: true,
+        accepted: false,
         desiredState: 'untrusted',
         requiresOperatorAction: true,
       });

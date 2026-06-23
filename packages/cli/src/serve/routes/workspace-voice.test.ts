@@ -22,6 +22,7 @@ import {
 import {
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
+  TrustLevel,
 } from '../../config/trustedFolders.js';
 import { createServeApp } from '../server.js';
 import type { ServeOptions } from '../types.js';
@@ -60,7 +61,7 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 }
 
 async function makeHarness(
-  opts: { persistSetting?: boolean; token?: string } = {},
+  opts: { persistSetting?: boolean; token?: string; trusted?: boolean } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -77,6 +78,13 @@ async function makeHarness(
     home,
     TRUSTED_FOLDERS_FILENAME,
   );
+  if (opts.trusted !== undefined) {
+    await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+      [workspace]: opts.trusted
+        ? TrustLevel.TRUST_FOLDER
+        : TrustLevel.DO_NOT_TRUST,
+    });
+  }
   resetHomeEnvBootstrapForTesting();
   resetTrustedFoldersForTesting();
 
@@ -147,6 +155,23 @@ async function writeVoiceModelSettings(h: Harness): Promise<void> {
   });
 }
 
+async function writeVoiceProviderSettings(h: Harness): Promise<void> {
+  await writeJson(path.join(h.home, 'settings.json'), {
+    modelProviders: {
+      openai: [
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Qwen ASR',
+          baseUrl: 'https://dashscope.example/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ],
+    },
+    env: { DASHSCOPE_API_KEY: 'sk-secret' },
+    voiceModel: 'qwen3-asr-flash',
+  });
+}
+
 describe('workspace voice routes', () => {
   let h: Harness;
 
@@ -208,19 +233,48 @@ describe('workspace voice routes', () => {
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.User,
+      SettingScope.Workspace,
       'general.voice.mode',
       'hold',
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.User,
+      SettingScope.Workspace,
       'general.voice.language',
       'english',
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.User,
+      SettingScope.Workspace,
+      'general.voice.enabled',
+      true,
+    );
+  });
+
+  it('POST writes initial trusted workspace voice settings to workspace scope', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: true });
+    await writeVoiceProviderSettings(h);
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({
+        enabled: true,
+        mode: 'tap',
+      });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.Workspace,
+      'general.voice.mode',
+      'tap',
+    );
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.Workspace,
       'general.voice.enabled',
       true,
     );
@@ -260,17 +314,17 @@ describe('workspace voice routes', () => {
         value: 'qwen3-asr-flash',
       },
       {
-        scope: SettingScope.User,
+        scope: SettingScope.Workspace,
         key: 'general.voice.mode',
         value: 'hold',
       },
       {
-        scope: SettingScope.User,
+        scope: SettingScope.Workspace,
         key: 'general.voice.language',
         value: 'english',
       },
       {
-        scope: SettingScope.User,
+        scope: SettingScope.Workspace,
         key: 'general.voice.enabled',
         value: true,
       },
@@ -286,21 +340,21 @@ describe('workspace voice routes', () => {
       2,
       'general.voice.mode',
       'hold',
-      'user',
+      'workspace',
       'client-1',
     );
     expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
       3,
       'general.voice.language',
       'english',
-      'user',
+      'workspace',
       'client-1',
     );
     expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
       4,
       'general.voice.enabled',
       true,
-      'user',
+      'workspace',
       'client-1',
     );
   });
@@ -442,7 +496,7 @@ describe('workspace voice routes', () => {
     expect(res.status).toBe(200);
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
-      SettingScope.User,
+      SettingScope.Workspace,
       'general.voice.enabled',
       false,
     );

@@ -43,12 +43,9 @@ import {
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import { loadSettings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
-import {
-  buildPermissionSettings,
-  type PermissionSettingsScope,
-} from '../../config/permission-settings.js';
+import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
@@ -83,11 +80,6 @@ export type {
   EnvReloadResult,
   ReloadResponse,
 } from './types.js';
-
-const PERMISSION_SCOPE_MAP: Record<PermissionSettingsScope, SettingScope> = {
-  user: SettingScope.User,
-  workspace: SettingScope.Workspace,
-};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -337,7 +329,7 @@ export function createDaemonWorkspaceService(
         originatorClientId: ctx.originatorClientId,
       });
       return {
-        accepted: true,
+        accepted: false,
         desiredState: request.desiredState,
         requiresOperatorAction: true,
       };
@@ -367,26 +359,10 @@ export function createDaemonWorkspaceService(
         if (!(err instanceof SessionNotFoundError)) {
           throw err;
         }
-      }
-
-      if (!persistSetting) {
         throw new Error(
-          'setWorkspacePermissionRules requires persistSetting in DaemonWorkspaceServiceDeps',
+          'setWorkspacePermissionRules requires a live ACP session to update active permission rules',
         );
       }
-
-      await persistSetting(
-        boundWorkspace,
-        PERMISSION_SCOPE_MAP[request.scope],
-        key,
-        request.rules,
-      );
-      publishWorkspaceEvent({
-        type: 'settings_changed',
-        data: { key, value: request.rules, scope: request.scope },
-        originatorClientId: ctx.originatorClientId,
-      });
-      return buildPermissionSettings(loadSettings(boundWorkspace));
     },
 
     async setWorkspaceVoiceSettings(

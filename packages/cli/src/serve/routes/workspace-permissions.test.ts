@@ -14,9 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
-  loadSettings,
   resetHomeEnvBootstrapForTesting,
-  SettingScope,
   SETTINGS_DIRECTORY_NAME,
 } from '../../config/settings.js';
 import {
@@ -58,7 +56,6 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 
 async function makeHarness(opts?: {
   invokeWorkspaceCommand?: ReturnType<typeof vi.fn>;
-  persistSetting?: boolean;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -86,23 +83,12 @@ async function makeHarness(opts?: {
     vi.fn(async () => {
       throw new SessionNotFoundError('workspace-command:qwen/permissions');
     });
-  const persistSetting = vi.fn(
-    async (
-      targetWorkspace: string,
-      scope: SettingScope,
-      key: string,
-      value: unknown,
-    ) => {
-      const settings = loadSettings(targetWorkspace);
-      settings.setValue(scope, key, value);
-    },
-  );
+  const persistSetting = vi.fn();
 
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: workspace,
     mutate: () => (_req, _res, next) => next(),
     safeBody,
-    ...(opts?.persistSetting === false ? {} : { persistSetting }),
     invokeWorkspaceCommand,
     broadcastSettingsChanged: (key, value, scope, clientId) => {
       events.push({
@@ -212,7 +198,7 @@ describe('workspace permissions routes', () => {
 
   it('GET remains available when settings persistence is unavailable', async () => {
     await teardown(h);
-    h = await makeHarness({ persistSetting: false });
+    h = await makeHarness();
     await writeJson(path.join(h.home, 'settings.json'), {
       permissions: {
         allow: ['Bash(git *)'],
@@ -225,22 +211,49 @@ describe('workspace permissions routes', () => {
     expect(res.body.user.rules.allow).toEqual(['Bash(git *)']);
   });
 
-  it('POST returns 501 when settings persistence is unavailable', async () => {
+  it('POST can update through a live ACP child when settings persistence is unavailable', async () => {
+    const acpResponse = {
+      v: 1,
+      user: {
+        path: path.join(h.home, 'settings.json'),
+        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      },
+      workspace: {
+        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+        rules: { allow: [], ask: [], deny: [] },
+      },
+      merged: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      isTrusted: true,
+    };
+    const live = vi.fn(async () => acpResponse);
     await teardown(h);
-    h = await makeHarness({ persistSetting: false });
+    h = await makeHarness({ invokeWorkspaceCommand: live });
 
     const res = await request(h.app)
       .post('/workspace/permissions')
+      .set('X-Qwen-Client-Id', 'client-1')
       .send({
         scope: 'user',
         ruleType: 'allow',
         rules: ['Bash(git status)'],
       });
 
-    expect(res.status).toBe(501);
-    expect(res.body.code).toBe('not_implemented');
-    expect(h.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(acpResponse);
+    expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
+      scope: 'user',
+      ruleType: 'allow',
+      rules: ['Bash(git status)'],
+    });
     expect(h.persistSetting).not.toHaveBeenCalled();
+    expect(h.events).toEqual([
+      {
+        key: 'permissions.allow',
+        scope: 'user',
+        value: ['Bash(git status)'],
+        clientId: 'client-1',
+      },
+    ]);
   });
 
   it('POST rejects invalid scope ruleType rules and malformed rule syntax', async () => {
@@ -315,7 +328,7 @@ describe('workspace permissions routes', () => {
     ]);
   });
 
-  it('POST falls back to daemon settings write when no ACP child is running', async () => {
+  it('POST returns 409 when no ACP child is running', async () => {
     const res = await request(h.app)
       .post('/workspace/permissions')
       .send({
@@ -324,26 +337,14 @@ describe('workspace permissions routes', () => {
         rules: [' Read(.env) ', 'Read(.env)', 'Bash(rm *)'],
       });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('permission_session_required');
     expect(h.invokeWorkspaceCommand).toHaveBeenCalled();
-    expect(h.persistSetting).toHaveBeenCalledWith(
-      h.workspace,
-      SettingScope.Workspace,
-      'permissions.deny',
-      ['Read(.env)', 'Bash(rm *)'],
-    );
-    expect(res.body.workspace.rules.deny).toEqual(['Read(.env)', 'Bash(rm *)']);
-    expect(res.body.merged.deny).toEqual(['Read(.env)', 'Bash(rm *)']);
-    expect(h.events).toEqual([
-      {
-        key: 'permissions.deny',
-        scope: 'workspace',
-        value: ['Read(.env)', 'Bash(rm *)'],
-      },
-    ]);
+    expect(h.persistSetting).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
   });
 
-  it('POST persists untrusted workspace rules without merging them into effective rules', async () => {
+  it('POST does not persist untrusted workspace rules without a live ACP child', async () => {
     await writeJson(path.join(h.home, 'settings.json'), {
       security: { folderTrust: { enabled: true } },
     });
@@ -360,15 +361,8 @@ describe('workspace permissions routes', () => {
         rules: ['Read(.env)'],
       });
 
-    expect(res.status).toBe(200);
-    expect(res.body.isTrusted).toBe(false);
-    expect(res.body.workspace.rules.deny).toEqual(['Read(.env)']);
-    expect(res.body.merged.deny).toEqual([]);
-    expect(h.persistSetting).toHaveBeenCalledWith(
-      h.workspace,
-      SettingScope.Workspace,
-      'permissions.deny',
-      ['Read(.env)'],
-    );
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('permission_session_required');
+    expect(h.persistSetting).not.toHaveBeenCalled();
   });
 });

@@ -2006,20 +2006,59 @@ describe('createServeApp', () => {
       // F2 (#4175 commit 5): the server.ts call site flips
       // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
       // (so a daemon booted without the kill switch advertises the F2
-      // pool surface by default). Voice transcription is also on for
-      // the daemon's built-in batch service. Anchor the expectation
-      // against those runtime toggles so the assertion reflects the
-      // runtime contract, not the registry default-OFF predicate.
+      // pool surface by default). Voice transcription is conditional on
+      // a usable batch ASR model, so the default isolated test settings
+      // do not advertise it.
       expect(res.body.features).toEqual(
         getAdvertisedServeFeatures(undefined, {
           mcpPoolActive: true,
-          voiceTranscriptionAvailable: true,
         }),
       );
       expect(res.body.modelServices).toEqual([]);
       expect(res.body.limits).toMatchObject({
         maxPendingPromptsPerSession: 5,
       });
+    });
+
+    it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-voice-capability-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify(
+            {
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: 'http://127.0.0.1:65535/v1',
+                  },
+                ],
+              },
+            },
+            null,
+            2,
+          ),
+          'utf8',
+        );
+
+        const app = createServeApp(baseOpts);
+        const res = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.features).toContain('workspace_voice_transcription');
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
     });
 
     it('reports disabled prompt queue cap as null in capabilities', async () => {
@@ -2171,15 +2210,20 @@ describe('createServeApp', () => {
   });
 
   describe('read-only status routes', () => {
-    it('registers read-only workspace permissions without settings persistence', async () => {
+    it('registers workspace permissions without settings persistence and requires a live session for writes', async () => {
       const wsRoot = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-permissions-readonly-'),
       );
       try {
+        const bridge = fakeBridge();
+        const invokeWorkspaceCommand = vi.fn(async () => {
+          throw new SessionNotFoundError('workspace-command:qwen/permissions');
+        });
+        bridge.invokeWorkspaceCommand = invokeWorkspaceCommand;
         const app = createServeApp(
           { ...baseOpts, workspace: wsRoot, token: 'secret' },
           undefined,
-          { bridge: fakeBridge(), statusProvider: fakeStatusProvider },
+          { bridge, statusProvider: fakeStatusProvider },
         );
 
         const read = await request(app)
@@ -2198,8 +2242,16 @@ describe('createServeApp', () => {
             ruleType: 'allow',
             rules: ['Bash(git status)'],
           });
-        expect(write.status).toBe(501);
-        expect(write.body.code).toBe('not_implemented');
+        expect(write.status).toBe(409);
+        expect(write.body.code).toBe('permission_session_required');
+        expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+          'qwen/permissions/setRules',
+          {
+            scope: 'user',
+            ruleType: 'allow',
+            rules: ['Bash(git status)'],
+          },
+        );
       } finally {
         await fsp.rm(wsRoot, { recursive: true, force: true });
       }
