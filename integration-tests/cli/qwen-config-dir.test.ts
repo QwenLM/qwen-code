@@ -30,6 +30,8 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+const CURRENT_SETTINGS_VERSION = 5;
+
 // Helper: list files under a directory recursively, returning relative paths
 function listFilesRecursive(dir: string, base = dir): string[] {
   if (!existsSync(dir)) return [];
@@ -217,9 +219,7 @@ describe('QWEN_HOME environment variable', () => {
       );
       const migrated = JSON.parse(migratedRaw) as Record<string, unknown>;
 
-      // Migration should have bumped the version to the current SETTINGS_VERSION
-      // (packages/cli/src/config/settings.ts). Update this when the schema bumps.
-      expect(migrated['$version']).toBe(4);
+      expect(migrated['$version']).toBe(CURRENT_SETTINGS_VERSION);
     });
   });
 
@@ -249,10 +249,16 @@ describe('QWEN_HOME environment variable', () => {
       process.env['QWEN_HOME'] = customConfigDir;
 
       // Seed QWEN_HOME with the current schema version so it shouldn't migrate.
-      // Bump alongside SETTINGS_VERSION in packages/cli/src/config/settings.ts.
       writeFileSync(
         join(customConfigDir, 'settings.json'),
-        JSON.stringify({ $version: 4, customKey: 'in-global-dir' }, null, 2),
+        JSON.stringify(
+          {
+            $version: CURRENT_SETTINGS_VERSION,
+            customKey: 'in-global-dir',
+          },
+          null,
+          2,
+        ),
       );
 
       // Overwrite the workspace settings.json with V1 format so migration is observable
@@ -284,14 +290,14 @@ describe('QWEN_HOME environment variable', () => {
       }
 
       // The workspace settings.json must have been migrated to the current
-      // SETTINGS_VERSION — proving the CLI read it from the workspace dir, not
-      // from QWEN_HOME. Update the version when the schema bumps.
+      // settings version, proving the CLI read it from the workspace dir, not
+      // from QWEN_HOME.
       const workspaceRaw = readFileSync(workspaceSettingsPath, 'utf-8');
       const workspaceSettings = JSON.parse(workspaceRaw) as Record<
         string,
         unknown
       >;
-      expect(workspaceSettings['$version']).toBe(4);
+      expect(workspaceSettings['$version']).toBe(CURRENT_SETTINGS_VERSION);
       expect(workspaceSettings['customWorkspaceKey']).toBe('workspace-value');
 
       // The QWEN_HOME settings.json must be unchanged (still at the version we wrote)

@@ -48,6 +48,8 @@ import {
   EVENT_ARENA_SESSION_ENDED,
   EVENT_PROMPT_SUGGESTION,
   EVENT_SPECULATION,
+  EVENT_WORKFLOW_KEYWORD,
+  EVENT_WORKFLOW_RUN,
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
@@ -115,6 +117,8 @@ import type {
   ArenaSessionEndedEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  WorkflowKeywordEvent,
+  WorkflowRunEvent,
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
@@ -122,6 +126,7 @@ import type {
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -467,6 +472,9 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
+    if (config.getUsageStatisticsEnabled()) {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+    }
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
@@ -1140,6 +1148,9 @@ export function logPromptSuggestion(
   if (event.accept_method) {
     attributes['accept_method'] = event.accept_method;
   }
+  if (event.accept_source) {
+    attributes['accept_source'] = event.accept_source;
+  }
   if (event.time_to_accept_ms !== undefined) {
     attributes['time_to_accept_ms'] = event.time_to_accept_ms;
   }
@@ -1195,6 +1206,39 @@ export function logSpeculation(config: Config, event: SpeculationEvent): void {
     attributes,
   };
   logger.emit(logRecord);
+}
+
+// ─── Workflow Log Functions (#4721) ──────────────────────────────────────────
+
+export function logWorkflowKeyword(
+  config: Config,
+  event: WorkflowKeywordEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_KEYWORD,
+    'event.timestamp': event['event.timestamp'],
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({ body: 'Workflow keyword trigger fired.', attributes });
+}
+
+export function logWorkflowRun(config: Config, event: WorkflowRunEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_RUN,
+    'event.timestamp': event['event.timestamp'],
+    status: event.status,
+    agents_dispatched: event.agents_dispatched,
+    agents_completed: event.agents_completed,
+    phase_count: event.phase_count,
+    tokens_spent: event.tokens_spent,
+    duration_ms: event.duration_ms,
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({ body: `Workflow run ${event.status}.`, attributes });
 }
 
 // ─── Auto-Memory Log Functions ───────────────────────────────────────────────

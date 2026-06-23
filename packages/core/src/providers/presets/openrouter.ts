@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const OPENROUTER_ENV_KEY = 'OPENROUTER_API_KEY';
@@ -15,7 +15,7 @@ export const openRouterProvider: ProviderConfig = {
   label: 'OpenRouter',
   description:
     'Connect with an OpenRouter API key (get one from openrouter.ai/keys)',
-  protocol: AuthType.USE_OPENAI,
+  protocol: Protocol.OPENAI,
   baseUrl: OPENROUTER_BASE_URL,
   envKey: OPENROUTER_ENV_KEY,
   models: [
@@ -25,10 +25,6 @@ export const openRouterProvider: ProviderConfig = {
   modelsEditable: true,
   modelNamePrefix: 'OpenRouter',
   ownsModel: (model) => {
-    // A user who manually added an OpenRouter-routed model under a custom
-    // envKey (e.g. their own gateway) shouldn't have their entry silently
-    // removed on re-install — require BOTH the hostname *and* our envKey to
-    // claim ownership.
     if (model.envKey !== OPENROUTER_ENV_KEY) return false;
     try {
       const host = new URL(model.baseUrl ?? '').hostname;
@@ -36,6 +32,10 @@ export const openRouterProvider: ProviderConfig = {
     } catch {
       return false;
     }
+  },
+  customHeaders: {
+    'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+    'X-OpenRouter-Title': 'Qwen Code',
   },
   documentationUrl: 'https://openrouter.ai/docs',
   uiGroup: 'third-party',

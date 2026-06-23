@@ -58,9 +58,12 @@ import {
   redactUrlCredentials,
   computeUniqueBranchTitle,
   unregisterGoalHook,
+  ToolNames,
+  FORK_SUBAGENT_TYPE,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
+  AgentParams,
   ApprovalMode,
   Config,
   ConversationRecord,
@@ -72,6 +75,7 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
+  Protocol,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -131,7 +135,6 @@ import {
 } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
-import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -214,6 +217,32 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
+
+function collapseForkDirective(directive: string, maxLength: number): string {
+  const oneLine = directive.replace(/\s+/g, ' ').trim();
+  return oneLine.length > maxLength
+    ? `${oneLine.slice(0, maxLength - 3)}…`
+    : oneLine;
+}
+
+function deriveForkDescription(directive: string): string {
+  return collapseForkDirective(directive, 60);
+}
+
+function truncateForkDirectiveForHistory(directive: string): string {
+  return collapseForkDirective(directive, 200);
+}
+
+function hasFailedDisplayStatus(
+  display: unknown,
+): display is { status: 'failed' } {
+  return (
+    display !== null &&
+    typeof display === 'object' &&
+    'status' in display &&
+    (display as { status?: unknown }).status === 'failed'
+  );
+}
 
 function sanitizeProviderBaseUrl(baseUrl: string): string {
   const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
@@ -1424,8 +1453,17 @@ function readProviderModels(
   const modelProviders = toRecord(
     (settings.merged as Record<string, unknown>)['modelProviders'],
   );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
+  const entry = modelProviders[protocol];
+  const entryRecord =
+    typeof entry === 'object' && entry !== null
+      ? (entry as Record<string, unknown>)
+      : undefined;
+  const models = Array.isArray(entry)
+    ? entry
+    : Array.isArray(entryRecord?.['models'])
+      ? (entryRecord['models'] as ProviderModelConfig[])
+      : [];
+  return models.filter(isProviderModelConfig);
 }
 
 function findExistingProviderModels(
@@ -1514,18 +1552,10 @@ function readExistingProviderConfig(
 function resolveExistingProviderApiKey(
   config: ProviderConfig,
   settings: LoadedSettings,
+  protocol: ProviderConfig['protocol'],
+  baseUrl: string,
 ): string | undefined {
-  const existing = findExistingProviderModels(config, settings);
-  const firstModel = existing?.models[0];
-  const protocol = existing?.protocol ?? config.protocol;
-  const baseUrl =
-    typeof firstModel?.baseUrl === 'string'
-      ? firstModel.baseUrl
-      : resolveBaseUrl(config);
-  const envKey =
-    typeof firstModel?.envKey === 'string'
-      ? firstModel.envKey
-      : resolveProviderEnvKey(config, protocol, baseUrl);
+  const envKey = resolveProviderEnvKey(config, protocol, baseUrl);
   return readSettingsEnv(settings, envKey);
 }
 
@@ -1564,10 +1594,13 @@ function serializeProviderConfig(
 function readProviderSetupInputs(
   config: ProviderConfig,
   params: Record<string, unknown>,
-  existingApiKey?: string,
+  resolveExistingApiKey?: (
+    protocol: ProviderConfig['protocol'],
+    baseUrl: string,
+  ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | AuthType
+    | Protocol
     | undefined;
   if (
     protocol &&
@@ -1597,7 +1630,8 @@ function readProviderSetupInputs(
   // `apiKey` is optional on update: when the client omits it (e.g. it only
   // received `hasApiKey` from the list response), fall back to the stored key.
   const apiKey =
-    readOptionalString(params['apiKey'], 'apiKey') ?? existingApiKey;
+    readOptionalString(params['apiKey'], 'apiKey') ??
+    resolveExistingApiKey?.(protocol ?? config.protocol, baseUrl);
   if (!apiKey) {
     throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
   }
@@ -1757,10 +1791,17 @@ function normalizeStringRecord(
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  const numberValue =
-    typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(numberValue) || numberValue <= 0) {
-    throw RequestError.invalidParams(undefined, 'Expected a positive number');
+  let numberValue: number;
+  if (typeof value === 'number') {
+    numberValue = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    numberValue = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  } else {
+    numberValue = Number.NaN;
+  }
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    throw RequestError.invalidParams(undefined, 'Expected a positive integer');
   }
   return numberValue;
 }
@@ -2503,6 +2544,16 @@ function createWorkspaceMcpBudget(
   });
 }
 
+const MAX_ACP_SESSION_PAGE_SIZE = 100;
+
+function normalizeAcpSessionListSize(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    return undefined;
+  }
+  return Math.min(Math.max(value, 1), MAX_ACP_SESSION_PAGE_SIZE);
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
@@ -2596,7 +2647,7 @@ class QwenAgent implements Agent {
     private connection: AgentSideConnection,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
-    // roll back without rebuilding. `runQwenServe.ts` sets this when
+    // roll back without rebuilding. `run-qwen-serve.ts` sets this when
     // `--no-mcp-pool` is passed at daemon startup.
     if (process.env['QWEN_SERVE_NO_MCP_POOL'] === '1') {
       this.mcpPool = undefined;
@@ -2701,7 +2752,7 @@ class QwenAgent implements Agent {
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
-    const method = z.nativeEnum(AuthType).parse(methodId);
+    const method = methodId as AuthType;
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
@@ -2862,22 +2913,28 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    const numericCursor = params.cursor ? Number(params.cursor) : undefined;
+    let numericCursor: number | undefined;
+    if (params.cursor != null && params.cursor !== '') {
+      const parsedCursor = Number(params.cursor);
+      if (!Number.isFinite(parsedCursor)) {
+        throw RequestError.invalidParams(
+          undefined,
+          `Invalid cursor: "${params.cursor}" is not a valid numeric cursor`,
+        );
+      }
+      numericCursor = parsedCursor;
+    }
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends
     // before it reaches this handler. Carry page size through `_meta.size`
     // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
-    const metaSize = params._meta?.['size'];
-    const size =
-      typeof metaSize === 'number' && metaSize > 0
-        ? Math.floor(metaSize)
-        : undefined;
+    const size = normalizeAcpSessionListSize(params._meta?.['size']);
 
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
-        cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+        cursor: numericCursor,
         size,
       });
     });
@@ -3026,6 +3083,7 @@ class QwenAgent implements Agent {
       const extensionManager = new ExtensionManager({
         workspaceDir: cwd,
         isWorkspaceTrusted: settings.isTrusted,
+        locale: getCurrentLanguage(),
       });
       await extensionManager.refreshCache();
       extensions = extensionManager.getLoadedExtensions();
@@ -3052,6 +3110,7 @@ class QwenAgent implements Agent {
         return {
           id: extension.id,
           name: extension.name,
+          displayName: extension.displayName,
           version: extension.version,
           isActive: extension.isActive,
           path: extension.path,
@@ -3097,11 +3156,18 @@ class QwenAgent implements Agent {
         'extension',
       ).map((entry) => ({
         ...entry,
-        server: { ...entry.server, extensionName: extension.name },
+        server: {
+          ...entry.server,
+          extensionName: extension.displayName ?? extension.name,
+        },
       })),
     );
     const extensionHooks = activeExtensions.flatMap((extension) =>
-      readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
+      readHooks(
+        { hooks: extension.hooks ?? {} },
+        'extension',
+        extension.displayName ?? extension.name,
+      ),
     );
 
     // Build the merged MCP/hook lists from the user and workspace settings
@@ -4513,6 +4579,7 @@ class QwenAgent implements Agent {
             kind: 'extension',
             id: ext.id,
             name: ext.name,
+            displayName: ext.displayName,
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -4532,6 +4599,16 @@ class QwenAgent implements Agent {
               ? { autoUpdate: ext.installMetadata.autoUpdate }
               : {}),
             capabilities,
+            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
+            details: {
+              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
+              commands: ext.commands ?? [],
+              skills: ext.skills?.map((skill) => skill.name) ?? [],
+              agents: ext.agents?.map((agent) => agent.name) ?? [],
+              contextFiles: ext.contextFiles,
+              settings:
+                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
+            },
           };
         },
       );
@@ -4836,7 +4913,13 @@ class QwenAgent implements Agent {
         const inputs = readProviderSetupInputs(
           providerConfig,
           params,
-          resolveExistingProviderApiKey(providerConfig, this.settings),
+          (protocol, baseUrl) =>
+            resolveExistingProviderApiKey(
+              providerConfig,
+              this.settings,
+              protocol,
+              baseUrl,
+            ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
@@ -4844,10 +4927,10 @@ class QwenAgent implements Agent {
           settings: createLoadedSettingsAdapter(this.settings, persistScope),
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
-          syncAuthState: (authType, modelId) =>
+          syncAuthState: (authType, modelId, baseUrl) =>
             this.config
               .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId),
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => this.config.refreshAuth(authType),
         });
 
@@ -4857,6 +4940,9 @@ class QwenAgent implements Agent {
           providerLabel: providerConfig.label,
           authType: plan.authType,
           modelId: plan.modelSelection?.modelId,
+          ...(plan.modelSelection?.baseUrl
+            ? { baseUrl: plan.modelSelection.baseUrl }
+            : {}),
         };
       }
       case 'qwen/skills/install': {
@@ -5417,6 +5503,39 @@ class QwenAgent implements Agent {
           AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
+        const sessionId = params['sessionId'];
+        const displayName = params['displayName'];
+        const titleSource = params['titleSource'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof displayName !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing displayName',
+          );
+        }
+        if (displayName.length > SESSION_TITLE_MAX_LENGTH) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const source =
+          titleSource === 'auto' ? ('auto' as const) : ('manual' as const);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          ok = recording.recordCustomTitle(displayName, source);
+          await recording.flush();
+        }
+        return { sessionId, displayName, titleSource: source, persisted: ok };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -5667,6 +5786,90 @@ class QwenAgent implements Agent {
           throw err;
         }
         return { sessionId, answer: result.text || null };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const directive =
+          typeof params['directive'] === 'string' ? params['directive'] : '';
+        const trimmed = directive.trim();
+        if (!trimmed) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing directive',
+          );
+        }
+
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        if (!config.getModel()) {
+          throw RequestError.invalidParams(undefined, 'No model configured.');
+        }
+
+        let hasHistory = false;
+        try {
+          hasHistory =
+            (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
+        } catch (error) {
+          debugLogger.debug('Failed to read history before /fork:', error);
+        }
+        if (!hasHistory) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Cannot fork before the first conversation turn.',
+          );
+        }
+
+        const agentTool = config.getToolRegistry().getTool(ToolNames.AGENT);
+        if (!agentTool) {
+          throw RequestError.invalidParams(
+            undefined,
+            'The agent tool is unavailable; cannot fork.',
+          );
+        }
+
+        const description = deriveForkDescription(trimmed);
+        const agentParams: AgentParams = {
+          description,
+          prompt: trimmed,
+          subagent_type: FORK_SUBAGENT_TYPE,
+          run_in_background: true,
+        };
+        const result = await agentTool
+          .build(agentParams)
+          .execute(new AbortController().signal);
+        if (hasFailedDisplayStatus(result?.returnDisplay)) {
+          const reason =
+            typeof result.llmContent === 'string' && result.llmContent.trim()
+              ? result.llmContent.trim()
+              : 'the background agent could not be started.';
+          throw RequestError.invalidParams(
+            undefined,
+            `Failed to launch fork: ${reason}`,
+          );
+        }
+
+        try {
+          config.getGeminiClient().addHistory({
+            role: 'user',
+            parts: [
+              {
+                text: `User launched a background fork via /fork. Directive (truncated): ${truncateForkDirectiveForHistory(
+                  trimmed,
+                )}`,
+              },
+            ],
+          });
+        } catch (error) {
+          debugLogger.debug('Failed to record fork event in history:', error);
+        }
+
+        return { sessionId, description, launched: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];
@@ -5948,6 +6151,23 @@ class QwenAgent implements Agent {
           originatorClientId,
         );
         return result as unknown as Record<string, unknown>;
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
+        const sessionId = params['sessionId'] as string;
+        const session = this.sessionOrThrow(sessionId);
+        const extensionManager = session.getConfig().getExtensionManager();
+        await extensionManager.refreshCache();
+        try {
+          await extensionManager.refreshTools();
+        } catch (err) {
+          debugLogger.warn(
+            `Extension tool refresh failed for session ${sessionId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        await session.sendAvailableCommandsUpdate();
+        return { ok: true };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
@@ -6307,7 +6527,7 @@ class QwenAgent implements Agent {
               throw err;
             }
 
-            return { newSessionId, title };
+            return { newSessionId, title, displayName: title };
           },
         );
       }
@@ -6335,6 +6555,13 @@ class QwenAgent implements Agent {
         );
         const scope = toSettingsScope(params['scope']);
         settings.setValue(scope, key, normalizedValue);
+        if (settingKey === 'model.name') {
+          // Selecting a model by id here can't disambiguate providers that
+          // share that id, so clear the paired baseUrl disambiguator left by a
+          // previous model-picker selection. Empty-string tombstone overrides a
+          // lower-scope value on merge (undefined would be dropped from JSON).
+          settings.setValue(scope, 'model.baseUrl', '');
+        }
         if (
           settingKey === 'general.outputLanguage' &&
           typeof normalizedValue === 'string' &&
@@ -6504,7 +6731,9 @@ class QwenAgent implements Agent {
         const settings = loadSettings(cwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: cwd,
-          isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+          isWorkspaceTrusted:
+            isWorkspaceTrusted(settings.merged).isTrusted ?? true,
+          locale: getCurrentLanguage(),
         });
         await extensionManager.refreshCache();
         const extension = extensionManager

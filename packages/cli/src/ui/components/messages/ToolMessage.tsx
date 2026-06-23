@@ -28,6 +28,7 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
@@ -669,10 +670,12 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
   const { compactMode } = useCompactMode();
-  const effectiveDisplayRenderer =
-    !compactMode || forceShowResult
-      ? displayRenderer
-      : { type: 'none' as const };
+
+  const isCompleted = status === ToolCallStatus.Success;
+  const shouldCollapse = compactMode && isCompleted && !forceShowResult;
+  const effectiveDisplayRenderer = shouldCollapse
+    ? { type: 'none' as const }
+    : displayRenderer;
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -779,6 +782,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
   status,
   emphasis,
 }) => {
+  const { compactMode } = useCompactMode();
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
       case 'high':
@@ -793,14 +797,16 @@ const ToolInfo: React.FC<ToolInfo> = ({
       }
     }
   }, [emphasis]);
+  const isDim = compactMode && status === ToolCallStatus.Success;
   return (
     <Box flexGrow={1}>
       <Text
         wrap="truncate-end"
         strikethrough={status === ToolCallStatus.Canceled}
+        dimColor={isDim}
       >
-        <Text color={nameColor} bold>
-          {name}
+        <Text color={nameColor} bold={!isDim}>
+          {localizeToolDisplayName(name)}
         </Text>{' '}
         <Text color={theme.text.secondary}>{description}</Text>
       </Text>

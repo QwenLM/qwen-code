@@ -784,7 +784,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.permissionResponseTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
   const permissionTimeoutMs =
     permissionTimeoutRaw > 0 && Number.isFinite(permissionTimeoutRaw)
-      ? permissionTimeoutRaw
+      ? // Clamp to 2^31-1: Node treats setTimeout delays larger than
+        // this as 1ms (TimeoutOverflowWarning), which would make a
+        // huge "effectively never" timeout cancel prompts almost
+        // immediately — the opposite of intent. Mirrors the sibling
+        // `resolvePositiveFiniteMs` / `resolvedChannelIdleTimeoutMs`.
+        Math.min(permissionTimeoutRaw, 2_147_483_647)
       : 0; // 0 = disabled
   const maxPendingRaw =
     opts.maxPendingPermissionsPerSession ?? DEFAULT_MAX_PENDING_PER_SESSION;
@@ -864,6 +869,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   );
   let sessionReaper: ReturnType<typeof setInterval> | undefined;
+
+  // Tracks the most recent "activity" event for idle-detection by
+  // external schedulers. Updated on prompt start/end and session
+  // spawn/restore. `null` until the first activity after boot.
+  let lastActivityTimestamp: number | null = null;
+  let activePromptCounter = 0;
+  function touchActivity(): void {
+    lastActivityTimestamp = Date.now();
+  }
 
   function resolvePositiveFiniteMs(
     raw: number | undefined,
@@ -1019,7 +1033,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // Build the mediator before the BridgeClient so the agent's
   // `requestPermission` callback can hand the record straight in.
   // Audit publisher fallback: when the host doesn't supply one
-  // (cli/serve/runQwenServe.ts wraps a real `PermissionAuditRing`
+  // (cli/serve/run-qwen-serve.ts wraps a real `PermissionAuditRing`
   // backed publisher in production), we use the canonical no-op
   // fallback so the mediator can still run for embedded callers /
   // tests without an audit consumer.
@@ -1333,6 +1347,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             });
           } catch {
             /* bus already closed */
+          }
+          if (sessEntry.promptActive) {
+            sessEntry.promptActive = false;
+            activePromptCounter--;
+            touchActivity();
           }
           byId.delete(sid);
           telemetry.metrics?.sessionLifecycle('die');
@@ -1718,6 +1737,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   };
 
+  const assertLivePromptEntry = (
+    sessionId: string,
+    entry: SessionEntry,
+  ): void => {
+    const info = channelInfoForEntry(entry);
+    if (byId.get(sessionId) !== entry || !info || info.isDying) {
+      throw new SessionNotFoundError(sessionId);
+    }
+  };
+
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
       info.statusClosedReject = info.channel.exited.then(() => {
@@ -2040,6 +2069,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
     // Drain any guardrail events that fired during this session's
     // `newSession` handler (before this entry registered) onto the
@@ -2454,6 +2484,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // closed bus.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
+    if (entry.promptActive) {
+      entry.promptActive = false;
+      activePromptCounter--;
+      touchActivity();
+    }
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     // Tombstone the closed sessionId so any late `extNotification`
@@ -2545,6 +2580,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     get sessionCount() {
       return byId.size;
+    },
+
+    get activePromptCount() {
+      return activePromptCounter;
+    },
+
+    get lastActivityAt() {
+      return lastActivityTimestamp;
+    },
+
+    get idleSinceMs() {
+      return lastActivityTimestamp !== null
+        ? Date.now() - lastActivityTimestamp
+        : null;
     },
 
     isChannelLive() {
@@ -2814,6 +2863,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 if (signal?.aborted) {
                   throw new DOMException('Prompt aborted', 'AbortError');
                 }
+                assertLivePromptEntry(sessionId, entry);
                 const requestedRetry =
                   (req as unknown as { retry?: unknown }).retry === true;
                 const isRetry = requestedRetry && entry.retryAllowed;
@@ -2839,7 +2889,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   return copy;
                 })();
                 entry.promptActive = true;
+                activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
+                touchActivity();
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -2876,15 +2928,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     );
                   }
                 } catch (echoErr) {
-                  entry.promptActive = false;
                   delete entry.activePromptOriginatorClientId;
+                  if (entry.promptActive) {
+                    entry.promptActive = false;
+                    activePromptCounter--;
+                    touchActivity();
+                  }
                   throw echoErr;
                 }
                 const promptPromise = entry.connection
                   .prompt(promptRequest)
                   .finally(() => {
-                    entry.promptActive = false;
-                    entry.sessionLastSeenAt = Date.now();
+                    if (entry.promptActive) {
+                      entry.promptActive = false;
+                      activePromptCounter--;
+                      entry.sessionLastSeenAt = Date.now();
+                      touchActivity();
+                    }
                     delete entry.activePromptOriginatorClientId;
                     if (
                       entry.clientIds.size === 0 &&
@@ -3319,28 +3379,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }),
           initTimeoutMs,
           'branchSession',
-        )) as { newSessionId: string; title: string };
+        )) as { newSessionId: string; title?: string; displayName?: string };
 
-        if (
-          !result ||
-          typeof result.newSessionId !== 'string' ||
-          typeof result.title !== 'string'
-        ) {
+        if (!result || typeof result.newSessionId !== 'string') {
           throw new Error(
             `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
           );
         }
+        const rawBranchName = result.displayName ?? result.title;
+        const branchDisplayName =
+          typeof rawBranchName === 'string'
+            ? rawBranchName
+            : result.newSessionId.slice(0, 8);
 
         let restored;
         try {
-          restored = await restoreSession('resume', {
+          restored = await restoreSession('load', {
             sessionId: result.newSessionId,
             workspaceCwd: boundWorkspace,
             clientId: context?.clientId,
           });
         } catch (restoreErr) {
           writeStderrLine(
-            `qwen serve: branchSession resume failed for ${result.newSessionId}, attempting cleanup...`,
+            `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
           );
           try {
             await ci.connection.extMethod(
@@ -3356,27 +3417,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
 
         const newEntry = byId.get(result.newSessionId);
-        if (newEntry) newEntry.displayName = result.title;
+        if (newEntry) newEntry.displayName = branchDisplayName;
 
         const eventData = {
           sourceSessionId: sessionId,
           newSessionId: result.newSessionId,
-          displayName: result.title,
+          displayName: branchDisplayName,
         };
         const branchEnvelope = {
           type: 'session_branched' as const,
           data: eventData,
           ...(originatorClientId ? { originatorClientId } : {}),
         };
-        entry.events.publish(branchEnvelope);
-        broadcastWorkspaceEvent(branchEnvelope, sessionId);
+        // The branch announcement belongs to the new session only. Publishing
+        // it on the source session would persist in that session's replay ring.
+        newEntry?.events.publish(branchEnvelope);
 
         return {
           ...restored,
-          title: result.title,
+          displayName: branchDisplayName,
           forkedFrom: {
             sessionId,
-            title: entry.displayName ?? sessionId.slice(0, 8),
+            displayName: entry.displayName ?? sessionId.slice(0, 8),
           },
         };
       });
@@ -3430,6 +3492,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ? ` by client ${JSON.stringify(context.clientId)}`
                 : ''),
           );
+          if (nextDisplayName) {
+            entry.connection
+              .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+                sessionId,
+                displayName: nextDisplayName,
+                titleSource: 'manual',
+              })
+              .then((res: unknown) => {
+                const r = res as { persisted?: boolean } | undefined;
+                if (r && r.persisted === false) {
+                  writeStderrLine(
+                    `qwen serve: displayName for ${sessionId} was not persisted (recording service unavailable)`,
+                  );
+                }
+              })
+              .catch((err: unknown) => {
+                writeStderrLine(
+                  `qwen serve: failed to persist displayName for ${sessionId}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              });
+          }
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
@@ -3726,6 +3811,61 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_STATUS_EXT_METHODS.workspaceExtensions,
         () => createIdleWorkspaceExtensionsStatus(boundWorkspace),
       );
+    },
+
+    async refreshExtensionsForAllSessions(data) {
+      const sessions = Array.from(byId.values());
+
+      const results = await Promise.all(
+        sessions.map(async (entry) => {
+          const info = channelInfoForEntry(entry);
+          if (!info || info.isDying) {
+            return { refreshed: 0, failed: 0 };
+          }
+          try {
+            await Promise.race([
+              withTimeout(
+                entry.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+                  { sessionId: entry.sessionId },
+                ),
+                30_000,
+                SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+              ),
+              getTransportClosedReject(entry),
+            ]);
+            return { refreshed: 1, failed: 0 };
+          } catch (err) {
+            writeServeDebugLine(
+              `refreshExtensions: session ${entry.sessionId} failed: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+            return { refreshed: 0, failed: 1 };
+          }
+        }),
+      );
+
+      const refreshed = results.reduce(
+        (sum, result) => sum + result.refreshed,
+        0,
+      );
+      const failed = results.reduce((sum, result) => sum + result.failed, 0);
+
+      if (refreshed > 0 || failed > 0 || data?.status !== undefined) {
+        broadcastWorkspaceEvent({
+          type: 'extensions_changed',
+          data: { ...data, refreshed, failed },
+        });
+      }
+
+      return { refreshed, failed };
+    },
+
+    broadcastExtensionsChanged(data) {
+      broadcastWorkspaceEvent({
+        type: 'extensions_changed',
+        data,
+      });
     },
 
     async setSessionModel(sessionId, req, context) {
@@ -4211,6 +4351,81 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     },
 
+    async launchSessionForkAgent(sessionId, directive, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+
+      const trimmed = directive.trim();
+      if (!trimmed) {
+        throw new Error('Fork directive is required');
+      }
+      if (entry.pendingPromptCount > 0 || entry.promptActive) {
+        throw new SessionBusyError(
+          sessionId,
+          'Cannot fork while a response or tool call is in progress',
+        );
+      }
+      return entry.promptQueue.then(async () => {
+        if (entry.pendingPromptCount > 0 || entry.promptActive) {
+          throw new SessionBusyError(
+            sessionId,
+            'Cannot fork while a response or tool call is in progress',
+          );
+        }
+
+        opts.onDiagnosticLine?.(
+          `qwen serve: launchSessionForkAgent requested for session=${sessionId}`,
+          'info',
+        );
+
+        let response: {
+          description?: string;
+          launched?: boolean;
+        };
+        try {
+          response = (await Promise.race([
+            withTimeout(
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+                {
+                  sessionId,
+                  directive: trimmed,
+                },
+              ),
+              initTimeoutMs,
+              SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+            ),
+            getTransportClosedReject(entry),
+          ])) as {
+            description?: string;
+            launched?: boolean;
+          };
+        } catch (error) {
+          opts.onDiagnosticLine?.(
+            `qwen serve: launchSessionForkAgent failed for session=${sessionId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            'warn',
+          );
+          throw error;
+        }
+
+        const result = {
+          sessionId: entry.sessionId,
+          description: response.description ?? trimmed.slice(0, 60),
+          launched: response.launched === true,
+        };
+        opts.onDiagnosticLine?.(
+          `qwen serve: launchSessionForkAgent completed for session=${sessionId} launched=${result.launched}`,
+          'info',
+        );
+        return result;
+      });
+    },
+
     async executeShellCommand(
       sessionId,
       command,
@@ -4614,6 +4829,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // byId.get(sessionId) (same order as closeSession).
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
+      if (entry.promptActive) {
+        entry.promptActive = false;
+        activePromptCounter--;
+        touchActivity();
+      }
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;

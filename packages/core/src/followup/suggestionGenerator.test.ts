@@ -39,6 +39,7 @@ vi.mock('../telemetry/uiTelemetry.js', async (importOriginal) => {
 
 import {
   generatePromptSuggestion,
+  getFilterReason,
   shouldFilterSuggestion,
 } from './suggestionGenerator.js';
 
@@ -176,6 +177,15 @@ describe('shouldFilterSuggestion', () => {
   it('filters formatting', () => {
     expect(shouldFilterSuggestion('run the **tests**')).toBe(true);
     expect(shouldFilterSuggestion('line1\nline2')).toBe(true);
+  });
+
+  it('filters control characters and ANSI escapes', () => {
+    expect(shouldFilterSuggestion('run\rtests')).toBe(true); // carriage return
+    expect(shouldFilterSuggestion('run\x1b[31mtests')).toBe(true); // ESC/CSI
+    expect(shouldFilterSuggestion('run\ttests')).toBe(true); // tab (C0)
+    expect(shouldFilterSuggestion('run\x7ftests')).toBe(true); // DEL
+    expect(shouldFilterSuggestion('run\x9btests')).toBe(true); // C1 CSI
+    expect(getFilterReason('run\x1b[31mtests')).toBe('control_chars');
   });
 
   it('filters evaluative language', () => {

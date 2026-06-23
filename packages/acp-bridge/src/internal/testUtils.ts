@@ -8,7 +8,7 @@
  * @internal
  *
  * Shared bridge test fixtures used by `bridge.test.ts` (acp-bridge
- * package) and `daemonStatusProvider.test.ts` (cli package). Extracted
+ * package) and `daemon-status-provider.test.ts` (cli package). Extracted
  * so both suites can exercise the same
  * `FakeAgent` / `makeChannel` / `makeBridge` helpers without
  * cross-package duplication.
@@ -86,7 +86,7 @@ export const SESS_A = `sess:${WS_A}`;
  * Unlike the pre-split cli-side helper, this version does NOT default
  * `statusProvider` — that's a daemon-host-specific seam and
  * the acp-bridge tests exercise the no-provider fallback paths. The
- * cli-side `daemonStatusProvider.test.ts` defines its own wrapper that
+ * cli-side `daemon-status-provider.test.ts` defines its own wrapper that
  * wires `createDaemonStatusProvider()` for the 4 daemon-host
  * integration tests.
  */
@@ -294,7 +294,10 @@ export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
   };
   // Spin up the fake agent on the agent side; keep the connection so tests can
   // drive client-bound ext-methods (e.g. the mid-turn drain).
-  handle.agentConnection = new AgentSideConnection(() => handle.agent, agentStream);
+  handle.agentConnection = new AgentSideConnection(
+    () => handle.agent,
+    agentStream,
+  );
   handle.channel = {
     stream: clientStream,
     exited,

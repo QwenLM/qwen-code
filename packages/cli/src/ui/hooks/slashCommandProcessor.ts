@@ -7,6 +7,7 @@
 import {
   useCallback,
   useMemo,
+  useLayoutEffect,
   useEffect,
   useRef,
   useState,
@@ -25,6 +26,9 @@ import {
   ToolConfirmationOutcome,
   IdeClient,
   type SessionListItem,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  MCPServerStatus,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -43,6 +47,7 @@ import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
+import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
@@ -93,6 +98,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'delete',
   'branch',
   'btw',
+  'history',
 ]);
 
 export interface SlashCommandProcessorActions {
@@ -103,12 +109,15 @@ export interface SlashCommandProcessorActions {
   openMemoryDialog: () => void;
   openSettingsDialog: () => void;
   openStatusLineDialog: () => void;
-  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openModelDialog: (options?: {
+    fastModelMode?: boolean;
+    voiceModelMode?: boolean;
+  }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
-  handleResume: (sessionId: string) => void;
+  handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
@@ -133,6 +142,7 @@ export interface SlashCommandProcessorActions {
 export const useSlashCommandProcessor = (
   config: Config | null,
   settings: LoadedSettings,
+  history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
   clearItems: UseHistoryManagerReturn['clearItems'],
   loadHistory: UseHistoryManagerReturn['loadHistory'],
@@ -149,6 +159,13 @@ export const useSlashCommandProcessor = (
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
 ) => {
+  // Ref avoids adding `history` to the commandContext useMemo deps,
+  // which would cause a full context rebuild on every history append.
+  const historyRef = useRef(history);
+  useLayoutEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
   const [recentCommands, setRecentCommands] = useState<
@@ -322,6 +339,9 @@ export const useSlashCommandProcessor = (
         logger,
       },
       ui: {
+        get history() {
+          return historyRef.current;
+        },
         addItem,
         clear: () => {
           cancelBtw();
@@ -331,6 +351,7 @@ export const useSlashCommandProcessor = (
           setSessionName?.(null);
         },
         loadHistory,
+        refreshStatic,
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
         setPendingItem,
@@ -403,6 +424,43 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
+  // MCP discovery is progressive: it runs in the background after the UI is
+  // already interactive, so a server's prompts (prompts/list) are not in the
+  // registry when the command loaders first run. Without this, an MCP prompt
+  // never surfaces as a `/<prompt>` command until some unrelated reload (IDE
+  // status / skill change) happens to fire — the `/mcp` dialog shows the
+  // prompt count while the slash menu stays empty. Rebuild the command tree
+  // when a server finishes connecting; debounce so a burst of servers
+  // connecting at startup triggers a single rebuild.
+  useEffect(() => {
+    if (!config) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const listener = (
+      _serverName: string,
+      status: MCPServerStatus | undefined,
+    ) => {
+      if (status !== MCPServerStatus.CONNECTED) {
+        return;
+      }
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        reloadCommands();
+      }, 250);
+    };
+    addMCPStatusChangeListener(listener);
+    return () => {
+      removeMCPStatusChangeListener(listener);
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [config, reloadCommands]);
+
   // SkillManager rebuilds its own cache when skills change on disk. The
   // slash-command list is a separate consumer: SkillCommandLoader reads
   // `listSkills()` once during CommandService.create(), so without this
@@ -440,6 +498,7 @@ export const useSlashCommandProcessor = (
           new BuiltinCommandLoader(config),
           new BundledSkillLoader(config),
           new SkillCommandLoader(config),
+          new SavedWorkflowLoader(config),
           new FileCommandLoader(config),
         ];
         const disabled = config?.getDisabledSlashCommands() ?? [];
@@ -736,6 +795,9 @@ export const useSlashCommandProcessor = (
                     case 'fast-model':
                       actions.openModelDialog({ fastModelMode: true });
                       return { type: 'handled' };
+                    case 'voice-model':
+                      actions.openModelDialog({ voiceModelMode: true });
+                      return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
                       return { type: 'handled' };
@@ -765,7 +827,7 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
-                        actions.handleResume(result.sessionId);
+                        await actions.handleResume(result.sessionId);
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }

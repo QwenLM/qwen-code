@@ -34,6 +34,7 @@ import {
   type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
+import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 import {
@@ -42,7 +43,7 @@ import {
   type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
-import { t } from '../../../i18n/index.js';
+import { localizeToolDisplayName, t } from '../../../i18n/index.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -57,7 +58,7 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 );
 
 function formatActivityLabel(name: string, description: string | undefined) {
-  const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
+  const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
   const singleLineDesc = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
@@ -920,6 +921,18 @@ const WorkflowDetailBody: React.FC<{
   dimSubtitleParts.push(
     `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
   );
+  // P5: surface the per-run token usage when there's anything to report
+  // (cap set OR tokens spent). Skipped when both are absent so legacy
+  // / test runs don't show a noisy `0 tokens` chip.
+  // P5 R1 (#7): apply `formatTokenCount` for consistency with
+  // `statusLinePresets` and other token-bearing UI surfaces.
+  if (entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null) {
+    dimSubtitleParts.push(
+      entry.tokenBudgetTotal !== null
+        ? `${formatTokenCount(entry.tokensSpent)}/${formatTokenCount(entry.tokenBudgetTotal)} ${t('tokens')}`
+        : `${formatTokenCount(entry.tokensSpent)} ${t('tokens')}`,
+    );
+  }
 
   // Phase tree: collapse the head when over the visible cap, keeping
   // the most recent N entries (the user almost always wants to see the
@@ -989,14 +1002,35 @@ const WorkflowDetailBody: React.FC<{
               i === visiblePhases.length - 1 &&
               entry.currentPhase === phaseTitle;
             const marker = isCurrent ? '▸' : '·';
+            // P5: per-phase token tally appended to the phase row.
+            // Skipped when no tokens attributed yet so empty phases
+            // (early register, schema-mode-pending) don't render a
+            // misleading `· 0` chip.
+            // P5 R1 (#7): apply `formatTokenCount` for consistency.
+            const phaseTokens = entry.perPhaseTokens.get(phaseTitle) ?? 0;
+            const tokenChip =
+              phaseTokens > 0 ? ` · ${formatTokenCount(phaseTokens)}t` : '';
             return (
               <Box key={`${phaseTitle}-${i}`}>
                 <Text color={isCurrent ? theme.status.success : undefined}>
-                  {`  ${marker} ${phaseTitle}`}
+                  {`  ${marker} ${phaseTitle}${tokenChip}`}
                 </Text>
               </Box>
             );
           })}
+          {/* P5 R1 (#6): surface null-sentinel attribution — tokens
+              spent BEFORE the first `phase()` call accumulate under the
+              `null` key. Without this row the entire pre-phase spend is
+              hidden in the UI. */}
+          {(entry.perPhaseTokens.get(null) ?? 0) > 0 && (
+            <Box>
+              <Text dimColor>
+                {`  · ${t('(no phase)')} · ${formatTokenCount(
+                  entry.perPhaseTokens.get(null) ?? 0,
+                )}t`}
+              </Text>
+            </Box>
+          )}
         </Fragment>
       )}
 
@@ -1099,6 +1133,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const [pendingCancelEntryId, setPendingCancelEntryId] = useState<
     string | null
   >(null);
+
+  // P7b-A3: when true, the workflow save overlay owns the keyboard (the main
+  // dialog handler yields). Reset whenever we leave detail mode so an armed
+  // save can't bleed into the list view.
+  const [saveActive, setSaveActive] = useState(false);
+  useEffect(() => {
+    if (!isDetailMode) setSaveActive(false);
+  }, [isDetailMode]);
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
@@ -1291,6 +1333,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useKeypress(
     (key) => {
       if (!dialogOpen) return;
+      // P7b-A3: the save overlay owns the keyboard while open — yield every
+      // key to it (its own `useKeypress` handles name input / scope / save).
+      if (saveActive) return;
       // While a parked approval is shown, the embedded ToolConfirmationMessage
       // owns the selection keys (↑/↓/numbers/Enter, Esc = deny this call).
       // Keep two escape hatches for compact approvals that don't have their
@@ -1356,6 +1401,21 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
 
       // detail mode
+      // P7b-A3: `s` opens the save overlay for a completed workflow run that
+      // still carries its script source. Gated to terminal workflow entries
+      // so it never collides with a live run's controls.
+      if (
+        key.sequence === 's' &&
+        !key.ctrl &&
+        !key.meta &&
+        config &&
+        selectedEntry?.kind === 'workflow' &&
+        selectedEntry.status !== 'running' &&
+        !!selectedEntry.script
+      ) {
+        setSaveActive(true);
+        return;
+      }
       if (key.name === 'left') {
         // Reset the foreground confirm-step before leaving detail so the
         // armed state can't carry into list mode and turn a stray `x` into
@@ -1395,6 +1455,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntry.status === 'paused' &&
     !selectedEntry.resumeBlockedReason;
 
+  // P7b-A3: a completed workflow run that still carries its script source can
+  // be saved to `.qwen/workflows/<name>.js` from the detail view.
+  const workflowSaveTarget =
+    config &&
+    selectedEntry?.kind === 'workflow' &&
+    selectedEntry.status !== 'running' &&
+    selectedEntry.script
+      ? selectedEntry
+      : null;
+
   // Hint footer — context-sensitive.
   const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
   const showCancelConfirmHint =
@@ -1433,6 +1503,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
     }
+    if (workflowSaveTarget) hints.push('s save');
   }
 
   return (
@@ -1493,9 +1564,19 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           </Box>
         )}
       </Box>
-      <Box marginTop={1} paddingX={1}>
-        <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
-      </Box>
+      {saveActive && workflowSaveTarget && config ? (
+        <WorkflowSaveOverlay
+          script={workflowSaveTarget.script}
+          initialName={workflowSaveTarget.meta?.name ?? ''}
+          config={config}
+          isActive={saveActive}
+          onClose={() => setSaveActive(false)}
+        />
+      ) : (
+        <Box marginTop={1} paddingX={1}>
+          <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+        </Box>
+      )}
     </Box>
   );
 };

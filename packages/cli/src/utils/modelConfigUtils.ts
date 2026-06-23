@@ -102,7 +102,7 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
 
   if (
     process.env['OPENAI_API_KEY'] &&
-    process.env['OPENAI_MODEL'] &&
+    (process.env['OPENAI_MODEL'] || process.env['QWEN_MODEL']) &&
     process.env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;
@@ -157,11 +157,15 @@ export function resolveCliGenerationConfig(
   // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
   let resolvedModel: string | undefined;
   let sourceEnvVar: string | undefined;
+  // Whether the model came from settings.model.name (vs argv/env). The persisted
+  // settings.model.baseUrl disambiguator only applies to this case.
+  let resolvedFromSettings = false;
   if (argv.model) {
     resolvedModel = argv.model;
   } else if (settings.model?.name) {
     // Self-heal configs already corrupted by older builds.
     resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
+    resolvedFromSettings = true;
   } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
     // Only check env vars for the current auth type
     for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
@@ -178,10 +182,45 @@ export function resolveCliGenerationConfig(
   // so the resolver correctly uses the settings-selected model (no override occurs).
   // The old candidate-loop code that fell through to OPENAI_MODEL is gone.
   let modelProvider: ProviderModelConfig | undefined;
+  let disambiguationWarning: string | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
-    const providers = settings.modelProviders[authType];
-    if (providers && Array.isArray(providers)) {
-      modelProvider = providers.find((p) => p.id === resolvedModel);
+    const providerConfig = settings.modelProviders[authType];
+    if (providerConfig && providerConfig.models) {
+      const providers = providerConfig.models;
+      // When multiple providers share the same id, disambiguate by the
+      // persisted settings.model.baseUrl (written by the model picker). This
+      // only applies when the model itself came from settings.model.name.
+      // Fall back to the first id match if the paired provider was edited or
+      // removed (and for the legacy id-only case where no baseUrl was saved),
+      // mirroring auth.ts:findModelConfig.
+      //
+      // Note: `settings` is already merged across user/workspace/system scopes.
+      // Every writer of model.name (the picker, /model, ACP, provider install)
+      // also writes model.baseUrl in the SAME scope — a real URL, or an empty
+      // string tombstone when there is none. The tombstone matters because an
+      // omitted key cannot override a stale model.baseUrl in a lower-priority
+      // scope on merge, but '' (a present value) can. Empty string is treated
+      // as "no disambiguator" here. The only remaining desync is a hand-edited
+      // config that sets model.name in a higher scope with no baseUrl key at
+      // all; the id-only fallback bounds the blast radius to a same-id provider.
+      const persistedBaseUrl = settings.model?.baseUrl;
+      if (resolvedFromSettings && persistedBaseUrl) {
+        const exactMatch = providers.find(
+          (p) => p.id === resolvedModel && p.baseUrl === persistedBaseUrl,
+        );
+        modelProvider =
+          exactMatch ?? providers.find((p) => p.id === resolvedModel);
+        // Surface the silent fallback: the paired provider was removed or its
+        // baseUrl changed, so traffic now routes to a different same-id provider.
+        if (!exactMatch && modelProvider) {
+          disambiguationWarning =
+            `Persisted model.baseUrl '${persistedBaseUrl}' no longer matches any provider ` +
+            `for model '${resolvedModel}' (authType '${authType}'); using the first id match ` +
+            `('${modelProvider.baseUrl ?? '(default baseUrl)'}'). Re-select the model to update it.`;
+        }
+      } else {
+        modelProvider = providers.find((p) => p.id === resolvedModel);
+      }
     }
   }
 
@@ -270,6 +309,7 @@ export function resolveCliGenerationConfig(
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,
+      ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]
         : []),

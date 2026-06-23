@@ -90,7 +90,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       type: 'tool.update',
-      toolName: 'TodoWrite',
+      toolName: 'todo_write',
       rawOutput: {
         entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
         stats: {
@@ -222,7 +222,10 @@ describe('daemon UI normalizer and transcript reducer', () => {
       createDaemonTranscriptState({ now: 1 }),
       [
         { type: 'assistant.text.delta', text: 'answer' },
-        { type: 'assistant.usage', usage: { inputTokens: 100, outputTokens: 20 } },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
         { type: 'assistant.usage', usage: { inputTokens: 5, outputTokens: 3 } },
       ],
       { now: 2 },
@@ -243,7 +246,10 @@ describe('daemon UI normalizer and transcript reducer', () => {
       [
         { type: 'assistant.text.delta', text: 'answer' },
         // The parent's own round.
-        { type: 'assistant.usage', usage: { inputTokens: 100, outputTokens: 20 } },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
         // A round from a spawned sub-agent — part of the turn's real cost.
         {
           type: 'assistant.usage',
@@ -1158,6 +1164,117 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect((malformed[0] as { text: string }).text).not.toContain('secret');
   });
 
+  it('normalizes session branch events as structured sidechannel events', () => {
+    const events = normalizeDaemonEvent({
+      id: 59,
+      v: 1,
+      type: 'session_branched',
+      data: {
+        sourceSessionId: '9976ed52-1bd3-48cd-b8dc-0f045009ad7d',
+        newSessionId: '7497af5d-b62f-42f4-82d7-6f2a81daf439',
+        displayName: 'support-branch-new3 (Branch 2)',
+      },
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'session.branched',
+        sourceSessionId: '9976ed52-1bd3-48cd-b8dc-0f045009ad7d',
+        newSessionId: '7497af5d-b62f-42f4-82d7-6f2a81daf439',
+        displayName: 'support-branch-new3 (Branch 2)',
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+    expect(state.blocks).toEqual([
+      expect.objectContaining({
+        kind: 'status',
+        source: 'session_branched',
+        data: {
+          sourceSessionId: '9976ed52-1bd3-48cd-b8dc-0f045009ad7d',
+          newSessionId: '7497af5d-b62f-42f4-82d7-6f2a81daf439',
+          displayName: 'support-branch-new3 (Branch 2)',
+        },
+      }),
+    ]);
+  });
+
+  it('rewinds to the last user turn when targetTurnIndex is out of range', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'first', { now: 2 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer one' }],
+      { now: 3 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'second', { now: 4 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer two' }],
+      { now: 5 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'session.rewound',
+          promptId: 'prompt-2',
+          targetTurnIndex: 99,
+        },
+      ],
+      { now: 6 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: 'first' },
+      { kind: 'assistant', text: 'answer one' },
+    ]);
+  });
+
+  it('rewinds to an exact user turn index', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = appendLocalUserTranscriptMessage(state, 'first', { now: 2 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer one' }],
+      { now: 3 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'second', { now: 4 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer two' }],
+      { now: 5 },
+    );
+    state = appendLocalUserTranscriptMessage(state, 'third', { now: 6 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer three' }],
+      { now: 7 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'session.rewound',
+          promptId: 'prompt-2',
+          targetTurnIndex: 1,
+        },
+      ],
+      { now: 8 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: 'first' },
+      { kind: 'assistant', text: 'answer one' },
+    ]);
+  });
+
   it('normalizes plan session updates as visible tool blocks', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
@@ -1535,6 +1652,21 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).toContain('ok');
     expect(output).not.toContain('bad');
     expect(output).not.toContain('\x00');
+  });
+
+  it('renders extension failures without assuming install failed', () => {
+    const output = daemonUiEventToTerminalText({
+      type: 'workspace.extensions.changed',
+      refreshed: 0,
+      failed: 0,
+      status: 'failed',
+      name: 'test-extension',
+      error: 'Extension mutation failed',
+    });
+
+    expect(output).toContain('extension action failed test-extension');
+    expect(output).toContain('Extension mutation failed');
+    expect(output).not.toContain('install failed');
   });
 
   it('strips terminal control and bidi spoofing sequences', () => {
@@ -2049,6 +2181,60 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(refused[0]).toMatchObject({
       type: 'workspace.mcp.server_restart_refused',
       reason: 'in_flight',
+    });
+  });
+
+  it('normalizes extension install lifecycle details', () => {
+    const installed = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 1,
+        failed: 0,
+        status: 'installed',
+        source: 'owner/repo',
+        name: 'test-extension',
+        version: '1.2.3',
+      }),
+    );
+    expect(installed[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      refreshed: 1,
+      failed: 0,
+      status: 'installed',
+      source: 'owner/repo',
+      name: 'test-extension',
+      version: '1.2.3',
+    });
+
+    const updated = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 1,
+        failed: 0,
+        status: 'updated',
+        name: 'test-extension',
+        version: '1.2.4',
+      }),
+    );
+    expect(updated[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      status: 'updated',
+      name: 'test-extension',
+      version: '1.2.4',
+    });
+
+    const failed = normalizeDaemonEvent(
+      envelopeOf('extensions_changed', {
+        refreshed: 0,
+        failed: 0,
+        status: 'failed',
+        source: 'owner/repo',
+        error: 'install failed',
+      }),
+    );
+    expect(failed[0]).toMatchObject({
+      type: 'workspace.extensions.changed',
+      status: 'failed',
+      source: 'owner/repo',
+      error: 'install failed',
     });
   });
 

@@ -42,11 +42,13 @@ import {
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
+import { SettingsWatcher } from './config/settingsWatcher.js';
 import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
 import { handleList as handleListExtensions } from './commands/extensions/list.js';
+import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,
@@ -96,7 +98,7 @@ import { getCliVersion } from './utils/version.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
-import { computeWindowTitle } from './utils/windowTitle.js';
+import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import {
   startEarlyInputCapture,
   stopAndGetCapturedInput,
@@ -242,7 +244,7 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
 ) {
   const version = await getCliVersion();
-  setWindowTitle(basename(workspaceRoot), settings);
+  setWindowTitle(settings, basename(workspaceRoot));
 
   // Write a small runtime.json sidecar next to the chat log so external
   // tools (terminal multiplexers, IDE integrations, status daemons) can
@@ -362,6 +364,7 @@ export async function startInteractiveUI(
     );
   };
 
+  const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>
@@ -373,6 +376,7 @@ export async function startInteractiveUI(
     {
       exitOnCtrlC: false,
       isScreenReaderEnabled: config.getScreenReader(),
+      alternateScreen: useVP,
     },
   );
   // Records the moment Ink's `render()` call has returned, which is
@@ -474,6 +478,9 @@ export async function main() {
   }
 
   if (argv.listExtensions) {
+    await initializeI18n(
+      resolveLanguageSetting(settings.merged.general?.language as string),
+    );
     await handleListExtensions();
     process.exit(0);
   }
@@ -777,6 +784,12 @@ export async function main() {
   }
 
   {
+    // Start settings file watcher (skip in bare mode)
+    const settingsWatcher = isBareMode(argv.bare)
+      ? undefined
+      : new SettingsWatcher(settings);
+    settingsWatcher?.startWatching();
+
     const config = await loadCliConfig(
       settings.merged,
       argv,
@@ -788,6 +801,8 @@ export async function main() {
         projectHooks: settings.getProjectHooks(),
       },
       buildDisabledSkillNamesProvider(settings),
+      undefined,
+      settingsWatcher,
     );
     profileCheckpoint('after_load_cli_config');
 
@@ -1204,13 +1219,22 @@ export function createNonInteractivePromptId(sessionId: string): string {
   return `${sessionId}########0`;
 }
 
-function setWindowTitle(title: string, settings: LoadedSettings) {
-  if (!settings.merged.ui?.hideWindowTitle) {
-    const windowTitle = computeWindowTitle(title);
-    process.stdout.write(`\x1b]2;${windowTitle}\x07`);
-
-    process.on('exit', () => {
-      process.stdout.write(`\x1b]2;\x07`);
-    });
+function setWindowTitle(settings: LoadedSettings, folderName?: string) {
+  if (
+    settings.merged.ui?.hideWindowTitle ||
+    settings.merged.ui?.showStatusInTitle === false
+  ) {
+    return;
   }
+  const windowTitle = computeWindowTitle(folderName);
+  writeTerminalTitle((value) => process.stdout.write(value), windowTitle);
+
+  process.on('exit', () => {
+    try {
+      writeTerminalTitle((value) => process.stdout.write(value), '');
+    } catch {
+      // Best-effort: clearing the title during exit must not produce
+      // a visible error (e.g. EPIPE if stdout is already closed).
+    }
+  });
 }

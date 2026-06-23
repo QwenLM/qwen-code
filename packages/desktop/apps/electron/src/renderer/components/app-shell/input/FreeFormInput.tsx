@@ -2757,20 +2757,22 @@ function WorkingDirectoryBadge({
     let cancelled = false;
     setGitBranch(null);
 
-    if (workingDirectory) {
-      window.electronAPI
-        ?.getGitBranch?.(workingDirectory)
-        .then((branch: string | null) => {
-          if (!cancelled) {
-            setGitBranch(branch);
-          }
-        });
+    if (!workingDirectory || workingDirectory === sessionFolderPath) {
+      return;
     }
+
+    window.electronAPI
+      ?.getGitBranch?.(workingDirectory)
+      .then((branch: string | null) => {
+        if (!cancelled) {
+          setGitBranch(branch);
+        }
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [workingDirectory]);
+  }, [workingDirectory, sessionFolderPath]);
 
   // Reset filter, refresh history, and focus input when popover opens
   React.useEffect(() => {

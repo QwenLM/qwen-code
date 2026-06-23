@@ -354,10 +354,7 @@ describe('BackgroundTaskRegistry', () => {
       isBackgrounded: true,
       outputFile: '/tmp/test.jsonl',
     });
-    registry.addPendingApproval(
-      'paused-approval',
-      makeApproval('c1', respond),
-    );
+    registry.addPendingApproval('paused-approval', makeApproval('c1', respond));
     registry.get('paused-approval')!.status = 'paused';
 
     registry.abandon('paused-approval');
@@ -1542,6 +1539,18 @@ describe('BackgroundTaskRegistry', () => {
       });
       expect(onRegister).toHaveBeenCalledTimes(1);
       expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
+    });
+
+    it('can suppress the register callback for background entries', () => {
+      const onRegister = vi.fn();
+      registry.setRegisterCallback(onRegister);
+
+      const entry = registry.register(makeRegistration('bg-suppressed'), {
+        suppressRegisterCallback: true,
+      });
+
+      expect(entry.agentId).toBe('bg-suppressed');
+      expect(onRegister).not.toHaveBeenCalled();
     });
 
     it('unregisterForeground emits status change after removing the entry', () => {

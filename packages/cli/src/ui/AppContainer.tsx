@@ -50,6 +50,8 @@ import {
   PromptSuggestionEvent,
   logSpeculation,
   SpeculationEvent,
+  logWorkflowKeyword,
+  WorkflowKeywordEvent,
   startSpeculation,
   acceptSpeculation,
   abortSpeculation,
@@ -65,10 +67,14 @@ import {
   restoreWorktreeContext,
   GitWorktreeService,
   readWorktreeSessionMarker,
+  isSessionRuntimeActive,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import {
+  applyCollapsePolicyAndSummary,
+  buildResumedHistoryItems,
+  expandCollapsedHistory,
+} from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
-import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -122,18 +128,23 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
+import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
+import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
 import ansiEscapes from 'ansi-escapes';
 import * as fs from 'node:fs';
 import { basename } from 'node:path';
-import { computeWindowTitle } from '../utils/windowTitle.js';
+import {
+  formatSessionWindowTitle,
+  writeTerminalTitle,
+} from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -144,6 +155,10 @@ import {
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
+import {
+  detectWorkflowKeyword,
+  buildWorkflowSteeringNotice,
+} from './utils/workflow-keyword.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -160,6 +175,7 @@ import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
 import { useCommandMigration } from './hooks/useCommandMigration.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
+import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -182,6 +198,11 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
+import {
+  ThinkingViewerProvider,
+  type ThinkingViewerData,
+} from './contexts/ThinkingViewerContext.js';
+import { ThinkingViewer } from './components/ThinkingViewer.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -252,6 +273,34 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function getResponseCandidateTokens(
+  pendingGeminiHistoryItems: HistoryItemWithoutId[],
+): number {
+  let tokens = 0;
+
+  for (const item of pendingGeminiHistoryItems) {
+    if (item.type !== 'tool_group') {
+      continue;
+    }
+
+    for (const tool of item.tools) {
+      const display = tool.resultDisplay;
+      if (
+        typeof display === 'object' &&
+        display !== null &&
+        'type' in display &&
+        display.type === 'task_execution' &&
+        'tokenCount' in display &&
+        typeof display.tokenCount === 'number'
+      ) {
+        tokens += display.tokenCount;
+      }
+    }
+  }
+
+  return tokens;
 }
 
 function useStableStickyTodos(todos: TodoItem[] | null): TodoItem[] | null {
@@ -430,6 +479,19 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
+  // Thinking viewer overlay state
+  const [thinkingViewerData, setThinkingViewerData] =
+    useState<ThinkingViewerData | null>(null);
+  const openThinkingViewer = useCallback((data: ThinkingViewerData) => {
+    setThinkingViewerData(data);
+  }, []);
+  const closeThinkingViewer = useCallback(() => {
+    setThinkingViewerData(null);
+  }, []);
+
+  // Alt+T inline expansion toggle for thinking blocks
+  const [thoughtExpanded, setThoughtExpanded] = useState(false);
+
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const { stdin, setRawMode } = useStdin();
@@ -459,6 +521,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
+  // P7-trigger: true while the current turn was steered toward the Workflow
+  // tool by the `workflow` keyword (drives the Footer indicator). Set in
+  // `handleFinalSubmit`, cleared when the turn returns to idle (effect below).
+  const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   /**
    * One-shot worktree restore reminder for the TUI path. Set during
    * `--resume` when the persisted sidecar names a live worktree, then
@@ -487,9 +553,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
-  const originalTitleRef = useRef(
-    computeWindowTitle(basename(config.getTargetDir())),
-  );
   const lastTitleRef = useRef<string | null>(null);
   const [startupWarnings, setStartupWarnings] = useState(
     () => props.startupWarnings || [],
@@ -562,9 +625,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
-        const historyItems = buildResumedHistoryItems(
-          resumedSessionData,
-          config,
+        const rawItems = buildResumedHistoryItems(resumedSessionData, config);
+        const collapseOnResume =
+          settings.merged.ui?.history?.collapseOnResume ?? false;
+
+        const historyItems = applyCollapsePolicyAndSummary(
+          rawItems,
+          collapseOnResume,
         );
         historyManager.loadHistory(historyItems);
 
@@ -1027,6 +1094,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     isModelDialogOpen,
     isFastModelMode,
+    isVoiceModelMode,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -1036,6 +1104,23 @@ export const AppContainer = (props: AppContainerProps) => {
   // Session name state (set via /rename, restored on /resume)
   const [sessionName, setSessionName] = useState<string | null>(null);
 
+  useEffect(() => {
+    const chatRecordingService = config.getChatRecordingService();
+    if (!chatRecordingService?.setTitleRecordedCallback) return;
+
+    // Chain with existing callback (e.g., Session's ACP notification)
+    const existingCallback = chatRecordingService.getTitleRecordedCallback();
+    chatRecordingService.setTitleRecordedCallback((customTitle, source) => {
+      existingCallback?.(customTitle, source);
+      setSessionName(customTitle);
+    });
+
+    return () => {
+      // Restore original callback on unmount
+      chatRecordingService.setTitleRecordedCallback(existingCallback);
+    };
+  }, [config]);
+
   const {
     isResumeDialogOpen,
     resumeMatchedSessions,
@@ -1044,6 +1129,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleResume,
   } = useResumeCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,
@@ -1052,6 +1138,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { handleBranch } = useBranchCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,
@@ -1137,6 +1224,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openApprovalModeDialog,
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
+        // Signal the client to skip background memory tasks (extract, dream,
+        // skill review) so the process can exit without spawning new agent
+        // work during the exit window.
+        config.getGeminiClient()?.requestShutdown();
         setTimeout(async () => {
           await runExitCleanup();
           process.exit(0);
@@ -1188,6 +1279,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       openDiffDialog,
+      config,
     ],
   );
 
@@ -1206,10 +1298,11 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useSlashCommandProcessor(
     config,
     settings,
+    historyManager.history,
     historyManager.addItem,
     historyManager.clearItems,
     historyManager.loadHistory,
-    remountStaticHistory,
+    refreshStatic,
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
@@ -1256,18 +1349,31 @@ export const AppContainer = (props: AppContainerProps) => {
           const owner = await readWorktreeSessionMarker(activeWorktree.path);
           const currentSessionId = config.getSessionId();
           if (owner !== null && owner !== currentSessionId) {
-            historyManager.addItem(
-              {
-                type: MessageType.ERROR,
-                text:
-                  `Refusing to remove worktree "${activeWorktree.slug}" — ` +
-                  `it was created by a different session (owner=${owner}). ` +
-                  `Resume the owning session to drop it, or remove it ` +
-                  `manually with \`git worktree remove ${activeWorktree.path}\`.`,
-              },
-              Date.now(),
-            );
-            return;
+            const ownerActive = await isSessionRuntimeActive(owner, [
+              activeWorktree.originalCwd,
+              activeWorktree.path,
+            ]).catch((error) => {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Worktree owner runtime check failed for ${owner}: ${error}`,
+                );
+              return true;
+            });
+            if (ownerActive) {
+              historyManager.addItem(
+                {
+                  type: MessageType.ERROR,
+                  text:
+                    `Refusing to remove worktree "${activeWorktree.slug}" — ` +
+                    `it was created by a different session (owner=${owner}). ` +
+                    `Resume the owning session to drop it, or remove it ` +
+                    `manually with \`git worktree remove ${activeWorktree.path}\`.`,
+                },
+                Date.now(),
+              );
+              return;
+            }
           }
           // The user just clicked Remove on a dialog that already showed
           // the dirty-state and unmerged-commit counts ("discards N
@@ -1419,6 +1525,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.history,
     historyManager.addItem,
     config,
+    isConfigInitialized,
     settings,
     onDebugMessage,
     handleSlashCommand,
@@ -1444,6 +1551,9 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (streamingState === StreamingState.Idle) {
       updateHandlerRef.current?.flush();
+      // P7-trigger: a steered turn has finished — drop the `workflow active`
+      // indicator until the next keyword prompt re-arms it.
+      setWorkflowKeywordActive(false);
     }
   }, [streamingState]);
 
@@ -1483,11 +1593,19 @@ export const AppContainer = (props: AppContainerProps) => {
   const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
   const suggestionAbortRef = useRef<AbortController | null>(null);
 
-  // Dismiss callback — clears suggestion + aborts in-flight generation/speculation
-  const dismissPromptSuggestion = useCallback(() => {
-    setPromptSuggestion(null);
+  // Aborts in-flight suggestion generation/speculation only. It deliberately
+  // does NOT clear `promptSuggestion`, so the placeholder can restore the
+  // suggestion when the buffer becomes empty again (user types then deletes).
+  // Named "abort" (not "dismiss") precisely because the suggestion text
+  // survives — see #5145 review.
+  const abortPromptSuggestion = useCallback(() => {
     suggestionAbortRef.current?.abort();
     suggestionAbortRef.current = null;
+    // Also abort the speculation so it doesn't continue running after abort.
+    if (speculationRef.current.status !== 'idle') {
+      abortSpeculation(speculationRef.current).catch(() => {});
+      speculationRef.current = IDLE_SPECULATION;
+    }
   }, []);
 
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
@@ -1652,6 +1770,9 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
       }
+      // The user's raw text, captured before any `<system-reminder>` prefix is
+      // prepended below (so keyword detection sees only what the user typed).
+      const userPromptText = submittedValue;
       // Phase C: one-shot worktree restore reminder. Set during --resume
       // when the persisted sidecar names a live worktree. We only inject
       // on top-level user prompts (not btw-during-response, not slash
@@ -1662,6 +1783,30 @@ export const AppContainer = (props: AppContainerProps) => {
         pendingWorktreeNoticeRef.current = null;
         submittedValue =
           `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
+          submittedValue;
+      }
+      // P7-trigger: when the user's prompt mentions `workflow`, softly steer
+      // this turn toward the Workflow tool (same one-shot reminder mechanism
+      // as the worktree notice). Detect on the user's original text — `notice`
+      // above only adds system text, never the keyword. Gated on the feature
+      // flag + the opt-out setting; skipped for slash commands. The model
+      // keeps discretion, so a casual mention can't force a tool call.
+      const workflowTriggerEnabled =
+        config.isWorkflowsEnabled() &&
+        !settings.merged.ui?.disableWorkflowKeywordTrigger;
+      if (
+        workflowTriggerEnabled &&
+        !isSlashCommand(userPromptText) &&
+        // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
+        // break the BTW routing check below (which tests `submittedValue`),
+        // queuing the side question as a normal prompt instead.
+        !isBtwCommand(userPromptText) &&
+        detectWorkflowKeyword(userPromptText)
+      ) {
+        setWorkflowKeywordActive(true);
+        logWorkflowKeyword(config, new WorkflowKeywordEvent());
+        submittedValue =
+          `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
       }
       if (
@@ -1819,6 +1964,7 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       geminiClient,
       historyManager,
+      settings.merged.ui?.disableWorkflowKeywordTrigger,
     ],
   );
 
@@ -2108,9 +2254,11 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
-  // Generate prompt suggestions when streaming completes
+  // Generate prompt suggestions when streaming completes. Enabled by default:
+  // `mergeSettings` doesn't apply the schema `default: true`, so the runtime
+  // gate must treat an unset value as enabled. Only an explicit `false` opts out.
   const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions === true;
+    settings.merged.ui?.enableFollowupSuggestions !== false;
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
@@ -2220,9 +2368,10 @@ export const AppContainer = (props: AppContainerProps) => {
     settingInputRequests,
   ]);
 
-  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, or
-  // user-initiated dismiss via typing/paste). InputPrompt calls onPromptSuggestionDismiss
-  // on user input, which clears promptSuggestion, triggering this effect to abort speculation.
+  // Abort speculation when promptSuggestion is cleared (new turn or feature toggle).
+  // promptSuggestion is only cleared when the model responds or the feature is disabled;
+  // user typing/paste no longer dismisses it — the AbortController in InputPrompt handles
+  // that path, so this effect only fires on state changes from non-user-input sources.
   useEffect(() => {
     if (!promptSuggestion && speculationRef.current.status !== 'idle') {
       abortSpeculation(speculationRef.current).catch(() => {});
@@ -2599,7 +2748,12 @@ export const AppContainer = (props: AppContainerProps) => {
           !(option === 'both' && hasRestoreFailure)
         ) {
           const originalHistory = historyManager.history;
-          const originalLength = originalHistory.length;
+          const hasSummary = originalHistory.some(
+            (h) => h.display?.kind === 'collapse-summary',
+          );
+          const effectiveLength = hasSummary
+            ? originalHistory.length - 1
+            : originalHistory.length;
 
           let targetTurnIndex = 0;
           for (const h of originalHistory) {
@@ -2609,7 +2763,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
           geminiClient.truncateHistory(apiTruncateIndex);
 
-          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          // Strip suppressOnRestore flags and filter out collapse-summary items
+          // so rewound items remain visible without stale summary text
+          const truncatedUi = expandCollapsedHistory(
+            originalHistory.filter((h) => h.id < userItem.id),
+          );
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();
@@ -2630,7 +2788,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
           config.getChatRecordingService()?.rewindRecording(
             targetTurnIndex,
-            { truncatedCount: originalLength - truncatedUi.length },
+            { truncatedCount: effectiveLength - truncatedUi.length },
             !hasRestoreFailure
               ? config
                   .getFileHistoryService()
@@ -2790,16 +2948,21 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
-  const currentCandidatesTokens = Object.values(
-    sessionStats.metrics?.models ?? {},
-  ).reduce((acc, model) => acc + (model.tokens?.candidates ?? 0), 0);
+  const responseCandidateTokens = getResponseCandidateTokens(
+    pendingGeminiHistoryItems,
+  );
 
-  const { elapsedTime, currentLoadingPhrase, taskStartTokens } =
-    useLoadingIndicator(
-      streamingState,
-      settings.merged.ui?.customWittyPhrases,
-      currentCandidatesTokens,
-    );
+  const {
+    elapsedTime,
+    currentLoadingPhrase,
+    taskStartTokens,
+    taskStartStreamingChars,
+  } = useLoadingIndicator(
+    streamingState,
+    settings.merged.ui?.customWittyPhrases,
+    responseCandidateTokens,
+    streamingResponseLengthRef.current,
+  );
 
   useAttentionNotifications({
     isFocused,
@@ -2810,6 +2973,29 @@ export const AppContainer = (props: AppContainerProps) => {
     terminal,
     pendingToolCalls,
   });
+
+  // P-notif: terminal-bell when a workflow run finishes (completed / failed),
+  // so a long run ending is noticed without watching the /workflows dialog.
+  // User-initiated cancels are intentionally not notified (the registry omits
+  // them). Separate from the dialog's status-change subscription.
+  const workflowBellEnabled =
+    (settings.merged.general?.terminalBell as boolean) ?? true;
+  useEffect(() => {
+    const registry = config.getWorkflowRunRegistry?.();
+    // Optional call: production always has `setNotificationCallback`, but
+    // partial registry mocks in CLI tests may omit it — no-op rather than throw.
+    if (!registry?.setNotificationCallback) return;
+    registry.setNotificationCallback((entry) => {
+      const name = entry.meta?.name ?? entry.runId;
+      const verb = entry.status === 'failed' ? 'failed' : 'completed';
+      sendNotification(
+        { message: `Workflow '${name}' ${verb}`, title: 'Qwen Code' },
+        terminal,
+        workflowBellEnabled,
+      );
+    });
+    return () => registry.setNotificationCallback(undefined);
+  }, [config, terminal, workflowBellEnabled]);
 
   // Dialog close functionality
   const { closeAnyOpenDialog } = useDialogClose({
@@ -2932,6 +3118,23 @@ export const AppContainer = (props: AppContainerProps) => {
       // Debug log keystrokes if enabled
       if (settings.merged.general?.debugKeystrokeLogging) {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
+      }
+
+      // ThinkingViewer owns all input while open.
+      // Ctrl+C / Ctrl+D close the viewer and fall through to quit/exit.
+      if (thinkingViewerData) {
+        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
+          closeThinkingViewer();
+        } else {
+          return;
+        }
+      }
+
+      // Alt+T: toggle inline expansion of thinking blocks.
+      if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
+        setThoughtExpanded((prev) => !prev);
+        refreshStatic();
+        return;
       }
 
       if (keyMatchers[Command.QUIT](key)) {
@@ -3194,45 +3397,52 @@ export const AppContainer = (props: AppContainerProps) => {
       handleDoubleEscRewind,
       vimEnabled,
       vimMode,
+      thinkingViewerData,
+      closeThinkingViewer,
+      setThoughtExpanded,
     ],
   );
 
   useKeypress(handleGlobalKeypress, { isActive: true });
 
-  // Update terminal title with Qwen Code status and thoughts
+  // Update terminal title with the session name, or a fallback derived
+  // from CLI_TITLE, the project folder, or the app default.
+  // showStatusInTitle gates whether dynamic title updates happen at all;
+  // it is kept for backward compatibility and future status-flag support.
   useEffect(() => {
-    // Respect both showStatusInTitle and hideWindowTitle settings
-    if (
-      !settings.merged.ui?.showStatusInTitle ||
-      settings.merged.ui?.hideWindowTitle
-    )
+    if (settings.merged.ui?.hideWindowTitle) {
       return;
-
-    let title;
-    if (streamingState === StreamingState.Idle) {
-      title = originalTitleRef.current;
-    } else {
-      const statusText = thought?.subject
-        ?.replace(/[\r\n]+/g, ' ')
-        .substring(0, 80);
-      title = statusText || originalTitleRef.current;
     }
 
-    // Pad the title to a fixed width to prevent taskbar icon resizing.
-    const paddedTitle = title.padEnd(80, ' ');
+    if (settings.merged.ui?.showStatusInTitle === false) {
+      if (lastTitleRef.current !== null) {
+        lastTitleRef.current = null;
+        const folderName = basename(config.getTargetDir());
+        writeTerminalTitle(
+          (value) => process.stdout.write(value),
+          formatSessionWindowTitle(null, folderName),
+        );
+      }
+      return;
+    }
+
+    const folderName = basename(config.getTargetDir());
+    const title = formatSessionWindowTitle(sessionName, folderName);
 
     // Only update the title if it's different from the last value we set
-    if (lastTitleRef.current !== paddedTitle) {
-      lastTitleRef.current = paddedTitle;
-      stdout.write(`\x1b]2;${paddedTitle}\x07`);
+    if (lastTitleRef.current !== title) {
+      lastTitleRef.current = title;
+      // Use process.stdout.write directly rather than Ink's proxied stdout
+      // to avoid corruption of OSC escape sequences (see writeRaw comment at
+      // line ~448 — Ink v6.2.3 proxies can mangle binary escape sequences).
+      writeTerminalTitle((value) => process.stdout.write(value), title);
     }
-    // Note: We don't need to reset the window title on exit because Qwen Code is already doing that elsewhere
+    // Exit cleanup is handled by setWindowTitle() in gemini.tsx → process.on('exit')
   }, [
-    streamingState,
-    thought,
-    settings.merged.ui?.showStatusInTitle,
+    sessionName,
     settings.merged.ui?.hideWindowTitle,
-    stdout,
+    settings.merged.ui?.showStatusInTitle,
+    config,
   ]);
 
   // Drain queued messages when idle. `queueDrainNonce` re-fires the effect
@@ -3289,6 +3499,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isVoiceModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3358,6 +3569,7 @@ export const AppContainer = (props: AppContainerProps) => {
       branchName,
       activeWorktree,
       showWorktreeExitDialog,
+      workflowKeywordActive,
       sessionStats,
       terminalWidth,
       terminalHeight,
@@ -3390,6 +3602,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,
@@ -3398,7 +3612,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setSessionName,
       // Prompt suggestion
       promptSuggestion,
-      dismissPromptSuggestion,
+      abortPromptSuggestion,
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
@@ -3421,6 +3635,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
+      isVoiceModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3489,6 +3704,7 @@ export const AppContainer = (props: AppContainerProps) => {
       branchName,
       activeWorktree,
       showWorktreeExitDialog,
+      workflowKeywordActive,
       sessionStats,
       terminalWidth,
       terminalHeight,
@@ -3523,6 +3739,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      taskStartStreamingChars,
+      responseCandidateTokens,
       // Real-time token display
       streamingResponseLengthRef,
       isReceivingContent,
@@ -3531,7 +3749,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setSessionName,
       // Prompt suggestion
       promptSuggestion,
-      dismissPromptSuggestion,
+      abortPromptSuggestion,
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
@@ -3721,6 +3939,11 @@ export const AppContainer = (props: AppContainerProps) => {
     [renderMode, setRenderMode],
   );
 
+  const thinkingViewerValue = useMemo(
+    () => ({ openThinkingViewer }),
+    [openThinkingViewer],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -3732,13 +3955,25 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <RenderModeProvider value={renderModeValue}>
-                <TerminalOutputProvider value={writeRaw}>
-                  <ShellFocusContext.Provider value={isFocused}>
-                    <App />
-                  </ShellFocusContext.Provider>
-                </TerminalOutputProvider>
-              </RenderModeProvider>
+              <ThoughtExpandedProvider value={thoughtExpanded}>
+                <RenderModeProvider value={renderModeValue}>
+                  <TerminalOutputProvider value={writeRaw}>
+                    <ThinkingViewerProvider value={thinkingViewerValue}>
+                      <ShellFocusContext.Provider value={isFocused}>
+                        {thinkingViewerData ? (
+                          <ThinkingViewer
+                            data={thinkingViewerData}
+                            onClose={closeThinkingViewer}
+                            useAlternateScreen={!useTerminalBuffer}
+                          />
+                        ) : (
+                          <App />
+                        )}
+                      </ShellFocusContext.Provider>
+                    </ThinkingViewerProvider>
+                  </TerminalOutputProvider>
+                </RenderModeProvider>
+              </ThoughtExpandedProvider>
             </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>

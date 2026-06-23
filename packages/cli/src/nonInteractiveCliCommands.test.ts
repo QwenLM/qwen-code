@@ -713,19 +713,83 @@ describe('handleSlashCommand', () => {
 
       expect(result.type).toBe('no_command');
     });
+
+    it('does not expose disabled model-invocable commands through SkillTool', async () => {
+      const modelInvocableCommand = {
+        name: 'custom',
+        description: 'Custom file command',
+        kind: CommandKind.FILE,
+        modelInvocable: true,
+        supportedModes: ['non_interactive'] as ExecutionMode[],
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'Expanded prompt',
+        }),
+      };
+      mockGetCommands.mockReturnValue([modelInvocableCommand]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue([
+        'custom',
+      ]);
+      mockCommandServiceCreate.mockImplementation(
+        async (_loaders, _signal, disabledNames?: ReadonlySet<string>) => {
+          const commands =
+            disabledNames?.has('custom') === true
+              ? []
+              : [modelInvocableCommand];
+          return {
+            getCommands: () => commands,
+            getCommandsForMode: (mode: ExecutionMode) =>
+              filterCommandsForMode(commands, mode),
+            getModelInvocableCommands: () =>
+              commands.filter((command) => command.modelInvocable === true),
+          };
+        },
+      );
+
+      const result = await handleSlashCommand(
+        '/custom',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('unsupported');
+      if (result.type === 'unsupported') {
+        expect(result.reason).toContain('disabled');
+      }
+      const provider = vi.mocked(mockConfig.setModelInvocableCommandsProvider)
+        .mock.calls[0]?.[0];
+      expect(provider?.()).toEqual([]);
+      const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
+        .mock.calls[0]?.[0];
+      await expect(executor?.('custom')).resolves.toBeNull();
+    });
   });
 });
 
 describe('getAvailableCommands', () => {
   let mockConfig: Config;
+  let notifyConfigChanged: ReturnType<typeof vi.fn>;
+  let fireUserPromptExpansionEvent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
+      filterCommandsForMode(mockGetCommands(), mode),
+    );
+    mockGetModelInvocableCommands.mockImplementation(() =>
+      mockGetCommands().filter(
+        (command: { modelInvocable?: boolean; hidden?: boolean }) =>
+          !command.hidden && command.modelInvocable === true,
+      ),
+    );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
       getCommandsForMode: mockGetCommandsForMode,
       getModelInvocableCommands: mockGetModelInvocableCommands,
     });
+    notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
+    fireUserPromptExpansionEvent = vi.fn().mockResolvedValue(undefined);
 
     mockConfig = {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -735,6 +799,14 @@ describe('getAvailableCommands', () => {
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireUserPromptExpansionEvent,
+      }),
+      setModelInvocableCommandsProvider: vi.fn(),
+      setModelInvocableCommandsExecutor: vi.fn(),
+      getSkillManager: vi.fn().mockReturnValue({ notifyConfigChanged }),
       storage: {},
     } as unknown as Config;
   });
@@ -755,5 +827,83 @@ describe('getAvailableCommands', () => {
     );
 
     expect(commands.map((command) => command.name)).toContain('export');
+  });
+
+  it('does not partially register model-invocable commands without settings', async () => {
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'expand-prompt',
+        description: 'Expand prompt',
+        kind: CommandKind.FILE,
+        modelInvocable: true,
+        supportedModes: ['acp'] as const,
+      },
+    ]);
+
+    await getAvailableCommands(mockConfig, new AbortController().signal, 'acp');
+
+    expect(mockConfig.setModelInvocableCommandsProvider).not.toHaveBeenCalled();
+    expect(mockConfig.setModelInvocableCommandsExecutor).not.toHaveBeenCalled();
+    expect(notifyConfigChanged).not.toHaveBeenCalled();
+  });
+
+  it('registers model-invocable commands for ACP command snapshots', async () => {
+    const promptCommand = {
+      name: 'expand-prompt',
+      description: 'Fallback description',
+      modelDescription: 'Model-facing description',
+      kind: CommandKind.FILE,
+      modelInvocable: true,
+      supportedModes: ['acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'expanded prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([promptCommand]);
+    vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+    const expiredSnapshotSignal = new AbortController();
+    expiredSnapshotSignal.abort();
+
+    await getAvailableCommands(
+      mockConfig,
+      expiredSnapshotSignal.signal,
+      'acp',
+      {
+        system: { path: '', settings: {} },
+        systemDefaults: { path: '', settings: {} },
+        user: { path: '', settings: {} },
+        workspace: { path: '', settings: {} },
+      } as LoadedSettings,
+    );
+
+    const provider = vi.mocked(mockConfig.setModelInvocableCommandsProvider)
+      .mock.calls[0]?.[0];
+    expect(provider?.()).toEqual([
+      {
+        name: 'expand-prompt',
+        description: 'Model-facing description',
+      },
+    ]);
+
+    const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
+      .mock.calls[0]?.[0];
+    await expect(executor?.('expand-prompt', 'with args')).resolves.toBe(
+      'expanded prompt',
+    );
+    expect(fireUserPromptExpansionEvent).toHaveBeenCalledTimes(1);
+    expect(fireUserPromptExpansionEvent.mock.calls[0]?.[3].aborted).toBe(false);
+    expect(promptCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionMode: 'acp',
+        invocation: {
+          raw: '/expand-prompt with args',
+          name: 'expand-prompt',
+          args: 'with args',
+        },
+      }),
+      'with args',
+    );
+    expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
   });
 });

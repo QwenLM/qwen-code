@@ -13,7 +13,11 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
-import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
+import type {
+  AuthType,
+  InputModalities,
+  Protocol,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
@@ -123,6 +127,12 @@ export interface ServeOptions {
    */
   enableSessionShell?: boolean;
   /**
+   * Serve the built Web Shell SPA at the daemon root (default true). Set
+   * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
+   * Web Shell assets aren't present in the build.
+   */
+  serveWebShell?: boolean;
+  /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
@@ -178,6 +188,12 @@ export interface ServeOptions {
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Wall-clock timeout in ms for a single human permission /
+   * ask_user_question response in daemon (ACP) mode. 0 = disabled
+   * (wait forever). Default: 300000 (5 min).
+   */
+  permissionResponseTimeoutMs?: number;
   /**
    * Enable per-tier HTTP rate limiting. Off by default. When enabled,
    * requests exceeding per-tier limits receive 429 + Retry-After.
@@ -298,8 +314,8 @@ export interface ServeAuthProviderDescriptor {
   label: string;
   description: string;
   uiGroup?: string;
-  protocol: AuthType;
-  protocolOptions?: AuthType[];
+  protocol: Protocol;
+  protocolOptions?: Protocol[];
   baseUrl?: string | ServeAuthProviderBaseUrlOption[];
   envKey?: string;
   models?: ServeAuthProviderModel[];

@@ -630,6 +630,10 @@ export class ContentGenerationPipeline {
         // message is spec-compliant and safe for permissive providers too.
         // Opt out via generationConfig.splitToolMedia = false.
         true,
+      toolResultContentFormat:
+        providerOverrides.toolResultContentFormat ??
+        this.contentGeneratorConfig.toolResultContentFormat ??
+        'parts',
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),

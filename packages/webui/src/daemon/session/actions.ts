@@ -9,6 +9,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
   DaemonSessionRecapResult,
   DaemonSessionTaskStatus,
@@ -27,6 +28,7 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
+import { persistStableClientId } from './clientLifecycle.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -775,6 +777,70 @@ export function createDaemonSessionActions({
           'Global permission response failed',
           error,
           'submit_permission',
+        );
+      }
+    },
+
+    async branchSession(name?: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Branch session failed',
+        'branch_session',
+      );
+      try {
+        const result = await withActionTimeout(
+          session.client.branchSession(
+            session.sessionId,
+            { name },
+            session.clientId,
+          ),
+          'Branch session timed out',
+        );
+        persistStableClientId(result.clientId, result.sessionId);
+        void startSessionSwitch(result.sessionId, 'load').catch(
+          (switchError: unknown) => {
+            if (isAbortError(switchError)) return;
+            dispatchActionError(
+              addNotice,
+              'Branch session failed',
+              switchError,
+              'branch_session',
+            );
+          },
+        );
+        return {
+          sessionId: result.sessionId,
+          displayName: result.displayName,
+        };
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Branch session failed',
+          error,
+          'branch_session',
+        );
+      }
+    },
+
+    async forkSession(directive: string): Promise<DaemonForkSessionResult> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Fork session failed',
+        'fork_session',
+      );
+      try {
+        return await withActionTimeout(
+          session.fork(directive),
+          'Fork session timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Fork session failed',
+          error,
+          'fork_session',
         );
       }
     },

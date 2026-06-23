@@ -234,7 +234,7 @@ function isNetworkPseudoDevice(target: string): boolean {
  * Handles:
  *   `> file`   `>> file`  `< file`   (with or without space)
  *   `2> file`  `2>> file` `&> file`  `&>> file`
- *   Combined forms: `>file`, `>>file`, `2>/dev/null`
+ *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
  */
 function extractRedirects(tokens: string[], cwd: string): RedirectResult {
   const readFiles: string[] = [];
@@ -299,7 +299,7 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
+      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
       if (m) {
         const op = m[1]!;
         const target = m[2]!;
@@ -2319,7 +2319,9 @@ function hasAbsolutePathTokenForOperation(
   filePath: string,
 ): boolean {
   for (const token of tokenize(command)) {
-    const redirectTarget = token.match(/^(?:>>|>|2>>|2>|&>>|&>|<)(.+)$/)?.[1];
+    const redirectTarget = token.match(
+      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/,
+    )?.[1];
     const candidate = redirectTarget ?? token;
     if (
       looksLikePath(candidate) &&

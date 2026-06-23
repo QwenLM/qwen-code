@@ -33,6 +33,7 @@ function normalizeExtension(
   return {
     id: extension.id ?? extension.name ?? '',
     name: extension.name ?? extension.id ?? '',
+    displayName: extension.displayName,
     version: extension.version,
     isActive: extension.isActive,
     path: extension.path,

@@ -191,6 +191,38 @@ describe('WorkflowRunRegistry', () => {
     expect(() => r.complete('wf_throw', null, 1)).not.toThrow();
   });
 
+  // P-notif: terminal-completion notification callback.
+  it('notification callback fires on complete and fail, not on cancel', () => {
+    const r = new WorkflowRunRegistry();
+    const cb = vi.fn();
+    r.setNotificationCallback(cb);
+
+    r.register(reg('wf_done'));
+    r.complete('wf_done', 'ok', 1_000);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb.mock.calls[0][0].status).toBe('completed');
+
+    r.register(reg('wf_bad'));
+    r.fail('wf_bad', 'boom', 2_000);
+    expect(cb).toHaveBeenCalledTimes(2);
+    expect(cb.mock.calls[1][0].status).toBe('failed');
+
+    // A user-initiated cancel is intentionally NOT notified.
+    r.register(reg('wf_cancelled'));
+    r.cancel('wf_cancelled', 3_000);
+    expect(cb).toHaveBeenCalledTimes(2);
+  });
+
+  it('errors thrown by the notification callback do not break the call site', () => {
+    const r = new WorkflowRunRegistry();
+    r.setNotificationCallback(() => {
+      throw new Error('notifier blew up');
+    });
+    r.register(reg('wf_n'));
+    expect(() => r.complete('wf_n', null, 1)).not.toThrow();
+    expect(r.get('wf_n')!.status).toBe('completed');
+  });
+
   // P4 Round 7 (wenshao): dialog-initiated cancel marks status='cancelled'
   // synchronously, then the abort propagates to the tool's catch arm which
   // calls setRecentLogs(runId, logs). The previous guard rejected this
@@ -271,5 +303,125 @@ describe('WorkflowRunRegistry', () => {
     expect(r.hasRunningEntries()).toBe(true);
     r.complete('wf_1', null, 1_000);
     expect(r.hasRunningEntries()).toBe(false);
+  });
+
+  // ── P5: budget + warning latch ─────────────────────────────────────
+
+  it('P5: register initializes tokensSpent=0, tokenBudgetTotal=null, perPhaseTokens=Map', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_1'));
+    expect(entry.tokensSpent).toBe(0);
+    expect(entry.tokenBudgetTotal).toBeNull();
+    expect(entry.perPhaseTokens).toBeInstanceOf(Map);
+    expect(entry.perPhaseTokens.size).toBe(0);
+  });
+
+  it('P5: register seeds tokenBudgetTotal from the caller-supplied cap', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_capped', { tokenBudgetTotal: 50_000 }));
+    expect(entry.tokenBudgetTotal).toBe(50_000);
+  });
+
+  it('P5: onBudgetUpdated mutates tokensSpent + tokenBudgetTotal', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onBudgetUpdated('wf_1', 1500, 10_000);
+    const e = r.get('wf_1')!;
+    expect(e.tokensSpent).toBe(1500);
+    expect(e.tokenBudgetTotal).toBe(10_000);
+  });
+
+  it('P5: onBudgetUpdated attributes delta to the entry currentPhase', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onPhaseStarted('wf_1', 'Find');
+    r.onBudgetUpdated('wf_1', 200, 1000); // +200 → Find
+    r.onBudgetUpdated('wf_1', 350, 1000); // +150 → Find
+    r.onPhaseStarted('wf_1', 'Verify');
+    r.onBudgetUpdated('wf_1', 500, 1000); // +150 → Verify
+    const e = r.get('wf_1')!;
+    expect(e.tokensSpent).toBe(500);
+    expect(e.perPhaseTokens.get('Find')).toBe(350);
+    expect(e.perPhaseTokens.get('Verify')).toBe(150);
+  });
+
+  it('P5: onBudgetUpdated attributes to the null sentinel before first phase()', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onBudgetUpdated('wf_1', 100, null); // no phase yet
+    const e = r.get('wf_1')!;
+    expect(e.perPhaseTokens.get(null)).toBe(100);
+  });
+
+  it('P5: onBudgetUpdated is a no-op on missing / terminal entries', () => {
+    const r = new WorkflowRunRegistry();
+    // Missing entry — no throw.
+    r.onBudgetUpdated('wf_unknown', 100, 1000);
+
+    r.register(reg('wf_1'));
+    r.complete('wf_1', null, 1_000);
+    r.onBudgetUpdated('wf_1', 999, 1000); // terminal → ignored
+    const e = r.get('wf_1')!;
+    expect(e.tokensSpent).toBe(0);
+    expect(e.tokenBudgetTotal).toBeNull();
+  });
+
+  it('P5: onBudgetUpdated is a no-op on backwards / zero deltas (R1 #8: monotonic spent)', () => {
+    // R1 #8 contract: the orchestrator fires `budgetUpdated` after every
+    // dispatch, but `WorkflowBudgetImpl.recordSpent` only accumulates
+    // positive integer deltas — so `budget.spent()` is monotonically
+    // increasing in production. A backwards / zero call here can only
+    // come from a buggy caller, and we treat it as a defensive no-op
+    // (skip the emit + the field mutation) rather than overwriting the
+    // tracker with a stale value.
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_1'));
+    r.onPhaseStarted('wf_1', 'A');
+    r.onBudgetUpdated('wf_1', 100, 1000);
+    r.onBudgetUpdated('wf_1', 100, 1000); // same total → delta 0 → no-op
+    r.onBudgetUpdated('wf_1', 50, 1000); // backwards → no-op
+    const e = r.get('wf_1')!;
+    expect(e.tokensSpent).toBe(100);
+    expect(e.perPhaseTokens.get('A')).toBe(100);
+  });
+
+  it('P5 R1 #8: onBudgetUpdated does NOT emit statusChange on no-op deltas', () => {
+    const r = new WorkflowRunRegistry();
+    const cb = vi.fn();
+    r.setStatusChangeCallback(cb);
+    r.register(reg('wf_1'));
+    r.onBudgetUpdated('wf_1', 100, 1000); // first delta → emits
+    cb.mockClear();
+    r.onBudgetUpdated('wf_1', 100, 1000); // delta = 0, total unchanged → skip
+    r.onBudgetUpdated('wf_1', 100, 1000); // same again → still skip
+    expect(cb).not.toHaveBeenCalled();
+    // But a cap change (rare; defensive) still emits even at no spend delta.
+    r.onBudgetUpdated('wf_1', 100, 2000);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('P5: onBudgetUpdated fires the statusChange callback', () => {
+    const r = new WorkflowRunRegistry();
+    const cb = vi.fn();
+    r.setStatusChangeCallback(cb);
+    r.register(reg('wf_1'));
+    cb.mockClear();
+    r.onBudgetUpdated('wf_1', 100, 1000);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('P5: shouldShowUsageWarning fires once per registry instance', () => {
+    const r = new WorkflowRunRegistry();
+    expect(r.shouldShowUsageWarning()).toBe(true);
+    expect(r.shouldShowUsageWarning()).toBe(false);
+    expect(r.shouldShowUsageWarning()).toBe(false);
+  });
+
+  it('P5: shouldShowUsageWarning latch survives reset() (per-session, not per-clear)', () => {
+    const r = new WorkflowRunRegistry();
+    r.shouldShowUsageWarning(); // flips to true
+    r.register(reg('wf_1'));
+    r.reset();
+    expect(r.shouldShowUsageWarning()).toBe(false);
   });
 });

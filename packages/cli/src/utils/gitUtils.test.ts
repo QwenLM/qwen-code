@@ -32,7 +32,26 @@ describe('isGitHubRepository', async () => {
   });
 
   it('returns false if the remote is not github.com', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce('https://gitlab.com');
+    vi.mocked(child_process.execSync).mockReturnValueOnce(`
+      origin  https://gitlab.com/owner/repo.git (fetch)
+      origin  https://gitlab.com/owner/repo.git (push)
+    `);
+    expect(isGitHubRepository()).toBe(false);
+  });
+
+  it('returns false for github.com lookalike hosts', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(`
+      origin  https://github.com.evil/owner/repo.git (fetch)
+      origin  https://github.com.evil/owner/repo.git (push)
+    `);
+    expect(isGitHubRepository()).toBe(false);
+  });
+
+  it('returns false when github.com only appears in the path', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(`
+      origin  https://gitlab.com/owner/github.com-mirror.git (fetch)
+      origin  https://gitlab.com/owner/github.com-mirror.git (push)
+    `);
     expect(isGitHubRepository()).toBe(false);
   });
 
@@ -42,6 +61,38 @@ describe('isGitHubRepository', async () => {
       origin  https://github.com/sethvargo/gemini-cli (push)
     `);
     expect(isGitHubRepository()).toBe(true);
+  });
+
+  it('returns true for GitHub SSH remotes', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(`
+      origin  git@github.com:owner/repo.git (fetch)
+      origin  git@github.com:owner/repo.git (push)
+    `);
+    expect(isGitHubRepository()).toBe(true);
+  });
+
+  it('returns true for GitHub SSH URL remotes', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(`
+      origin  ssh://git@github.com/owner/repo.git (fetch)
+      origin  ssh://git@github.com/owner/repo.git (push)
+    `);
+    expect(isGitHubRepository()).toBe(true);
+  });
+
+  it('returns true for GitHub SSH URL remotes with an explicit port', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(`
+      origin  ssh://git@github.com:22/owner/repo.git (fetch)
+      origin  ssh://git@github.com:22/owner/repo.git (push)
+    `);
+    expect(isGitHubRepository()).toBe(true);
+  });
+
+  it('returns false for GitHub SSH lookalike hosts', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(`
+      origin  git@github.com.evil:owner/repo.git (fetch)
+      origin  git@github.com.evil:owner/repo.git (push)
+    `);
+    expect(isGitHubRepository()).toBe(false);
   });
 });
 
@@ -135,6 +186,13 @@ describe('getGitHubRepoInfo', async () => {
   it('returns the owner and repo for SSH URL', async () => {
     vi.mocked(child_process.execSync).mockReturnValueOnce(
       'git@github.com:owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('returns the owner and repo for SSH URL with an explicit port', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'ssh://git@github.com:22/owner/repo.git',
     );
     expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
   });

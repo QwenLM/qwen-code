@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const modelscopeProvider: ProviderConfig = {
   id: 'modelscope',
   label: 'ModelScope API Key',
   description: 'Quick setup for ModelScope API Inference',
-  protocol: AuthType.USE_OPENAI,
+  protocol: Protocol.OPENAI,
   baseUrl: 'https://api-inference.modelscope.cn/v1',
   envKey: 'MODELSCOPE_API_KEY',
   models: [

@@ -1085,7 +1085,7 @@ Response:
 
 `attached: true` means the session was already live (either from a prior `session/load`/`session/resume`, or because a coalesced concurrent caller raced just ahead).
 
-**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 4000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
+**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 8000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
 
 **Errors:**
 
@@ -1663,24 +1663,23 @@ The connection then closes.
 
 ## Environment variables
 
-| Var                 | Purpose                                                                                                                                                             |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_SERVER_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot.                                                                                                      |
-| `SKIP_LLM_TESTS`    | Set to `1` to **skip** LLM-required integration tests in `integration-tests/cli/qwen-serve-streaming.test.ts` (default-on for CI envs that lack provider API keys). |
+| Var                 | Purpose                                                        |
+| ------------------- | -------------------------------------------------------------- |
+| `QWEN_SERVER_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot. |
 
 ## Source layout
 
 | Path                                                 | Purpose                                                                                                    |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                                                                |
-| `packages/cli/src/serve/runQwenServe.ts`             | listener lifecycle + signal handling                                                                       |
+| `packages/cli/src/serve/run-qwen-serve.ts`           | listener lifecycle + signal handling                                                                       |
 | `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                                                                |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
 | `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry                                                   |
 | `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
-| `packages/cli/src/serve/envSnapshot.ts`              | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
-| `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                                                          |
+| `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
+| `packages/acp-bridge/src/eventBus.ts`                | bounded async queue + replay ring                                                                          |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                                                                  |
 | `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                                                                   |
 | `integration-tests/cli/qwen-serve-routes.test.ts`    | 18 cases, no LLM                                                                                           |
-| `integration-tests/cli/qwen-serve-streaming.test.ts` | 3 cases, real `qwen --acp` child (skipped when `SKIP_LLM_TESTS=1`)                                         |
+| `integration-tests/cli/qwen-serve-streaming.test.ts` | 3 cases, real `qwen --acp` child backed by the local fake OpenAI server (POSIX only; skipped on Windows)   |

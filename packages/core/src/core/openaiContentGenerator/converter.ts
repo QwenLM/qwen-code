@@ -285,8 +285,13 @@ export function convertGeminiToolParametersToOpenAI(
         key === 'maxItems'
       ) {
         // Ensure length constraints are integers, not strings
-        if (typeof value === 'string' && !isNaN(Number(value))) {
-          result[key] = parseInt(value, 10);
+        const numberValue = typeof value === 'string' ? Number(value) : NaN;
+        if (
+          typeof value === 'string' &&
+          value.trim() !== '' &&
+          Number.isInteger(numberValue)
+        ) {
+          result[key] = numberValue;
         } else {
           result[key] = value;
         }
@@ -655,6 +660,20 @@ function processContent(
             toolMessage.content =
               textOnly || '[media attached in following user message]';
             accumulatedSplitMedia.push(...mediaParts);
+          }
+        }
+        if (
+          requestContext.toolResultContentFormat === 'string' &&
+          Array.isArray(toolMessage.content)
+        ) {
+          const toolContent = toolMessage.content as OpenAIContentPart[];
+          if (
+            toolContent.every(
+              (cp): cp is OpenAI.Chat.ChatCompletionContentPartText =>
+                cp?.type === 'text',
+            )
+          ) {
+            toolMessage.content = toolContent.map((cp) => cp.text).join('\n');
           }
         }
         messages.push(toolMessage);
@@ -1163,9 +1182,11 @@ export function convertOpenAIResponseToGemini(
     let finalCompletionTokens = completionTokens;
 
     if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
+      // Estimate: assume 70% input, 30% output. Derive completion from the
+      // remainder so the two halves always add back up to totalTokens rather
+      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
       finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
+      finalCompletionTokens = totalTokens - finalPromptTokens;
     }
 
     response.usageMetadata = {
@@ -1360,9 +1381,11 @@ export function convertOpenAIChunkToGemini(
     let finalCompletionTokens = completionTokens;
 
     if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
+      // Estimate: assume 70% input, 30% output. Derive completion from the
+      // remainder so the two halves always add back up to totalTokens rather
+      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
       finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
+      finalCompletionTokens = totalTokens - finalPromptTokens;
     }
 
     response.usageMetadata = {

@@ -73,6 +73,46 @@ export interface WorkflowTask extends TaskBase {
   agentsCompleted: number;
   /** Most recent log lines from the sandbox's `getLogs()`. Capped at 100 for the UI. */
   recentLogs: string[];
+  /**
+   * P5: cumulative output tokens spent by this run's `agent()` dispatches.
+   * Mirrored from `budget.spent()` after each successful completion via
+   * the `budgetUpdated` emitter event. Stays at `0` for runs without a
+   * budget (legacy callers) and for the period between register and the
+   * first dispatch settling.
+   */
+  tokensSpent: number;
+  /**
+   * P5: per-run token cap from `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW`. `null`
+   * when no cap is set — the dialog renders `tokensSpent` alone in that
+   * case rather than the `M / N` form. Set at register time from
+   * `budget.total` and re-affirmed by every `budgetUpdated` fire (the
+   * budget's `total` is immutable so the value never changes mid-run).
+   */
+  tokenBudgetTotal: number | null;
+  /**
+   * P5: per-phase token attribution. Delta tokens are attributed to the
+   * entry's `currentPhase` at the moment `budgetUpdated` fires. A
+   * workflow that dispatches an agent before its first `phase()` call
+   * accumulates that agent's tokens under a sentinel `null` phase, which
+   * the UI surfaces as `(no phase)` so the share is observable rather
+   * than hidden.
+   */
+  perPhaseTokens: Map<string | null, number>;
+  /**
+   * P7b: the workflow script source (verbatim, as the tool received it).
+   * Used by the run-snapshot writer (so a persisted run carries its
+   * script) and the save-to-disk dialog (so a completed run can be saved
+   * to `.qwen/workflows/<name>.js`). Empty string for legacy callers that
+   * don't supply it.
+   */
+  script: string;
+  /**
+   * P7b: the path the script was loaded from, when the run was launched
+   * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
+   * slash command). `undefined` for inline scripts. Recorded as run
+   * provenance (e.g. for the snapshot).
+   */
+  scriptPath?: string;
   /** Final script return value once the run completes (success path). */
   result?: unknown;
   /** Error message on `failed` (terminal). */
@@ -95,12 +135,27 @@ export type WorkflowTaskRegistration = Omit<
   | 'agentsDispatched'
   | 'agentsCompleted'
   | 'recentLogs'
+  | 'tokensSpent'
+  | 'tokenBudgetTotal'
+  | 'perPhaseTokens'
+  | 'script'
   | 'description'
 > & {
   // Allow the caller to omit `description` — we synthesize it from
   // `meta?.name ?? runId` for symmetry with shell registry's `command`
   // synthesis.
   description?: string;
+  /**
+   * P5: optional per-run token cap at register time. Defaults to `null`
+   * (no cap). Persists for the life of the entry — `onBudgetUpdated`
+   * does NOT re-write it because the budget's `total` is immutable.
+   */
+  tokenBudgetTotal?: number | null;
+  /**
+   * P7b: the workflow script source. Defaults to `''` when omitted (legacy
+   * callers / tests). Needed for run snapshots + the save-to-disk dialog.
+   */
+  script?: string;
 };
 
 /** Fires when a new entry is registered. */
@@ -114,11 +169,44 @@ export type WorkflowRunRegisterCallback = (entry: WorkflowTask) => void;
  */
 export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
 
+/**
+ * P-notif: fires once when a run reaches a terminal state worth surfacing to
+ * the user — `completed` / `failed`, but NOT a user-initiated `cancel` (the
+ * user already knows). The CLI wires this to the terminal-bell notification
+ * service. A separate slot from `statusChangeCallback` (which the dialog's
+ * `useBackgroundTaskView` owns), so the two never clobber each other.
+ */
+export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
+
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
+  private notificationCallback: WorkflowRunNotificationCallback | undefined;
+  /**
+   * P5 T7: one-time usage-warning latch. The first `Workflow` tool
+   * invocation per session checks `shouldShowUsageWarning()`; if true,
+   * the tool prepends a one-line banner to the result describing the
+   * token-budget knob (`QWEN_CODE_MAX_TOKENS_PER_WORKFLOW`) and how to
+   * suppress (`skipWorkflowUsageWarning` setting). The latch flips on
+   * the same call so subsequent runs are quiet. Survives `reset()` —
+   * the warning is per-session, not per-clear.
+   */
+  private usageWarningShown = false;
+
+  /**
+   * P5 T7: gate the one-time usage warning. Returns `true` exactly once
+   * per session, flipping the latch as a side effect. Settings-level
+   * suppression (`skipWorkflowUsageWarning`) is enforced upstream by
+   * the caller (`WorkflowTool`) before invoking — the registry only
+   * tracks session-scoped freshness.
+   */
+  shouldShowUsageWarning(): boolean {
+    if (this.usageWarningShown) return false;
+    this.usageWarningShown = true;
+    return true;
+  }
 
   setRegisterCallback(cb: WorkflowRunRegisterCallback | undefined): void {
     this.registerCallback = cb;
@@ -128,6 +216,22 @@ export class WorkflowRunRegistry {
     cb: WorkflowRunStatusChangeCallback | undefined,
   ): void {
     this.statusChangeCallback = cb;
+  }
+
+  setNotificationCallback(
+    cb: WorkflowRunNotificationCallback | undefined,
+  ): void {
+    this.notificationCallback = cb;
+  }
+
+  /** Fire the terminal-completion notification (best-effort). */
+  private emitNotification(entry: WorkflowTask): void {
+    if (!this.notificationCallback) return;
+    try {
+      this.notificationCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit workflow notification:', error);
+    }
   }
 
   /**
@@ -147,6 +251,18 @@ export class WorkflowRunRegistry {
     entry.agentsDispatched = 0;
     entry.agentsCompleted = 0;
     entry.recentLogs = [];
+    entry.tokensSpent = 0;
+    // Preserve a caller-supplied cap; default to "no cap" otherwise.
+    // Note: the registration's optional `tokenBudgetTotal` shape is the
+    // sole way to seed this — `onBudgetUpdated` only mirrors mid-run
+    // updates, never the initial value.
+    if (entry.tokenBudgetTotal === undefined) {
+      entry.tokenBudgetTotal = null;
+    }
+    entry.perPhaseTokens = new Map();
+    // P7b: default the script source so the snapshot writer + save dialog
+    // always have a (possibly empty) string to work with.
+    if (entry.script === undefined) entry.script = '';
     if (!entry.description) {
       entry.description = entry.meta?.name ?? entry.runId;
     }
@@ -198,6 +314,41 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * P5: mirror a `budgetUpdated` emitter event into the entry. Attributes
+   * the cumulative delta (`spent - entry.tokensSpent`) to the entry's
+   * `currentPhase`. Per-phase attribution is best-effort: agents in
+   * flight when the script issues a new `phase()` will attribute their
+   * tokens to whichever phase was current when `budgetUpdated` fires —
+   * the orchestrator fires immediately after `agentCompleted`, so the
+   * race window is bounded but not zero. Tasks before the first
+   * `phase()` call attribute to the sentinel `null` key.
+   */
+  onBudgetUpdated(runId: string, spent: number, total: number | null): void {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.status !== 'running') return;
+    const delta = spent - entry.tokensSpent;
+    const totalChanged = entry.tokenBudgetTotal !== total;
+    // P5 R1 (#8): skip the statusChange emit when nothing observable
+    // changed. The orchestrator fires `budgetUpdated` after EVERY
+    // successful dispatch — including dispatches whose subagent
+    // reported `outputTokens === 0` (early failures, fast no-op
+    // responses). Those produce a no-delta call here; firing the
+    // UI re-render anyway burns frames for no visible effect.
+    if (delta <= 0 && !totalChanged) return;
+    if (delta > 0) {
+      const key = entry.currentPhase;
+      const prior = entry.perPhaseTokens.get(key) ?? 0;
+      entry.perPhaseTokens.set(key, prior + delta);
+    }
+    entry.tokensSpent = spent;
+    // `total` is immutable on the budget, but mirror it defensively so
+    // a stale register-time value can't drift if the caller wires a
+    // budget without seeding `tokenBudgetTotal`.
+    entry.tokenBudgetTotal = total;
+    this.emitStatusChange(entry);
+  }
+
+  /**
    * Replace the recent-log tail. The sandbox owns the source-of-truth
    * `getLogs()` array; we mirror it here for the UI so the dialog
    * doesn't have to thread a sandbox reference. Capped at 100 entries
@@ -228,6 +379,7 @@ export class WorkflowRunRegistry {
     entry.result = result;
     entry.notified = true;
     this.emitStatusChange(entry);
+    this.emitNotification(entry);
     this.evictTerminal();
   }
 
@@ -239,6 +391,7 @@ export class WorkflowRunRegistry {
     entry.error = message;
     entry.notified = true;
     this.emitStatusChange(entry);
+    this.emitNotification(entry);
     this.evictTerminal();
   }
 

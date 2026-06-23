@@ -172,8 +172,10 @@ export const useAuthCommand = (
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
-          syncAuthState: (authType, modelId) =>
-            config.getModelsConfig().syncAfterAuthRefresh(authType, modelId),
+          syncAuthState: (authType, modelId, baseUrl) =>
+            config
+              .getModelsConfig()
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
 
@@ -235,7 +237,7 @@ export const useAuthCommand = (
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
     ];
-    if (val && !valid.includes(val as AuthType)) {
+    if (val && !(valid as string[]).includes(val)) {
       onAuthError(
         t(
           'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}',

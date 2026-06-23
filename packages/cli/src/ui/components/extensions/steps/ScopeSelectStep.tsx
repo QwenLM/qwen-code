@@ -6,9 +6,12 @@
 
 import { Box, Text } from 'ink';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
-import { type Extension } from '@qwen-code/qwen-code-core';
+import {
+  type Extension,
+  getExtensionDisplayName,
+} from '@qwen-code/qwen-code-core';
 import { theme } from '../../../semantic-colors.js';
-import { t } from '../../../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 
 interface ScopeSelectStepProps {
   selectedExtension: Extension | null;
@@ -52,8 +55,18 @@ export function ScopeSelectStep({
 
   const title =
     mode === 'disable'
-      ? t('Disable "{{name}}" - Select Scope', { name: selectedExtension.name })
-      : t('Enable "{{name}}" - Select Scope', { name: selectedExtension.name });
+      ? t('Disable "{{name}}" - Select Scope', {
+          name: getExtensionDisplayName(
+            selectedExtension,
+            getCurrentLanguage(),
+          ),
+        })
+      : t('Enable "{{name}}" - Select Scope', {
+          name: getExtensionDisplayName(
+            selectedExtension,
+            getCurrentLanguage(),
+          ),
+        });
 
   return (
     <Box flexDirection="column" gap={1}>

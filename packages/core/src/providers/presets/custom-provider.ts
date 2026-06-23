@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const CUSTOM_API_KEY_ENV_PREFIX = 'QWEN_CUSTOM_API_KEY_';
@@ -76,7 +76,7 @@ function stripTrailingSlashes(value: string): string {
 }
 
 export function generateCustomEnvKey(
-  protocol: AuthType,
+  protocol: Protocol,
   baseUrl: string,
 ): string {
   // Strip trailing slashes before hashing so callers that differ only in
@@ -99,25 +99,20 @@ export const customProvider: ProviderConfig = {
   label: 'Custom Provider',
   description:
     'Manually connect a local server, proxy, or unsupported provider',
-  protocol: AuthType.USE_OPENAI,
-  protocolOptions: [
-    AuthType.USE_OPENAI,
-    AuthType.USE_ANTHROPIC,
-    AuthType.USE_GEMINI,
-  ],
+  protocol: Protocol.OPENAI,
+  protocolOptions: [Protocol.OPENAI, Protocol.ANTHROPIC, Protocol.GEMINI],
   baseUrl: undefined,
   envKey: generateCustomEnvKey,
   models: undefined,
   modelNamePrefix: '',
   showAdvancedConfig: true,
-  // Without this, applyModelProvidersPatch falls back to id+baseUrl identity
-  // matching, so reinstalling a custom provider under a different baseUrl
-  // leaves the old model entries behind — they accumulate over time.
-  // Every key we mint via generateCustomEnvKey starts with the well-known
-  // prefix, so a prefix match cleanly identifies "ours" without false
-  // positives against preset entries.
+  // Detect existing custom entries by our env-key namespace for UI/ACP flows,
+  // but merge installs by id+baseUrl so /auth can add another custom model
+  // without deleting models from other endpoints or different models on the
+  // same endpoint.
   ownsModel: (model) =>
     typeof model.envKey === 'string' &&
     model.envKey.startsWith(CUSTOM_API_KEY_ENV_PREFIX),
+  mergeModelsByIdentity: true,
   uiGroup: 'custom',
 };

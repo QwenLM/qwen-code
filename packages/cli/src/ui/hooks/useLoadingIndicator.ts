@@ -13,6 +13,7 @@ export const useLoadingIndicator = (
   streamingState: StreamingState,
   customWittyPhrases?: string[],
   currentCandidatesTokens?: number,
+  currentStreamingChars?: number,
 ) => {
   const [timerResetKey, setTimerResetKey] = useState(0);
   const isTimerActive = streamingState === StreamingState.Responding;
@@ -29,6 +30,7 @@ export const useLoadingIndicator = (
 
   const [retainedElapsedTime, setRetainedElapsedTime] = useState(0);
   const [taskStartTokens, setTaskStartTokens] = useState(0);
+  const [taskStartStreamingChars, setTaskStartStreamingChars] = useState(0);
   const prevStreamingStateRef = useRef<StreamingState | null>(null);
 
   useEffect(() => {
@@ -39,6 +41,7 @@ export const useLoadingIndicator = (
       setTimerResetKey((prevKey) => prevKey + 1);
       setRetainedElapsedTime(0);
       setTaskStartTokens(currentCandidatesTokens ?? 0);
+      setTaskStartStreamingChars(currentStreamingChars ?? 0);
     } else if (
       streamingState === StreamingState.Idle &&
       prevStreamingStateRef.current === StreamingState.Responding
@@ -46,17 +49,24 @@ export const useLoadingIndicator = (
       setTimerResetKey((prevKey) => prevKey + 1);
       setRetainedElapsedTime(0);
       setTaskStartTokens(0);
+      setTaskStartStreamingChars(0);
     } else if (
       streamingState === StreamingState.Responding &&
       prevStreamingStateRef.current !== StreamingState.Responding
     ) {
       setTaskStartTokens(currentCandidatesTokens ?? 0);
+      setTaskStartStreamingChars(currentStreamingChars ?? 0);
     } else if (streamingState === StreamingState.WaitingForConfirmation) {
       setRetainedElapsedTime(elapsedTimeFromTimer);
     }
 
     prevStreamingStateRef.current = streamingState;
-  }, [streamingState, elapsedTimeFromTimer, currentCandidatesTokens]);
+  }, [
+    streamingState,
+    elapsedTimeFromTimer,
+    currentCandidatesTokens,
+    currentStreamingChars,
+  ]);
 
   return {
     elapsedTime:
@@ -65,5 +75,6 @@ export const useLoadingIndicator = (
         : elapsedTimeFromTimer,
     currentLoadingPhrase,
     taskStartTokens,
+    taskStartStreamingChars,
   };
 };

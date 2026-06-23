@@ -4,13 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Protocol } from '../core/contentGenerator.js';
 import type { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../models/types.js';
+import type { ModelProvidersConfig, ProviderConfig } from '../models/types.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
   ProviderSettingsAdapter,
 } from './types.js';
+
+const AUTH_TYPE_TO_PROTOCOL: Record<string, Protocol> = {
+  openai: Protocol.OPENAI,
+  'qwen-oauth': Protocol.QWEN_OAUTH,
+  gemini: Protocol.GEMINI,
+  'vertex-ai': Protocol.GEMINI,
+  anthropic: Protocol.ANTHROPIC,
+};
+
+export function authTypeToProtocol(authType: AuthType): Protocol {
+  return Object.hasOwn(AUTH_TYPE_TO_PROTOCOL, authType)
+    ? AUTH_TYPE_TO_PROTOCOL[authType]
+    : Protocol.OPENAI;
+}
 
 /**
  * Environment variable names an install plan must never set — they alter
@@ -47,7 +62,10 @@ function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
 ): ModelProvidersConfig {
-  const existingModels = existingModelProviders[patch.authType] ?? [];
+  const existingProvider = existingModelProviders[patch.authType];
+  const existingModels = Array.isArray(existingProvider)
+    ? existingProvider
+    : (existingProvider?.models ?? []);
 
   let updatedModels = patch.models;
   if (patch.mergeStrategy === 'append') {
@@ -69,9 +87,17 @@ function applyModelProvidersPatch(
         : [...patch.models, ...preservedModels];
   }
 
+  // Preserve the existing provider config (protocol, baseUrl, envKey) and update models
+  const updatedProvider: ProviderConfig = {
+    protocol: existingProvider?.protocol ?? authTypeToProtocol(patch.authType),
+    models: updatedModels,
+    ...(existingProvider?.baseUrl ? { baseUrl: existingProvider.baseUrl } : {}),
+    ...(existingProvider?.envKey ? { envKey: existingProvider.envKey } : {}),
+  };
+
   return {
     ...existingModelProviders,
-    [patch.authType]: updatedModels,
+    [patch.authType]: updatedProvider,
   };
 }
 
@@ -84,7 +110,11 @@ export interface ApplyProviderInstallPlanOptions {
   /** Callback to reload model providers config in the runtime. */
   reloadModelProviders?: (mp: ModelProvidersConfig) => void;
   /** Callback to sync auth state after install. */
-  syncAuthState?: (authType: AuthType, modelId: string) => void;
+  syncAuthState?: (
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ) => void;
   /** Callback to refresh auth after install. */
   refreshAuth?: (authType: AuthType) => Promise<void>;
   /** Whether to call refreshAuth after install. Defaults to true. */
@@ -186,7 +216,7 @@ export async function applyProviderInstallPlan(
       );
       settings.setValue(
         `modelProviders.${patch.authType}`,
-        updatedModelProviders[patch.authType] ?? [],
+        updatedModelProviders[patch.authType],
       );
     }
 
@@ -210,6 +240,16 @@ export async function applyProviderInstallPlan(
     currentStep = 'modelSelection';
     if (plan.modelSelection?.modelId) {
       settings.setValue('model.name', plan.modelSelection.modelId);
+      if (plan.modelSelection.baseUrl) {
+        settings.setValue('model.baseUrl', plan.modelSelection.baseUrl);
+      } else {
+        // The plan selects by model id only, so clear any baseUrl disambiguator
+        // left by a previous model-picker selection — otherwise the next launch
+        // could resolve to a stale provider sharing this model id. Empty-string
+        // tombstone so the clear overrides a lower-scope value on merge (an
+        // undefined write is dropped from JSON and would not override).
+        settings.setValue('model.baseUrl', '');
+      }
     }
 
     // Provider state metadata
@@ -229,7 +269,11 @@ export async function applyProviderInstallPlan(
     reloadModelProviders?.(updatedModelProviders);
     if (plan.modelSelection?.modelId) {
       currentStep = 'syncAuthState';
-      syncAuthState?.(plan.authType, plan.modelSelection.modelId);
+      syncAuthState?.(
+        plan.authType,
+        plan.modelSelection.modelId,
+        plan.modelSelection.baseUrl,
+      );
     }
     if (doRefreshAuth && refreshAuth) {
       currentStep = 'refreshAuth';

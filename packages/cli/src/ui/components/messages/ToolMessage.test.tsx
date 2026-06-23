@@ -190,6 +190,42 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 
+  it('shows result for Error status in compact mode', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} status={ToolCallStatus.Error} />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
+  it('shows result for Executing status in compact mode', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
+  it('shows result for Pending status in compact mode', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} status={ToolCallStatus.Pending} />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
+  it('shows result when forceShowResult overrides compact collapse', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} forceShowResult />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
   describe('ToolStatusIndicator rendering', () => {
     it('shows ✓ for Success status', () => {
       const { lastFrame } = renderWithContext(
@@ -928,5 +964,46 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:# My Plan');
     expect(output).toContain('- Step 1');
     expect(output).toContain('- Step 2');
+  });
+});
+
+describe('<ToolMessage /> localized badge', () => {
+  const localizedProps: ToolMessageProps = {
+    callId: 'tool-i18n',
+    name: 'ReadFile',
+    description: '',
+    resultDisplay: '',
+    status: ToolCallStatus.Success,
+    contentWidth: 80,
+    confirmationDetails: undefined,
+    emphasis: 'medium',
+    config: {} as Config,
+  };
+
+  afterEach(async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('en');
+  });
+
+  it('shows the localized display name under the zh locale', async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('zh');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...localizedProps} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('读取文件');
+    expect(output).not.toContain('ReadFile');
+  });
+
+  it('keeps the English display name under the en locale', async () => {
+    const { setLanguageAsync } = await import('../../../i18n/index.js');
+    await setLanguageAsync('en');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...localizedProps} />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame() ?? '').toContain('ReadFile');
   });
 });

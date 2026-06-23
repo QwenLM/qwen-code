@@ -348,6 +348,14 @@ const EN: Messages = {
   'help.shortcut.compact': 'Toggle compact mode',
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
+  'branch.failed': 'Failed to branch session.',
+  'branch.success': (v) =>
+    `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
+  'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
+  'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
+  'fork.notStarted': 'Background agent was not launched.',
+  'fork.started': (v) =>
+    `Started background agent: "${v?.name ?? ''}". Track it in background tasks.`,
   'command.hidden': 'This command is not available.',
   'help.shortcut.approvals': 'Cycle approval modes',
   'help.shortcut.cancel': 'Close dialogs or cancel operation',
@@ -355,6 +363,7 @@ const EN: Messages = {
   'bug.popupBlocked': 'Popup blocked — please allow popups and try again.',
   'bug.submitted': 'Bug report opened in a new tab.',
   'clear.blocked': 'Cannot clear while streaming — cancel first (Esc).',
+  'error.unknown': 'Unknown error',
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
@@ -433,6 +442,8 @@ const EN: Messages = {
   'local.copy': 'Copy last output or snippet',
   'local.delete': 'Delete a session permanently',
   'local.release': 'Release a live session',
+  'local.branch': 'Copy the current conversation into a new session',
+  'local.fork': 'Start a background agent from this conversation',
   'local.help': 'Show help and commands',
   'local.language': 'Change UI language',
   'local.mcp': 'Manage MCP servers',
@@ -457,6 +468,84 @@ const EN: Messages = {
   'local.status': 'Show version info',
   'local.theme': 'Change theme',
   'local.settings': 'View and edit settings',
+  'local.extensions':
+    'Manage extensions. Usage: /extensions manage|install <source>',
+  'extensions.label': 'extension',
+  'extensions.action.failed': (v) =>
+    `Extension action failed${
+      v?.name ? ` for "${v.name}"` : v?.source ? ` from "${v.source}"` : ''
+    }: ${v?.error ?? 'Unknown error'}`,
+  'extensions.commands.refreshFailed': 'Failed to refresh extension commands.',
+  'extensions.install.failed': (v) =>
+    `Failed to install extension${
+      v?.source ? ` from "${v.source}"` : ''
+    }: ${v?.error ?? 'Unknown error'}`,
+  'extensions.manage.agents': 'Agents:',
+  'extensions.manage.checkingUpdates': 'Checking for updates...',
+  'extensions.manage.commands': 'Commands:',
+  'extensions.manage.contextFiles': 'Context files:',
+  'extensions.manage.count': (v) => `${v?.count ?? 0} extensions installed`,
+  'extensions.manage.detailsTitle': 'Extension Details',
+  'extensions.manage.disable': 'Disable Extension',
+  'extensions.manage.disabled': (v) =>
+    `Extension "${v?.name ?? 'extension'}" disabled.`,
+  'extensions.manage.empty': 'No extensions installed.',
+  'extensions.manage.enable': 'Enable Extension',
+  'extensions.manage.enabled': (v) =>
+    `Extension "${v?.name ?? 'extension'}" enabled.`,
+  'extensions.manage.footer.back': 'Esc to go back',
+  'extensions.manage.footer.confirm': 'Enter confirm · Esc cancel',
+  'extensions.manage.footer.list':
+    '↑↓ to navigate · Enter select · r refresh · Esc close',
+  'extensions.manage.footer.select': '↑↓ to navigate · Enter select · Esc back',
+  'extensions.manage.loading': 'Loading extensions...',
+  'extensions.manage.mcpServers': 'MCP servers:',
+  'extensions.manage.name': 'Name:',
+  'extensions.manage.notUpdatable': 'not updatable',
+  'extensions.manage.path': 'Path:',
+  'extensions.manage.queued': (v) =>
+    `Extension action queued for "${v?.name ?? 'extension'}".`,
+  'extensions.manage.refreshed': (v) =>
+    `Extensions refreshed in ${v?.refreshed ?? 0} session(s), ${v?.failed ?? 0} failed.`,
+  'extensions.manage.settings': 'Settings:',
+  'extensions.manage.skills': 'Skills:',
+  'extensions.manage.source': 'Source:',
+  'extensions.manage.status': 'Status:',
+  'extensions.manage.status.disabled': 'disabled',
+  'extensions.manage.status.enabled': 'enabled',
+  'extensions.manage.title': 'Manage Extensions',
+  'extensions.manage.unknownUpdate': 'unknown',
+  'extensions.manage.uninstalled': (v) =>
+    `Extension "${v?.name ?? 'extension'}" uninstalled.`,
+  'extensions.manage.uninstallAction': 'Uninstall Extension',
+  'extensions.manage.uninstallConfirm': (v) =>
+    `Uninstall extension "${v?.name ?? 'extension'}"?`,
+  'extensions.manage.upToDate': 'up to date',
+  'extensions.manage.update': 'Update Extension',
+  'extensions.manage.updateAvailable': 'update available',
+  'extensions.manage.updateError': 'update check failed',
+  'extensions.manage.updated': (v) =>
+    `Extension "${v?.name ?? 'extension'}" updated.`,
+  'extensions.manage.updatedWithVersion': (v) =>
+    `Extension "${v?.name ?? 'extension'}" updated to v${v?.version ?? ''}.`,
+  'extensions.manage.version': 'Version:',
+  'extensions.manage.viewDetails': 'View Details',
+  'extensions.install.installed': (v) =>
+    `Extension "${v?.name ?? 'extension'}" installed.`,
+  'extensions.install.installedWithVersion': (v) =>
+    `Extension "${v?.name ?? 'extension'}" v${v?.version ?? ''} installed.`,
+  'extensions.install.missingOptionValue': (v) =>
+    `Missing value for ${v?.option ?? 'option'}`,
+  'extensions.install.requestFailed': 'Failed to install extension',
+  'extensions.install.started': (v) =>
+    `Installing extension from "${v?.source ?? ''}"...`,
+  'extensions.install.unknownOption': (v) =>
+    `Unknown option ${v?.option ?? ''}`,
+  'extensions.install.usage': 'Usage: /extensions manage|install <source>',
+  'extensions.install.waitForSession':
+    'Wait for the session to connect before installing an extension.',
+  'extensions.install.waitForTurn':
+    'Wait for the current turn to finish before installing an extension.',
   'local.tools': 'List available tools. Usage: /tools [desc]',
   'loadWarning.commands':
     'Failed to load command list; slash commands may be incomplete.',
@@ -890,6 +979,50 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
+  // a wire name with no entry here falls back to the English display name via
+  // `localizeToolDisplayName`. Proper tool names / acronyms stay in English
+  // (Agent, Grep, Glob, LSP); a product name (e.g. `Notebook`) stays verbatim.
+  'toolName.edit': '编辑',
+  'toolName.write_file': '写入文件',
+  'toolName.read_file': '读取文件',
+  'toolName.grep_search': 'Grep',
+  'toolName.glob': 'Glob',
+  'toolName.run_shell_command': '运行命令',
+  'toolName.todo_write': '任务清单',
+  'toolName.save_memory': '保存记忆',
+  'toolName.agent': 'Agent',
+  'toolName.skill': '技能',
+  'toolName.enter_plan_mode': '进入计划模式',
+  'toolName.exit_plan_mode': '退出计划模式',
+  'toolName.web_fetch': '网络抓取',
+  'toolName.web_search': '网络搜索',
+  'toolName.list_directory': '列出文件',
+  'toolName.lsp': 'LSP',
+  'toolName.ask_user_question': '询问用户',
+  'toolName.cron_create': '创建定时任务',
+  'toolName.cron_list': '定时任务列表',
+  'toolName.cron_delete': '删除定时任务',
+  'toolName.task_create': '创建任务',
+  'toolName.task_update': '更新任务',
+  'toolName.task_list': '任务列表',
+  'toolName.task_stop': '停止任务',
+  'toolName.team_create': '创建团队',
+  'toolName.team_delete': '删除团队',
+  'toolName.send_message': '发送消息',
+  'toolName.structured_output': '结构化输出',
+  'toolName.monitor': '监控',
+  'toolName.notebook_edit': '编辑 Notebook',
+  'toolName.tool_search': '工具搜索',
+  'toolName.enter_worktree': '进入 Worktree',
+  'toolName.exit_worktree': '退出 Worktree',
+  'toolName.workflow': '工作流',
+  // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
+  'toolName.bash': '运行命令',
+  'toolName.shell': 'Shell 命令',
+  'toolName.read': '读取文件',
+  'toolName.write': '写入文件',
+  'toolName.search': 'Grep',
   'about.auth': '认证',
   'about.baseUrl': 'Base URL',
   'about.fastModel': '快速模型',
@@ -1198,6 +1331,14 @@ const ZH: Messages = {
   'help.shortcut.compact': '切换紧凑模式',
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
+  'branch.failed': '分支会话失败。',
+  'branch.success': (v) =>
+    `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
+  'fork.empty': '请提供任务指令。用法：/fork <指令>',
+  'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
+  'fork.notStarted': '后台智能体未启动。',
+  'fork.started': (v) =>
+    `已启动后台智能体："${v?.name ?? ''}"，可在后台任务中查看。`,
   'command.hidden': '该命令不可用。',
   'help.shortcut.approvals': '切换审批模式',
   'help.shortcut.cancel': '关闭弹窗或取消操作',
@@ -1205,6 +1346,7 @@ const ZH: Messages = {
   'bug.popupBlocked': '弹窗被拦截，请允许弹窗后重试。',
   'bug.submitted': 'Bug 报告已在新标签页中打开。',
   'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
+  'error.unknown': '未知错误',
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
@@ -1279,6 +1421,8 @@ const ZH: Messages = {
   'local.copy': '复制最后输出或代码片段',
   'local.delete': '永久删除会话',
   'local.release': '释放 live session',
+  'local.branch': '将当前对话复制到新会话',
+  'local.fork': '基于当前对话启动后台智能体',
   'local.help': '查看帮助和可用命令',
   'local.language': '切换 UI 语言',
   'local.mcp': '管理 MCP servers',
@@ -1303,6 +1447,75 @@ const ZH: Messages = {
   'local.status': '查看版本信息',
   'local.theme': '切换主题',
   'local.settings': '查看和编辑设置',
+  'local.extensions': '管理扩展。用法: /extensions manage|install <source>',
+  'extensions.label': '扩展',
+  'extensions.action.failed': (v) =>
+    `扩展操作失败${v?.name ? `（${v.name}）` : v?.source ? `（${v.source}）` : ''}：${
+      v?.error ?? '未知错误'
+    }`,
+  'extensions.commands.refreshFailed': '刷新扩展命令失败。',
+  'extensions.install.failed': (v) =>
+    `安装扩展失败${v?.source ? `（${v.source}）` : ''}：${
+      v?.error ?? '未知错误'
+    }`,
+  'extensions.manage.agents': '智能体：',
+  'extensions.manage.checkingUpdates': '正在检查更新...',
+  'extensions.manage.commands': '命令：',
+  'extensions.manage.contextFiles': '上下文文件：',
+  'extensions.manage.count': (v) => `已安装 ${v?.count ?? 0} 个扩展`,
+  'extensions.manage.detailsTitle': '扩展详情',
+  'extensions.manage.disable': '禁用扩展',
+  'extensions.manage.disabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已禁用。`,
+  'extensions.manage.empty': '未安装扩展。',
+  'extensions.manage.enable': '启用扩展',
+  'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
+  'extensions.manage.footer.back': 'Esc 返回',
+  'extensions.manage.footer.confirm': 'Enter 确认 · Esc 取消',
+  'extensions.manage.footer.list': '↑↓ 导航 · Enter 选择 · r 刷新 · Esc 关闭',
+  'extensions.manage.footer.select': '↑↓ 导航 · Enter 选择 · Esc 返回',
+  'extensions.manage.loading': '正在加载扩展...',
+  'extensions.manage.mcpServers': 'MCP servers：',
+  'extensions.manage.name': '名称：',
+  'extensions.manage.notUpdatable': '不可更新',
+  'extensions.manage.path': '路径：',
+  'extensions.manage.queued': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 的操作已提交。`,
+  'extensions.manage.refreshed': (v) =>
+    `已刷新 ${v?.refreshed ?? 0} 个 session，${v?.failed ?? 0} 个失败。`,
+  'extensions.manage.settings': '设置：',
+  'extensions.manage.skills': 'Skills：',
+  'extensions.manage.source': '来源：',
+  'extensions.manage.status': '状态：',
+  'extensions.manage.status.disabled': '已禁用',
+  'extensions.manage.status.enabled': '已启用',
+  'extensions.manage.title': '管理扩展',
+  'extensions.manage.unknownUpdate': '未知',
+  'extensions.manage.uninstalled': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 已卸载。`,
+  'extensions.manage.uninstallAction': '卸载扩展',
+  'extensions.manage.uninstallConfirm': (v) =>
+    `确定卸载扩展 "${v?.name ?? '扩展'}"？`,
+  'extensions.manage.upToDate': '已是最新',
+  'extensions.manage.update': '更新扩展',
+  'extensions.manage.updateAvailable': '有可用更新',
+  'extensions.manage.updateError': '检查更新失败',
+  'extensions.manage.updated': (v) => `扩展 "${v?.name ?? '扩展'}" 已更新。`,
+  'extensions.manage.updatedWithVersion': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 已更新到 v${v?.version ?? ''}。`,
+  'extensions.manage.version': '版本：',
+  'extensions.manage.viewDetails': '查看详情',
+  'extensions.install.installed': (v) => `扩展 "${v?.name ?? '扩展'}" 已安装。`,
+  'extensions.install.installedWithVersion': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" v${v?.version ?? ''} 已安装。`,
+  'extensions.install.missingOptionValue': (v) =>
+    `${v?.option ?? '选项'} 缺少值`,
+  'extensions.install.requestFailed': '安装扩展失败',
+  'extensions.install.started': (v) =>
+    `正在从 "${v?.source ?? ''}" 安装扩展...`,
+  'extensions.install.unknownOption': (v) => `未知选项 ${v?.option ?? ''}`,
+  'extensions.install.usage': '用法: /extensions manage|install <source>',
+  'extensions.install.waitForSession': '等待会话连接后再安装扩展。',
+  'extensions.install.waitForTurn': '等待当前回合结束后再安装扩展。',
   'local.tools': '列出可用工具。用法: /tools [desc]',
   'loadWarning.commands': '命令列表加载失败，斜杠命令可能不完整。',
   'loadWarning.context': '会话上下文加载失败，当前模式可能不准确。',

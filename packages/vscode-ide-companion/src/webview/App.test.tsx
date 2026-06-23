@@ -20,16 +20,16 @@ const {
   mockAddMessage,
   mockEndStreaming,
 } = vi.hoisted(() => ({
-    mockPostMessage: vi.fn(),
-    mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
-    mockCloseCompletion: vi.fn(),
-    mockMessageState: {
-      isStreaming: false,
-      isWaitingForResponse: false,
-    },
-    mockAddMessage: vi.fn(),
-    mockEndStreaming: vi.fn(),
-  }));
+  mockPostMessage: vi.fn(),
+  mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
+  mockCloseCompletion: vi.fn(),
+  mockMessageState: {
+    isStreaming: false,
+    isWaitingForResponse: false,
+  },
+  mockAddMessage: vi.fn(),
+  mockEndStreaming: vi.fn(),
+}));
 
 const slashSkillsItem: CompletionItem = {
   id: 'skills',
@@ -592,9 +592,7 @@ describe('App /skills secondary picker', () => {
 
     expect(blurSpy).toHaveBeenCalled();
     expect(input.getAttribute('data-empty')).toBe('false');
-    expect(getRenderedInputText(rendered.container)).toBe(
-      'draft after escape',
-    );
+    expect(getRenderedInputText(rendered.container)).toBe('draft after escape');
     expect(mockPostMessage).not.toHaveBeenCalledWith({
       type: 'cancelStreaming',
       data: {},

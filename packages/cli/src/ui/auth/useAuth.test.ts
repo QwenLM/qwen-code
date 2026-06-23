@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import {
-  AuthType,
+  Protocol,
   deepseekProvider,
   openRouterProvider,
   tokenPlanProvider,
@@ -58,7 +58,7 @@ const createConfig = () => {
     syncAfterAuthRefresh: vi.fn(),
   };
   return {
-    getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    getAuthType: vi.fn(() => Protocol.OPENAI),
     getUsageStatisticsEnabled: vi.fn(() => false),
     reloadModelProvidersConfig: vi.fn(),
     refreshAuth: vi.fn(async () => undefined),
@@ -126,7 +126,7 @@ describe('useAuthCommand', () => {
       'model.name',
       'deepseek-v4-flash',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(Protocol.OPENAI);
     expect(result.current.isAuthDialogOpen).toBe(false);
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -168,7 +168,7 @@ describe('useAuthCommand', () => {
       'model.name',
       'z-ai/glm-4.5-air:free',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(Protocol.OPENAI);
   });
 
   it('configures Token Plan with the independent Token Plan endpoint', async () => {
@@ -193,12 +193,12 @@ describe('useAuthCommand', () => {
       'env.BAILIAN_TOKEN_PLAN_API_KEY',
       'sk-token-plan',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(Protocol.OPENAI);
   });
 
   it('configures Custom API Key via the provider install plan flow', async () => {
     const envKey = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.example.com/v1',
     );
     const settings = createSettings();
@@ -211,7 +211,7 @@ describe('useAuthCommand', () => {
 
     await act(async () => {
       await result.current.handleProviderSubmit(customProvider, {
-        protocol: AuthType.USE_OPENAI,
+        protocol: Protocol.OPENAI,
         baseUrl: 'https://api.example.com/v1',
         apiKey: 'sk-custom',
         modelIds: ['custom-model'],
@@ -229,14 +229,14 @@ describe('useAuthCommand', () => {
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
       'security.auth.selectedType',
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
     );
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
       'model.name',
       'custom-model',
     );
-    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(config.refreshAuth).toHaveBeenCalledWith(Protocol.OPENAI);
   });
 
   it('cancelAuthentication resets dialog + flags + clears authError', async () => {
@@ -298,19 +298,19 @@ describe('useAuthCommand', () => {
     // silently dropped on failure. (We can't assert the telemetry sink
     // directly here, but the visible side effects above all depend on
     // handleAuthFailure having seen pendingAuthType.)
-    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
+    expect(result.current.pendingAuthType).toBe(Protocol.OPENAI);
   });
 });
 
 describe('generateCustomApiKeyEnvKey', () => {
   it('generates deterministic URL-based env key', () => {
     const key = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.openai.com/v1',
     );
     expect(key).toMatch(/^QWEN_CUSTOM_API_KEY_[A-Z0-9_]+$/);
     const key2 = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.openai.com/v1',
     );
     expect(key).toBe(key2);
@@ -318,11 +318,11 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('produces different keys for different protocols', () => {
     const key1 = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.example.com/v1',
     );
     const key2 = generateCustomApiKeyEnvKey(
-      AuthType.USE_ANTHROPIC,
+      Protocol.ANTHROPIC,
       'https://api.example.com/v1',
     );
     expect(key1).not.toBe(key2);
@@ -330,11 +330,11 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('produces different keys for different base URLs', () => {
     const key1 = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://api.openai.com/v1',
     );
     const key2 = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'http://localhost:11434/v1',
     );
     expect(key1).not.toBe(key2);
@@ -342,11 +342,11 @@ describe('generateCustomApiKeyEnvKey', () => {
 
   it('produces equal keys for URLs that differ only in trailing slash', () => {
     const key1 = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://openrouter.ai/api/v1/',
     );
     const key2 = generateCustomApiKeyEnvKey(
-      AuthType.USE_OPENAI,
+      Protocol.OPENAI,
       'https://openrouter.ai/api/v1',
     );
     expect(key1).toBe(key2);

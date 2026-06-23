@@ -101,6 +101,7 @@ Commands for managing AI tools and models.
 | `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena status`               |
 | `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`            |
 | `/tasks`         | List background tasks                         | `/tasks`                                      |
+| `/workflows`     | Inspect workflow runs                         | `/workflows`, `/workflows <runId>`            |
 | `/lsp`           | Show LSP server status                        | `/lsp`                                        |
 | `/trust`         | Manage folder trust settings                  | `/trust`                                      |
 

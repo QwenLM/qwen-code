@@ -18,6 +18,15 @@ vi.mock('os', async (importOriginal) => {
   };
 });
 
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof osActual>();
+  return {
+    ...actualOs,
+    homedir: vi.fn(() => '/mock/home/user'),
+    platform: vi.fn(() => 'linux'),
+  };
+});
+
 // Mock trustedFolders
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi
@@ -113,7 +122,7 @@ vi.mock('node:fs', async (importOriginal) => {
     copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
-    realpathSync: (p: string) => p,
+    realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
 
@@ -132,7 +141,7 @@ vi.mock('fs', async (importOriginal) => {
     copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
-    realpathSync: (p: string) => p,
+    realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
 
@@ -177,6 +186,9 @@ describe('Settings Loading and Merging', () => {
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}'); // Return valid empty JSON
+    (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
+      p.toString(),
+    );
     (mockFsMkdirSync as Mock).mockImplementation(() => undefined);
     vi.mocked(isWorkspaceTrusted).mockReturnValue({
       isTrusted: true,
@@ -198,6 +210,37 @@ describe('Settings Loading and Merging', () => {
       expect(settings.user.settings).toEqual({});
       expect(settings.workspace.settings).toEqual({});
       expect(settings.merged).toEqual({});
+    });
+
+    describe('home directory workspace scope', () => {
+      it('should mark workspace settings inactive when workspace is the home directory', () => {
+        const homeDir = '/mock/home/user';
+        vi.mocked(osActual.homedir).mockReturnValue(homeDir);
+        const homeSettingsPath = pathActual.join(
+          homeDir,
+          SETTINGS_DIRECTORY_NAME,
+          'settings.json',
+        );
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p.toString() === homeSettingsPath,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() =>
+          JSON.stringify({ ui: { theme: 'Default' } }),
+        );
+        (fs.realpathSync as Mock).mockImplementation(() => homeDir);
+
+        const settings = loadSettings(homeDir);
+
+        expect(settings.workspaceSettingsActive).toBe(false);
+        expect(settings.user.settings.ui).toEqual({ theme: 'Default' });
+        expect(settings.workspace.settings).toEqual({});
+      });
+
+      it('should keep workspace settings active outside the home directory', () => {
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.workspaceSettingsActive).toBe(true);
+      });
     });
 
     it('should load system settings if only system file exists', () => {
@@ -425,6 +468,9 @@ describe('Settings Loading and Merging', () => {
         },
         allowMCPServers: ['legacy-server-1'],
         someUnrecognizedSetting: 'should-be-preserved',
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
+        },
       };
 
       (fs.readFileSync as Mock).mockImplementation(
@@ -467,6 +513,12 @@ describe('Settings Loading and Merging', () => {
           allowed: ['legacy-server-1'],
         },
         someUnrecognizedSetting: 'should-be-preserved',
+        modelProviders: {
+          openai: {
+            protocol: 'openai',
+            models: [{ id: 'gpt-4o' }],
+          },
+        },
       });
     });
 
@@ -666,6 +718,9 @@ describe('Settings Loading and Merging', () => {
       const legacySettingsContent = {
         theme: 'dark',
         model: 'qwen-coder',
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
+        },
       };
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -771,6 +826,9 @@ describe('Settings Loading and Merging', () => {
           name: 'qwen-coder',
         },
         autoAccept: false, // V1 key
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
+        },
       };
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -882,6 +940,9 @@ describe('Settings Loading and Merging', () => {
         $version: 2,
         general: {
           enableAutoUpdate: true,
+        },
+        modelProviders: {
+          openai: [{ id: 'gpt-4o' }],
         },
       };
       (fs.readFileSync as Mock).mockImplementation(
@@ -1932,9 +1993,11 @@ describe('Settings Loading and Merging', () => {
       vi.restoreAllMocks();
     });
 
-    it('should recover from .orig backup when settings.json is corrupted', () => {
+    it('should ignore a stale .orig backup and reset to empty when settings.json is corrupted', () => {
+      // `.orig` is no longer used for recovery — writeWithBackupSync removes it
+      // on success, so any leftover is stale and must not be restored from.
       const invalidJsonContent = 'invalid json';
-      const validBackupContent = JSON.stringify({
+      const staleBackupContent = JSON.stringify({
         $version: SETTINGS_VERSION,
         model: { id: 'backup-model' },
       });
@@ -1944,7 +2007,7 @@ describe('Settings Loading and Merging', () => {
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH) return invalidJsonContent;
-          if (p === `${USER_SETTINGS_PATH}.orig`) return validBackupContent;
+          if (p === `${USER_SETTINGS_PATH}.orig`) return staleBackupContent;
           return '{}';
         },
       );
@@ -1952,16 +2015,21 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the backup was written back to the original path
+      // The stale backup must NOT be written back to the original path.
       const writeCalls = (fs.writeFileSync as Mock).mock.calls;
       const restoreWrite = writeCalls.find(
         (call: unknown[]) =>
-          call[0] === USER_SETTINGS_PATH && call[1] === validBackupContent,
+          call[0] === USER_SETTINGS_PATH && call[1] === staleBackupContent,
       );
-      expect(restoreWrite).toBeDefined();
+      expect(restoreWrite).toBeUndefined();
 
-      // Recovery is communicated via wasRecovered flag, not migrationWarnings
-      expect(result.wasRecovered).toBe(true);
+      // Settings are reset to empty and corruption is reported, not recovered.
+      expect(result.wasRecovered).toBe(false);
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      const resetWrites = writeCalls.filter(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      );
+      expect(resetWrites.length).toBeGreaterThan(0);
 
       vi.restoreAllMocks();
     });
@@ -4302,6 +4370,9 @@ describe('Settings Loading and Merging', () => {
         const settingsWithOldVersion = {
           [SETTINGS_VERSION_KEY]: SETTINGS_VERSION - 1,
           theme: 'dark',
+          modelProviders: {
+            openai: [{ id: 'gpt-4o' }],
+          },
         };
         expect(needsMigration(settingsWithOldVersion)).toBe(true);
       });

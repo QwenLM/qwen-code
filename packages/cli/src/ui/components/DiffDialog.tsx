@@ -235,7 +235,10 @@ export function DiffDialog({
   useKeypress(handleKeypress, { isActive: true });
 
   const { columns, rows } = useTerminalSize();
-  const dialogWidth = Math.min(columns - 4, 110);
+  // Cap to the app's main content area (AppContainer caps it at 100). The old
+  // 110 cap exceeded that container, so on wide terminals the dialog overflowed
+  // and its right border/edge was clipped off-screen.
+  const dialogWidth = Math.min(columns - 4, 100);
   const detailHeight = Math.max(8, rows - 12);
 
   const headerTitle =

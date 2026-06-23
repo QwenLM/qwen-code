@@ -25,7 +25,10 @@ const rootDir = join(__dirname, '..');
 // Bumped from 116KB to 118KB for the transport abstraction layer (~1.5KB).
 // Bumped from 118KB to 119KB for the mid-turn drain surface (enqueue methods +
 // `mid_turn_message_injected` event type/guard/registration, ~150 bytes).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 119 * 1024;
+// Bumped from 119KB to 122KB for the workspace extension management surface
+// (install/update/enable/disable/uninstall/refresh/check update endpoints).
+// Bumped from 122KB to 124KB for daemon fork-session APIs/events.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 124 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });

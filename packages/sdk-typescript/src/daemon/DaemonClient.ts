@@ -29,6 +29,7 @@ import type {
   DaemonSessionContextUsageStatus,
   BranchSessionRequest,
   DaemonBranchedSession,
+  DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
@@ -79,8 +80,15 @@ import type {
   DaemonToolToggleResult,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
+  ForkSessionRequest,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
+  ExtensionMutationResponse,
+  ExtensionInstallRequest,
+  ExtensionInstallResponse,
+  ExtensionScopeRequest,
+  ExtensionRefreshResponse,
+  ExtensionUpdateCheckResponse,
   DaemonWorkspaceHooksStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
@@ -562,6 +570,29 @@ export class DaemonClient {
     return new DaemonHttpError(res.status, body, `${label}: ${detail}`);
   }
 
+  private async jsonRequest<T>(
+    path: string,
+    label: string,
+    opts: { method?: string; body?: unknown; clientId?: string } = {},
+  ): Promise<T> {
+    const hasBody = opts.body !== undefined;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      {
+        ...(opts.method ? { method: opts.method } : {}),
+        headers: this.headers(
+          hasBody ? { 'Content-Type': 'application/json' } : {},
+          opts.clientId,
+        ),
+        ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, label);
+        return (await res.json()) as T;
+      },
+    );
+  }
+
   // -- Lifecycle / discovery ---------------------------------------------
 
   async health(): Promise<{ status: string }> {
@@ -662,14 +693,86 @@ export class DaemonClient {
   }
 
   async workspaceExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/extensions`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok)
-          throw await this.failOnError(res, 'GET /workspace/extensions');
-        return (await res.json()) as DaemonWorkspaceExtensionsStatus;
-      },
+    return await this.jsonRequest<DaemonWorkspaceExtensionsStatus>(
+      '/workspace/extensions',
+      'GET /workspace/extensions',
+    );
+  }
+
+  async installExtension(
+    params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    return await this.jsonRequest<ExtensionInstallResponse>(
+      '/workspace/extensions/install',
+      'POST /workspace/extensions/install',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async checkExtensionUpdates(
+    clientId?: string,
+  ): Promise<ExtensionUpdateCheckResponse> {
+    return await this.jsonRequest<ExtensionUpdateCheckResponse>(
+      '/workspace/extensions/check-updates',
+      'POST /workspace/extensions/check-updates',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async refreshExtensions(
+    clientId?: string,
+  ): Promise<ExtensionRefreshResponse> {
+    return await this.jsonRequest<ExtensionRefreshResponse>(
+      '/workspace/extensions/refresh',
+      'POST /workspace/extensions/refresh',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async enableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}/enable`,
+      'POST /workspace/extensions/:name/enable',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async disableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}/disable`,
+      'POST /workspace/extensions/:name/disable',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async updateExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}/update`,
+      'POST /workspace/extensions/:name/update',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async uninstallExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${encodeURIComponent(name)}`,
+      'DELETE /workspace/extensions/:name',
+      { method: 'DELETE', clientId },
     );
   }
 
@@ -1160,6 +1263,27 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/branch');
         }
         return (await res.json()) as DaemonBranchedSession;
+      },
+    );
+  }
+
+  async forkSession(
+    sessionId: string,
+    req: ForkSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonForkSessionResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/fork`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ directive: req.directive }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/fork');
+        }
+        return (await res.json()) as DaemonForkSessionResult;
       },
     );
   }

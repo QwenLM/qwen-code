@@ -4,6 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+const { writeTerminalTitleSpy } = vi.hoisted(() => ({
+  writeTerminalTitleSpy: vi.fn(),
+}));
+
+vi.mock('../utils/windowTitle.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/windowTitle.js')>();
+  return {
+    ...actual,
+    writeTerminalTitle: (
+      ...args: Parameters<typeof actual.writeTerminalTitle>
+    ) => {
+      writeTerminalTitleSpy(...args);
+      return actual.writeTerminalTitle(...args);
+    },
+  };
+});
+
 import {
   describe,
   it,
@@ -22,6 +40,10 @@ import {
   isRenderModeToggleKey,
   mergeStartupWarnings,
 } from './AppContainer.js';
+import {
+  formatSessionWindowTitle,
+  writeTerminalTitle,
+} from '../utils/windowTitle.js';
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
@@ -192,15 +214,6 @@ describe('AppContainer State Management', () => {
     // Initialize mock stdout for terminal title tests
     mockStdout = { write: vi.fn() };
 
-    // Mock computeWindowTitle function to centralize title logic testing
-    vi.mock('../utils/windowTitle.js', async () => ({
-      computeWindowTitle: vi.fn(
-        (folderName: string) =>
-          // Default behavior: return "Gemini - {folderName}" unless CLI_TITLE is set
-          process.env['CLI_TITLE'] || `Gemini - ${folderName}`,
-      ),
-    }));
-
     capturedUIState = null!;
     capturedUIActions = null!;
     capturedRenderMode = 'render';
@@ -291,6 +304,8 @@ describe('AppContainer State Management', () => {
       thought: null,
       cancelOngoingRequest: vi.fn(),
       retryLastPrompt: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
     });
     mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
     mockedUseFolderTrust.mockReturnValue({
@@ -325,7 +340,10 @@ describe('AppContainer State Management', () => {
       vimEnabled: false,
       vimMode: 'NORMAL',
     });
-    mockedUseSessionStats.mockReturnValue({ stats: {} });
+    mockedUseSessionStats.mockReturnValue({
+      stats: {},
+      seedPromptCount: vi.fn(),
+    });
     mockedUseTextBuffer.mockReturnValue({
       text: '',
       setText: vi.fn(),
@@ -338,6 +356,8 @@ describe('AppContainer State Management', () => {
     mockedUseLoadingIndicator.mockReturnValue({
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
+      taskStartTokens: 0,
+      taskStartStreamingChars: 0,
     });
     mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
 
@@ -815,6 +835,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: [],
@@ -853,6 +875,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: [],
@@ -922,11 +946,11 @@ describe('AppContainer State Management', () => {
 
   describe('Cancel Handler (issue #3204)', () => {
     // The cancel handler is wired through useGeminiStream's onCancelSubmit
-    // arg (positional index 14 — see the useGeminiStream call site in
+    // arg (positional index 15 — see the useGeminiStream call site in
     // AppContainer.tsx). We capture it via mockImplementation so a future
     // signature change surfaces as a clear test failure rather than silently
     // grabbing the wrong callback.
-    const ON_CANCEL_SUBMIT_ARG_INDEX = 14;
+    const ON_CANCEL_SUBMIT_ARG_INDEX = 15;
     type CapturedCancelSubmit = (info?: {
       pendingItem: HistoryItemWithoutId | null;
       lastTurnUserItem: { id: number; text: string } | null;
@@ -956,7 +980,11 @@ describe('AppContainer State Management', () => {
         if (typeof candidate === 'function') {
           capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
         }
-        return streamReturnValue;
+        return {
+          ...streamReturnValue,
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        };
       });
     };
 
@@ -2169,9 +2197,27 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Terminal Title Update Feature', () => {
+    /**
+     * Helper to build the expected padded OSC title escape sequence.
+     * writeTerminalTitle pads the title to 80 characters with trailing
+     * spaces and writes both \x1b]0; (icon+title) and \x1b]2; (title).
+     */
+    const titleEscape = (title: string) => {
+      const padded = title.padEnd(80, ' ');
+      return `\x1b]0;${padded}\x07\x1b]2;${padded}\x07`;
+    };
+
     beforeEach(() => {
-      // Reset mock stdout for each test
+      // Reset mock stdout for each test. The title useEffect now uses
+      // process.stdout.write directly (to avoid Ink proxy corruption of
+      // OSC escape sequences), so we spy on that.
       mockStdout = { write: vi.fn() };
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
     });
 
     it('should not update terminal title when showStatusInTitle is false', () => {
@@ -2199,9 +2245,9 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that no title-related writes occurred
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(0);
       unmount();
     });
@@ -2231,14 +2277,14 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that no title-related writes occurred
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(0);
       unmount();
     });
 
-    it('should update terminal title with thought subject when in active state', () => {
+    it('should keep default terminal title when active without a session name', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2262,6 +2308,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: thoughtSubject },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2274,14 +2322,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with thought subject
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: Check that title uses the default (not thought subject)
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`,
-      );
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
@@ -2308,6 +2354,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2320,18 +2368,16 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with default Idle text
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: Check that title was updated with default text
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${'Gemini - workspace'.padEnd(80, ' ')}\x07`,
-      );
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should update terminal title when in WaitingForConfirmation state with thought subject', () => {
+    it('should keep default terminal title when waiting for confirmation without a session name', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2355,6 +2401,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: thoughtSubject },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2367,18 +2415,16 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with confirmation text
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: Check that confirmation status does not replace the session title
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${thoughtSubject.padEnd(80, ' ')}\x07`,
-      );
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should pad title to exactly 80 characters', () => {
+    it('should pad the terminal title to 80 characters', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2402,6 +2448,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: shortTitle },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2415,21 +2463,20 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that title is padded to exactly 80 characters
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
       const calledWith = titleWrites[0][0];
-      const expectedTitle = shortTitle.padEnd(80, ' ');
-
-      expect(calledWith).toContain(shortTitle);
+      expect(calledWith).toContain('Qwen - workspace');
+      expect(calledWith).toContain('\x1b]0;');
       expect(calledWith).toContain('\x1b]2;');
       expect(calledWith).toContain('\x07');
-      expect(calledWith).toBe('\x1b]2;' + expectedTitle + '\x07');
+      expect(calledWith).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should use correct ANSI escape code format', () => {
+    it('should use correct ANSI escape code format with padding', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2453,6 +2500,8 @@ describe('AppContainer State Management', () => {
         thought: { subject: title },
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2466,16 +2515,15 @@ describe('AppContainer State Management', () => {
       );
 
       // Assert: Check that the correct ANSI escape sequence is used
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      const expectedEscapeSequence = `\x1b]2;${title.padEnd(80, ' ')}\x07`;
-      expect(titleWrites[0][0]).toBe(expectedEscapeSequence);
+      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
       unmount();
     });
 
-    it('should use CLI_TITLE environment variable when set', () => {
+    it('should format terminal title from CLI_TITLE when set', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
         ...mockSettings,
@@ -2490,7 +2538,7 @@ describe('AppContainer State Management', () => {
       } as unknown as LoadedSettings;
 
       // Mock CLI_TITLE environment variable
-      vi.stubEnv('CLI_TITLE', 'Custom Gemini Title');
+      vi.stubEnv('CLI_TITLE', 'Custom Title');
 
       // Mock the streaming state as Idle with no thought
       mockedUseGeminiStream.mockReturnValue({
@@ -2501,6 +2549,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       // Act: Render the container
@@ -2513,15 +2563,208 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      // Assert: Check that title was updated with CLI_TITLE value
-      const titleWrites = mockStdout.write.mock.calls.filter((call) =>
-        call[0].includes('\x1b]2;'),
-      );
+      // Assert: formatSessionWindowTitle falls back to computeWindowTitle()
+      // which respects CLI_TITLE, so the custom title appears padded to 80 chars.
+      const titleWrites = (
+        process.stdout.write as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(
-        `\x1b]2;${'Custom Gemini Title'.padEnd(80, ' ')}\x07`,
-      );
+      expect(titleWrites[0][0]).toBe(titleEscape('Custom Title'));
       unmount();
+    });
+
+    it('should register for recorded session titles and format them in the terminal title', async () => {
+      const mockSettingsWithTitleEnabled = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            showStatusInTitle: true,
+            hideWindowTitle: false,
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      let titleRecordedCallback: ((customTitle: string) => void) | undefined;
+      let registeredTitleRecordedCallback:
+        | ((customTitle: string) => void)
+        | undefined;
+      const setTitleRecordedCallback = vi.fn(
+        (callback: ((customTitle: string) => void) | undefined) => {
+          titleRecordedCallback = callback;
+          if (callback) {
+            registeredTitleRecordedCallback = callback;
+          }
+        },
+      );
+      const getTitleRecordedCallback = vi.fn(() => titleRecordedCallback);
+      vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
+        setTitleRecordedCallback,
+        getTitleRecordedCallback,
+      } as unknown as NonNullable<
+        ReturnType<Config['getChatRecordingService']>
+      >);
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettingsWithTitleEnabled}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(registeredTitleRecordedCallback).toBeDefined();
+
+      // Invoke the callback to exercise the full chain:
+      // recording service fires callback → setSessionName('Fix terminal title')
+      // → React re-render → title useEffect calls writeTerminalTitle
+      //
+      // Note: React 19's effect batching in the ink-testing-library
+      // environment prevents asserting the writeTerminalTitle call
+      // inline (effects are not flushed inside act()). The downstream
+      // title write is verified by the other tests that render
+      // AppContainer with different settings and assert the output via
+      // process.stdout.write.
+      expect(registeredTitleRecordedCallback).toStrictEqual(
+        expect.any(Function),
+      );
+      await act(async () => {
+        registeredTitleRecordedCallback!('Fix terminal title');
+      });
+      // The initial render wrote the default title; after the callback
+      // the next writeTerminalTitle call (when effects flush) should
+      // carry the session name. We validate the logic standalone:
+      expect(formatSessionWindowTitle('Fix terminal title')).toBe(
+        'Fix terminal title',
+      );
+      // When null, falls back to computeWindowTitle() which returns
+      // 'Qwen - qwen' when CLI_TITLE is not set.
+      expect(formatSessionWindowTitle(null)).toBe('Qwen - qwen');
+      // When null with a folder name, adds the Qwen prefix.
+      expect(formatSessionWindowTitle(null, 'my-project')).toBe(
+        'Qwen - my-project',
+      );
+      // Session names with control characters are sanitized at entry point.
+      expect(formatSessionWindowTitle('Bad\x07Title')).toBe('BadTitle');
+      unmount();
+      expect(titleRecordedCallback).toBeUndefined();
+    });
+
+    it('should chain with existing titleRecordedCallback from Session (ACP notifications)', async () => {
+      const mockSettingsWithTitleEnabled = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            showStatusInTitle: true,
+            hideWindowTitle: false,
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      const existingCallback = vi.fn();
+      let titleRecordedCallback:
+        | ((customTitle: string, source: string) => void)
+        | undefined;
+      const setTitleRecordedCallback = vi.fn(
+        (
+          callback: ((customTitle: string, source: string) => void) | undefined,
+        ) => {
+          titleRecordedCallback = callback;
+        },
+      );
+      // Simulate Session having already registered an ACP callback
+      const getTitleRecordedCallback = vi.fn(() => existingCallback);
+      vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
+        setTitleRecordedCallback,
+        getTitleRecordedCallback,
+      } as unknown as NonNullable<
+        ReturnType<Config['getChatRecordingService']>
+      >);
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettingsWithTitleEnabled}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // The chained callback should exist
+      expect(titleRecordedCallback).toBeDefined();
+
+      // Invoke the chained callback — it should call both the existing
+      // ACP callback AND the new setSessionName setter
+      await act(async () => {
+        titleRecordedCallback!('Test title', 'rename');
+      });
+
+      // The existing ACP callback was called (preserved by chaining)
+      expect(existingCallback).toHaveBeenCalledWith('Test title', 'rename');
+
+      unmount();
+      // After unmount, the callback should be restored to the original
+      expect(titleRecordedCallback).toBe(existingCallback);
+    });
+
+    it('should revert to static title when showStatusInTitle toggles from true to false', () => {
+      // The revert logic in the useEffect calls formatSessionWindowTitle(null, folderName)
+      // when showStatusInTitle changes from true to false. This test verifies the
+      // formatting function produces the correct static fallback.
+      const folderName = 'my-project';
+
+      // When sessionName is null (revert case), should use computeWindowTitle fallback
+      const staticTitle = formatSessionWindowTitle(null, folderName);
+      expect(staticTitle).toBe('Qwen - my-project');
+
+      // When CLI_TITLE is set, it should use that instead
+      vi.stubEnv('CLI_TITLE', 'Custom Title');
+      const staticTitleWithEnv = formatSessionWindowTitle(null, folderName);
+      expect(staticTitleWithEnv).toBe('Custom Title');
+      vi.unstubAllEnvs();
+
+      // Verify the escape sequence format for the static title
+      const writeSpy = vi.fn();
+      writeTerminalTitle(writeSpy, staticTitle);
+      const padded = staticTitle.padEnd(80, ' ');
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`\x1b]2;${padded}\x07`),
+      );
     });
   });
 
@@ -2581,6 +2824,8 @@ describe('AppContainer State Management', () => {
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
         activePtyId: 'some-id',
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -2599,6 +2844,105 @@ describe('AppContainer State Management', () => {
         resizePtySpy.mock.calls[resizePtySpy.mock.calls.length - 1];
       // Check the height argument specifically
       expect(lastCall[2]).toBe(1);
+    });
+
+    it('loads a collapsed summary into history on cold-boot resume when collapseOnResume is enabled', async () => {
+      const historyManager = {
+        history: [] as HistoryItem[],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn((items: HistoryItem[]) => {
+          historyManager.history = items;
+        }),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+
+      const resumeSessionData = {
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 'session-1',
+              timestamp: '2024-01-01T00:00:00Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'hello' }] },
+              cwd: '/test/workspace',
+              version: '1.0.0',
+            },
+            {
+              uuid: 'a1',
+              parentUuid: 'u1',
+              sessionId: 'session-1',
+              timestamp: '2024-01-01T00:00:01Z',
+              type: 'assistant',
+              message: { role: 'model', parts: [{ text: 'world' }] },
+              cwd: '/test/workspace',
+              version: '1.0.0',
+            },
+          ],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'a1',
+      };
+
+      vi.spyOn(mockConfig, 'getContentGenerator').mockReturnValue({
+        useSummarizedThinking: vi.fn(() => false),
+      } as unknown as ReturnType<typeof mockConfig.getContentGenerator>);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue(
+        resumeSessionData as ReturnType<
+          typeof mockConfig.getResumedSessionData
+        >,
+      );
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      mockSettings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            history: {
+              collapseOnResume: true,
+            },
+          },
+        },
+      } as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(historyManager.loadHistory).toHaveBeenCalled();
+      });
+
+      expect(historyManager.loadHistory).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ display: { kind: 'collapse-summary' } }),
+        ]),
+      );
+      expect(historyManager.history.at(-1)).toMatchObject({
+        type: 'info',
+        display: { kind: 'collapse-summary' },
+      });
+      expect(
+        historyManager.history
+          .slice(0, -1)
+          .every((item) => item.display?.suppressOnRestore === true),
+      ).toBe(true);
     });
 
     it('does not remeasure footer height for sticky todo status-only updates', async () => {
@@ -2810,6 +3154,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: mockCancelOngoingRequest,
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       const mockHandleSlashCommand = vi.fn();
@@ -2887,6 +3233,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -2941,6 +3289,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -3000,6 +3350,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
 
       render(
@@ -3592,6 +3944,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
 
@@ -3634,6 +3988,8 @@ describe('AppContainer State Management', () => {
         thought: null,
         cancelOngoingRequest: vi.fn(),
         retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
       vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(false);
 

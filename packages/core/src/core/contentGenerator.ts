@@ -29,7 +29,7 @@ import {
   StrictMissingCredentialsError,
   StrictMissingModelIdError,
 } from '../models/modelConfigErrors.js';
-import { PROVIDER_SOURCED_FIELDS } from '../models/modelsConfig.js';
+import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -52,12 +52,21 @@ export interface ContentGenerator {
   useSummarizedThinking(): boolean;
 }
 
-export enum AuthType {
-  USE_OPENAI = 'openai',
+export type AuthType = string;
+
+export const AuthType = {
+  USE_OPENAI: 'openai',
+  QWEN_OAUTH: 'qwen-oauth',
+  USE_GEMINI: 'gemini',
+  USE_VERTEX_AI: 'vertex-ai',
+  USE_ANTHROPIC: 'anthropic',
+} as const;
+
+export enum Protocol {
+  OPENAI = 'openai',
   QWEN_OAUTH = 'qwen-oauth',
-  USE_GEMINI = 'gemini',
-  USE_VERTEX_AI = 'vertex-ai',
-  USE_ANTHROPIC = 'anthropic',
+  GEMINI = 'gemini',
+  ANTHROPIC = 'anthropic',
 }
 
 /**
@@ -78,6 +87,7 @@ export type ContentGeneratorConfig = {
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
+  protocol?: Protocol;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
@@ -135,6 +145,12 @@ export type ContentGeneratorConfig = {
   // and safe for permissive providers); set false to restore the legacy
   // embed-in-tool-message behavior. See QwenLM/qwen-code#4876, #3616.
   splitToolMedia?: boolean;
+  // OpenAI Chat Completions accepts tool result content as either a plain
+  // string or an array of text content parts. Some older OpenAI-compatible
+  // tool templates only read the string form, so this opt-in serializes
+  // text-only tool results as strings while leaving the default spec-compliant
+  // content-part shape unchanged.
+  toolResultContentFormat?: 'parts' | 'string';
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic
@@ -339,20 +355,20 @@ export async function createContentGenerator(
     throw new Error(validation.errors.map((e) => e.message).join('\n'));
   }
 
-  const authType = generatorConfig.authType;
-  if (!authType) {
-    throw new Error('ContentGeneratorConfig must have an authType');
+  const protocol = generatorConfig.protocol;
+  if (!protocol) {
+    throw new Error('ContentGeneratorConfig must have a protocol');
   }
 
   let baseGenerator: ContentGenerator;
 
   try {
-    if (authType === AuthType.USE_OPENAI) {
+    if (protocol === Protocol.OPENAI) {
       const { createOpenAIContentGenerator } = await import(
         './openaiContentGenerator/index.js'
       );
       baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
-    } else if (authType === AuthType.QWEN_OAUTH) {
+    } else if (protocol === Protocol.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(
         '../qwen/qwenOAuth2.js'
       );
@@ -376,22 +392,19 @@ export async function createContentGenerator(
         }
         throw new Error(error instanceof Error ? error.message : String(error));
       }
-    } else if (authType === AuthType.USE_ANTHROPIC) {
+    } else if (protocol === Protocol.ANTHROPIC) {
       const { createAnthropicContentGenerator } = await import(
         './anthropicContentGenerator/index.js'
       );
       baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
-    } else if (
-      authType === AuthType.USE_GEMINI ||
-      authType === AuthType.USE_VERTEX_AI
-    ) {
+    } else if (protocol === Protocol.GEMINI) {
       const { createGeminiContentGenerator } = await import(
         './geminiContentGenerator/index.js'
       );
       baseGenerator = createGeminiContentGenerator(generatorConfig, config);
     } else {
       throw new Error(
-        `Error creating contentGenerator: Unsupported authType: ${authType}`,
+        `Error creating contentGenerator: Unknown protocol: ${protocol}`,
       );
     }
   } catch (error) {
@@ -399,7 +412,7 @@ export async function createContentGenerator(
     if (moduleNotFoundError) {
       throw new Error(
         `Qwen Code was updated in the background and needs to be restarted.\n` +
-          `Please exit and restart Qwen Code to use the '${authType}' provider.`,
+          `Please exit and restart Qwen Code to use the '${protocol}' provider.`,
         { cause: moduleNotFoundError },
       );
     }

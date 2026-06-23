@@ -160,10 +160,13 @@ function getInstalledOwnedModelIds(
   if (!protocol) return [];
   const mergedSettings = settings.merged as Record<string, unknown>;
   const modelProviders = mergedSettings['modelProviders'] as
-    | Record<string, ProviderModelConfig[]>
+    | Record<string, ProviderModelConfig[] | { models: ProviderModelConfig[] }>
     | undefined;
   if (!modelProviders) return [];
-  const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
+  const entry = modelProviders[protocol];
+  const allModels: ProviderModelConfig[] = Array.isArray(entry)
+    ? entry
+    : (entry?.models ?? []);
   const ownsFn = resolveOwnsModel(provider);
   if (!ownsFn) return allModels.map((m) => m.id);
   return allModels.filter(ownsFn).map((m) => m.id);
@@ -240,8 +243,10 @@ export function useProviderUpdates(
         await applyProviderInstallPlan(installPlan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
-          syncAuthState: (authType, modelId) =>
-            config.getModelsConfig().syncAfterAuthRefresh(authType, modelId),
+          syncAuthState: (authType, modelId, baseUrl) =>
+            config
+              .getModelsConfig()
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
           doRefreshAuth: false,
         });
