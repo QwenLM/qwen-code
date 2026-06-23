@@ -87,7 +87,11 @@ operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
 `GET /session/:id/context`, `GET /session/:id/supported-commands`, and
-`GET /session/:id/tasks`.
+`GET /session/:id/tasks`, and `GET /session/:id/lsp`.
+
+`GET /session/:id/lsp` returns structured per-session LSP status. Start the
+daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
+otherwise the route returns `enabled: false` with no servers.
 
 `GET /daemon/status` is the consolidated troubleshooting snapshot. The default
 `detail=summary` reads only in-memory daemon state (sessions, permissions,
