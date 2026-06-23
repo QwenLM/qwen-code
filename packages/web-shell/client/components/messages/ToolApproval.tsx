@@ -8,6 +8,7 @@ import styles from './ToolApproval.module.css';
 interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void;
+  variant?: 'inline' | 'floating';
 }
 
 export function parseTitle(title?: string): {
@@ -116,7 +117,11 @@ function getOptionI18nKey(
   return undefined;
 }
 
-export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
+export function ToolApproval({
+  request,
+  onConfirm,
+  variant = 'inline',
+}: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
     () => orderPermissionOptions(request.options),
@@ -216,7 +221,13 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const command = getCommandFromRawInput(request);
 
   return (
-    <div className={styles.approval}>
+    <div
+      className={
+        variant === 'floating'
+          ? `${styles.approval} ${styles.floating}`
+          : styles.approval
+      }
+    >
       <div className={styles.header}>
         <span className={styles.icon}>?</span>
         <span className={styles.name}>{toolName}</span>

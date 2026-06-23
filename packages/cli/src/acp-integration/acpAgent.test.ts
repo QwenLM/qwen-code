@@ -1061,6 +1061,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
+        getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -1371,6 +1372,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: vi
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+        getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -4779,7 +4781,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       cwd: '/tmp',
     });
 
-    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1);
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
+      rewindFiles: true,
+    });
     expect(response).toEqual({
       success: true,
       historyBeforeRewind: [{ role: 'user', parts: [{ text: 'before' }] }],
@@ -4787,6 +4791,39 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       apiTruncateIndex: 2,
       filesChanged: [],
       filesFailed: [],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession extension method can skip file rewind', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      rewindFiles: false,
+      cwd: '/tmp',
+    });
+
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
+      rewindFiles: false,
     });
 
     mockConnectionState.resolve();
