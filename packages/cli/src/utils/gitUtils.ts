@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import { ProxyAgent } from 'undici';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
@@ -14,6 +14,29 @@ interface GitCommandOptions {
   cwd?: string;
 }
 
+async function runGit(
+  args: string[],
+  opts: GitCommandOptions = {},
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    childProcess.execFile(
+      'git',
+      args,
+      {
+        encoding: 'utf-8',
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      },
+      (err, stdout) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(String(stdout ?? '').trim());
+      },
+    );
+  });
+}
+
 /**
  * Checks if a directory is within a git repository hosted on GitHub.
  * @returns true if the directory is in a git repository with a github.com remote, false otherwise
@@ -21,7 +44,7 @@ interface GitCommandOptions {
 export const isGitHubRepository = (opts: GitCommandOptions = {}): boolean => {
   try {
     const remotes = (
-      execSync('git remote -v', {
+      childProcess.execSync('git remote -v', {
         encoding: 'utf-8',
         ...(opts.cwd ? { cwd: opts.cwd } : {}),
       }) || ''
@@ -33,6 +56,22 @@ export const isGitHubRepository = (opts: GitCommandOptions = {}): boolean => {
     });
   } catch (_error) {
     // If any filesystem error occurs, assume not a git repo
+    debugLogger.debug(`Failed to get git remote:`, _error);
+    return false;
+  }
+};
+
+export const isGitHubRepositoryAsync = async (
+  opts: GitCommandOptions = {},
+): Promise<boolean> => {
+  try {
+    const remotes = await runGit(['remote', '-v'], opts);
+
+    return remotes.split('\n').some((line) => {
+      const remoteUrl = line.trim().split(/\s+/)[1];
+      return remoteUrl ? isGitHubRemoteUrl(remoteUrl) : false;
+    });
+  } catch (_error) {
     debugLogger.debug(`Failed to get git remote:`, _error);
     return false;
   }
@@ -60,11 +99,23 @@ function isGitHubRemoteUrl(remoteUrl: string): boolean {
  */
 export const getGitRepoRoot = (opts: GitCommandOptions = {}): string => {
   const gitRepoRoot = (
-    execSync('git rev-parse --show-toplevel', {
+    childProcess.execSync('git rev-parse --show-toplevel', {
       encoding: 'utf-8',
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
     }) || ''
   ).trim();
+
+  if (!gitRepoRoot) {
+    throw new Error(`Git repo returned empty value`);
+  }
+
+  return gitRepoRoot;
+};
+
+export const getGitRepoRootAsync = async (
+  opts: GitCommandOptions = {},
+): Promise<string> => {
+  const gitRepoRoot = await runGit(['rev-parse', '--show-toplevel'], opts);
 
   if (!gitRepoRoot) {
     throw new Error(`Git repo returned empty value`);
@@ -127,11 +178,31 @@ export function getGitHubRepoInfo(opts: GitCommandOptions = {}): {
   owner: string;
   repo: string;
 } {
-  const remoteUrl = execSync('git remote get-url origin', {
-    encoding: 'utf-8',
-    ...(opts.cwd ? { cwd: opts.cwd } : {}),
-  }).trim();
+  const remoteUrl = childProcess
+    .execSync('git remote get-url origin', {
+      encoding: 'utf-8',
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+    })
+    .trim();
 
+  return parseGitHubRepoInfo(remoteUrl);
+}
+
+export async function getGitHubRepoInfoAsync(
+  opts: GitCommandOptions = {},
+): Promise<{
+  owner: string;
+  repo: string;
+}> {
+  return parseGitHubRepoInfo(
+    await runGit(['remote', 'get-url', 'origin'], opts),
+  );
+}
+
+function parseGitHubRepoInfo(remoteUrl: string): {
+  owner: string;
+  repo: string;
+} {
   // Handle SCP-style SSH URLs (git@github.com:owner/repo.git)
   let urlToParse = remoteUrl;
   if (remoteUrl.startsWith('git@github.com:')) {

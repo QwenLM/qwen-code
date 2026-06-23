@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 
 interface CapturedRequest {
   url: string;
@@ -130,6 +131,41 @@ describe('DaemonClient voice helpers', () => {
     expect(calls[0]?.body).toBe(audio);
   });
 
+  it('uses the REST endpoint for binary voice audio when ACP transport is configured', async () => {
+    const response = {
+      v: 1,
+      text: 'hello',
+      model: 'qwen3-asr-flash',
+      transport: 'qwen-asr-chat',
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, response));
+    const acpTransport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: false,
+      connected: true,
+      fetch: vi.fn(async () => {
+        throw new Error('ACP transport cannot carry binary voice bodies');
+      }),
+      subscribeEvents: vi.fn(() => emptyAsyncEvents()),
+      dispose: vi.fn(),
+    };
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      fetch,
+      transport: acpTransport,
+    });
+
+    await expect(
+      client.transcribeWorkspaceVoice(new Uint8Array([1, 2, 3]), {
+        mimeType: 'audio/wav',
+      }),
+    ).resolves.toEqual(response);
+
+    expect(acpTransport.fetch).not.toHaveBeenCalled();
+    expect(calls[0]?.url).toBe('http://daemon/workspace/voice/transcribe');
+    expect(calls[0]?.method).toBe('POST');
+  });
+
   it('allows voice transcription to run longer than the client default timeout', async () => {
     const response = {
       v: 1,
@@ -161,3 +197,7 @@ describe('DaemonClient voice helpers', () => {
     ).resolves.toEqual(response);
   });
 });
+
+async function* emptyAsyncEvents() {
+  yield* [];
+}

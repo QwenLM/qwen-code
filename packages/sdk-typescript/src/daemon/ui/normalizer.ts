@@ -261,6 +261,9 @@ export function normalizeDaemonEvent(
     case 'settings_changed':
       return normalizeSettingsChanged(event, base);
 
+    case 'trust_change_requested':
+      return normalizeTrustChangeRequested(event, base);
+
     case 'workspace_initialized':
       return normalizeWorkspaceInitialized(event, base);
 
@@ -1209,6 +1212,30 @@ function normalizeWorkspaceInitialized(
     );
   }
   return [{ ...base, type: 'workspace.initialized', path, action }];
+}
+
+function normalizeTrustChangeRequested(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const workspaceCwd = getString(event.data, 'workspaceCwd');
+  const desiredState = getString(event.data, 'desiredState');
+  const reason = getString(event.data, 'reason');
+  if (
+    !workspaceCwd ||
+    (desiredState !== 'trusted' && desiredState !== 'untrusted')
+  ) {
+    return fallbackDebug(event, base, 'bad trust_change_requested payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.trust.change.requested',
+      workspaceCwd,
+      desiredState,
+      ...(reason !== undefined ? { reason } : {}),
+    },
+  ];
 }
 
 function normalizeGithubSetupCompleted(

@@ -1159,6 +1159,16 @@ export function createServeApp(
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
     });
 
+  let cachedVoiceTranscriptionAvailable: boolean | undefined;
+  const invalidateServeFeaturesCache = () => {
+    cachedVoiceTranscriptionAvailable = undefined;
+  };
+  const getCachedVoiceTranscriptionAvailable = () => {
+    cachedVoiceTranscriptionAvailable ??=
+      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+    return cachedVoiceTranscriptionAvailable;
+  };
+
   // Allow same-origin requests from the demo page. Browsers send an
   // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
   // below would reject them. This middleware strips `Origin` when it
@@ -1300,7 +1310,15 @@ export function createServeApp(
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
-      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+      publishWorkspaceEvent: (event) => {
+        if (
+          event.type === 'settings_changed' ||
+          event.type === 'settings_reloaded'
+        ) {
+          invalidateServeFeaturesCache();
+        }
+        bridge.publishWorkspaceEvent(event);
+      },
     });
   let extensionInstallQueue: Promise<unknown> = Promise.resolve();
   let extensionInstallQueueDepth = 0;
@@ -2060,8 +2078,7 @@ export function createServeApp(
         ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
         : {}),
       persistSettingAvailable: deps.persistSetting !== undefined,
-      voiceTranscriptionAvailable:
-        isWorkspaceVoiceTranscriptionAvailable(boundWorkspace),
+      voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
@@ -2742,6 +2759,7 @@ export function createServeApp(
     scope: string,
     clientId: string | undefined,
   ) => {
+    invalidateServeFeaturesCache();
     bridge.publishWorkspaceEvent({
       type: 'settings_changed',
       data: { key, value, scope },
@@ -4437,6 +4455,7 @@ export function createServeApp(
       try {
         const ctx = buildWorkspaceCtx(req, 'POST /workspace/reload', clientId);
         const result = await workspace.reload(ctx);
+        invalidateServeFeaturesCache();
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/reload' });

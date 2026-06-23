@@ -2218,6 +2218,24 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes trust_change_requested', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('trust_change_requested', {
+        workspaceCwd: '/w',
+        desiredState: 'untrusted',
+        reason: 'remote client request',
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.trust.change.requested',
+        workspaceCwd: '/w',
+        desiredState: 'untrusted',
+        reason: 'remote client request',
+      }),
+    ]);
+  });
+
   it('normalizes github_setup_completed', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('github_setup_completed', {

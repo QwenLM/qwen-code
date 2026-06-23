@@ -32,9 +32,23 @@ const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
 }));
 
+const setupGithubMocks = vi.hoisted(() => ({
+  setupGithub: vi.fn(),
+}));
+
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: stdioMocks.writeStderrLine,
 }));
+
+vi.mock('../../services/setup-github.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../../services/setup-github.js')
+  >('../../services/setup-github.js');
+  return {
+    ...actual,
+    setupGithub: setupGithubMocks.setupGithub,
+  };
+});
 
 /**
  * End-to-end transport test: boots a real Express server with the ACP
@@ -102,6 +116,7 @@ class FakeBridge {
   closeError: Error | undefined;
   killed: string[] = [];
   cancelled: string[] = [];
+  workspaceEvents: BridgeEvent[] = [];
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
@@ -305,7 +320,9 @@ class FakeBridge {
       originatorClientId: 'c',
     };
   }
-  publishWorkspaceEvent() {}
+  publishWorkspaceEvent(event: BridgeEvent) {
+    this.workspaceEvents.push(event);
+  }
   knownClientIds() {
     return new Set<string>();
   }
@@ -550,6 +567,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   beforeEach(async () => {
     stdioMocks.writeStderrLine.mockClear();
+    setupGithubMocks.setupGithub.mockReset();
+    setupGithubMocks.setupGithub.mockResolvedValue({
+      kind: 'github_setup',
+      workspaceCwd: '/ws',
+      gitRepoRoot: '/ws',
+      releaseTag: 'v1.2.3',
+      readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+      workflows: [],
+      gitignore: { path: '.gitignore', status: 'unchanged' },
+      warnings: [],
+    });
     bridge = new FakeBridge();
     const app = express();
     app.use(express.json());
@@ -700,6 +728,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/voice/set',
+    );
+  });
+
+  it('initialize advertises _qwen/workspace/setup-github', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/setup-github',
     );
   });
 
@@ -1845,6 +1885,43 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     });
     setSpy.mockRestore();
+  });
+
+  it('dispatches _qwen/workspace/setup-github', async () => {
+    await restartServer({ fsFactory: makeFileFsFactory({}) });
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 221,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    const frames = (await got) as Array<{ id: number; result?: unknown }>;
+
+    expect(frames[0]).toMatchObject({
+      id: 221,
+      result: {
+        kind: 'github_setup',
+        workspaceCwd: '/ws',
+        releaseTag: 'v1.2.3',
+      },
+    });
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: '/ws',
+        workspaceRoot: '/ws',
+        fileOps: expect.any(Object),
+      }),
+    );
+    expect(bridge.workspaceEvents).toContainEqual(
+      expect.objectContaining({
+        type: 'github_setup_completed',
+        data: expect.objectContaining({ releaseTag: 'v1.2.3' }),
+      }),
+    );
   });
 
   it('translateEvent: stream_error + client_evicted → _qwen/notify with kind', async () => {
@@ -3604,6 +3681,32 @@ describe('ACP WebSocket transport security', () => {
       id: 2,
       result: { enabled: false },
     });
+    expect(tiers).toEqual(['mutation']);
+    ws.close();
+  });
+
+  it('classifies _qwen/workspace/setup-github as a WS mutation method', async () => {
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+
     expect(tiers).toEqual(['mutation']);
     ws.close();
   });

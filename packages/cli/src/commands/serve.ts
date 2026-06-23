@@ -221,12 +221,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           "the agent's native `newSession()`). Stage 2 native in-process mode " +
           'is not yet implemented; this flag will become opt-in then.',
       })
-      .option('experimental-lsp', {
-        type: 'boolean',
-        default: false,
-        description:
-          'Forward the experimental LSP opt-in to spawned ACP children.',
-      })
       .option('mcp-client-budget', {
         type: 'number',
         description:

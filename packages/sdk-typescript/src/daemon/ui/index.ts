@@ -108,6 +108,7 @@ export type {
   DaemonUiWorkspaceAgentChangedEvent,
   DaemonUiWorkspaceToolToggledEvent,
   DaemonUiWorkspaceSettingsChangedEvent,
+  DaemonUiTrustChangeRequestedEvent,
   DaemonUiWorkspaceInitializedEvent,
   DaemonUiGithubSetupCompletedEvent,
   DaemonUiMcpBudgetWarningEvent,

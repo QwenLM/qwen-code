@@ -68,9 +68,9 @@ async function handleSetupGithub(
     const result = await setupGithub({
       cwd: deps.boundWorkspace,
       workspaceRoot: deps.boundWorkspace,
-      proxy: resolveProxy(deps.boundWorkspace),
+      proxy: resolveSetupGithubProxy(deps.boundWorkspace),
       abortSignal: requestAbortSignal(req, res),
-      fileOps: createRouteFileOps(factory, originatorClientId),
+      fileOps: createSetupGithubFileOps(factory, ROUTE, originatorClientId),
     });
     deps.bridge.publishWorkspaceEvent({
       type: 'github_setup_completed',
@@ -120,12 +120,13 @@ function validateClientId(
   return clientId;
 }
 
-function createRouteFileOps(
+export function createSetupGithubFileOps(
   factory: WorkspaceFileSystemFactory,
+  route: string,
   originatorClientId: string | undefined,
 ): SetupGithubFileOps {
   const fs = factory.forRequest({
-    route: ROUTE,
+    route,
     ...(originatorClientId ? { originatorClientId } : {}),
   });
   return {
@@ -250,7 +251,7 @@ async function assertDirectoryWithoutSymlink(
   }
 }
 
-function sanitizeSetupGithubMessage(
+export function sanitizeSetupGithubMessage(
   message: string,
   boundWorkspace: string,
 ): string {
@@ -281,7 +282,7 @@ function sendSetupGithubError(
   });
 }
 
-function setupGithubEventData(
+export function setupGithubEventData(
   result: SetupGithubResult,
 ): Record<string, unknown> {
   return {
@@ -294,7 +295,9 @@ function setupGithubEventData(
   };
 }
 
-function resolveProxy(boundWorkspace: string): string | undefined {
+export function resolveSetupGithubProxy(
+  boundWorkspace: string,
+): string | undefined {
   const settingsProxy = loadSettings(boundWorkspace).merged.proxy;
   return (
     settingsProxy ||

@@ -25,9 +25,12 @@ global.fetch = vi.fn();
 
 vi.mock('../../utils/gitUtils.js', () => ({
   isGitHubRepository: vi.fn(),
+  isGitHubRepositoryAsync: vi.fn(),
   getGitRepoRoot: vi.fn(),
+  getGitRepoRootAsync: vi.fn(),
   getLatestGitHubRelease: vi.fn(),
   getGitHubRepoInfo: vi.fn(),
+  getGitHubRepoInfoAsync: vi.fn(),
 }));
 
 vi.mock('../utils/commandUtils.js', () => ({
@@ -66,12 +69,12 @@ describe('setupGithubCommand', async () => {
       );
     }
 
-    vi.mocked(gitUtils.isGitHubRepository).mockReturnValueOnce(true);
-    vi.mocked(gitUtils.getGitRepoRoot).mockReturnValueOnce(fakeRepoRoot);
+    vi.mocked(gitUtils.isGitHubRepositoryAsync).mockResolvedValueOnce(true);
+    vi.mocked(gitUtils.getGitRepoRootAsync).mockResolvedValueOnce(fakeRepoRoot);
     vi.mocked(gitUtils.getLatestGitHubRelease).mockResolvedValueOnce(
       fakeReleaseVersion,
     );
-    vi.mocked(gitUtils.getGitHubRepoInfo).mockReturnValue({
+    vi.mocked(gitUtils.getGitHubRepoInfoAsync).mockResolvedValue({
       owner: fakeRepoOwner,
       repo: fakeRepoName,
     });

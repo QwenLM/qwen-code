@@ -465,6 +465,7 @@ export class DaemonClient {
     init: RequestInit = {},
     consume?: (res: Response) => Promise<T>,
     perCallTimeoutMs?: number,
+    mode: 'transport' | 'rest' = 'transport',
   ): Promise<T> {
     // When `consume` is provided, the timer must remain
     // armed through the entire callback (body read + parse). The
@@ -497,7 +498,10 @@ export class DaemonClient {
       effectiveTimeoutMs = perCallTimeoutMs;
     }
     if (!effectiveTimeoutMs || !Number.isFinite(effectiveTimeoutMs)) {
-      const res = await this.transport.fetch(url, init);
+      const res =
+        mode === 'rest'
+          ? await this._fetch(url, init)
+          : await this.transport.fetch(url, init);
       if (consume) return consume(res);
       return res as unknown as T;
     }
@@ -522,7 +526,10 @@ export class DaemonClient {
       ? composeAbortSignals([callerSignal, ctrl.signal])
       : ctrl.signal;
     try {
-      const res = await this.transport.fetch(url, { ...init, signal });
+      const res =
+        mode === 'rest'
+          ? await this._fetch(url, { ...init, signal })
+          : await this.transport.fetch(url, { ...init, signal });
       if (consume) return await consume(res);
       return res as unknown as T;
     } finally {
@@ -1854,6 +1861,7 @@ export class DaemonClient {
         return (await res.json()) as DaemonWorkspaceVoiceTranscriptionResult;
       },
       VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
+      'rest',
     );
   }
 

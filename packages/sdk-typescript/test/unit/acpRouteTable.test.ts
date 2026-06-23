@@ -387,6 +387,16 @@ describe('acpRouteTable – matchRoute', () => {
     );
   });
 
+  it('POST /workspace/setup-github maps to _qwen/workspace/setup-github', () => {
+    const body = { consent: true };
+    const result = matchRoute('/workspace/setup-github', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/setup-github');
+    expect(result!.mapping.extractParams(result!.segments, body, 'POST')).toBe(
+      body,
+    );
+  });
+
   it('GET /workspace/tools maps to _qwen/workspace/tools', () => {
     const result = matchRoute('/workspace/tools', 'GET');
     expect(result).not.toBeNull();

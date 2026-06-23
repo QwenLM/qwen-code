@@ -1174,7 +1174,7 @@ export interface DaemonWorkspaceTrustChangeRequest {
 }
 
 export interface DaemonWorkspaceTrustChangeResult {
-  accepted: true;
+  accepted: boolean;
   desiredState: DaemonWorkspaceTrustDesiredState;
   requiresOperatorAction: true;
 }

@@ -416,6 +416,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (_s, body) => (isRecord(body) ? body : {}),
     },
   },
+  // POST /workspace/setup-github → _qwen/workspace/setup-github
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/setup-github\/?$/,
+    mapping: {
+      method: '_qwen/workspace/setup-github',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
   // GET /workspace/tools → _qwen/workspace/tools
   {
     httpMethod: 'GET',

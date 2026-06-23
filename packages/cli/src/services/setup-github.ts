@@ -9,10 +9,10 @@ import * as path from 'node:path';
 import { ProxyAgent } from 'undici';
 
 import {
-  getGitHubRepoInfo,
-  getGitRepoRoot,
+  getGitHubRepoInfoAsync,
+  getGitRepoRootAsync,
   getLatestGitHubRelease,
-  isGitHubRepository,
+  isGitHubRepositoryAsync,
 } from '../utils/gitUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -149,7 +149,7 @@ export async function setupGithub(
   const cwd = options.cwd ?? process.cwd();
   const fileOps = options.fileOps ?? nodeFileOps;
 
-  if (!isGitHubRepository({ cwd })) {
+  if (!(await isGitHubRepositoryAsync({ cwd }))) {
     throw new SetupGithubError(
       'github_repository_not_found',
       'Unable to determine the GitHub repository. /setup-github must be run from a git repository.',
@@ -159,7 +159,7 @@ export async function setupGithub(
 
   let gitRepoRoot: string;
   try {
-    gitRepoRoot = getGitRepoRoot({ cwd });
+    gitRepoRoot = await getGitRepoRootAsync({ cwd });
   } catch (error) {
     debugLogger.debug('Failed to get git repo root:', error);
     throw new SetupGithubError(
@@ -204,7 +204,7 @@ export async function setupGithub(
   }
 
   const readmeUrl = `https://github.com/QwenLM/qwen-code-action/blob/${releaseTag}/README.md#quick-start`;
-  const secretsUrl = resolveSecretsUrl(cwd);
+  const secretsUrl = await resolveSecretsUrl(cwd);
   const downloads = await downloadWorkflows({
     releaseTag,
     proxy: options.proxy,
@@ -368,9 +368,9 @@ async function downloadWorkflows(options: {
   }
 }
 
-function resolveSecretsUrl(cwd: string): string | undefined {
+async function resolveSecretsUrl(cwd: string): Promise<string | undefined> {
   try {
-    const repoInfo = getGitHubRepoInfo({ cwd });
+    const repoInfo = await getGitHubRepoInfoAsync({ cwd });
     return `https://github.com/${repoInfo.owner}/${repoInfo.repo}/settings/secrets/actions`;
   } catch {
     return undefined;

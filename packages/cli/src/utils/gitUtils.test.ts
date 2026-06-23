@@ -8,12 +8,31 @@ import { vi, describe, expect, it, afterEach, beforeEach } from 'vitest';
 import * as child_process from 'node:child_process';
 import {
   isGitHubRepository,
+  isGitHubRepositoryAsync,
   getGitRepoRoot,
+  getGitRepoRootAsync,
   getLatestGitHubRelease,
   getGitHubRepoInfo,
+  getGitHubRepoInfoAsync,
 } from './gitUtils.js';
 
-vi.mock('child_process');
+vi.mock('node:child_process');
+
+function mockExecFileStdout(stdout: string): void {
+  vi.mocked(child_process.execFile).mockImplementation(((
+    _cmd,
+    _args,
+    _opts,
+    cb,
+  ) => {
+    (cb as (err: Error | null, stdout: string, stderr: string) => void)(
+      null,
+      stdout,
+      '',
+    );
+    return {} as ReturnType<typeof child_process.execFile>;
+  }) as typeof child_process.execFile);
+}
 
 describe('isGitHubRepository', async () => {
   beforeEach(() => {
@@ -93,6 +112,23 @@ describe('isGitHubRepository', async () => {
       origin  git@github.com.evil:owner/repo.git (push)
     `);
     expect(isGitHubRepository()).toBe(false);
+  });
+});
+
+describe('isGitHubRepositoryAsync', async () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns true for GitHub remotes without blocking execSync', async () => {
+    mockExecFileStdout('origin  https://github.com/owner/repo.git (fetch)\n');
+
+    await expect(isGitHubRepositoryAsync()).resolves.toBe(true);
+    expect(child_process.execSync).not.toHaveBeenCalled();
   });
 });
 
@@ -235,6 +271,26 @@ describe('getGitHubRepoInfo', async () => {
   });
 });
 
+describe('getGitHubRepoInfoAsync', async () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns the owner and repo without blocking execSync', async () => {
+    mockExecFileStdout('git@github.com:owner/repo.git\n');
+
+    await expect(getGitHubRepoInfoAsync()).resolves.toEqual({
+      owner: 'owner',
+      repo: 'repo',
+    });
+    expect(child_process.execSync).not.toHaveBeenCalled();
+  });
+});
+
 describe('getGitRepoRoot', async () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -263,6 +319,23 @@ describe('getGitRepoRoot', async () => {
   it('returns the root', async () => {
     vi.mocked(child_process.execSync).mockReturnValueOnce('/path/to/git/repo');
     expect(getGitRepoRoot()).toBe('/path/to/git/repo');
+  });
+});
+
+describe('getGitRepoRootAsync', async () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns the root without blocking execSync', async () => {
+    mockExecFileStdout('/path/to/git/repo\n');
+
+    await expect(getGitRepoRootAsync()).resolves.toBe('/path/to/git/repo');
+    expect(child_process.execSync).not.toHaveBeenCalled();
   });
 });
 

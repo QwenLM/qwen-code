@@ -124,6 +124,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.key} changed (scope: ${event.scope})`,
         '36',
       );
+    case 'workspace.trust.change.requested':
+      return terminalLine(
+        'trust',
+        `${event.desiredState} ${event.workspaceCwd}`,
+        '33',
+      );
     case 'workspace.initialized':
       return terminalLine(
         'workspace',

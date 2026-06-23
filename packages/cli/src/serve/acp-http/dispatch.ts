@@ -41,6 +41,13 @@ import {
   PermissionRulesValidationError,
 } from '../../config/permission-settings.js';
 import { WorkspaceVoiceError } from '../../services/voice-service.js';
+import { SetupGithubError, setupGithub } from '../../services/setup-github.js';
+import {
+  createSetupGithubFileOps,
+  resolveSetupGithubProxy,
+  sanitizeSetupGithubMessage,
+  setupGithubEventData,
+} from '../routes/workspace-setup-github.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_LANGUAGE_LENGTH,
@@ -104,6 +111,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/permissions/set`,
   `${QWEN_METHOD_NS}workspace/voice`,
   `${QWEN_METHOD_NS}workspace/voice/set`,
+  `${QWEN_METHOD_NS}workspace/setup-github`,
   `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
   // Wave 1: session extensions
@@ -1460,6 +1468,61 @@ export class AcpDispatcher {
             update,
           );
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/setup-github`: {
+          if (params['consent'] !== true) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`consent` must be true', {
+                  errorKind: 'github_setup_consent_required',
+                }),
+              );
+            }
+            return;
+          }
+          if (!this.fsFactory) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured', {
+                  errorKind: 'internal_error',
+                }),
+              );
+            }
+            return;
+          }
+          try {
+            const result = await setupGithub({
+              cwd: this.boundWorkspace,
+              workspaceRoot: this.boundWorkspace,
+              proxy: resolveSetupGithubProxy(this.boundWorkspace),
+              fileOps: createSetupGithubFileOps(
+                this.fsFactory,
+                `ACP ${method}`,
+                conn.clientId,
+              ),
+            });
+            this.bridge.publishWorkspaceEvent({
+              type: 'github_setup_completed',
+              data: setupGithubEventData(result),
+              ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+            } as BridgeEvent);
+            this.replyConn(conn, id, result as unknown);
+          } catch (err) {
+            if (err instanceof SetupGithubError && id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  err.status >= 500 ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
+                  sanitizeSetupGithubMessage(err.message, this.boundWorkspace),
+                  { errorKind: err.code },
+                ),
+              );
+              return;
+            }
+            throw err;
+          }
           return;
         }
 

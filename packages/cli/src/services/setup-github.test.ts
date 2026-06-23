@@ -22,9 +22,12 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/gitUtils.js', () => ({
   isGitHubRepository: vi.fn(),
+  isGitHubRepositoryAsync: vi.fn(),
   getGitRepoRoot: vi.fn(),
+  getGitRepoRootAsync: vi.fn(),
   getLatestGitHubRelease: vi.fn(),
   getGitHubRepoInfo: vi.fn(),
+  getGitHubRepoInfoAsync: vi.fn(),
 }));
 
 vi.mock('undici', () => ({
@@ -49,9 +52,15 @@ describe('setupGithub service', () => {
       path.join(os.tmpdir(), 'setup-github-service-'),
     );
     vi.mocked(gitUtils.isGitHubRepository).mockReturnValue(true);
+    vi.mocked(gitUtils.isGitHubRepositoryAsync).mockResolvedValue(true);
     vi.mocked(gitUtils.getGitRepoRoot).mockReturnValue(scratchDir);
+    vi.mocked(gitUtils.getGitRepoRootAsync).mockResolvedValue(scratchDir);
     vi.mocked(gitUtils.getLatestGitHubRelease).mockResolvedValue('v1.2.3');
     vi.mocked(gitUtils.getGitHubRepoInfo).mockReturnValue({
+      owner: 'owner',
+      repo: 'repo',
+    });
+    vi.mocked(gitUtils.getGitHubRepoInfoAsync).mockResolvedValue({
       owner: 'owner',
       repo: 'repo',
     });
@@ -241,7 +250,7 @@ describe('setupGithub service', () => {
   });
 
   it('wraps setup failures with SetupGithubError', async () => {
-    vi.mocked(gitUtils.isGitHubRepository).mockReturnValue(false);
+    vi.mocked(gitUtils.isGitHubRepositoryAsync).mockResolvedValue(false);
 
     await expect(
       setupGithub({
