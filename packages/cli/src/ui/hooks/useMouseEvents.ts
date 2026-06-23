@@ -3,10 +3,9 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  *
- * Inspired by gemini-cli's MouseContext (Google LLC, Apache-2.0) but
- * collapsed for our single-consumer case: enable SGR mouse mode on
- * mount, parse mouse sequences out of the KeypressContext pipeline,
- * call the handler, restore on unmount.
+ * Inspired by gemini-cli's MouseContext (Google LLC, Apache-2.0): enable SGR
+ * mouse mode while at least one subscriber is active, parse mouse sequences
+ * out of the KeypressContext pipeline, call each handler, restore on cleanup.
  */
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -19,6 +18,47 @@ import {
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 
 export type MouseHandler = (event: MouseEvent) => void;
+
+type MouseModeEntry = {
+  refs: number;
+};
+
+const mouseModeRefs = new Map<NodeJS.WriteStream, MouseModeEntry>();
+
+const disableAllMouseModes = () => {
+  for (const stdout of mouseModeRefs.keys()) {
+    disableMouseEvents(stdout);
+  }
+  mouseModeRefs.clear();
+};
+
+function acquireMouseMode(stdout: NodeJS.WriteStream): void {
+  const entry = mouseModeRefs.get(stdout);
+  if (entry) {
+    entry.refs += 1;
+    return;
+  }
+
+  enableMouseEvents(stdout);
+  if (mouseModeRefs.size === 0) {
+    process.on('exit', disableAllMouseModes);
+  }
+  mouseModeRefs.set(stdout, { refs: 1 });
+}
+
+function releaseMouseMode(stdout: NodeJS.WriteStream): void {
+  const entry = mouseModeRefs.get(stdout);
+  if (!entry) return;
+
+  entry.refs -= 1;
+  if (entry.refs <= 0) {
+    mouseModeRefs.delete(stdout);
+    disableMouseEvents(stdout);
+    if (mouseModeRefs.size === 0) {
+      process.removeListener('exit', disableAllMouseModes);
+    }
+  }
+}
 
 /**
  * Subscribes to SGR mouse events while `isActive` is true.
@@ -54,16 +94,10 @@ export function useMouseEvents(
   useEffect(() => {
     if (!enabled) return;
 
-    enableMouseEvents(stdout);
-
-    const onExit = () => {
-      disableMouseEvents(stdout);
-    };
-    process.on('exit', onExit);
+    acquireMouseMode(stdout);
 
     return () => {
-      process.removeListener('exit', onExit);
-      disableMouseEvents(stdout);
+      releaseMouseMode(stdout);
     };
   }, [enabled, stdout]);
 
