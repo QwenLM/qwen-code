@@ -25,8 +25,10 @@ describe('qwen resolve workflow', () => {
     ).toBe(false);
     expect(workflow).toContain('issue_comment:');
     expect(workflow).toContain("github.event.inputs.command == 'resolve'");
-    expect(workflow).toContain('needs.authorize-resolve.outputs.should_run');
-    expect(workflow).not.toContain('needs.authorize.outputs.should_run');
+    expect(workflow).toContain("startsWith(github.event.comment.body, '@qwen-code /resolve')");
+    expect(workflow).toContain('needs.authorize.outputs.should_review');
+    expect(workflow).not.toContain('authorize-resolve:');
+    expect(workflow).toContain("github.event.comment.body == '@qwen-code /resolve'");
   });
 
   it('listens for /resolve comments', () => {
