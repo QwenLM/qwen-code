@@ -266,6 +266,25 @@ export function useVoiceCapture(
 
         ws.onopen = () => {
           if (isStale()) {
+            processor.onaudioprocess = null;
+            for (const node of [processor, source, sink]) {
+              try {
+                node.disconnect();
+              } catch {
+                /* ignore */
+              }
+            }
+            stream.getTracks().forEach((track) => track.stop());
+            if (context.state !== 'closed') {
+              void context.close().catch(() => {});
+            }
+            const res = resourcesRef.current;
+            if (res.ws === ws) res.ws = undefined;
+            if (res.processor === processor) res.processor = undefined;
+            if (res.source === source) res.source = undefined;
+            if (res.sink === sink) res.sink = undefined;
+            if (res.stream === stream) res.stream = undefined;
+            if (res.context === context) res.context = undefined;
             try {
               ws.close();
             } catch {

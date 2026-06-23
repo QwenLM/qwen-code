@@ -216,6 +216,11 @@ describe('createVoiceWsConnectionHandler', () => {
 
   it('lets abort preempt a pending streaming start', async () => {
     const sessionReady = deferred<VoiceStreamSession>();
+    const session: VoiceStreamSession = {
+      pushAudio: vi.fn(),
+      finish: vi.fn(async () => ''),
+      abort: vi.fn(),
+    };
     const ws = new FakeWs();
     const handler = createVoiceWsConnectionHandler('/ws', {
       loadContext: () => streamingCtx(),
@@ -227,8 +232,11 @@ describe('createVoiceWsConnectionHandler', () => {
     await tick();
     ws.text({ type: 'abort' });
     await tick();
+    sessionReady.resolve(session);
+    await tick();
 
     expect(ws.closeCode).toBe(1000);
+    expect(session.abort).toHaveBeenCalledOnce();
   });
 
   it('aborts a streaming session that resolves after the socket closed', async () => {
