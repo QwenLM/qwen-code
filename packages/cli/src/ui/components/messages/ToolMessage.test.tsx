@@ -312,6 +312,24 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('diff results are not collapsed for completed tools (bypass shouldCollapseResult)', () => {
+    const diffResult = {
+      fileDiff: '--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new',
+      fileName: 'file.txt',
+      originalContent: 'old',
+      newContent: 'new',
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        resultDisplay={diffResult}
+        status={ToolCallStatus.Success}
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
+  });
+
   it('renders a saved-session preview notice for truncated diff results', () => {
     const diffResult = {
       fileDiff: '--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-omitted\n+preview',

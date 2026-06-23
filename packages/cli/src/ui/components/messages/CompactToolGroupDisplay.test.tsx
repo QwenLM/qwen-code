@@ -10,6 +10,7 @@ import { Text } from 'ink';
 import {
   CompactToolGroupDisplay,
   buildToolSummary,
+  isCollapsibleTool,
 } from './CompactToolGroupDisplay.js';
 import { ToolCallStatus } from '../../types.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
@@ -217,5 +218,31 @@ describe('buildToolSummary', () => {
       make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
     ];
     expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran 1 command');
+  });
+});
+
+describe('isCollapsibleTool', () => {
+  it('returns true for read/search/list tools', () => {
+    expect(isCollapsibleTool('ReadFile')).toBe(true);
+    expect(isCollapsibleTool('Grep')).toBe(true);
+    expect(isCollapsibleTool('Glob')).toBe(true);
+    expect(isCollapsibleTool('ListFiles')).toBe(true);
+    expect(isCollapsibleTool('Read File')).toBe(true);
+    expect(isCollapsibleTool('Read File(s)')).toBe(true);
+    expect(isCollapsibleTool('Read Directory')).toBe(true);
+  });
+
+  it('returns false for mutation/command/agent tools', () => {
+    expect(isCollapsibleTool('Shell')).toBe(false);
+    expect(isCollapsibleTool('Edit')).toBe(false);
+    expect(isCollapsibleTool('WriteFile')).toBe(false);
+    expect(isCollapsibleTool('Agent')).toBe(false);
+    expect(isCollapsibleTool('Workflow')).toBe(false);
+    expect(isCollapsibleTool('NotebookEdit')).toBe(false);
+  });
+
+  it('returns false for unknown tool names', () => {
+    expect(isCollapsibleTool('CustomMcpTool')).toBe(false);
+    expect(isCollapsibleTool('unknown')).toBe(false);
   });
 });

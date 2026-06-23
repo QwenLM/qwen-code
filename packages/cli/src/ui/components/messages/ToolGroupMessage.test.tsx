@@ -70,6 +70,7 @@ vi.mock('./ToolMessage.js', () => ({
     return (
       <Text>
         MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
+        {forceShowResult ? ' [forceShow]' : ''}
       </Text>
     );
   },
@@ -171,6 +172,88 @@ describe('<ToolGroupMessage />', () => {
       // Non-collapsible tools (unknown → 'other') render individually
       expect(frame).toContain('MockTool[tool-1]');
       expect(frame).toContain('MockTool[tool-2]');
+    });
+
+    it('renders collapsible tools as summary via CompactToolGroupDisplay', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
+        createToolCall({ callId: 'r2', name: 'ReadFile', description: 'b.ts' }),
+        createToolCall({ callId: 'g1', name: 'Grep', description: 'pattern' }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // CATEGORY_ORDER: search first (capitalized), then read (lowercased)
+      expect(frame).toContain('Searched 1 pattern');
+      expect(frame).toContain('read 2 files');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('renders mixed group with summary + individual tools', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
+        createToolCall({
+          callId: 's1',
+          name: 'Shell',
+          description: 'npm test',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // Collapsible → summary line
+      expect(frame).toContain('Read 1 file');
+      // Non-collapsible → individual ToolMessage
+      expect(frame).toContain('MockTool[s1]');
+    });
+
+    it('forceExpandAll bypasses partition when group has error', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
+        createToolCall({
+          callId: 'e1',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Error,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // All tools render individually — no summary line
+      expect(frame).toContain('MockTool[r1]');
+      expect(frame).toContain('MockTool[e1]');
+      expect(frame).not.toContain('Read 1 file');
+    });
+
+    it('forceExpandAll passes forceShowResult to Success siblings in error group', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'ok1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'err1',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Error,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // Both tools get forceShowResult because forceExpandAll is true
+      expect(frame).toContain('MockTool[ok1]');
+      expect(frame).toContain('[forceShow]');
+      // Count occurrences: both tools should have [forceShow]
+      const forceShowCount = (frame.match(/\[forceShow\]/g) || []).length;
+      expect(forceShowCount).toBe(2);
     });
 
     it('renders tool call awaiting confirmation', () => {

@@ -1,9 +1,9 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`<ToolGroupMessage /> > Confirmation Handling > shows confirmation dialog for first confirming tool only 1`] = `
-"MockTool[tool-1]: ? first-confirm - A tool for testing (high)
+"MockTool[tool-1]: ? first-confirm - A tool for testing (high) [forceShow]
 MockConfirmation: Confirm first tool
-MockTool[tool-2]: ? second-confirm - A tool for testing (low)"
+MockTool[tool-2]: ? second-confirm - A tool for testing (low) [forceShow]"
 `;
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders empty tool calls array 1`] = `""`;
@@ -15,9 +15,9 @@ MockTool[tool-3]: o write_file - Write to file (medium)"
 `;
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders multiple tool calls with different statuses 1`] = `
-"MockTool[tool-1]: ✓ successful-tool - This tool succeeded (medium)
-MockTool[tool-2]: o pending-tool - This tool is pending (medium)
-MockTool[tool-3]: x error-tool - This tool failed (medium)"
+"MockTool[tool-1]: ✓ successful-tool - This tool succeeded (medium) [forceShow]
+MockTool[tool-2]: o pending-tool - This tool is pending (medium) [forceShow]
+MockTool[tool-3]: x error-tool - This tool failed (medium) [forceShow]"
 `;
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders shell command 1`] = `"MockTool[shell-1]: ✓ run_shell_command - Execute shell command (medium)"`;
@@ -26,7 +26,7 @@ exports[`<ToolGroupMessage /> > Golden Snapshots > renders single successful too
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders tool call awaiting confirmation 1`] = `
 "MockTool[tool-confirm]: ? confirmation-tool - This tool needs confirmation
-(high)
+(high) [forceShow]
 MockConfirmation: Are you sure you want to proceed?"
 `;
 
