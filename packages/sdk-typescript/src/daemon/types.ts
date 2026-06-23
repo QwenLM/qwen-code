@@ -1777,9 +1777,40 @@ export interface ExtensionInstallRequest {
 
 export interface ExtensionInstallResponse {
   accepted: true;
+  operationId: string;
 }
 
 export type ExtensionMutationResponse = ExtensionInstallResponse;
+
+export type ExtensionOperationState =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'succeeded_with_refresh_error'
+  | 'failed';
+
+export interface ExtensionOperationResult {
+  status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
+  source?: string;
+  name?: string;
+  version?: string;
+  refreshed?: number;
+  failed?: number;
+  error?: string;
+}
+
+export interface ExtensionOperationStatus {
+  v: 1;
+  operationId: string;
+  operation: string;
+  status: ExtensionOperationState;
+  createdAt: number;
+  updatedAt: number;
+  source?: string;
+  name?: string;
+  result?: ExtensionOperationResult;
+  error?: string;
+}
 
 export type ExtensionScope = 'user' | 'workspace';
 

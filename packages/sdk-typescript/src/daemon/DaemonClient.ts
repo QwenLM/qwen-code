@@ -87,6 +87,7 @@ import type {
   ExtensionMutationResponse,
   ExtensionInstallRequest,
   ExtensionInstallResponse,
+  ExtensionOperationStatus,
   ExtensionScopeRequest,
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
@@ -708,6 +709,15 @@ export class DaemonClient {
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
       { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus> {
+    return await this.jsonRequest<ExtensionOperationStatus>(
+      `/workspace/extensions/operations/${encodeURIComponent(operationId)}`,
+      'GET /workspace/extensions/operations/:operationId',
     );
   }
 
@@ -1531,7 +1541,7 @@ export class DaemonClient {
   async rewindSession(
     sessionId: string,
     promptId: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
@@ -1541,7 +1551,12 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ promptId }),
+        body: JSON.stringify({
+          promptId,
+          ...(opts?.rewindFiles !== undefined
+            ? { rewindFiles: opts.rewindFiles }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {

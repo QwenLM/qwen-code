@@ -66,7 +66,6 @@ import type {
   AgentParams,
   ApprovalMode,
   Config,
-  ConversationRecord,
   DeviceAuthorizationData,
   HookConfig,
   McpBudgetEvent,
@@ -75,6 +74,7 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
+  ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -2823,10 +2823,7 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    const session = await this.createAndStoreSession(
-      config,
-      sessionData?.conversation,
-    );
+    const session = await this.createAndStoreSession(config, sessionData);
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2865,7 +2862,11 @@ class QwenAgent implements Agent {
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    const session = await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(
+      config,
+      config.getResumedSessionData(),
+      { replayHistory: false },
+    );
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -5138,6 +5139,7 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
+        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -5147,6 +5149,7 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
+            .filter(({ idx }) => idx < rewindableTurnCount)
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
               return {
@@ -6324,10 +6327,13 @@ class QwenAgent implements Agent {
           );
         }
 
+        const rewindFiles = params['rewindFiles'] !== false;
         const historyBeforeRewind = session.captureHistorySnapshot();
         let rewindResult;
         try {
-          rewindResult = session.rewindToTurn(turnIndex as number);
+          rewindResult = session.rewindToTurn(turnIndex as number, {
+            rewindFiles,
+          });
         } catch (err) {
           if (err instanceof RequestError) {
             const msg = err.message;
@@ -6347,7 +6353,6 @@ class QwenAgent implements Agent {
 
         let filesChanged: string[] = [];
         let filesFailed: string[] = [];
-        const rewindFiles = params['rewindFiles'] !== false;
         if (rewindFiles && promptId) {
           const fhs = session.getConfig().getFileHistoryService();
           try {
@@ -7158,7 +7163,8 @@ class QwenAgent implements Agent {
 
   private async createAndStoreSession(
     config: Config,
-    conversation?: ConversationRecord,
+    sessionData?: ResumedSessionData,
+    options: { replayHistory?: boolean } = {},
   ): Promise<Session> {
     const sessionId = config.getSessionId();
     const geminiClient = config.getGeminiClient();
@@ -7182,8 +7188,14 @@ class QwenAgent implements Agent {
       await session.sendAvailableCommandsUpdate();
     }, 0);
 
-    if (conversation && conversation.messages) {
-      await session.replayHistory(conversation.messages);
+    if (sessionData?.fileHistorySnapshots?.length) {
+      config
+        .getFileHistoryService()
+        .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+    }
+
+    if (options.replayHistory !== false && sessionData?.conversation.messages) {
+      await session.replayHistory(sessionData.conversation.messages);
     }
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages

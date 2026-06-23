@@ -2602,6 +2602,39 @@ describe('ModelsConfig', () => {
       expect(modelsConfig.getModelDisplayName('gpt-4o')).toBe('GPT-4o');
     });
 
+    it('should disambiguate duplicate model ids by current baseUrl', async () => {
+      const idealabBaseUrl = 'https://idealab.example.com/api/openai/v1';
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'qwen3.7-max',
+            name: '[Token Plan] qwen3.7-max',
+            baseUrl: 'https://token-plan.example.com/v1',
+            envKey: 'TOKEN_PLAN_API_KEY',
+          },
+          {
+            id: 'qwen3.7-max',
+            name: '[Idealab] qwen3.7-max',
+            baseUrl: idealabBaseUrl,
+            envKey: 'IDEALAB_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'qwen3.7-max', {
+        baseUrl: idealabBaseUrl,
+      });
+
+      expect(modelsConfig.getModelDisplayName('qwen3.7-max')).toBe(
+        '[Idealab] qwen3.7-max',
+      );
+    });
+
     it('should return raw modelId when currentAuthType is falsy', () => {
       const modelsConfig = new ModelsConfig();
       // currentAuthType is undefined by default

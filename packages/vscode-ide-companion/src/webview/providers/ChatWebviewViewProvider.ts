@@ -14,7 +14,7 @@ import type { WebViewProvider } from './WebViewProvider.js';
 export type WebViewProviderFactory = () => WebViewProvider;
 
 /**
- * WebviewView host for placing the chat UI in sidebar / panel / secondary sidebar.
+ * WebviewView host for placing the chat UI in the Activity Bar sidebar.
  *
  * Accepts a factory function instead of a pre-built WebViewProvider so the
  * heavyweight provider (QwenAgentManager, ConversationStore, etc.) is only
