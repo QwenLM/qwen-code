@@ -317,6 +317,20 @@ describe('useLoadingIndicator', () => {
       expect(result.current.currentLoadingPhrase).toBe('some reasoning');
     });
 
+    it('should use only first line of multiline description when subject is empty', () => {
+      const { result } = renderHook(() =>
+        useLoadingIndicator(
+          StreamingState.Responding,
+          undefined,
+          undefined,
+          undefined,
+          { subject: '', description: 'first line\nsecond line\nthird line' },
+        ),
+      );
+
+      expect(result.current.currentLoadingPhrase).toBe('first line');
+    });
+
     it('should truncate long thought subjects', () => {
       const longSubject = 'A'.repeat(120);
       const { result } = renderHook(() =>

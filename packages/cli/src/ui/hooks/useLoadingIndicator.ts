@@ -9,6 +9,7 @@ import type { ThoughtSummary } from '../types.js';
 import { useTimer } from './useTimer.js';
 import { usePhraseCycler } from './usePhraseCycler.js';
 import { useState, useEffect, useRef } from 'react';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 const MAX_LOADING_PHRASE_LENGTH = 80;
 
@@ -84,10 +85,11 @@ export const useLoadingIndicator = (
   // throughout the rest of the turn.
   // Falls back to description (first line) when subject is absent — many
   // models don't emit **bold** subjects in their thinking.
-  const thoughtText =
+  const thoughtText = escapeAnsiCtrlCodes(
     thought?.subject?.trim() ||
-    thought?.description?.trim().split('\n')[0] ||
-    '';
+      thought?.description?.trim().split('\n')[0] ||
+      '',
+  );
   const retainedThoughtRef = useRef<string | null>(null);
   if (thoughtText) retainedThoughtRef.current = thoughtText;
   if (streamingState === StreamingState.Idle) retainedThoughtRef.current = null;
