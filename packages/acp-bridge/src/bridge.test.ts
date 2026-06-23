@@ -604,6 +604,7 @@ describe('createAcpSessionBridge', () => {
         { clientId: second.clientId },
       ),
     ).toThrow(InvalidClientIdError);
+    expect(bridge.activePromptCount).toBe(0);
 
     await bridge.shutdown();
   });
