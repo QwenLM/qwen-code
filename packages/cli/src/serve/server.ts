@@ -3994,7 +3994,7 @@ export function createServeApp(
       try {
         const response = await bridge.rewindSession(
           sessionId,
-          { promptId },
+          { promptId, rewindFiles: body['rewindFiles'] !== false },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);

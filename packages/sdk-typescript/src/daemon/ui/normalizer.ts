@@ -195,6 +195,9 @@ export function normalizeDaemonEvent(
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
 
+    case 'mid_turn_message_injected':
+      return normalizeMidTurnMessageInjected(event, base);
+
     case 'user_shell_command': {
       const command = getString(event.data, 'command');
       const cwd = getString(event.data, 'cwd');
@@ -403,6 +406,33 @@ function normalizeFollowupSuggestion(
   ];
 }
 
+function normalizeMidTurnMessageInjected(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
+  }
+  const messages = Array.isArray(event.data['messages'])
+    ? event.data['messages'].filter(
+        (message): message is string =>
+          typeof message === 'string' && message.length > 0,
+      )
+    : [];
+  if (messages.length === 0) {
+    return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
+  }
+  return [
+    {
+      ...base,
+      type: 'status',
+      text: `Inserted message: ${messages.join('\n')}`,
+      source: 'mid_turn_message_injected',
+      data: event.data,
+    },
+  ];
+}
+
 function createBase(
   event: DaemonEvent,
   opts: NormalizeDaemonEventOptions,
@@ -433,7 +463,9 @@ function createBase(
  * Forward-compat: SDK reads whichever location the daemon eventually emits
  * without requiring a coordinated SDK release.
  */
-function extractServerTimestamp(event: DaemonEvent): number | undefined {
+export function extractServerTimestamp(
+  event: DaemonEvent,
+): number | undefined {
   const direct = (event as { serverTimestamp?: unknown }).serverTimestamp;
   if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
   const envelopeMeta = (event as { _meta?: unknown })._meta;
@@ -524,6 +556,7 @@ function normalizeSessionUpdate(
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
       const parentToolCallId = extractParentToolCallId(update);
+      const meta = extractUpdateMeta(update);
       const events: DaemonUiEvent[] = [];
       if (text) {
         events.push({
@@ -531,6 +564,7 @@ function normalizeSessionUpdate(
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(meta ? { meta } : {}),
         });
       }
       // A turn's per-round token usage rides on an otherwise-empty
@@ -616,6 +650,13 @@ function extractParentToolCallId(
 ): string | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   return meta ? getString(meta, 'parentToolCallId') : undefined;
+}
+
+function extractUpdateMeta(
+  update: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  return meta ? { ...meta } : undefined;
 }
 
 /**

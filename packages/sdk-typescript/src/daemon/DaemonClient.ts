@@ -1541,7 +1541,7 @@ export class DaemonClient {
   async rewindSession(
     sessionId: string,
     promptId: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
@@ -1551,7 +1551,12 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ promptId }),
+        body: JSON.stringify({
+          promptId,
+          ...(opts?.rewindFiles !== undefined
+            ? { rewindFiles: opts.rewindFiles }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {

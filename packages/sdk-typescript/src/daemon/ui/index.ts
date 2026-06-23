@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export { normalizeDaemonEvent, getSessionUpdatePayload } from './normalizer.js';
+export {
+  extractServerTimestamp,
+  normalizeDaemonEvent,
+  getSessionUpdatePayload,
+} from './normalizer.js';
 export { createDaemonToolPreview } from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
@@ -63,6 +67,7 @@ export type {
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
+  DaemonTextDeltaMeta,
   DaemonToolPreview,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,

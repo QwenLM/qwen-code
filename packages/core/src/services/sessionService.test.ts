@@ -1941,6 +1941,50 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('preserves file history snapshots on the forked session', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313131';
+      const newId = '41414141-4141-4141-4141-414141414141';
+      const { file, lines } = seedSession(oldId);
+      const snapshotRecord = {
+        uuid: 'snapshot-1',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        timestamp: '2026-04-22T00:00:02.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: `${oldId}########0`,
+              timestamp: '2026-04-22T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'backup-a',
+                  version: 1,
+                  backupTime: '2026-04-22T00:00:00.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [...lines, snapshotRecord].map((l) => JSON.stringify(l)).join('\n') +
+          '\n',
+      );
+
+      await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+
+      expect(loaded?.fileHistorySnapshots).toHaveLength(1);
+      expect(loaded?.fileHistorySnapshots?.[0]?.promptId).toBe(
+        `${newId}########0`,
+      );
+    });
+
     it('forks only the active branch after rewind', async () => {
       const oldId = '12121212-1212-1212-1212-121212121212';
       const newId = '34343434-3434-3434-3434-343434343434';
