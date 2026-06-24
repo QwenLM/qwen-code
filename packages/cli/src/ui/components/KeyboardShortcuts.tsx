@@ -42,7 +42,6 @@ const getShortcuts = (): Shortcut[] => [
   { key: 'ctrl+y', description: t('to retry last request') },
   { key: getPasteKey(), description: t('to paste images') },
   { key: getExternalEditorKey(), description: t('for external editor') },
-  { key: 'ctrl+o', description: t('to toggle compact mode') },
 ];
 
 const ShortcutItem: React.FC<{ shortcut: Shortcut }> = ({ shortcut }) => (

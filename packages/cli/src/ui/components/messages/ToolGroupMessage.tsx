@@ -14,7 +14,6 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
-import { useCompactMode } from '../../contexts/CompactModeContext.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
 function isAgentWithPendingConfirmation(
@@ -169,7 +168,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   compactLabel,
 }) => {
   const config = useConfig();
-  const { compactMode } = useCompactMode();
 
   const hasConfirmingTool = toolCalls.some(
     (t) => t.status === ToolCallStatus.Confirming,
@@ -347,12 +345,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   //     the only surface that carries the run's outcome until the
   //     parent commits. Mirrors the renderer-side decision in
   //     `SubagentExecutionRenderer` (terminal summary fires regardless
-  //     of `isPending`) and the preprocessor in
-  //     `mergeCompactToolGroups.isForceExpandGroup` (no `isPending`
-  //     gate either).
+  //     of `isPending`) and the force-expand predicate in
+  //     `MainContent.isForceExpandGroup` (no `isPending` gate either).
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const showCompact =
-    (compactMode || allComplete) &&
+    allComplete &&
     !hasConfirmingTool &&
     !hasSubagentPendingConfirmation &&
     !hasErrorTool &&

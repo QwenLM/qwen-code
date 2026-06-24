@@ -17,7 +17,6 @@ import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 
 // Mock child components
@@ -351,9 +350,7 @@ describe('<HistoryItemDisplay />', () => {
     };
 
     const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
     );
 
     const output = lastFrame() ?? '';
@@ -370,32 +367,10 @@ describe('<HistoryItemDisplay />', () => {
     };
 
     const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
     );
 
     expect(lastFrame()).not.toContain('Continuing the reasoning');
-  });
-
-  it('keeps committed thinking collapsed in compact mode too', () => {
-    const item: HistoryItem = {
-      id: 1,
-      type: 'gemini_thought',
-      text: 'Inspecting the repository',
-      durationMs: 1200,
-    };
-
-    const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
-    );
-
-    const output = lastFrame() ?? '';
-    expect(output).toContain('Thought for');
-    expect(output).toContain('alt+t to expand');
-    expect(output).not.toContain('Inspecting the repository');
   });
 
   it('renders committed thinking expanded when ThoughtExpandedProvider is true', () => {
@@ -416,22 +391,6 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Thought for');
     expect(output).toContain('alt+t to collapse');
     expect(output).toContain('Inspecting the repository');
-  });
-
-  it('keeps committed thinking continuations hidden in compact mode', () => {
-    const item: HistoryItem = {
-      id: 1,
-      type: 'gemini_thought_content',
-      text: 'Continuing the reasoning',
-    };
-
-    const { lastFrame } = renderWithProviders(
-      <CompactModeProvider value={{ compactMode: true, compactInline: false }}>
-        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
-      </CompactModeProvider>,
-    );
-
-    expect(lastFrame()).not.toContain('Continuing the reasoning');
   });
 
   describe('showTimestamps', () => {

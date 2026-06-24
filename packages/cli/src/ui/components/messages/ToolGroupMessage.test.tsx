@@ -18,7 +18,6 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
 
 // Mock child components to isolate ToolGroupMessage behavior
 vi.mock('./ToolMessage.js', () => ({
@@ -562,20 +561,17 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
-  describe('Compact mode + terminal subagent expansion', () => {
-    // Helper that wraps the group with `compactMode: true` so the
-    // `showCompact` branch is exercised. Verifies the safety net that
-    // forces the group to expand when it carries a committed terminal
-    // subagent — without it, `CompactToolGroupDisplay` would skip the
-    // ToolMessage path and `SubagentScrollbackSummary` would never
-    // surface in scrollback. The committed-summary handoff promised
-    // by the LiveAgentPanel design depends on this.
-    const renderCompact = (component: React.ReactElement, compactMode = true) =>
+  describe('Completed-group + terminal subagent expansion', () => {
+    // Verifies the safety net that forces a completed tool_group to expand
+    // when it carries a committed terminal subagent — without it,
+    // `CompactToolGroupDisplay` would skip the ToolMessage path and
+    // `SubagentScrollbackSummary` would never surface in scrollback. The
+    // committed-summary handoff promised by the LiveAgentPanel design
+    // depends on this.
+    const renderCompact = (component: React.ReactElement) =>
       render(
         <ConfigContext.Provider value={mockConfig}>
-          <CompactModeProvider value={{ compactMode, compactInline: false }}>
-            {component}
-          </CompactModeProvider>
+          {component}
         </ConfigContext.Provider>,
       );
 
@@ -644,9 +640,8 @@ describe('<ToolGroupMessage />', () => {
       // until the parent commits. Force-expand here so
       // `SubagentScrollbackSummary` lands inline immediately and
       // bridges the gap. Mirrors `SubagentExecutionRenderer`'s
-      // ungated terminal-summary path and
-      // `mergeCompactToolGroups.isForceExpandGroup`'s no-isPending-gate
-      // committed-history rule.
+      // ungated terminal-summary path and `MainContent.isForceExpandGroup`'s
+      // no-isPending-gate committed-history rule.
       const { lastFrame } = renderCompact(
         <ToolGroupMessage
           {...baseProps}

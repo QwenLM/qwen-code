@@ -133,7 +133,6 @@ import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
-import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -230,7 +229,6 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
-import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
@@ -2407,12 +2405,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
-  const [compactMode, setCompactMode] = useState<boolean>(
-    settings.merged.ui?.compactMode ?? false,
-  );
-  const [compactInline] = useState<boolean>(
-    settings.merged.ui?.compactInline ?? false,
-  );
   const configuredRenderMode = settings.merged.ui?.renderMode;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
@@ -3290,19 +3282,6 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
-      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
-        const newValue = !compactMode;
-        setCompactMode(newValue);
-        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
-        // Skip the expensive clearTerminal + Static remount when no past
-        // item would render differently (no tool_group / gemini_thought*).
-        // Future items pick up the new mode naturally because Static is
-        // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
-        // long sessions; tool/thinking-bearing sessions still go through
-        // the (now chunked) full path in MainContent.
-        if (compactToggleHasVisualEffect(historyRef.current)) {
-          refreshStatic();
-        }
       } else if (keyMatchers[Command.PROMOTE_SHELL_TO_BACKGROUND](key)) {
         // Ctrl+B: promote a running foreground shell command to a
         // background task (#3831). The child keeps running, the
@@ -3390,8 +3369,6 @@ export const AppContainer = (props: AppContainerProps) => {
       // debugKeystrokeLogging is read at call time, so no stale closure risk.
       settings,
       isAuthenticating,
-      compactMode,
-      setCompactMode,
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
@@ -3930,10 +3907,6 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
-  const compactModeValue = useMemo(
-    () => ({ compactMode, compactInline, setCompactMode }),
-    [compactMode, compactInline, setCompactMode],
-  );
   const renderModeValue = useMemo(
     () => ({ renderMode, setRenderMode }),
     [renderMode, setRenderMode],
@@ -3954,27 +3927,25 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings,
             }}
           >
-            <CompactModeProvider value={compactModeValue}>
-              <ThoughtExpandedProvider value={thoughtExpanded}>
-                <RenderModeProvider value={renderModeValue}>
-                  <TerminalOutputProvider value={writeRaw}>
-                    <ThinkingViewerProvider value={thinkingViewerValue}>
-                      <ShellFocusContext.Provider value={isFocused}>
-                        {thinkingViewerData ? (
-                          <ThinkingViewer
-                            data={thinkingViewerData}
-                            onClose={closeThinkingViewer}
-                            useAlternateScreen={!useTerminalBuffer}
-                          />
-                        ) : (
-                          <App />
-                        )}
-                      </ShellFocusContext.Provider>
-                    </ThinkingViewerProvider>
-                  </TerminalOutputProvider>
-                </RenderModeProvider>
-              </ThoughtExpandedProvider>
-            </CompactModeProvider>
+            <ThoughtExpandedProvider value={thoughtExpanded}>
+              <RenderModeProvider value={renderModeValue}>
+                <TerminalOutputProvider value={writeRaw}>
+                  <ThinkingViewerProvider value={thinkingViewerValue}>
+                    <ShellFocusContext.Provider value={isFocused}>
+                      {thinkingViewerData ? (
+                        <ThinkingViewer
+                          data={thinkingViewerData}
+                          onClose={closeThinkingViewer}
+                          useAlternateScreen={!useTerminalBuffer}
+                        />
+                      ) : (
+                        <App />
+                      )}
+                    </ShellFocusContext.Provider>
+                  </ThinkingViewerProvider>
+                </TerminalOutputProvider>
+              </RenderModeProvider>
+            </ThoughtExpandedProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

@@ -15,7 +15,6 @@ import {
   type UIActions,
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
-import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { ToolCallStatus } from '../types.js';
 
@@ -241,15 +240,13 @@ const createUIActions = (): UIActions =>
 const renderMainContent = (uiState: UIState) =>
   render(
     <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <UIActionsContext.Provider value={createUIActions()}>
-          <UIStateContext.Provider value={uiState}>
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
-          </UIStateContext.Provider>
-        </UIActionsContext.Provider>
-      </CompactModeProvider>
+      <UIActionsContext.Provider value={createUIActions()}>
+        <UIStateContext.Provider value={uiState}>
+          <OverflowProvider>
+            <MainContent />
+          </OverflowProvider>
+        </UIStateContext.Provider>
+      </UIActionsContext.Provider>
     </AppContext.Provider>,
   );
 
@@ -280,22 +277,18 @@ describe('<MainContent />', () => {
 
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                currentModel: 'gpt-5.4',
-                historyRemountKey: 7,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              currentModel: 'gpt-5.4',
+              historyRemountKey: 7,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -432,25 +425,21 @@ describe('<MainContent />', () => {
     staticItemsSpy.mockClear();
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history: [
-                  ...history,
-                  { type: 'user' as const, id: 100, text: 'new msg' },
-                ],
-                historyRemountKey: 1,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history: [
+                ...history,
+                { type: 'user' as const, id: 100, text: 'new msg' },
+              ],
+              historyRemountKey: 1,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -492,19 +481,15 @@ describe('<MainContent />', () => {
     // meant to avoid.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({ history, historyRemountKey: 2 })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({ history, historyRemountKey: 2 })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -596,23 +581,19 @@ describe('<MainContent />', () => {
     // someone correctly drives the reset off the model dimension instead.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history,
-                historyRemountKey: 1,
-                currentModel: 'model-b',
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history,
+              historyRemountKey: 1,
+              currentModel: 'model-b',
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -620,15 +601,14 @@ describe('<MainContent />', () => {
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
   });
 
-  describe('compact mode + Static path (useTerminalBuffer=false)', () => {
-    it('skips cross-group merge in Static mode to avoid screen flash (issue #4794)', () => {
+  describe('Static path (useTerminalBuffer=false)', () => {
+    it('renders tool_groups 1:1 in Static mode (no cross-group merge)', () => {
       staticItemsSpy.mockClear();
       historyItemDisplayPropsSpy.mockClear();
 
-      // Two consecutive tool_groups that mergeCompactToolGroups would normally
-      // consolidate into a single item. In Static mode this merge MUST be
-      // skipped because Ink's <Static> is append-only and cannot handle
-      // item-count changes without a full clearTerminal + remount (flash).
+      // Two consecutive tool_groups. There is no cross-group merge layer, so
+      // each tool_group renders as its own item (no item-count change that
+      // Ink's append-only <Static> couldn't handle).
       const history = [
         {
           id: 1,
@@ -660,20 +640,16 @@ describe('<MainContent />', () => {
         },
       ];
 
-      // Render with compactMode=true and useTerminalBuffer=false (default Static path).
+      // Render in the default Static path (useTerminalBuffer=false).
       render(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: true, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider value={createUIState({ history })}>
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -687,13 +663,13 @@ describe('<MainContent />', () => {
       expect(renderedIds).toEqual([1, 2]);
     });
 
-    it('preserves tool_use_summary as standalone line when merge is skipped (Static mode)', () => {
+    it('preserves tool_use_summary as standalone line in Static mode', () => {
       staticItemsSpy.mockClear();
       historyItemDisplayPropsSpy.mockClear();
 
       // History with a tool_group followed by its tool_use_summary, then another tool_group.
-      // When merge is skipped (Static mode), absorbedCallIds returns EMPTY_ABSORBED_CALL_IDS
-      // so isSummaryAbsorbed returns false — the summary MUST pass through as a standalone
+      // In Static mode, absorbedCallIds returns EMPTY_ABSORBED_CALL_IDS so
+      // isSummaryAbsorbed returns false — the summary MUST pass through as a standalone
       // item and render as `● <label>` line in HistoryItemDisplay.
       const history = [
         {
@@ -734,17 +710,13 @@ describe('<MainContent />', () => {
 
       render(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: true, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider value={createUIState({ history })}>
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -875,25 +847,21 @@ describe('<MainContent />', () => {
       // Flip activePtyId; identical re-render except this one streaming-state field.
       rerender(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: false, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider
-                value={createUIState({
-                  useTerminalBuffer: true,
-                  activePtyId: 1,
-                  history: stableHistory,
-                  pendingHistoryItems: stablePending,
-                  slashCommands: stableSlashCommands,
-                })}
-              >
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                activePtyId: 1,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 

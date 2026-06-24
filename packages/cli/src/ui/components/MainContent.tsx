@@ -13,19 +13,13 @@ import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
-import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
-import { useCompactMode } from '../contexts/CompactModeContext.js';
 import {
   countMarkdownSourceBlocks,
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
-import {
-  isForceExpandGroup,
-  mergeCompactToolGroups,
-} from '../utils/mergeCompactToolGroups.js';
 import { buildThinkingFullTextMap } from '../utils/historyUtils.js';
 import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
 
@@ -97,6 +91,69 @@ const VirtualHistoryItem = memo(HistoryItemDisplay);
 // item — defeating the static-item memo.
 const EMPTY_ABSORBED_CALL_IDS = new Set<string>();
 
+// A tool_group renders through the full ToolGroupMessage path (and therefore
+// ignores `compactLabel`) when any of these force-expand conditions hold.
+// Mirrors `ToolGroupMessage.showCompact`'s exclusion list so MainContent can
+// decide which callIds get their `tool_use_summary` label absorbed by the
+// compact partition header vs. which need the standalone `● <label>` line.
+function isForceExpandGroup(
+  item: HistoryItem,
+  embeddedShellFocused: boolean,
+  activeShellPtyId: number | undefined,
+): boolean {
+  if (item.type !== 'tool_group') return false;
+
+  // User-initiated groups stay distinct as visual boundaries.
+  if (item.isUserInitiated) return true;
+
+  const tools = item.tools;
+
+  // Authorization prompts must show.
+  if (tools.some((t) => t.status === ToolCallStatus.Confirming)) return true;
+
+  // Errors must be visible.
+  if (tools.some((t) => t.status === ToolCallStatus.Error)) return true;
+
+  // Subagent pending confirmations / terminal subagent runs must show — the
+  // inline summary is the only surface carrying the run's outcome.
+  if (
+    tools.some((t) => {
+      const rd = t.resultDisplay;
+      if (
+        !rd ||
+        typeof rd !== 'object' ||
+        !('type' in rd) ||
+        (rd as { type?: string }).type !== 'task_execution'
+      ) {
+        return false;
+      }
+      const typed = rd as { pendingConfirmation?: unknown; status?: string };
+      if (typed.pendingConfirmation !== undefined) return true;
+      return (
+        typed.status === 'completed' ||
+        typed.status === 'failed' ||
+        typed.status === 'cancelled'
+      );
+    })
+  ) {
+    return true;
+  }
+
+  // Active focused shell must be visible.
+  if (
+    embeddedShellFocused &&
+    activeShellPtyId !== undefined &&
+    tools.some(
+      (t) =>
+        t.ptyId === activeShellPtyId && t.status === ToolCallStatus.Executing,
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
 const virtualEstimatedItemHeight = () => 3;
@@ -107,8 +164,6 @@ const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
-  const uiActions = useUIActions();
-  const { compactMode, compactInline } = useCompactMode();
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -144,12 +199,11 @@ export const MainContent = () => {
   // `isSummaryAbsorbed` → `renderVirtualItem` → every static item re-renders.
   const prevAbsorbedCallIdsRef = useRef<Set<string>>(EMPTY_ABSORBED_CALL_IDS);
   const absorbedCallIds = useMemo(() => {
-    // When no cross-group merge will happen (Static mode or compactInline),
-    // don't mark summaries as absorbed so the standalone `● <label>` line
-    // in HistoryItemDisplay can render — <Static> can't repaint committed
-    // items, so the label's only path to the screen is the standalone line.
-    if (!uiState.useTerminalBuffer || compactInline)
-      return EMPTY_ABSORBED_CALL_IDS;
+    // In Static (append-only) mode, don't mark summaries as absorbed so the
+    // standalone `● <label>` line in HistoryItemDisplay can render — <Static>
+    // can't repaint committed items, so the standalone line is the label's
+    // only path to the screen (getCompactLabel also returns undefined there).
+    if (!uiState.useTerminalBuffer) return EMPTY_ABSORBED_CALL_IDS;
     const absorbed = new Set<string>();
     for (const item of visibleHistory) {
       if (item.type !== 'tool_group') continue;
@@ -162,18 +216,16 @@ export const MainContent = () => {
       ) {
         continue;
       }
-      // In non-compact mode, only completed groups render via
-      // CompactToolGroupDisplay (unified mode). Active groups still
-      // expand inline, so their summaries should NOT be absorbed.
-      if (!compactMode) {
-        const groupComplete = item.tools.every(
-          (t) =>
-            t.status === ToolCallStatus.Success ||
-            t.status === ToolCallStatus.Error ||
-            t.status === ToolCallStatus.Canceled,
-        );
-        if (!groupComplete) continue;
-      }
+      // Only completed groups render via CompactToolGroupDisplay (partition
+      // mode). Active groups still expand inline, so their summaries should
+      // NOT be absorbed.
+      const groupComplete = item.tools.every(
+        (t) =>
+          t.status === ToolCallStatus.Success ||
+          t.status === ToolCallStatus.Error ||
+          t.status === ToolCallStatus.Canceled,
+      );
+      if (!groupComplete) continue;
       for (const tool of item.tools) absorbed.add(tool.callId);
     }
     const prev = prevAbsorbedCallIdsRef.current;
@@ -190,76 +242,20 @@ export const MainContent = () => {
     prevAbsorbedCallIdsRef.current = absorbed;
     return absorbed;
   }, [
-    compactMode,
-    compactInline,
     visibleHistory,
     uiState.embeddedShellFocused,
     uiState.activePtyId,
     uiState.useTerminalBuffer,
   ]);
 
-  // Merge consecutive tool_groups for compact mode display. Summaries for
-  // absorbed call IDs are dropped during merging so the compact header can
-  // display the label directly; summaries for force-expanded (non-absorbed)
-  // groups pass through so HistoryItemDisplay can render them as standalone
-  // `● <label>` lines.
-  //
-  // Compact-mode content-stable: `mergeCompactToolGroups` always allocates a
-  // fresh array. With `activePtyId` / `embeddedShellFocused` in the deps,
-  // every streaming tick mid-shell-tool produced a new array even when
-  // membership was identical, defeating the Round-2 renderItem stability
-  // fix for compact-mode users. Pair-wise compare the new merged array to
-  // the previous one and return the previous reference when items align.
-  const prevMergedHistoryRef = useRef<HistoryItem[] | null>(null);
-  const mergedHistory = useMemo(() => {
-    if (!compactMode) {
-      prevMergedHistoryRef.current = visibleHistory;
-      return visibleHistory;
-    }
-    // <Static> is append-only: merging reduces item count, which <Static>
-    // can't handle without clearTerminal + remount (the flash we're fixing).
-    if (!uiState.useTerminalBuffer) {
-      prevMergedHistoryRef.current = visibleHistory;
-      return visibleHistory;
-    }
-    // compactInline: user opted into per-group display without cross-group merging.
-    if (compactInline) {
-      prevMergedHistoryRef.current = visibleHistory;
-      return visibleHistory;
-    }
-    const next = mergeCompactToolGroups(
-      visibleHistory,
-      uiState.embeddedShellFocused,
-      uiState.activePtyId,
-      absorbedCallIds,
-    );
-    const prev = prevMergedHistoryRef.current;
-    if (prev && prev.length === next.length) {
-      let same = true;
-      for (let i = 0; i < next.length; i++) {
-        if (prev[i] !== next[i]) {
-          same = false;
-          break;
-        }
-      }
-      if (same) return prev;
-    }
-    prevMergedHistoryRef.current = next;
-    return next;
-  }, [
-    compactMode,
-    compactInline,
-    visibleHistory,
-    uiState.useTerminalBuffer,
-    uiState.embeddedShellFocused,
-    uiState.activePtyId,
-    absorbedCallIds,
-  ]);
+  // History renders 1:1 — there is no cross-group merge layer. Tool grouping
+  // is handled per-group by the partition renderer (CompactToolGroupDisplay).
+  const mergedHistory = visibleHistory;
 
   // Build a callId → summary lookup from `tool_use_summary` history items so
-  // compact-mode tool groups can render a semantic label instead of a generic
-  // "Tool × N" line. A summary is indexed under every callId it covers; when
-  // multiple groups are merged, the first group's summary wins (see below).
+  // completed tool groups can render a semantic label instead of a generic
+  // "Tool × N" line. A summary is indexed under every callId it covers; the
+  // first summary covering a callId wins (see below).
   const summaryByCallId = useMemo(() => {
     const map = new Map<string, string>();
     for (const item of visibleHistory) {
@@ -288,54 +284,19 @@ export const MainContent = () => {
     (item: HistoryItem | HistoryItemWithoutId): string | undefined => {
       if (item.type !== 'tool_group' || item.tools.length === 0)
         return undefined;
-      // When merge is skipped (Static mode or compactInline), tool_groups
-      // render via the full ToolGroupMessage path which ignores compactLabel.
-      // The standalone `● <label>` line in HistoryItemDisplay is the label's
-      // only path to the screen. Suppress the header label to avoid
-      // double-display.
-      if (!uiState.useTerminalBuffer || compactInline) return undefined;
-      // Look up ONLY the first tool's callId. A merged group concatenates
-      // batch A (earliest calls) then batch B; earlier iterations scanned
-      // all callIds and returned "first hit", but async resolution order
-      // breaks that — if B's summary resolves first, the header renders
-      // SB; when A later resolves, the next render flips to SA. Anchoring
-      // on item.tools[0].callId gives stable "leading batch governs"
-      // semantics; if A's call failed and only B resolved, the header
-      // stays blank for that group (acceptable — the fallback is the
-      // default "Tool × N" rendering once the lookup misses).
+      // In Static (append-only) mode tool_groups render via the full
+      // ToolGroupMessage path which ignores compactLabel; the standalone
+      // `● <label>` line in HistoryItemDisplay is the label's only path to
+      // the screen. Suppress the header label to avoid double-display.
+      if (!uiState.useTerminalBuffer) return undefined;
+      // Look up ONLY the first tool's callId so the label is stable regardless
+      // of async summary resolution order ("leading batch governs"). If the
+      // first tool's summary never resolves, the header stays blank (the
+      // fallback is the default "Tool × N" rendering once the lookup misses).
       return summaryByCallId.get(item.tools[0].callId);
     },
-    [summaryByCallId, uiState.useTerminalBuffer, compactInline],
+    [summaryByCallId, uiState.useTerminalBuffer],
   );
-
-  // Ink's <Static> is append-only: once an item is rendered to the terminal
-  // buffer, it cannot be replaced. In compact mode, when a new tool_group is
-  // merged into a previous one, the merged result has FEWER items than the
-  // raw history. Static would not re-render the older items even though their
-  // content changed, so we explicitly call refreshStatic() to clear the
-  // terminal and re-render the merged view.
-  //
-  // Detection: if history length grew but mergedHistory length did NOT grow
-  // proportionally (i.e., a merge consolidated items), trigger a refresh.
-  const prevHistoryLengthRef = useRef(visibleHistory.length);
-  const prevMergedLengthRef = useRef(mergedHistory.length);
-  useEffect(() => {
-    if (!compactMode) {
-      prevHistoryLengthRef.current = visibleHistory.length;
-      prevMergedLengthRef.current = mergedHistory.length;
-      return;
-    }
-    const prevHLen = prevHistoryLengthRef.current;
-    const currHLen = visibleHistory.length;
-    const prevMLen = prevMergedLengthRef.current;
-    const currMLen = mergedHistory.length;
-    // History grew, but merged length stayed same or shrank → a merge happened.
-    if (currHLen > prevHLen && currMLen <= prevMLen) {
-      uiActions.refreshStatic();
-    }
-    prevHistoryLengthRef.current = currHLen;
-    prevMergedLengthRef.current = currMLen;
-  }, [compactMode, visibleHistory, mergedHistory, uiActions]);
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay
