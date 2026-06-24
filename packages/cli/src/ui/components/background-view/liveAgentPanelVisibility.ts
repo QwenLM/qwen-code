@@ -54,7 +54,8 @@ export function getLiveAgentPanelLayoutKey(
   let key = livePanelFocused ? 'f' : '_';
   for (const entry of entries) {
     if (entry.kind !== 'agent') continue;
-    key += `|${entry.agentId}:${entry.status}`;
+    // `id` is the canonical registry key; `agentId` is a @deprecated synonym.
+    key += `|${entry.id}:${entry.status}`;
   }
   return key;
 }

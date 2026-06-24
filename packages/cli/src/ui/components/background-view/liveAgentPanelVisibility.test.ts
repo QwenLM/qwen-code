@@ -20,7 +20,7 @@ function agentEntry(
 ): AgentDialogEntry {
   return {
     kind: 'agent',
-    agentId: 'a',
+    id: 'a',
     description: 'desc',
     status: 'running',
     startTime: 0,
@@ -46,39 +46,33 @@ function shellEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
 describe('getLiveAgentPanelLayoutKey', () => {
   it('changes when an agent is added (panel grows)', () => {
     const before = getLiveAgentPanelLayoutKey([], false);
-    const after = getLiveAgentPanelLayoutKey(
-      [agentEntry({ agentId: 'a1' })],
-      false,
-    );
+    const after = getLiveAgentPanelLayoutKey([agentEntry({ id: 'a1' })], false);
     expect(after).not.toBe(before);
   });
 
   it('changes when an agent is removed (panel shrinks)', () => {
     const two = getLiveAgentPanelLayoutKey(
-      [agentEntry({ agentId: 'a1' }), agentEntry({ agentId: 'a2' })],
+      [agentEntry({ id: 'a1' }), agentEntry({ id: 'a2' })],
       false,
     );
-    const one = getLiveAgentPanelLayoutKey(
-      [agentEntry({ agentId: 'a1' })],
-      false,
-    );
+    const one = getLiveAgentPanelLayoutKey([agentEntry({ id: 'a1' })], false);
     expect(one).not.toBe(two);
   });
 
   it('changes when an agent status flips (running -> completed)', () => {
     const running = getLiveAgentPanelLayoutKey(
-      [agentEntry({ agentId: 'a1', status: 'running' })],
+      [agentEntry({ id: 'a1', status: 'running' })],
       false,
     );
     const done = getLiveAgentPanelLayoutKey(
-      [agentEntry({ agentId: 'a1', status: 'completed', endTime: 1 })],
+      [agentEntry({ id: 'a1', status: 'completed', endTime: 1 })],
       false,
     );
     expect(done).not.toBe(running);
   });
 
   it('changes when panel focus toggles (adds the navigation hint row)', () => {
-    const entries = [agentEntry({ agentId: 'a1' })];
+    const entries = [agentEntry({ id: 'a1' })];
     expect(getLiveAgentPanelLayoutKey(entries, true)).not.toBe(
       getLiveAgentPanelLayoutKey(entries, false),
     );
@@ -89,8 +83,8 @@ describe('getLiveAgentPanelLayoutKey', () => {
     // tick never touches the roster — the key must not churn, or AppContainer
     // would needlessly re-measure the footer every second.
     const entries = [
-      agentEntry({ agentId: 'a1', status: 'running', startTime: 0 }),
-      agentEntry({ agentId: 'a2', status: 'running', startTime: 0 }),
+      agentEntry({ id: 'a1', status: 'running', startTime: 0 }),
+      agentEntry({ id: 'a2', status: 'running', startTime: 0 }),
     ];
     const k1 = getLiveAgentPanelLayoutKey(entries, false);
     const k2 = getLiveAgentPanelLayoutKey(entries, false);

@@ -40,7 +40,7 @@ const TERMINAL_HEIGHT = 24;
 const agent = (id: string): AgentDialogEntry =>
   ({
     kind: 'agent',
-    agentId: id,
+    id,
     description: 'desc',
     status: 'running',
     startTime: 0,
@@ -82,7 +82,7 @@ function ControlsMeasured({
     <Box flexDirection="column" ref={ref}>
       <Text>main</Text>
       {entries.map((e) => (
-        <Text key={e.agentId}>{e.agentId} · running</Text>
+        <Text key={e.id}>{e.id} · running</Text>
       ))}
     </Box>
   );
