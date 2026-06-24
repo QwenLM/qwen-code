@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import yargs, { type Argv } from 'yargs';
 import {
   mkdirSync,
   mkdtempSync,
@@ -37,6 +38,7 @@ import {
 import * as runQwenServeModule from './run-qwen-serve.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import type { Settings } from '../config/settingsSchema.js';
+import { serveCommand } from '../commands/serve.js';
 
 let tempWorkspace: string | undefined;
 let tempLaunchCwd: string | undefined;
@@ -75,6 +77,12 @@ function useTempQwenHome(): string {
     'system-defaults.json',
   );
   return tempQwenHome;
+}
+
+function buildServeCommandParser(): Argv {
+  return (serveCommand.builder as (argv: Argv) => Argv)(
+    yargs([]).exitProcess(false).fail(false).locale('en'),
+  );
 }
 
 function pickServeFastPathComparable(settings: Settings): ServeFastPathSettings {
@@ -349,6 +357,92 @@ describe('serve fast path argument parsing', () => {
     expect(parseServeFastPathArgs(['serve', '--unknown-option'])).toEqual({
       kind: 'fallback',
     });
+  });
+
+  it('handles every yargs serve long option or explicitly falls back', () => {
+    const options = (
+      buildServeCommandParser() as unknown as {
+        getOptions(): {
+          key: Record<string, boolean>;
+          alias: Record<string, string[]>;
+        };
+      }
+    ).getOptions();
+    const longOptionNames = Object.keys(options.key).filter(
+      (name) => name.length > 1 && !(options.alias[name]?.length),
+    );
+    const sampleArgvByOption = new Map<string, string[]>([
+      ['port', ['--port', '0']],
+      ['hostname', ['--hostname', '127.0.0.1']],
+      ['token', ['--token', 'token']],
+      ['max-sessions', ['--max-sessions', '10']],
+      [
+        'max-pending-prompts-per-session',
+        ['--max-pending-prompts-per-session', '5'],
+      ],
+      ['max-connections', ['--max-connections', '256']],
+      ['event-ring-size', ['--event-ring-size', '8000']],
+      ['workspace', ['--workspace', process.cwd()]],
+      ['require-auth', ['--require-auth']],
+      ['enable-session-shell', ['--enable-session-shell']],
+      ['web', ['--no-web']],
+      ['open', ['--open']],
+      ['http-bridge', ['--no-http-bridge']],
+      ['mcp-client-budget', ['--mcp-client-budget', '10']],
+      ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
+      ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
+      ['allow-private-auth-base-url', ['--allow-private-auth-base-url']],
+      ['prompt-deadline-ms', ['--prompt-deadline-ms', '1000']],
+      ['writer-idle-timeout-ms', ['--writer-idle-timeout-ms', '1000']],
+      ['channel-idle-timeout-ms', ['--channel-idle-timeout-ms', '1000']],
+      ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
+      ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
+      [
+        'permission-response-timeout-ms',
+        ['--permission-response-timeout-ms', '1000'],
+      ],
+      ['rate-limit', ['--rate-limit']],
+      ['rate-limit-prompt', ['--rate-limit-prompt', '10']],
+      ['rate-limit-mutation', ['--rate-limit-mutation', '30']],
+      ['rate-limit-read', ['--rate-limit-read', '120']],
+      ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
+      ['experimental-lsp', ['--experimental-lsp']],
+      ['help', ['--help']],
+      ['version', ['--version']],
+    ]);
+    const expectedFallbackOptions = new Set(['help', 'version']);
+
+    expect(longOptionNames.sort()).toEqual(
+      [...sampleArgvByOption.keys()].sort(),
+    );
+    for (const [optionName, sampleArgv] of sampleArgvByOption) {
+      const parsed = parseServeFastPathArgs(['serve', ...sampleArgv]);
+      if (parsed.kind === 'fallback') {
+        expect(expectedFallbackOptions.has(optionName)).toBe(true);
+      } else {
+        expect(expectedFallbackOptions.has(optionName)).toBe(false);
+      }
+    }
+  });
+
+  it('matches yargs defaults for options materialized before runQwenServe', () => {
+    const yargsParsed = buildServeCommandParser().parseSync('');
+    const fastPathParsed = parseServeFastPathArgs(['serve']);
+
+    expect(fastPathParsed).toMatchObject({
+      kind: 'serve',
+      options: {
+        hostname: yargsParsed['hostname'],
+        mode: 'http-bridge',
+        port: yargsParsed['port'],
+      },
+    });
+    expect(fastPathParsed).not.toHaveProperty('options.maxSessions');
+    expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
+    expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
+    expect(fastPathParsed).not.toHaveProperty(
+      'options.maxPendingPromptsPerSession',
+    );
   });
 
   it('keeps --experimental-lsp on the fast path', () => {
