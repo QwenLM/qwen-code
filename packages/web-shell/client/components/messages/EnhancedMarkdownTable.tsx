@@ -1564,7 +1564,6 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                         </span>
                       </button>
                       <button
-                        ref={isMenuOpen ? filterTriggerRef : undefined}
                         className={`${styles.filterTrigger} ${
                           isFiltered ? styles.filterTriggerActive : ''
                         }`}

@@ -692,6 +692,33 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).not.toContain('Custom filter');
   });
 
+  it('returns focus to the filter trigger when Escape closes the menu', async () => {
+    const container = renderTable();
+    const filterButton = button(container, 'Filter Team');
+
+    click(filterButton);
+    expect(container.textContent).toContain('Custom filter');
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-option-search-0"]',
+      ),
+    ).toBe(document.activeElement);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+    await act(async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+    });
+
+    expect(container.textContent).not.toContain('Custom filter');
+    expect(document.activeElement).toBe(filterButton);
+  });
+
   it('closes the filter menu on scroll', () => {
     const container = renderTable();
 
