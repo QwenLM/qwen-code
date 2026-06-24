@@ -3043,7 +3043,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isHelpDialogOpen,
     closeHelpDialog,
     isSkillReviewDialogOpen,
-    closeSkillReviewDialog,
+    dismissSkillReviewDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,

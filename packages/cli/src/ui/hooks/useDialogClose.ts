@@ -59,7 +59,7 @@ export interface DialogCloseOptions {
 
   // Skill review dialog
   isSkillReviewDialogOpen: boolean;
-  closeSkillReviewDialog: () => void;
+  dismissSkillReviewDialog: () => void;
 
   // Background tasks dialog
   isBackgroundTasksDialogOpen: boolean;
@@ -165,11 +165,10 @@ export function useDialogClose(options: DialogCloseOptions) {
     }
 
     if (options.isSkillReviewDialogOpen) {
-      // Skill-review dialog: Ctrl+C / global escape dismisses it (same
-      // semantics as Esc "decide later"). Pending skills remain staged for
-      // later review; closeSkillReviewDialog records the dismissed batch so
-      // it isn't immediately reopened.
-      options.closeSkillReviewDialog();
+      // Skill-review dialog: Ctrl+C defers it (same as Esc "decide later").
+      // Must call dismiss (not close) so the batch is recorded in the dismissed
+      // set — otherwise the idle effect immediately reopens it.
+      options.dismissSkillReviewDialog();
       return true;
     }
 

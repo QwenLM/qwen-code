@@ -32,7 +32,17 @@ function parseDescription(content: string): string {
   // `[ \t]*` (not `\s*`) so an empty `description:` value doesn't let the
   // capture spill onto the next YAML line; `.*?` keeps it on the same line.
   const m = /^description:[ \t]*(.*?)[ \t]*$/m.exec(fm[1]);
-  return m ? m[1].trim() : '';
+  let value = m ? m[1].trim() : '';
+  // Strip a single matching pair of surrounding quotes (YAML quoted scalar) so
+  // the dialog doesn't render literal `"`/`'` characters.
+  if (
+    value.length >= 2 &&
+    (value[0] === '"' || value[0] === "'") &&
+    value[value.length - 1] === value[0]
+  ) {
+    value = value.slice(1, -1);
+  }
+  return value;
 }
 
 /**

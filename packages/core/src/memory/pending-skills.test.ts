@@ -87,6 +87,18 @@ describe('pendingSkills', () => {
     expect(pending[0].description).toBe('');
   });
 
+  it('strips surrounding quotes from a quoted description', async () => {
+    const dir = path.join(root, '.qwen', 'skills', 'auto-skill-quoted');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'SKILL.md'),
+      '---\ndescription: "A skill for X"\nsource: auto-skill\n---\nbody\n',
+      'utf-8',
+    );
+    const pending = await stageSkillDirs([path.join(dir, 'SKILL.md')], root);
+    expect(pending[0].description).toBe('A skill for X');
+  });
+
   it('namespaces staged dirs by taskId so same-named batches do not collide', async () => {
     const fileA = await makeSkill(root, 'dup');
     const [pa] = await stageSkillDirs([fileA], root, new Set(), 'task-A');
