@@ -303,12 +303,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           ? undefined
           : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
         if (shouldCollectSensitiveSpanAttributes) {
-          addModelOutputAttributes(
-            this.config,
-            llmSpan,
-            modelOutput?.text,
-            modelOutput?.originalLength,
-          );
+          this.safelyAddModelOutputAttributes(llmSpan, modelOutput);
         }
         this.safelyLogApiResponse(
           result.responseId ?? '',
@@ -666,12 +661,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           ),
         );
         if (shouldCollectSensitiveSpanAttributes && span) {
-          addModelOutputAttributes(
-            this.config,
-            span,
-            streamModelOutput?.text,
-            streamModelOutput?.originalLength,
-          );
+          this.safelyAddModelOutputAttributes(span, streamModelOutput);
         }
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
@@ -949,20 +939,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     response: GenerateContentResponse | undefined,
     maxLength: number,
   ): string | undefined {
-    const parts = response?.candidates?.[0]?.content?.parts;
-    if (!parts?.length) {
-      return undefined;
-    }
-
     let text = '';
-    let hasText = false;
     let truncated = false;
     const maxPrefixLength = Math.max(
       0,
       maxLength - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
     );
-    const appendText = (partText: string) => {
-      hasText = true;
+    const hasText = this.forEachVisibleResponseText(response, (partText) => {
       if (truncated) {
         return;
       }
@@ -975,22 +958,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
       text += partText.slice(0, Math.max(0, remaining));
       truncated = true;
-    };
-
-    for (const part of parts as Part[]) {
-      if (typeof part === 'string') {
-        appendText(part);
-        continue;
-      }
-
-      if (
-        'text' in part &&
-        typeof part.text === 'string' &&
-        !('thought' in part && part.thought)
-      ) {
-        appendText(part.text);
-      }
-    }
+    });
 
     if (!hasText) {
       return undefined;
@@ -1003,43 +971,73 @@ export class LoggingContentGenerator implements ContentGenerator {
     response: GenerateContentResponse | undefined,
     maxLength: number,
   ): { text: string; originalLength: number } | undefined {
-    const parts = response?.candidates?.[0]?.content?.parts;
-    if (!parts?.length) {
-      return undefined;
-    }
-
     let text = '';
     let originalLength = 0;
-    let hasText = false;
-    const appendText = (partText: string) => {
-      hasText = true;
+    const hasText = this.forEachVisibleResponseText(response, (partText) => {
       originalLength += partText.length;
       const remaining = maxLength - text.length;
       if (remaining > 0) {
         text += partText.slice(0, remaining);
       }
-    };
-
-    for (const part of parts as Part[]) {
-      if (typeof part === 'string') {
-        appendText(part);
-        continue;
-      }
-
-      if (
-        'text' in part &&
-        typeof part.text === 'string' &&
-        !('thought' in part && part.thought)
-      ) {
-        appendText(part.text);
-      }
-    }
+    });
 
     if (!hasText) {
       return undefined;
     }
 
     return { text, originalLength };
+  }
+
+  private forEachVisibleResponseText(
+    response: GenerateContentResponse | undefined,
+    onText: (text: string) => void,
+  ): boolean {
+    const parts = response?.candidates?.[0]?.content?.parts;
+    if (!parts?.length) {
+      return false;
+    }
+
+    let hasText = false;
+    for (const part of parts as Array<Part | string>) {
+      const text = this.getVisibleResponsePartText(part);
+      if (text === undefined) {
+        continue;
+      }
+
+      hasText = true;
+      onText(text);
+    }
+    return hasText;
+  }
+
+  private getVisibleResponsePartText(part: Part | string): string | undefined {
+    if (typeof part === 'string') {
+      return part;
+    }
+    if (
+      'text' in part &&
+      typeof part.text === 'string' &&
+      !('thought' in part && part.thought)
+    ) {
+      return part.text;
+    }
+    return undefined;
+  }
+
+  private safelyAddModelOutputAttributes(
+    span: Span,
+    modelOutput: { text: string; originalLength: number } | undefined,
+  ): void {
+    try {
+      addModelOutputAttributes(
+        this.config,
+        span,
+        modelOutput?.text,
+        modelOutput?.originalLength,
+      );
+    } catch (error) {
+      debugLogger.warn('Failed to add model output span attributes:', error);
+    }
   }
 
   private shouldCollectSensitiveSpanAttributes(): boolean {

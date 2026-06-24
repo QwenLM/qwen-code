@@ -898,6 +898,40 @@ describe('LoggingContentGenerator', () => {
     );
   });
 
+  it('excludes thought parts from sensitive model output attributes', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-thought', 'test-model', [
+            { text: 'visible' },
+            { text: 'hidden thought', thought: true },
+          ]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ includeSensitiveSpanAttributes: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-thought');
+
+    const sensitiveCall = vi.mocked(addModelOutputAttributes).mock.calls.at(-1);
+    expect(sensitiveCall?.[2]).toBe('visible');
+    expect(sensitiveCall?.[3]).toBe('visible'.length);
+  });
+
   it('bounds sensitive model output collection while preserving original length', async () => {
     const longText = 'x'.repeat(MAX_RESPONSE_TEXT_LENGTH + 100);
     const wrapped = createWrappedGenerator(
@@ -933,6 +967,42 @@ describe('LoggingContentGenerator', () => {
     expect(sensitiveCall?.[3]).toBe(longText.length);
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
     expect(responseEvent.response_text).toHaveLength(MAX_RESPONSE_TEXT_LENGTH);
+  });
+
+  it('does not fail generateContent when sensitive span output attributes fail', async () => {
+    vi.mocked(addModelOutputAttributes).mockImplementationOnce(() => {
+      throw new TypeError('bad span attribute input');
+    });
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-safe', 'test-model', [{ text: 'visible' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ includeSensitiveSpanAttributes: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const response = await generator.generateContent(request, 'prompt-safe');
+
+    expect(response.responseId).toBe('resp-safe');
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    expect(getGenerateContentSpanRecord().statuses).toEqual([
+      { code: SpanStatusCode.OK },
+    ]);
   });
 
   it('skips sensitive model output attributes when the sensitive flag is disabled', async () => {
@@ -1024,6 +1094,47 @@ describe('LoggingContentGenerator', () => {
     expect(vi.mocked(addModelOutputAttributes).mock.calls.at(-1)?.[2]).toBe(
       longText,
     );
+  });
+
+  it('does not fail generateContentStream when sensitive span output attributes fail', async () => {
+    vi.mocked(addModelOutputAttributes).mockImplementationOnce(() => {
+      throw new TypeError('bad span attribute input');
+    });
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-safe', 'test-model', [{ text: 'visible' }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ includeSensitiveSpanAttributes: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-safe',
+    );
+    const responses: GenerateContentResponse[] = [];
+    for await (const response of stream) {
+      responses.push(response);
+    }
+
+    expect(responses).toHaveLength(1);
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    expect(getStreamSpanRecord().statuses).toEqual([
+      { code: SpanStatusCode.OK },
+    ]);
   });
 
   it.each([
