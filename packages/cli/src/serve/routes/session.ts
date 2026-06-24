@@ -26,7 +26,7 @@ import {
   type AcpSessionBridge,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
-import type { BridgeErrorContext } from '../server/error-response.js';
+import type { SendBridgeError } from '../server/error-response.js';
 import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
@@ -43,12 +43,6 @@ import {
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
 } from '../server/session-list.js';
-
-type SendBridgeError = (
-  res: Response,
-  err: unknown,
-  ctx?: BridgeErrorContext,
-) => void;
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;

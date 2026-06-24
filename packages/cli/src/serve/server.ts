@@ -86,7 +86,7 @@ import {
 import {
   sendBridgeError as sendBridgeErrorResponse,
   sendPermissionVoteError as sendPermissionVoteErrorResponse,
-  type BridgeErrorContext,
+  type SendBridgeError,
 } from './server/error-response.js';
 import { resolveBridgeFsFactory } from './server/fs-factory.js';
 import {
@@ -435,11 +435,8 @@ export function createServeApp(
 
   const { daemonLog } = deps;
 
-  const sendBridgeError = (
-    res: import('express').Response,
-    err: unknown,
-    ctx?: BridgeErrorContext,
-  ) => sendBridgeErrorResponse(res, err, ctx, daemonLog);
+  const sendBridgeError: SendBridgeError = (res, err, ctx) =>
+    sendBridgeErrorResponse(res, err, ctx, daemonLog);
   const sendPermissionVoteError = (
     res: import('express').Response,
     err: unknown,

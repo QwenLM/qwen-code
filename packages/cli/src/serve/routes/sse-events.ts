@@ -5,7 +5,7 @@
  */
 
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
-import type { Application, Response } from 'express';
+import type { Application } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
@@ -15,7 +15,7 @@ import {
 } from '../event-bus.js';
 import {
   errorMessage,
-  type BridgeErrorContext,
+  type SendBridgeError,
 } from '../server/error-response.js';
 import {
   parseLastEventId,
@@ -27,12 +27,6 @@ let activeSseCount = 0;
 export function getActiveSseCount(): number {
   return activeSseCount;
 }
-
-type SendBridgeError = (
-  res: Response,
-  err: unknown,
-  ctx?: BridgeErrorContext,
-) => void;
 
 interface RegisterSseEventsRoutesDeps {
   bridge: AcpSessionBridge;

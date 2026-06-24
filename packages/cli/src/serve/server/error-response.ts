@@ -45,6 +45,12 @@ export type BridgeErrorContext = {
   [key: string]: string | number | boolean | undefined;
 };
 
+export type SendBridgeError = (
+  res: Response,
+  err: unknown,
+  ctx?: BridgeErrorContext,
+) => void;
+
 function bridgeErrorExtraContext(
   ctx: BridgeErrorContext | undefined,
 ): Record<string, string | number | boolean> {

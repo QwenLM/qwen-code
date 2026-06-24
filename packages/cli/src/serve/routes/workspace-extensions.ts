@@ -22,7 +22,7 @@ import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
-import type { BridgeErrorContext } from '../server/error-response.js';
+import type { SendBridgeError } from '../server/error-response.js';
 import {
   parseAndValidateWorkspaceClientId,
   type safeBody as safeBodyType,
@@ -39,12 +39,6 @@ import type {
 } from '../workspace-service/index.js';
 
 type SafeBody = typeof safeBodyType;
-
-type SendBridgeError = (
-  res: Response,
-  err: unknown,
-  ctx?: BridgeErrorContext,
-) => void;
 
 interface RegisterWorkspaceExtensionRoutesDeps {
   boundWorkspace: string;

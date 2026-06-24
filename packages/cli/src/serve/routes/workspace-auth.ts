@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application, RequestHandler, Response } from 'express';
+import type { Application, RequestHandler } from 'express';
 import { ALL_PROVIDERS } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -20,18 +20,12 @@ import {
   buildAuthProviderCatalog,
   parseAuthProviderInstallRequest,
 } from '../server/auth-provider-helpers.js';
-import type { BridgeErrorContext } from '../server/error-response.js';
+import type { SendBridgeError } from '../server/error-response.js';
 import { parseClientIdHeader, safeBody } from '../server/request-helpers.js';
 import type {
   ServeAuthProviderInstallRequest,
   ServeAuthProviderInstallResult,
 } from '../types.js';
-
-type SendBridgeError = (
-  res: Response,
-  err: unknown,
-  ctx?: BridgeErrorContext,
-) => void;
 
 interface RegisterWorkspaceAuthRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
