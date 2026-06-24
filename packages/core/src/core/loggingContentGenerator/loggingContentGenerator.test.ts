@@ -22,6 +22,7 @@ import {
   logApiResponse,
   logApiError,
 } from '../../telemetry/loggers.js';
+import { addModelOutputAttributes } from '../../telemetry/index.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
 
@@ -208,6 +209,7 @@ vi.mock('../../telemetry/index.js', () => {
     addSystemPromptAttributes: vi.fn(),
     addToolSchemaAttributes: vi.fn(),
     addModelOutputAttributes: vi.fn(),
+    isTelemetrySdkInitialized: vi.fn(() => true),
   };
 });
 
@@ -247,15 +249,17 @@ const convertGeminiResponseToOpenAISpy = vi
   } as OpenAI.Chat.ChatCompletion);
 
 const createConfig = (overrides: Record<string, unknown> = {}): Config => {
-  const configContent = {
+  const configContent: Record<string, unknown> = {
     authType: 'openai',
     enableOpenAILogging: false,
     ...overrides,
   };
   return {
     getContentGeneratorConfig: () => configContent,
-    getAuthType: () => configContent.authType as AuthType | undefined,
+    getAuthType: () => configContent['authType'] as AuthType | undefined,
     getWorkingDir: () => process.cwd(),
+    getTelemetryIncludeSensitiveSpanAttributes: () =>
+      Boolean(configContent['includeSensitiveSpanAttributes']),
   } as Config;
 };
 
@@ -838,6 +842,38 @@ describe('LoggingContentGenerator', () => {
         0,
         MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
       )}${RESPONSE_TEXT_TRUNCATION_SUFFIX}`,
+    );
+  });
+
+  it('passes uncapped response text to sensitive model output attributes', async () => {
+    const longText = 'x'.repeat(MAX_RESPONSE_TEXT_LENGTH + 100);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-long', 'test-model', [{ text: longText }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ includeSensitiveSpanAttributes: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-long');
+
+    expect(vi.mocked(addModelOutputAttributes).mock.calls.at(-1)?.[2]).toBe(
+      longText,
     );
   });
 

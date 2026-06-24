@@ -56,6 +56,7 @@ import {
   addSystemPromptAttributes,
   addToolSchemaAttributes,
   addModelOutputAttributes,
+  isTelemetrySdkInitialized,
 } from '../../telemetry/index.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
@@ -95,8 +96,6 @@ const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
 const MAX_RESPONSE_TEXT_LENGTH = 4096;
 const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
-const MAX_RESPONSE_TEXT_PREFIX_LENGTH =
-  MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length;
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -294,9 +293,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         const durationMs = Date.now() - startTime;
         const responseText = isInternal
           ? undefined
-          : this.extractResponseText(result);
-        if (!isInternal) {
-          addModelOutputAttributes(this.config, llmSpan, responseText);
+          : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
+        if (!isInternal && this.shouldCollectSensitiveSpanAttributes()) {
+          const modelOutputText = this.extractResponseText(result);
+          addModelOutputAttributes(this.config, llmSpan, modelOutputText);
         }
         this.safelyLogApiResponse(
           result.responseId ?? '',
@@ -623,7 +623,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         : undefined;
       const streamResponseText = isInternal
         ? undefined
-        : this.extractResponseText(consolidatedResponse);
+        : this.extractResponseText(
+            consolidatedResponse,
+            MAX_RESPONSE_TEXT_LENGTH,
+          );
       // If the idle timeout already closed the span as failed, do not contradict
       // it with a "success" api_response log or model-output span attributes.
       // The OpenAI interaction log is also skipped — telemetry already carries
@@ -640,8 +643,14 @@ export class LoggingContentGenerator implements ContentGenerator {
             streamResponseText,
           ),
         );
-        if (!isInternal && span) {
-          addModelOutputAttributes(this.config, span, streamResponseText);
+        if (
+          !isInternal &&
+          span &&
+          this.shouldCollectSensitiveSpanAttributes()
+        ) {
+          const streamModelOutputText =
+            this.extractResponseText(consolidatedResponse);
+          addModelOutputAttributes(this.config, span, streamModelOutputText);
         }
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
@@ -917,6 +926,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
   private extractResponseText(
     response: GenerateContentResponse | undefined,
+    maxLength?: number,
   ): string | undefined {
     const parts = response?.candidates?.[0]?.content?.parts;
     if (!parts?.length) {
@@ -926,13 +936,22 @@ export class LoggingContentGenerator implements ContentGenerator {
     let text = '';
     let hasText = false;
     let truncated = false;
+    const maxPrefixLength =
+      maxLength === undefined
+        ? undefined
+        : Math.max(0, maxLength - RESPONSE_TEXT_TRUNCATION_SUFFIX.length);
     const appendText = (partText: string) => {
       hasText = true;
       if (truncated) {
         return;
       }
 
-      const remaining = MAX_RESPONSE_TEXT_PREFIX_LENGTH - text.length;
+      if (maxPrefixLength === undefined) {
+        text += partText;
+        return;
+      }
+
+      const remaining = maxPrefixLength - text.length;
       if (partText.length <= remaining) {
         text += partText;
         return;
@@ -962,6 +981,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     return truncated ? `${text}${RESPONSE_TEXT_TRUNCATION_SUFFIX}` : text;
+  }
+
+  private shouldCollectSensitiveSpanAttributes(): boolean {
+    return (
+      isTelemetrySdkInitialized() &&
+      this.config.getTelemetryIncludeSensitiveSpanAttributes()
+    );
   }
 
   async countTokens(req: CountTokensParameters): Promise<CountTokensResponse> {
