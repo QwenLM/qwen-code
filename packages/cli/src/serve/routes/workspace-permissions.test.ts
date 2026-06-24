@@ -747,7 +747,7 @@ describe('workspace permissions routes', () => {
       security: { folderTrust: { enabled: true } },
     });
     await writeJson(path.join(h.home, TRUSTED_FOLDERS_FILENAME), {
-      [process.cwd()]: TrustLevel.DO_NOT_TRUST,
+      [h.workspace]: TrustLevel.DO_NOT_TRUST,
     });
     resetTrustedFoldersForTesting();
 
