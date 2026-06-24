@@ -2093,6 +2093,7 @@ export async function runQwenServe(
                     }`,
                   );
                 })
+                .finally(() => daemonLog.flush().catch(() => {}))
                 .finally(() => {
                   // Server.close error takes precedence (operator-visible
                   // listener problem); fall back to the bridge error

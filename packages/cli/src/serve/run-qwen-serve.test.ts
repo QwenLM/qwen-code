@@ -718,6 +718,54 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('flushes runtime startup failures to the daemon log when closing', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-log-')),
+    );
+    const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+      throw new Error('runtime boom');
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      await handle.close();
+      const daemonDir = path.join(tmpDir, 'debug', 'daemon');
+      const logFile = fs
+        .readdirSync(daemonDir)
+        .find((file) => file.endsWith('.log'));
+      expect(logFile).toBeDefined();
+      const logContent = fs.readFileSync(
+        path.join(daemonDir, logFile!),
+        'utf8',
+      );
+      expect(logContent).toContain('runtime startup failed');
+      expect(logContent).toContain('runtime boom');
+    } finally {
+      if (handle.server.listening) {
+        await handle.close();
+      }
+      if (originalRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+      }
+    }
+  });
+
   it('fails runtimeReady and health when runtime startup times out', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
