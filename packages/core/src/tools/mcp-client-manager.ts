@@ -269,7 +269,8 @@ export function mcpTransportOf(config: MCPServerConfig): McpTransportKind {
  * behavior, no enforcement.
  *
  * `QWEN_SERVE_MCP_CLIENT_BUDGET` — positive integer; non-numeric /
- *   zero / negative / NaN are silently ignored (treated as unset).
+ *   zero / negative / NaN are rejected (treated as unset) and a
+ *   stderr breadcrumb is written so the misconfiguration is visible.
  * `QWEN_SERVE_MCP_BUDGET_MODE` — `enforce|warn|off`. Defaults to
  *   `warn` when a budget is set, `off` otherwise.
  */
