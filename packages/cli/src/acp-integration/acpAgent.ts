@@ -39,7 +39,7 @@ import {
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
-  resolveOwnsModel,
+  findExistingProviderModels,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -132,6 +132,14 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import {
+  buildPermissionSettings,
+  normalizePermissionRules,
+  PermissionRulesValidationError,
+  PERMISSION_RULE_TYPES,
+  readPermissionRuleSet,
+  type PermissionRuleSet,
+} from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
 import { z } from 'zod';
@@ -277,71 +285,6 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
 export const AUTH_PREFLIGHT_WAIVED_AUTH_TYPES: ReadonlySet<string> = new Set([
   'qwen-oauth',
 ]);
-
-type PermissionRuleType = 'allow' | 'ask' | 'deny';
-
-interface PermissionRuleSet {
-  allow: string[];
-  ask: string[];
-  deny: string[];
-}
-
-interface PermissionSettingsScopeState {
-  path: string;
-  rules: PermissionRuleSet;
-}
-
-interface QwenPermissionSettings {
-  user: PermissionSettingsScopeState;
-  workspace: PermissionSettingsScopeState;
-  merged: PermissionRuleSet;
-  isTrusted: boolean;
-}
-
-const PERMISSION_RULE_TYPES: PermissionRuleType[] = ['allow', 'ask', 'deny'];
-
-function readPermissionRuleSet(settings: unknown): PermissionRuleSet {
-  const permissions =
-    settings && typeof settings === 'object'
-      ? (
-          settings as {
-            permissions?: Partial<Record<PermissionRuleType, unknown>>;
-          }
-        ).permissions
-      : undefined;
-
-  const readRules = (type: PermissionRuleType): string[] => {
-    const value = permissions?.[type];
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === 'string')
-      : [];
-  };
-
-  return {
-    allow: readRules('allow'),
-    ask: readRules('ask'),
-    deny: readRules('deny'),
-  };
-}
-
-function normalizePermissionRules(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    throw RequestError.invalidParams(undefined, 'rules must be an array');
-  }
-  return Array.from(
-    new Set(
-      value.map((item) => {
-        if (typeof item !== 'string' || !item.trim()) {
-          throw RequestError.invalidParams(
-            undefined,
-            'rules must contain only non-empty strings',
-          );
-        }
-        return item.trim();
-      }),
-    ),
-  );
-}
 
 type QwenMemorySettings = {
   enableManagedAutoMemory: boolean;
@@ -1414,11 +1357,6 @@ function resolveProviderDocumentationUrl(
   return undefined;
 }
 
-function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
-  const record = toRecord(value);
-  return typeof record['id'] === 'string';
-}
-
 function readSettingsEnv(
   settings: LoadedSettings,
   envKey: string | undefined,
@@ -1427,35 +1365,6 @@ function readSettingsEnv(
   const env = toRecord((settings.merged as Record<string, unknown>)['env']);
   const value = env[envKey];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function readProviderModels(
-  settings: LoadedSettings,
-  protocol: string,
-): ProviderModelConfig[] {
-  const modelProviders = toRecord(
-    (settings.merged as Record<string, unknown>)['modelProviders'],
-  );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
-}
-
-function findExistingProviderModels(
-  config: ProviderConfig,
-  settings: LoadedSettings,
-):
-  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
-  | undefined {
-  const ownsModel = resolveOwnsModel(config);
-  if (!ownsModel) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
-  for (const protocol of protocols) {
-    const models = readProviderModels(settings, protocol).filter(ownsModel);
-    if (models.length > 0) return { protocol, models };
-  }
-  return undefined;
 }
 
 function resolveProviderEnvKey(
@@ -1491,7 +1400,12 @@ function readExistingProviderConfig(
   config: ProviderConfig,
   settings: LoadedSettings,
 ): Record<string, unknown> | undefined {
-  const existing = findExistingProviderModels(config, settings);
+  const existing = findExistingProviderModels(
+    config,
+    (settings.merged as Record<string, unknown>)['modelProviders'] as
+      | Record<string, unknown>
+      | undefined,
+  );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
   const baseUrl =
@@ -2481,34 +2395,37 @@ function parsePoolDrainMs(envValue: string | undefined): number {
  * invokes `tryReserve`/`release`; this helper produces the controller
  * and wires the event callback.
  */
-function createWorkspaceMcpBudget(
+export function createWorkspaceMcpBudget(
   onEvent: (event: McpBudgetEvent) => void,
 ): WorkspaceMcpBudget | undefined {
   const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
-  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly.
-  // Use `Number(...)` + `Number.isInteger` so the pool and the manager
+  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly: only plain
+  // decimal digits set a budget. A loose `Number(...)` would silently accept
+  // `0x10`=16, `1e2`=100, and `1.0`=1 (all pass `isInteger`); the strict
+  // `/^\d+$/` + `isSafeInteger` check rejects them so the pool and the manager
   // honor the same env values.
-  const budget =
-    rawBudget !== undefined && rawBudget !== '' ? Number(rawBudget) : undefined;
+  let budget: number | undefined;
+  if (rawBudget !== undefined && rawBudget !== '') {
+    const trimmed = rawBudget.trim();
+    const parsed = Number(trimmed);
+    if (/^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) && parsed > 0) {
+      budget = parsed;
+    } else {
+      process.stderr.write(
+        `qwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=` +
+          `'${rawBudget}' (expected positive integer); ` +
+          `MCP budget enforcement disabled for this child.\n`,
+      );
+    }
+  }
   const mode: McpBudgetMode = (() => {
     if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
       return rawMode;
     }
-    return budget !== undefined &&
-      Number.isFinite(budget) &&
-      Number.isInteger(budget) &&
-      budget > 0
-      ? 'warn'
-      : 'off';
+    return budget !== undefined ? 'warn' : 'off';
   })();
-  if (
-    mode === 'off' ||
-    budget === undefined ||
-    !Number.isFinite(budget) ||
-    !Number.isInteger(budget) ||
-    budget <= 0
-  ) {
+  if (mode === 'off' || budget === undefined) {
     return undefined;
   }
   return new WorkspaceMcpBudget({
@@ -3033,23 +2950,6 @@ class QwenAgent implements Agent {
   private loadPermissionSettings(cwd: string): LoadedSettings {
     this.settings = loadSettings(cwd);
     return this.settings;
-  }
-
-  private buildPermissionSettings(
-    settings: LoadedSettings,
-  ): QwenPermissionSettings {
-    return {
-      user: {
-        path: settings.user.path,
-        rules: readPermissionRuleSet(settings.user.settings),
-      },
-      workspace: {
-        path: settings.workspace.path,
-        rules: readPermissionRuleSet(settings.workspace.settings),
-      },
-      merged: readPermissionRuleSet(settings.merged),
-      isTrusted: settings.isTrusted,
-    };
   }
 
   private async buildCoreSettings(
@@ -6793,7 +6693,7 @@ class QwenAgent implements Agent {
       }
       case 'qwen/permissions/getSettings': {
         const settings = this.loadPermissionSettings(cwd);
-        return this.buildPermissionSettings(settings) as unknown as Record<
+        return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;
@@ -6816,9 +6716,24 @@ class QwenAgent implements Agent {
 
         const settings = this.loadPermissionSettings(cwd);
         const before = readPermissionRuleSet(settings.merged);
-        const rules = normalizePermissionRules(params['rules']);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
+        const scopeSettings =
+          scope === 'workspace'
+            ? settings.workspace.settings
+            : settings.user.settings;
+        const existingRules = readPermissionRuleSet(scopeSettings)[ruleType];
+        let rules: string[];
+        try {
+          rules = normalizePermissionRules(params['rules'], {
+            existingRules,
+          });
+        } catch (error) {
+          if (error instanceof PermissionRulesValidationError) {
+            throw RequestError.invalidParams(undefined, error.message);
+          }
+          throw error;
+        }
 
         settings.setValue(settingScope, `permissions.${ruleType}`, rules);
         // `setValue` already recomputed the in-memory merged view, so read the
@@ -6827,7 +6742,7 @@ class QwenAgent implements Agent {
         // could mutate settings between the two loads).
         const after = readPermissionRuleSet(settings.merged);
         this.syncLivePermissionManagers(before, after);
-        return this.buildPermissionSettings(settings) as unknown as Record<
+        return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;
