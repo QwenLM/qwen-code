@@ -599,8 +599,6 @@ const EN: Messages = {
   'extensions.install.usage': 'Usage: /extensions manage|install <source>',
   'extensions.install.waitForSession':
     'Wait for the session to connect before installing an extension.',
-  'extensions.install.waitForTurn':
-    'Wait for the current turn to finish before installing an extension.',
   'local.tools': 'List available tools. Usage: /tools [desc]',
   'loadWarning.commands':
     'Failed to load command list; slash commands may be incomplete.',
@@ -1679,7 +1677,6 @@ const ZH: Messages = {
   'extensions.install.unknownOption': (v) => `未知选项 ${v?.option ?? ''}`,
   'extensions.install.usage': '用法: /extensions manage|install <source>',
   'extensions.install.waitForSession': '等待会话连接后再安装扩展。',
-  'extensions.install.waitForTurn': '等待当前回合结束后再安装扩展。',
   'local.tools': '列出可用工具。用法: /tools [desc]',
   'loadWarning.commands': '命令列表加载失败，斜杠命令可能不完整。',
   'loadWarning.context': '会话上下文加载失败，当前模式可能不准确。',
