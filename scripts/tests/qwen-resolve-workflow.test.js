@@ -103,6 +103,19 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).toContain('--force-with-lease');
   });
 
+  it('keeps the verification-gate failure checks on resolve-pr', () => {
+    // These guard against prompt-injection symptoms; a future edit that drops
+    // any of them from the credentialed conflict-resolution path must fail here.
+    expect(resolveJob).toContain(
+      'Leftover conflict markers found after resolution',
+    );
+    expect(resolveJob).toContain('Branch still has merge conflicts with');
+    expect(resolveJob).toContain('The top commit is a default merge commit');
+    expect(resolveJob).toContain(
+      'Branch unchanged and no no-action.md was written',
+    );
+  });
+
   it('runs the agent without any GitHub credentials', () => {
     const agentStep = resolveJob.slice(
       resolveJob.indexOf("- name: 'Resolve conflicts'"),

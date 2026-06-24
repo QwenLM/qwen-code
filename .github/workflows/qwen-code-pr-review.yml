@@ -621,7 +621,12 @@ jobs:
           startsWith(github.event.comment.body, '@qwen-code /resolve ') ||
           startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', '\n'))))
       )
-    runs-on: 'ubuntu-latest'
+    # Self-hosted ECS pool, matching review-pr. NOTE: unlike review-pr (which only
+    # checks out trusted base and never builds PR code), this job's verification
+    # gate runs the untrusted PR's build/typecheck/lint/test on a reused workspace.
+    # That isolation tradeoff is accepted deliberately; the cleanup step below keeps
+    # stale per-run artifacts from leaking between PRs.
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     timeout-minutes: 90
     concurrency:
       group: 'qwen-resolve-${{ github.event.issue.number || github.event.inputs.pr_number }}'
@@ -638,6 +643,19 @@ jobs:
       WORKDIR: '/tmp/qwen-resolve'
       DRY_RUN: '${{ github.event.inputs.dry_run || false }}'
     steps:
+      # Self-hosted runners reuse the workspace and /tmp across jobs. A prior
+      # /resolve can leave stale ${WORKDIR} reports (failure.md, no-action.md, ...)
+      # that the verification gate would misread as this run's outcome, plus stale
+      # git worktrees that trip the checkout. Clean defensively; never fail the job.
+      - name: 'Clean stale resolve workspace'
+        run: |-
+          set -uo pipefail
+          rm -rf "${WORKDIR}" 2>/dev/null || true
+          if [ -e .git ]; then
+            git worktree prune -v || true
+          fi
+          echo "stale resolve workspace cleaned"
+
       - name: 'Acknowledge resolve request'
         if: "github.event_name == 'issue_comment'"
         env:
@@ -1022,7 +1040,10 @@ jobs:
           if-no-files-found: 'ignore'
 
       - name: 'Report skipped request'
-        if: "steps.prepare.outputs.decision == 'skip' || steps.prepare.outputs.decision == 'unsupported' || steps.prepare.outputs.decision == 'failed'"
+        # always(): the prepare step's EXIT trap writes decision=failed when it
+        # crashes, but a bare if implicitly requires success() — so without
+        # always() this step is skipped on the very crash it must report.
+        if: "${{ always() && (steps.prepare.outputs.decision == 'skip' || steps.prepare.outputs.decision == 'unsupported' || steps.prepare.outputs.decision == 'failed') }}"
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
@@ -1035,7 +1056,10 @@ jobs:
             echo
             echo "${SKIP_REASON}"
           } > "${WORKDIR}/report.md"
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md"
+          # Best-effort, matching 'Report result': a transient API error here must
+          # not abort the step under set -e and swallow the only failure signal.
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md" ||
+            echo "::warning::Resolve was skipped, but posting the skip-reason comment failed."
 
       - name: 'Report result'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
