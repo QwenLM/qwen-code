@@ -77,13 +77,16 @@ export function buildPermissionCheckContext(
     }
   }
 
-  // Generic specifier for literal matching (Skill name, Task subagent type, etc.)
+  // Generic specifier for literal matching (Skill name, Task subagent type,
+  // read_mcp_resource server name, etc.)
   const specifier =
     typeof toolParams['skill'] === 'string'
       ? toolParams['skill']
       : typeof toolParams['subagent_type'] === 'string'
         ? toolParams['subagent_type']
-        : undefined;
+        : typeof toolParams['server_name'] === 'string'
+          ? toolParams['server_name']
+          : undefined;
 
   return { toolName, command, cwd, filePath, domain, specifier };
 }

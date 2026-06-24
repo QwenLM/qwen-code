@@ -19,7 +19,6 @@ import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   MAX_MCP_RESOURCE_BLOB_CHARS,
-  MAX_MCP_RESOURCE_TEXT_CHARS,
   emptyMcpResourceText,
   formatMcpResourceContents,
   summarizeMcpResource,
@@ -84,9 +83,11 @@ class ReadMcpResourceToolInvocation extends BaseToolInvocation<
       type: 'info',
       title: 'Confirm MCP Resource Read',
       prompt: `Read resource ${this.params.uri} from MCP server "${this.params.server_name}"`,
-      // Tool-level rule (read_mcp_resource uses a 'literal' specifier, so a
-      // bare name rule is what reliably persists an "always allow").
-      permissionRules: ['ReadMcpResource'],
+      // Server-scoped rule: "always allow" persists only this server, not a
+      // blanket grant over every configured MCP server. read_mcp_resource uses
+      // a 'literal' specifier, matched against the server_name extracted in
+      // buildPermissionCheckContext.
+      permissionRules: [`ReadMcpResource(${this.params.server_name})`],
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
@@ -191,13 +192,15 @@ export class ReadMcpResourceTool extends BaseDeclarativeTool<
   }
 
   /**
-   * Keep the formatter's framed output (including the closing delimiter) intact
-   * instead of letting the scheduler's ~25K global truncation slice it mid-frame
-   * for a 25K–100K char resource. Mirrors the `@` path (which bypasses the
-   * scheduler) and ReadFile's per-tool budget.
+   * Self-managed size: the formatter already caps text at
+   * MAX_MCP_RESOURCE_TEXT_CHARS and blobs at the per-call/per-turn blob
+   * budget, so the scheduler's char truncation is redundant — and harmful,
+   * since a long `label` (server_name:uri, up to ~5K chars each in the
+   * delimiters) could push a fixed budget over and slice the nonce-framed
+   * output mid-content. Exempt it, like ReadFile.
    */
   override get maxOutputChars(): number {
-    return MAX_MCP_RESOURCE_TEXT_CHARS + 2_000; // + delimiter/notice overhead
+    return Number.POSITIVE_INFINITY;
   }
 
   override toAutoClassifierInput(

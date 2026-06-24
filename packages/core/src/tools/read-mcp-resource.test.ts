@@ -159,7 +159,7 @@ describe('ReadMcpResourceTool', () => {
     expect(await inv.getDefaultPermission()).toBe('ask');
   });
 
-  it('surfaces a persistable ReadMcpResource rule in the confirmation', async () => {
+  it('surfaces a server-scoped ReadMcpResource rule in the confirmation', async () => {
     const tool = new ReadMcpResourceTool(
       configWith(vi.fn(), { mcpServers: { srv: {} } }),
     );
@@ -167,9 +167,10 @@ describe('ReadMcpResourceTool', () => {
     const details = await inv.getConfirmationDetails(
       new AbortController().signal,
     );
+    // Server-scoped, not a blanket grant: "always allow" only authorizes 'srv'.
     expect(details).toMatchObject({
       type: 'info',
-      permissionRules: ['ReadMcpResource'],
+      permissionRules: ['ReadMcpResource(srv)'],
     });
   });
 
