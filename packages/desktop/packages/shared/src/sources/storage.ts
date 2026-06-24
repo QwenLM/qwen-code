@@ -31,6 +31,14 @@ import {
   isIconUrl,
 } from '../utils/icon.ts';
 
+const SOURCE_SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+function assertValidSourceSlug(sourceSlug: string): void {
+  if (!SOURCE_SLUG_REGEX.test(sourceSlug)) {
+    throw new Error('Invalid source slug');
+  }
+}
+
 // ============================================================
 // Directory Utilities
 // ============================================================
@@ -558,6 +566,7 @@ export async function createSource(
  * Delete a source from a workspace
  */
 export function deleteSource(workspaceRootPath: string, sourceSlug: string): void {
+  assertValidSourceSlug(sourceSlug);
   const dir = getSourcePath(workspaceRootPath, sourceSlug);
   if (existsSync(dir)) {
     rmSync(dir, { recursive: true });
@@ -583,4 +592,3 @@ export function sourceExists(workspaceRootPath: string, sourceSlug: string): boo
 // ============================================================
 
 export { parseGuideMarkdown };
-
