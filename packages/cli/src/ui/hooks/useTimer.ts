@@ -9,7 +9,15 @@ import { useState, useEffect, useRef } from 'react';
 const TIMER_REFRESH_INTERVAL_MS = 250;
 
 function elapsedSeconds(elapsedMs: number): number {
-  return Number((elapsedMs / 1000).toFixed(1));
+  return Number((Math.max(0, elapsedMs) / 1000).toFixed(1));
+}
+
+function getRunningElapsedMs(activeSinceMs: number | null): number {
+  if (activeSinceMs === null) {
+    return 0;
+  }
+
+  return Math.max(0, performance.now() - activeSinceMs);
 }
 
 /**
@@ -45,7 +53,9 @@ export const useTimer = (
 
     const finalizeRunningSegment = () => {
       if (activeSinceRef.current !== null) {
-        accumulatedElapsedMsRef.current += Date.now() - activeSinceRef.current;
+        accumulatedElapsedMsRef.current += getRunningElapsedMs(
+          activeSinceRef.current,
+        );
         activeSinceRef.current = null;
       }
       publishElapsedTime(accumulatedElapsedMsRef.current);
@@ -78,14 +88,11 @@ export const useTimer = (
     }
 
     if (activeSinceRef.current === null) {
-      activeSinceRef.current = Date.now();
+      activeSinceRef.current = performance.now();
     }
 
     const updateElapsedTime = () => {
-      const runningElapsedMs =
-        activeSinceRef.current === null
-          ? 0
-          : Date.now() - activeSinceRef.current;
+      const runningElapsedMs = getRunningElapsedMs(activeSinceRef.current);
       publishElapsedTime(accumulatedElapsedMsRef.current + runningElapsedMs);
     };
 

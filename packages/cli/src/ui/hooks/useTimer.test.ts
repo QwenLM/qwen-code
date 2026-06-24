@@ -50,6 +50,21 @@ describe('useTimer', () => {
     expect(result.current).toBe(0.5);
   });
 
+  it('should keep timing stable if the system clock moves backward', () => {
+    const { result } = renderHook(() => useTimer(true, 0));
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(1);
+
+    act(() => {
+      vi.setSystemTime(new Date(0));
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(2);
+  });
+
   it('should reset to 0 and start incrementing when isActive becomes true from false', () => {
     const { result, rerender } = renderHook(
       ({ isActive, resetKey }) => useTimer(isActive, resetKey),
