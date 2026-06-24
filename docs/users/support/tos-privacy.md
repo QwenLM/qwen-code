@@ -52,6 +52,14 @@ When you authenticate using API keys from other providers, the applicable Terms 
 
 Qwen Code supports various OpenAI-compatible providers. Please refer to your specific provider's terms of service and privacy policy for detailed information.
 
+## 4. If you are using Vertex AI
+
+When you authenticate with Google Cloud Vertex AI, the applicable Terms of Service and Privacy Notice are Google Cloud's.
+
+> [!important]
+>
+> When using Vertex AI, you are subject to [Google Cloud's Terms of Service](https://cloud.google.com/terms) and [Google Cloud Privacy Notice](https://cloud.google.com/privacy), not Qwen Code's terms. Please review Google Cloud's documentation for specific details about data usage, retention, and privacy practices.
+
 ## Usage Statistics and Telemetry
 
 Qwen Code may collect anonymous usage statistics and [telemetry](../../developers/development/telemetry) data to improve the user experience and product quality. This data collection is optional and can be controlled through configuration settings.
@@ -69,6 +77,7 @@ When enabled, Qwen Code may collect:
 - **Qwen OAuth:** Usage statistics are governed by Qwen's privacy policy. You can opt-out through Qwen Code's configuration settings.
 - **Alibaba Cloud Coding Plan:** Usage statistics are governed by Alibaba Cloud's privacy policy. You can opt-out through Qwen Code's configuration settings.
 - **API Key:** No additional data is collected by Qwen Code beyond what your chosen API provider collects.
+- **Vertex AI:** Usage statistics are governed by Google Cloud's privacy policy. No additional data is collected by Qwen Code beyond what Google Cloud collects.
 
 ## Frequently Asked Questions (FAQ)
 
@@ -81,6 +90,8 @@ Whether your code, including prompts and answers, is used to train AI models dep
 - **Alibaba Cloud Coding Plan**: Data usage is governed by Alibaba Cloud's privacy policy. Please refer to their policy for specific details about data collection and model training practices.
 
 - **API Key**: Data usage depends entirely on your chosen API provider. Each provider has their own data usage policies. Please review the privacy policy and terms of service of your specific provider.
+
+- **Vertex AI**: Data usage is governed by [Google Cloud's Terms of Service](https://cloud.google.com/terms) and [Privacy Notice](https://cloud.google.com/privacy). Please review Google Cloud's policies for specific details about data collection and model training practices.
 
 **Important**: Qwen Code itself does not use your prompts, code, or responses for model training. Any data usage for training purposes would be governed by the policies of the AI service provider you authenticate with.
 
@@ -105,7 +116,7 @@ The Usage Statistics setting only controls data collection by Qwen Code itself. 
 
 ### 3. How do I switch between authentication methods?
 
-You can switch between Qwen OAuth, Alibaba Cloud Coding Plan, and your own API key at any time:
+You can switch between Qwen OAuth, Alibaba Cloud Coding Plan, your own API key, and Vertex AI at any time:
 
 1. **During startup**: Choose your preferred authentication method when prompted
 2. **Within the CLI**: Use the `/auth` command to reconfigure your authentication method
