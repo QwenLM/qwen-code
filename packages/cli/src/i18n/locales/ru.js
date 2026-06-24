@@ -2078,8 +2078,6 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
-  'Auto-update is disabled. Enable it in settings to use this command.':
-    'Автообновление отключено. Включите его в настройках, чтобы использовать эту команду.',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
   'Update successful! The new version will be used on your next run.':
     'Обновление успешно! Новая версия будет использована при следующем запуске.',

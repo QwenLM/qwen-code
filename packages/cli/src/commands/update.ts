@@ -7,7 +7,10 @@
 import type { CommandModule } from 'yargs';
 import { loadSettings } from '../config/settings.js';
 import { checkForUpdates } from '../ui/utils/updateCheck.js';
-import { getInstallationInfo } from '../utils/installationInfo.js';
+import {
+  getInstallationInfo,
+  resolveUpdateCommand,
+} from '../utils/installationInfo.js';
 import { performStandaloneUpdate } from '../utils/standalone-update.js';
 import { getPackageJson } from '../utils/package.js';
 import { writeStdoutLine, writeStderrLine } from '../utils/stdioHelpers.js';
@@ -74,10 +77,9 @@ export const updateCommand: CommandModule = {
     }
 
     if (installationInfo.updateCommand) {
-      const isNightly = info.update.latest.includes('nightly');
-      const updateCmd = installationInfo.updateCommand.replace(
-        '@latest',
-        isNightly ? '@nightly' : `@${info.update.latest}`,
+      const updateCmd = resolveUpdateCommand(
+        installationInfo.updateCommand,
+        info.update.latest,
       );
       writeStdoutLine(t('Run the following to update:'));
       writeStdoutLine(`  ${updateCmd}`);

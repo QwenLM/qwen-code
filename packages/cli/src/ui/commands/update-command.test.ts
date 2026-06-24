@@ -10,11 +10,18 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 const checkForUpdates = vi.fn();
 const handleAutoUpdate = vi.fn();
 const getInstallationInfo = vi.fn();
+const resolveUpdateCommand = vi.fn(
+  (updateCommand: string, latestVersion: string) =>
+    updateCommand.replace('@latest', `@${latestVersion}`),
+);
 const getPackageJson = vi.fn();
 
 vi.mock('../utils/updateCheck.js', () => ({ checkForUpdates }));
 vi.mock('../../utils/handleAutoUpdate.js', () => ({ handleAutoUpdate }));
-vi.mock('../../utils/installationInfo.js', () => ({ getInstallationInfo }));
+vi.mock('../../utils/installationInfo.js', () => ({
+  getInstallationInfo,
+  resolveUpdateCommand,
+}));
 vi.mock('../../utils/package.js', () => ({ getPackageJson }));
 
 const { updateCommand } = await import('./update-command.js');
@@ -79,6 +86,36 @@ describe('updateCommand', () => {
       messageType: 'info',
       content:
         'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
+    });
+  });
+
+  it('returns standalone reinstall guidance when no update command is available', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+    });
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nUnable to auto-update this standalone installation. Please reinstall from:\n  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/',
+    });
+  });
+
+  it('returns manual reinstall guidance when no update command is available', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+    });
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
     });
   });
 

@@ -28,6 +28,17 @@ const STANDALONE_UNIX_INSTALLER =
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
 
+export function resolveUpdateCommand(
+  updateCommand: string,
+  latestVersion: string,
+): string {
+  const isNightly = latestVersion.includes('nightly');
+  return updateCommand.replace(
+    '@latest',
+    isNightly ? '@nightly' : `@${latestVersion}`,
+  );
+}
+
 export interface InstallationInfo {
   packageManager: PackageManager;
   isGlobal: boolean;

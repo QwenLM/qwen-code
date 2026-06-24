@@ -225,12 +225,18 @@ function isAlreadyExistsError(err: unknown): boolean {
   );
 }
 
-function validateExtractedPaths(resolvedDest: string): void {
+function validateExtractedPaths(
+  resolvedDest: string,
+  options: { symlinksOnly?: boolean } = {},
+): void {
   const entries = fs.readdirSync(resolvedDest, {
     recursive: true,
     withFileTypes: true,
   });
   for (const entry of entries) {
+    if (options.symlinksOnly && !entry.isSymbolicLink()) {
+      continue;
+    }
     const fullPath = path.join(
       String(entry.parentPath || entry.path),
       entry.name,
@@ -302,7 +308,7 @@ async function extractArchive(
     });
     // Post-extraction defense-in-depth: detect chained symlink attacks that
     // bypass the string-level filter (e.g. symlink A → ".", then A/payload → "../../etc")
-    validateExtractedPaths(fs.realpathSync(destDir));
+    validateExtractedPaths(fs.realpathSync(destDir), { symlinksOnly: true });
   }
 }
 

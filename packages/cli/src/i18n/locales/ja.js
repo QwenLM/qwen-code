@@ -1864,8 +1864,6 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
-  'Auto-update is disabled. Enable it in settings to use this command.':
-    '自動アップデートが無効です。設定で有効にしてこのコマンドを使用してください。',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
   'Update successful! The new version will be used on your next run.':
     'アップデート成功！新バージョンは次回起動時に使用されます。',

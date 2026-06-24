@@ -5,10 +5,15 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ArgumentsCamelCase } from 'yargs';
 
 const loadSettings = vi.fn();
 const checkForUpdates = vi.fn();
 const getInstallationInfo = vi.fn();
+const resolveUpdateCommand = vi.fn(
+  (updateCommand: string, latestVersion: string) =>
+    updateCommand.replace('@latest', `@${latestVersion}`),
+);
 const performStandaloneUpdate = vi.fn();
 const getPackageJson = vi.fn();
 const writeStdoutLine = vi.fn();
@@ -16,7 +21,10 @@ const writeStderrLine = vi.fn();
 
 vi.mock('../config/settings.js', () => ({ loadSettings }));
 vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdates }));
-vi.mock('../utils/installationInfo.js', () => ({ getInstallationInfo }));
+vi.mock('../utils/installationInfo.js', () => ({
+  getInstallationInfo,
+  resolveUpdateCommand,
+}));
 vi.mock('../utils/standalone-update.js', () => ({ performStandaloneUpdate }));
 vi.mock('../utils/package.js', () => ({ getPackageJson }));
 vi.mock('../utils/stdioHelpers.js', () => ({
@@ -25,6 +33,11 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 }));
 
 const { updateCommand } = await import('./update.js');
+
+const updateArgs: ArgumentsCamelCase<Record<string, never>> = {
+  _: [],
+  $0: 'qwen',
+};
 
 function settings(enableAutoUpdate?: boolean) {
   return {
@@ -52,7 +65,7 @@ describe('update command', () => {
   it('prints the package-manager update command even when auto-update is disabled', async () => {
     loadSettings.mockReturnValue(settings(false));
 
-    await updateCommand.handler({});
+    await updateCommand.handler(updateArgs);
 
     expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), false);
     expect(writeStdoutLine).toHaveBeenCalledWith('Update available: 1.2.3');
@@ -71,7 +84,7 @@ describe('update command', () => {
     });
     performStandaloneUpdate.mockRejectedValue(new Error('boom'));
 
-    await updateCommand.handler({});
+    await updateCommand.handler(updateArgs);
 
     expect(performStandaloneUpdate).toHaveBeenCalledWith(
       '/tmp/qwen-code',
@@ -81,11 +94,39 @@ describe('update command', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('prints success message on standalone update', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('done');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update successful! The new version will be used on your next run.',
+    );
+  });
+
+  it('prints deferred message on standalone update', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('deferred');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update downloaded. It will be applied after you exit this session.',
+    );
+  });
+
   it('prints the current version when no update is available', async () => {
     checkForUpdates.mockResolvedValue(null);
     getPackageJson.mockResolvedValue({ version: '1.0.0' });
 
-    await updateCommand.handler({});
+    await updateCommand.handler(updateArgs);
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
       'Qwen Code 1.0.0 is up to date!',

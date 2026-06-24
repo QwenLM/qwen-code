@@ -2059,8 +2059,6 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
-  'Auto-update is disabled. Enable it in settings to use this command.':
-    "L'actualització automàtica està desactivada. Activeu-la a la configuració per utilitzar aquesta ordre.",
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} està actualitzat!',
   'Update successful! The new version will be used on your next run.':

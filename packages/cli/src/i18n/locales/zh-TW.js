@@ -2089,8 +2089,6 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     '檢查 Qwen Code 更新並安裝（如果可用）',
-  'Auto-update is disabled. Enable it in settings to use this command.':
-    '自動更新已停用。請在設定中啟用以使用此命令。',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
   'Update successful! The new version will be used on your next run.':
     '更新成功！新版本將在下次執行時生效。',
