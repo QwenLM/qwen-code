@@ -201,6 +201,10 @@ sequenceDiagram
     AF-->>App: final state
 ```
 
+`qwen-oauth` is the legacy v1 provider identifier. Qwen OAuth free tier was
+discontinued on 2026-04-15, so new clients should prefer a currently supported
+auth provider when one is available.
+
 ## State & Lifecycle
 
 - `DaemonClient` is connection-less; nothing happens at construction. Every method opens a fresh `fetch`.

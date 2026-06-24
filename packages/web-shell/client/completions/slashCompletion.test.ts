@@ -500,7 +500,7 @@ describe('slashCompletionSource', () => {
       {
         name: 'mcp',
         description: 'Manage MCP servers',
-        argumentHint: 'desc|nodesc|schema|auth|noauth',
+        argumentHint: 'desc|nodesc|schema',
       },
     ];
     const source = slashCompletionSource(() => commands);

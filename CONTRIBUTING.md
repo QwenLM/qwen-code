@@ -148,7 +148,7 @@ To run the integration tests, use the following command:
 npm run test:e2e
 ```
 
-For more detailed information on the integration testing framework, please see the [Integration Tests documentation](./docs/integration-tests.md).
+For more detailed information on the integration testing framework, please see the [Integration Tests documentation](./docs/developers/development/integration-tests.md).
 
 ### Linting and Preflight Checks
 

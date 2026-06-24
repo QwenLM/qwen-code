@@ -30,8 +30,42 @@ const vscodeMock = vi.hoisted(() => {
     }
   }
 
+  class Position {
+    line: number;
+    character: number;
+    constructor(line: number, character: number) {
+      if (line < 0 || character < 0) {
+        throw new Error('Position line and character must be non-negative');
+      }
+      this.line = line;
+      this.character = character;
+    }
+  }
+
+  class Selection {
+    anchor: Position;
+    active: Position;
+    constructor(anchor: Position, active: Position) {
+      this.anchor = anchor;
+      this.active = active;
+    }
+  }
+
+  class Range {
+    start: Position;
+    end: Position;
+    constructor(start: Position, end: Position) {
+      this.start = start;
+      this.end = end;
+    }
+  }
+
   return {
     Uri,
+    Position,
+    Selection,
+    Range,
+    TextEditorRevealType: { InCenter: 2 },
     ViewColumn: { One: 1, Two: 2, Three: 3, Beside: -2 },
     workspace: {
       findFiles: vi.fn(),
@@ -50,6 +84,7 @@ const vscodeMock = vi.hoisted(() => {
     window: {
       activeTextEditor: undefined,
       showTextDocument: vi.fn(),
+      showErrorMessage: vi.fn(),
       tabGroups: {
         all: [] as Array<{
           tabs: Array<{ input: unknown }>;
@@ -249,6 +284,42 @@ describe('FileMessageHandler', () => {
 
     expect(vscodeMock.workspace.openTextDocument).toHaveBeenCalledWith(
       expect.objectContaining({ fsPath: '\\\\server\\share\\app.ts' }),
+    );
+  });
+
+  it('openFile clamps zero line and column values to the file start', async () => {
+    vscodeMock.workspace.workspaceFolders = [
+      { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+    ];
+    vscodeMock.workspace.openTextDocument.mockResolvedValue({
+      uri: vscode.Uri.file('/workspace/src/app.ts'),
+    });
+    const editor = { selection: undefined, revealRange: vi.fn() };
+    vscodeMock.window.showTextDocument.mockResolvedValue(editor);
+
+    const handler = new FileMessageHandler(
+      {} as QwenAgentManager,
+      {} as ConversationStore,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openFile',
+      data: { path: 'src/app.ts:0:0' },
+    });
+
+    expect(vscodeMock.window.showErrorMessage).not.toHaveBeenCalled();
+    expect(editor.selection).toMatchObject({
+      anchor: { line: 0, character: 0 },
+      active: { line: 0, character: 0 },
+    });
+    expect(editor.revealRange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 0 },
+      }),
+      vscodeMock.TextEditorRevealType.InCenter,
     );
   });
 
