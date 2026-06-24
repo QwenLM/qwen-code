@@ -14,6 +14,7 @@ import {
   ensurePathInShellRc,
   performStandaloneUpdate,
   isSafeTarEntryPath,
+  isSafeTarLinkTarget,
 } from './standalone-update.js';
 
 describe('standalone-update', () => {
@@ -143,7 +144,7 @@ describe('standalone-update', () => {
         const wrapperPath = path.join(tempDir, '.local', 'bin', 'qwen');
         expect(fs.existsSync(wrapperPath)).toBe(true);
         const content = fs.readFileSync(wrapperPath, 'utf-8');
-        expect(content).toContain('#!/bin/sh');
+        expect(content).toContain('#!/usr/bin/env sh');
         expect(content).toContain(standaloneDir);
         const mode = fs.statSync(wrapperPath).mode;
         expect(mode & 0o111).toBeGreaterThan(0);
@@ -162,6 +163,36 @@ describe('standalone-update', () => {
       const content = fs.readFileSync(wrapperPath, 'utf-8');
       expect(content).toContain('@echo off');
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'escapes single quotes in Unix wrapper paths',
+      () => {
+        const libDir = path.join(tempDir, "o'brien", '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(standaloneDir, { recursive: true });
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        const wrapperPath = path.join(
+          tempDir,
+          "o'brien",
+          '.local',
+          'bin',
+          'qwen',
+        );
+        const content = fs.readFileSync(wrapperPath, 'utf-8');
+        expect(content).toContain("o'\\''brien");
+      },
+    );
 
     it.skipIf(process.platform === 'win32')(
       'does not overwrite existing wrapper',
@@ -280,6 +311,35 @@ describe('standalone-update', () => {
     });
   });
 
+  describe('isSafeTarLinkTarget', () => {
+    it('allows relative link targets inside the extraction directory', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../lib/cli.js', dest),
+      ).toBe(true);
+      expect(isSafeTarLinkTarget('qwen-code/bin/qwen', './qwen', dest)).toBe(
+        true,
+      );
+    });
+
+    it('rejects symlink and hardlink targets outside the extraction directory', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../../../etc/passwd', dest),
+      ).toBe(false);
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '/etc/passwd', dest),
+      ).toBe(false);
+      expect(
+        isSafeTarLinkTarget(
+          'qwen-code/bin/qwen',
+          'C:\\Windows\\System32',
+          dest,
+        ),
+      ).toBe(false);
+    });
+  });
+
   describe('rollbackStandaloneUpdate — concurrent lock protection', () => {
     it('returns error when an active update holds the lock', () => {
       const standaloneDir = path.join(tempDir, 'qwen-code');
@@ -358,10 +418,79 @@ describe('standalone-update', () => {
       try {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(zshrc, 'utf-8');
-        const matches = content.match(
-          /# Qwen Code PATH block begin/g,
-        );
+        const matches = content.match(/# Qwen Code PATH block begin/g);
         expect(matches).toHaveLength(1);
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('skips if legacy marker already in rc file', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const zshrc = path.join(tempDir, '.zshrc');
+      fs.writeFileSync(
+        zshrc,
+        `# Added by Qwen Code standalone installer\nexport PATH="${binDir}:$PATH"\n`,
+      );
+
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+
+      try {
+        ensurePathInShellRc(binDir);
+        const content = fs.readFileSync(zshrc, 'utf-8');
+        const matches = content.match(/export PATH/g);
+        expect(matches).toHaveLength(1);
+        expect(content).not.toContain('# Qwen Code PATH block begin');
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('uses .bashrc before .bash_profile for bash shells', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const bashrc = path.join(tempDir, '.bashrc');
+      const profile = path.join(tempDir, '.bash_profile');
+      fs.writeFileSync(bashrc, '# bashrc\n');
+      fs.writeFileSync(profile, '# profile\n');
+
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/bash';
+      process.env['HOME'] = tempDir;
+
+      try {
+        ensurePathInShellRc(binDir);
+        expect(fs.readFileSync(bashrc, 'utf-8')).toContain(
+          '# Qwen Code PATH block begin',
+        );
+        expect(fs.readFileSync(profile, 'utf-8')).toBe('# profile\n');
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('falls back to .bash_profile for bash when .bashrc is absent', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const profile = path.join(tempDir, '.bash_profile');
+      fs.writeFileSync(profile, '# profile\n');
+
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/bash';
+      process.env['HOME'] = tempDir;
+
+      try {
+        ensurePathInShellRc(binDir);
+        expect(fs.readFileSync(profile, 'utf-8')).toContain(
+          '# Qwen Code PATH block begin',
+        );
+        expect(fs.existsSync(path.join(tempDir, '.bashrc'))).toBe(false);
       } finally {
         process.env['SHELL'] = origShell;
         process.env['HOME'] = origHome;

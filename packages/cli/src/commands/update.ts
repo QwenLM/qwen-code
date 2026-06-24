@@ -20,13 +20,6 @@ export const updateCommand: CommandModule = {
     const cwd = process.cwd();
     const settings = loadSettings(cwd, false);
 
-    if (settings.merged.general?.enableAutoUpdate === false) {
-      writeStdoutLine(
-        t('Auto-update is disabled. Enable it in settings to use this command.'),
-      );
-      return;
-    }
-
     const info = await checkForUpdates();
 
     if (!info) {
@@ -42,7 +35,7 @@ export const updateCommand: CommandModule = {
       settings.merged.general?.enableAutoUpdate !== false;
     const installationInfo = getInstallationInfo(cwd, isAutoUpdateEnabled);
 
-    if (installationInfo.updateMessage) {
+    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
       writeStdoutLine(installationInfo.updateMessage);
     }
 
@@ -58,11 +51,15 @@ export const updateCommand: CommandModule = {
         );
         if (result === 'done') {
           writeStdoutLine(
-            t('Update successful! The new version will be used on your next run.'),
+            t(
+              'Update successful! The new version will be used on your next run.',
+            ),
           );
         } else {
           writeStdoutLine(
-            t('Update downloaded. It will be applied after you exit this session.'),
+            t(
+              'Update downloaded. It will be applied after you exit this session.',
+            ),
           );
         }
       } catch (err) {
@@ -71,6 +68,7 @@ export const updateCommand: CommandModule = {
             error: err instanceof Error ? err.message : String(err),
           }),
         );
+        process.exitCode = 1;
       }
       return;
     }
@@ -86,7 +84,9 @@ export const updateCommand: CommandModule = {
     } else {
       if (installationInfo.isStandalone) {
         writeStdoutLine(
-          t('Unable to auto-update this standalone installation. Please reinstall from:'),
+          t(
+            'Unable to auto-update this standalone installation. Please reinstall from:',
+          ),
         );
         writeStdoutLine(
           '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/',

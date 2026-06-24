@@ -2076,13 +2076,19 @@ export default {
   out: 'вых.',
   'In/Out': 'Вх/Вых',
   // Update command
-  'Check for Qwen Code updates and install if available': 'Проверить обновления Qwen Code и установить при наличии',
-  'Auto-update is disabled. Enable it in settings to use this command.': 'Автообновление отключено. Включите его в настройках, чтобы использовать эту команду.',
+  'Check for Qwen Code updates and install if available':
+    'Проверить обновления Qwen Code и установить при наличии',
+  'Auto-update is disabled. Enable it in settings to use this command.':
+    'Автообновление отключено. Включите его в настройках, чтобы использовать эту команду.',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
-  'Update successful! The new version will be used on your next run.': 'Обновление успешно! Новая версия будет использована при следующем запуске.',
-  'Update downloaded. It will be applied after you exit this session.': 'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
+  'Update successful! The new version will be used on your next run.':
+    'Обновление успешно! Новая версия будет использована при следующем запуске.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
   'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
   'Run the following to update:': 'Выполните следующую команду для обновления:',
-  'Unable to auto-update this standalone installation. Please reinstall from:': 'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
-  'Manual update required. Please reinstall Qwen Code.': 'Требуется ручное обновление. Переустановите Qwen Code.',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Требуется ручное обновление. Переустановите Qwen Code.',
 };

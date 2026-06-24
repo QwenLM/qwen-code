@@ -193,6 +193,38 @@ async function downloadToFile(
   return hash.digest('hex');
 }
 
+function isPathInside(base: string, candidate: string): boolean {
+  const rel = path.relative(base, candidate);
+  return (
+    rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel))
+  );
+}
+
+export function isSafeTarLinkTarget(
+  entryPath: string,
+  linkPath: string,
+  resolvedDest: string,
+): boolean {
+  if (path.posix.isAbsolute(linkPath) || path.win32.isAbsolute(linkPath)) {
+    return false;
+  }
+  const linkTarget = path.resolve(
+    resolvedDest,
+    path.dirname(entryPath),
+    linkPath,
+  );
+  return isPathInside(resolvedDest, linkTarget);
+}
+
+function isAlreadyExistsError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: string }).code === 'EEXIST'
+  );
+}
+
 function validateExtractedPaths(resolvedDest: string): void {
   const entries = fs.readdirSync(resolvedDest, {
     recursive: true,
@@ -204,10 +236,7 @@ function validateExtractedPaths(resolvedDest: string): void {
       entry.name,
     );
     const resolved = fs.realpathSync(fullPath);
-    if (
-      !resolved.startsWith(resolvedDest + path.sep) &&
-      resolved !== resolvedDest
-    ) {
+    if (!isPathInside(resolvedDest, resolved)) {
       fs.rmSync(resolvedDest, { recursive: true, force: true });
       throw new Error(
         `Path traversal detected in archive: ${entry.name} resolves to ${resolved}`,
@@ -261,18 +290,10 @@ async function extractArchive(
         if (!isSafeTarEntryPath(p)) return false;
         if (
           'type' in entry &&
-          entry.type === 'SymbolicLink' &&
+          (entry.type === 'SymbolicLink' || entry.type === 'Link') &&
           'linkpath' in entry
         ) {
-          const linkTarget = path.resolve(
-            resolvedDest,
-            path.dirname(p),
-            String(entry.linkpath),
-          );
-          if (
-            !linkTarget.startsWith(resolvedDest + path.sep) &&
-            linkTarget !== resolvedDest
-          ) {
+          if (!isSafeTarLinkTarget(p, String(entry.linkpath), resolvedDest)) {
             return false;
           }
         }
@@ -417,6 +438,10 @@ function assertSafeForShellEmbed(p: string, context: string): void {
   }
 }
 
+function shellQuoteForSh(p: string): string {
+  return `'${p.replace(/'/g, "'\\''")}'`;
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -549,18 +574,29 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
         );
       }
       const wrapperPath = path.join(binDir, 'qwen.cmd');
-      if (!fs.existsSync(wrapperPath)) {
+      try {
         const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
-        fs.writeFileSync(wrapperPath, content);
+        fs.writeFileSync(wrapperPath, content, { flag: 'wx' });
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          throw err;
+        }
       }
     } else {
       assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
-      if (!fs.existsSync(wrapperPath)) {
+      try {
         // Match install-qwen-standalone.sh's write_unix_wrapper:
         // uses /usr/bin/env sh for portability, and single-quoted paths.
-        const content = `#!/usr/bin/env sh\nexec '${standaloneDir}/bin/qwen' "$@"\n`;
-        fs.writeFileSync(wrapperPath, content, { mode: 0o755 });
+        const quotedQwenBin = shellQuoteForSh(
+          path.join(standaloneDir, 'bin', 'qwen'),
+        );
+        const content = `#!/usr/bin/env sh\nexec ${quotedQwenBin} "$@"\n`;
+        fs.writeFileSync(wrapperPath, content, { mode: 0o755, flag: 'wx' });
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          throw err;
+        }
       }
       ensurePathInShellRc(binDir);
     }
@@ -585,10 +621,13 @@ export function ensurePathInShellRc(binDir: string): void {
   } else if (shell.endsWith('/bash')) {
     const bashrc = path.join(home, '.bashrc');
     const profile = path.join(home, '.bash_profile');
-    // macOS bash reads .bash_profile for login shells; Linux reads .bashrc.
-    // Match install-qwen-standalone.sh's maybe_update_shell_path logic.
-    if (os.platform() === 'darwin') {
-      rcFile = fs.existsSync(profile) ? profile : bashrc;
+    // Match install-qwen-standalone.sh's maybe_update_shell_path logic:
+    // prefer .bashrc when it exists, otherwise fall back to .bash_profile,
+    // and create .bashrc if neither file exists.
+    if (fs.existsSync(bashrc)) {
+      rcFile = bashrc;
+    } else if (fs.existsSync(profile)) {
+      rcFile = profile;
     } else {
       rcFile = bashrc;
     }
@@ -607,10 +646,12 @@ export function ensurePathInShellRc(binDir: string): void {
     // install script and does not produce duplicate PATH entries.
     const beginMarker = '# Qwen Code PATH block begin';
     const endMarker = '# Qwen Code PATH block end';
+    const legacyMarker = '# Added by Qwen Code standalone installer';
     if (content.includes(beginMarker) && content.includes(endMarker)) return;
+    if (content.includes(legacyMarker)) return;
 
     // shell_quote equivalent: wrap in single quotes, escape any embedded single quotes
-    const quotedBinDir = `'${binDir.replace(/'/g, "'\\''")}'`;
+    const quotedBinDir = shellQuoteForSh(binDir);
 
     const exportLine = shell.endsWith('/fish')
       ? `set -gx PATH ${quotedBinDir} $PATH`

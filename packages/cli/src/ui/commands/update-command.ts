@@ -8,6 +8,7 @@ import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { checkForUpdates } from '../utils/updateCheck.js';
 import { handleAutoUpdate } from '../../utils/handleAutoUpdate.js';
+import { getInstallationInfo } from '../../utils/installationInfo.js';
 import { getPackageJson } from '../../utils/package.js';
 import { t } from '../../i18n/index.js';
 
@@ -21,17 +22,6 @@ export const updateCommand: SlashCommand = {
   action: async (context) => {
     const settings = context.services.settings;
     const projectRoot = context.services.config?.getProjectRoot();
-
-    if (settings.merged.general?.enableAutoUpdate === false) {
-      const msg = t(
-        'Auto-update is disabled. Enable it in settings to use this command.',
-      );
-      return {
-        type: 'message' as const,
-        messageType: 'info' as const,
-        content: msg,
-      };
-    }
 
     const info = await checkForUpdates();
 
@@ -48,13 +38,37 @@ export const updateCommand: SlashCommand = {
 
     // In interactive mode (TUI), route through handleAutoUpdate which emits
     // events the TUI already listens to (UpdateNotification, etc.).
-    if (context.executionMode === 'interactive' && projectRoot) {
+    const isAutoUpdateEnabled =
+      settings.merged.general?.enableAutoUpdate !== false;
+
+    if (
+      context.executionMode === 'interactive' &&
+      projectRoot &&
+      isAutoUpdateEnabled
+    ) {
       handleAutoUpdate(info, settings, projectRoot);
       return;
     }
 
-    // Non-interactive / ACP mode: just report the available update.
-    const msg = info.message;
+    const installationInfo = getInstallationInfo(
+      projectRoot || process.cwd(),
+      isAutoUpdateEnabled,
+    );
+    const lines = [info.message];
+    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+      lines.push(installationInfo.updateMessage);
+    }
+    if (installationInfo.updateCommand) {
+      const isNightly = info.update.latest.includes('nightly');
+      const updateCmd = installationInfo.updateCommand.replace(
+        '@latest',
+        isNightly ? '@nightly' : `@${info.update.latest}`,
+      );
+      lines.push(t('Run the following to update:'), `  ${updateCmd}`);
+    }
+
+    // Non-interactive / ACP mode: report the available update and manual command.
+    const msg = lines.join('\n');
     return {
       type: 'message' as const,
       messageType: 'info' as const,

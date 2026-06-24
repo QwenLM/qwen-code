@@ -2088,13 +2088,20 @@ export default {
   out: 'saída',
   'In/Out': 'Ent/Saída',
   // Update command
-  'Check for Qwen Code updates and install if available': 'Verificar atualizações do Qwen Code e instalar se disponível',
-  'Auto-update is disabled. Enable it in settings to use this command.': 'A atualização automática está desativada. Habilite-a nas configurações para usar este comando.',
-  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} está atualizado!',
-  'Update successful! The new version will be used on your next run.': 'Atualização bem-sucedida! A nova versão será usada na próxima execução.',
-  'Update downloaded. It will be applied after you exit this session.': 'Atualização baixada. Será aplicada após você sair desta sessão.',
+  'Check for Qwen Code updates and install if available':
+    'Verificar atualizações do Qwen Code e instalar se disponível',
+  'Auto-update is disabled. Enable it in settings to use this command.':
+    'A atualização automática está desativada. Habilite-a nas configurações para usar este comando.',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} está atualizado!',
+  'Update successful! The new version will be used on your next run.':
+    'Atualização bem-sucedida! A nova versão será usada na próxima execução.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Atualização baixada. Será aplicada após você sair desta sessão.',
   'Update failed: {{error}}': 'Falha na atualização: {{error}}',
   'Run the following to update:': 'Execute o seguinte para atualizar:',
-  'Unable to auto-update this standalone installation. Please reinstall from:': 'Não foi possível atualizar automaticamente esta instalação independente. Reinstale de:',
-  'Manual update required. Please reinstall Qwen Code.': 'Atualização manual necessária. Reinstale o Qwen Code.',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Não foi possível atualizar automaticamente esta instalação independente. Reinstale de:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Atualização manual necessária. Reinstale o Qwen Code.',
 };

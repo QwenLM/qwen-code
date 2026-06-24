@@ -1862,13 +1862,20 @@ export default {
   out: '出力',
   'In/Out': '入力/出力',
   // Update command
-  'Check for Qwen Code updates and install if available': 'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
-  'Auto-update is disabled. Enable it in settings to use this command.': '自動アップデートが無効です。設定で有効にしてこのコマンドを使用してください。',
+  'Check for Qwen Code updates and install if available':
+    'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
+  'Auto-update is disabled. Enable it in settings to use this command.':
+    '自動アップデートが無効です。設定で有効にしてこのコマンドを使用してください。',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
-  'Update successful! The new version will be used on your next run.': 'アップデート成功！新バージョンは次回起動時に使用されます。',
-  'Update downloaded. It will be applied after you exit this session.': 'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
+  'Update successful! The new version will be used on your next run.':
+    'アップデート成功！新バージョンは次回起動時に使用されます。',
+  'Update downloaded. It will be applied after you exit this session.':
+    'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
   'Update failed: {{error}}': 'アップデート失敗：{{error}}',
-  'Run the following to update:': '以下のコマンドを実行してアップデートしてください：',
-  'Unable to auto-update this standalone installation. Please reinstall from:': 'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
-  'Manual update required. Please reinstall Qwen Code.': '手動更新が必要です。Qwen Codeを再インストールしてください。',
+  'Run the following to update:':
+    '以下のコマンドを実行してアップデートしてください：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '手動更新が必要です。Qwen Codeを再インストールしてください。',
 };

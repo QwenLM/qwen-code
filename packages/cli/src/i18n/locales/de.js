@@ -2102,13 +2102,19 @@ export default {
   out: 'aus',
   'In/Out': 'Ein/Aus',
   // Update command
-  'Check for Qwen Code updates and install if available': 'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
-  'Auto-update is disabled. Enable it in settings to use this command.': 'Automatische Updates sind deaktiviert. Aktivieren Sie sie in den Einstellungen, um diesen Befehl zu verwenden.',
+  'Check for Qwen Code updates and install if available':
+    'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
+  'Auto-update is disabled. Enable it in settings to use this command.':
+    'Automatische Updates sind deaktiviert. Aktivieren Sie sie in den Einstellungen, um diesen Befehl zu verwenden.',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} ist aktuell!',
-  'Update successful! The new version will be used on your next run.': 'Update erfolgreich! Die neue Version wird beim nächsten Start verwendet.',
-  'Update downloaded. It will be applied after you exit this session.': 'Update heruntergeladen. Es wird nach dem Beenden dieser Sitzung angewendet.',
+  'Update successful! The new version will be used on your next run.':
+    'Update erfolgreich! Die neue Version wird beim nächsten Start verwendet.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Update heruntergeladen. Es wird nach dem Beenden dieser Sitzung angewendet.',
   'Update failed: {{error}}': 'Update fehlgeschlagen: {{error}}',
   'Run the following to update:': 'Führen Sie Folgendes zum Aktualisieren aus:',
-  'Unable to auto-update this standalone installation. Please reinstall from:': 'Diese Standalone-Installation kann nicht automatisch aktualisiert werden. Bitte neu installieren von:',
-  'Manual update required. Please reinstall Qwen Code.': 'Manuelles Update erforderlich. Bitte installieren Sie Qwen Code neu.',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Diese Standalone-Installation kann nicht automatisch aktualisiert werden. Bitte neu installieren von:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Manuelles Update erforderlich. Bitte installieren Sie Qwen Code neu.',
 };

@@ -2087,13 +2087,19 @@ export default {
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
   // Update command
-  'Check for Qwen Code updates and install if available': '檢查 Qwen Code 更新並安裝（如果可用）',
-  'Auto-update is disabled. Enable it in settings to use this command.': '自動更新已停用。請在設定中啟用以使用此命令。',
+  'Check for Qwen Code updates and install if available':
+    '檢查 Qwen Code 更新並安裝（如果可用）',
+  'Auto-update is disabled. Enable it in settings to use this command.':
+    '自動更新已停用。請在設定中啟用以使用此命令。',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
-  'Update successful! The new version will be used on your next run.': '更新成功！新版本將在下次執行時生效。',
-  'Update downloaded. It will be applied after you exit this session.': '更新已下載。將在結束目前工作階段後套用。',
+  'Update successful! The new version will be used on your next run.':
+    '更新成功！新版本將在下次執行時生效。',
+  'Update downloaded. It will be applied after you exit this session.':
+    '更新已下載。將在結束目前工作階段後套用。',
   'Update failed: {{error}}': '更新失敗：{{error}}',
   'Run the following to update:': '執行以下命令進行更新：',
-  'Unable to auto-update this standalone installation. Please reinstall from:': '無法自動更新此獨立安裝。請從以下位址重新安裝：',
-  'Manual update required. Please reinstall Qwen Code.': '需要手動更新。請重新安裝 Qwen Code。',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    '無法自動更新此獨立安裝。請從以下位址重新安裝：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '需要手動更新。請重新安裝 Qwen Code。',
 };
