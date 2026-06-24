@@ -51,7 +51,7 @@ export class StreamInactivityTimeoutError extends Error {
 
 /**
  * Wraps a streaming chunk source with an inactivity watchdog. If no chunk
- * arrives for `idleMs`, `onTimeout()` is invoked (to abort the underlying
+ * arrives for `idleMs`, `abortRequest()` is invoked (to abort the underlying
  * request and free the socket) and the iterator throws — a user `AbortError`
  * when the parent signal was cancelled, otherwise a retryable ETIMEDOUT. The
  * timer resets on every chunk (including thinking/reasoning deltas), so an
@@ -60,41 +60,50 @@ export class StreamInactivityTimeoutError extends Error {
 async function* withStreamInactivityTimeout(
   source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   idleMs: number,
-  onTimeout: () => void,
+  abortRequest: () => void,
   parentSignal: AbortSignal | undefined,
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
   const it = source[Symbol.asyncIterator]();
-  while (true) {
-    const nextPromise = it.next();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        if (parentSignal?.aborted) {
-          // Plain Error (not DOMException) so error redaction's prototype
-          // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
-          const abortErr = new Error('Aborted');
-          abortErr.name = 'AbortError';
-          reject(abortErr);
-        } else {
-          onTimeout();
-          reject(new StreamInactivityTimeoutError(idleMs));
-        }
-      }, idleMs);
-      timer.unref?.();
-    });
-    let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
-    try {
-      result = await Promise.race([nextPromise, timeout]);
-    } catch (err) {
-      // Once onTimeout() aborts the request, the orphaned next() rejects with
-      // an AbortError; swallow it so it is not an unhandled rejection.
-      void Promise.resolve(nextPromise).catch(() => {});
-      throw err;
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
+  try {
+    while (true) {
+      const nextPromise = it.next();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          if (parentSignal?.aborted) {
+            // Plain Error (not DOMException) so error redaction's prototype
+            // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
+            const abortErr = new Error('Aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          } else {
+            abortRequest();
+            reject(new StreamInactivityTimeoutError(idleMs));
+          }
+        }, idleMs);
+        timer.unref?.();
+      });
+      let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+      try {
+        result = await Promise.race([nextPromise, timeout]);
+      } catch (err) {
+        // Once abortRequest() aborts the request, the orphaned next() rejects
+        // with an AbortError; swallow it so it is not an unhandled rejection.
+        void Promise.resolve(nextPromise).catch(() => {});
+        throw err;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (result.done) return;
+      yield result.value;
     }
-    if (result.done) return;
-    yield result.value;
+  } finally {
+    abortRequest();
+    try {
+      await it.return?.();
+    } catch {
+      // The abort above is the cleanup that matters; ignore return failures.
+    }
   }
 }
 
@@ -322,6 +331,8 @@ export class ContentGenerationPipeline {
         throw redactProxyError(error);
       }
 
+      // Bypass handleError: it strips `code` from timeout errors, which would
+      // prevent classifyRetryError from recognizing retryable ETIMEDOUT.
       if (error instanceof StreamInactivityTimeoutError) {
         throw error;
       }

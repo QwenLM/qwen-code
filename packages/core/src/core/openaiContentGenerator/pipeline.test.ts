@@ -2963,11 +2963,15 @@ describe('ContentGenerationPipeline', () => {
       let resolveNext:
         | ((r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => void)
         | null = null;
+      let rejectNext: ((err: unknown) => void) | null = null;
       const buffered: OpenAI.Chat.ChatCompletionChunk[] = [];
       let ended = false;
+      let failure: { error: unknown } | null = null;
+      let returned = false;
       const deliver = (r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => {
         const r2 = resolveNext;
         resolveNext = null;
+        rejectNext = null;
         r2?.(r);
       };
       return {
@@ -2975,9 +2979,19 @@ describe('ContentGenerationPipeline', () => {
           if (resolveNext) deliver({ done: false, value: chunk });
           else buffered.push(chunk);
         },
+        error(error: unknown) {
+          failure = { error };
+          const reject = rejectNext;
+          resolveNext = null;
+          rejectNext = null;
+          reject?.(error);
+        },
         end() {
           ended = true;
           if (resolveNext) deliver({ done: true, value: undefined as never });
+        },
+        wasReturned() {
+          return returned;
         },
         stream: {
           [Symbol.asyncIterator]() {
@@ -2989,14 +3003,31 @@ describe('ContentGenerationPipeline', () => {
                     value: buffered.shift()!,
                   });
                 }
+                if (failure) {
+                  return Promise.reject(failure.error);
+                }
                 if (ended) {
                   return Promise.resolve({
                     done: true,
                     value: undefined as never,
                   });
                 }
-                return new Promise((res) => {
+                return new Promise((res, rej) => {
                   resolveNext = res;
+                  rejectNext = rej;
+                });
+              },
+              return(): Promise<
+                IteratorResult<OpenAI.Chat.ChatCompletionChunk>
+              > {
+                returned = true;
+                ended = true;
+                if (resolveNext) {
+                  deliver({ done: true, value: undefined as never });
+                }
+                return Promise.resolve({
+                  done: true,
+                  value: undefined as never,
                 });
               },
             };
@@ -3146,6 +3177,52 @@ describe('ContentGenerationPipeline', () => {
       await consume;
       expect(results).toHaveLength(2);
       // Late advance after completion must not produce a delayed throw.
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    it('closes the guarded SDK iterator when the consumer breaks early', async () => {
+      const gated = gatedStream();
+      gated.push(chunk('hello'));
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const call = (mockClient.chat.completions.create as Mock).mock.calls[0];
+      const sdkSignal = call[1]?.signal;
+
+      for await (const _ of gen) {
+        break;
+      }
+
+      expect(gated.wasReturned()).toBe(true);
+      expect(sdkSignal?.aborted).toBe(true);
+    });
+
+    it('propagates mid-stream errors without converting them to ETIMEDOUT', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const results: GenerateContentResponse[] = [];
+      gated.push(chunk('hello'));
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      const networkError = new Error('network down');
+      gated.error(networkError);
+      const err = await captured;
+      expect(err).toBe(networkError);
+      expect(results).toHaveLength(1);
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        networkError,
+        expect.anything(),
+        expect.anything(),
+      );
+
       await vi.advanceTimersByTimeAsync(5000);
     });
 
