@@ -877,6 +877,42 @@ describe('LoggingContentGenerator', () => {
     );
   });
 
+  it('passes uncapped stream response text to sensitive model output attributes', async () => {
+    const longText = 'x'.repeat(MAX_RESPONSE_TEXT_LENGTH + 100);
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-long', 'test-model', [{ text: longText }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ includeSensitiveSpanAttributes: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-long',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    expect(vi.mocked(addModelOutputAttributes).mock.calls.at(-1)?.[2]).toBe(
+      longText,
+    );
+  });
+
   it.each([
     ['thought-only', [{ text: 'hidden thought', thought: true }]],
     [

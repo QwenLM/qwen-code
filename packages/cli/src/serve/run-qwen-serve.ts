@@ -40,6 +40,7 @@ import {
   buildInstallPlan,
   applyProviderInstallPlan,
   resolveBaseUrl,
+  FatalConfigError,
   getDefaultModelIds,
   resolveTelemetrySettings,
   shutdownTelemetry,
@@ -801,10 +802,20 @@ export async function runQwenServe(
   }
 
   const daemonWorkspaceHash = hashDaemonWorkspace(boundWorkspace);
-  const daemonTelemetrySettings = await resolveTelemetrySettings({
-    env: process.env,
-    settings: bootSettings?.merged.telemetry,
-  });
+  let daemonTelemetrySettings: TelemetrySettings;
+  try {
+    daemonTelemetrySettings = await resolveTelemetrySettings({
+      env: process.env,
+      settings: bootSettings?.merged.telemetry,
+    });
+  } catch (err) {
+    if (err instanceof FatalConfigError) {
+      throw new FatalConfigError(
+        `Invalid telemetry configuration: ${err.message}.`,
+      );
+    }
+    throw err;
+  }
   const cliVersion = await getCliVersion();
   initializeTelemetry(
     createDaemonTelemetryRuntimeConfig(

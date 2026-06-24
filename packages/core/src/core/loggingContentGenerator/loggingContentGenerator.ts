@@ -97,6 +97,21 @@ const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 const MAX_RESPONSE_TEXT_LENGTH = 4096;
 const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
 
+function truncateResponseText(
+  text: string | undefined,
+  maxLength: number,
+): string | undefined {
+  if (text === undefined || text.length <= maxLength) {
+    return text;
+  }
+
+  const maxPrefixLength = Math.max(
+    0,
+    maxLength - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
+  );
+  return `${text.slice(0, maxPrefixLength)}${RESPONSE_TEXT_TRUNCATION_SUFFIX}`;
+}
+
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
  */
@@ -291,11 +306,17 @@ export class LoggingContentGenerator implements ContentGenerator {
           this.wrapped.generateContent(req, userPromptId),
         );
         const durationMs = Date.now() - startTime;
+        const shouldCollectSensitiveSpanAttributes =
+          !isInternal && this.shouldCollectSensitiveSpanAttributes();
+        const modelOutputText = shouldCollectSensitiveSpanAttributes
+          ? this.extractResponseText(result)
+          : undefined;
         const responseText = isInternal
           ? undefined
-          : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
-        if (!isInternal && this.shouldCollectSensitiveSpanAttributes()) {
-          const modelOutputText = this.extractResponseText(result);
+          : shouldCollectSensitiveSpanAttributes
+            ? truncateResponseText(modelOutputText, MAX_RESPONSE_TEXT_LENGTH)
+            : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
+        if (shouldCollectSensitiveSpanAttributes) {
           addModelOutputAttributes(this.config, llmSpan, modelOutputText);
         }
         this.safelyLogApiResponse(
@@ -621,12 +642,24 @@ export class LoggingContentGenerator implements ContentGenerator {
       const consolidatedResponse = shouldCollectResponses
         ? this.consolidateGeminiResponsesForLogging(responses)
         : undefined;
+      const shouldCollectSensitiveSpanAttributes =
+        !isInternal &&
+        span !== undefined &&
+        this.shouldCollectSensitiveSpanAttributes();
+      const streamModelOutputText = shouldCollectSensitiveSpanAttributes
+        ? this.extractResponseText(consolidatedResponse)
+        : undefined;
       const streamResponseText = isInternal
         ? undefined
-        : this.extractResponseText(
-            consolidatedResponse,
-            MAX_RESPONSE_TEXT_LENGTH,
-          );
+        : shouldCollectSensitiveSpanAttributes
+          ? truncateResponseText(
+              streamModelOutputText,
+              MAX_RESPONSE_TEXT_LENGTH,
+            )
+          : this.extractResponseText(
+              consolidatedResponse,
+              MAX_RESPONSE_TEXT_LENGTH,
+            );
       // If the idle timeout already closed the span as failed, do not contradict
       // it with a "success" api_response log or model-output span attributes.
       // The OpenAI interaction log is also skipped — telemetry already carries
@@ -643,13 +676,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             streamResponseText,
           ),
         );
-        if (
-          !isInternal &&
-          span &&
-          this.shouldCollectSensitiveSpanAttributes()
-        ) {
-          const streamModelOutputText =
-            this.extractResponseText(consolidatedResponse);
+        if (shouldCollectSensitiveSpanAttributes && span) {
           addModelOutputAttributes(this.config, span, streamModelOutputText);
         }
         await runInSpan(() =>

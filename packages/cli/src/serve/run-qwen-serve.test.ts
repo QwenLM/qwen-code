@@ -8,6 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { FatalConfigError } from '@qwen-code/qwen-code-core';
 import {
   extractContextFilename,
   InvalidPolicyConfigError,
@@ -281,6 +282,40 @@ describe('runQwenServe daemon logger wiring', () => {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
       }
     }
+  });
+});
+
+describe('runQwenServe telemetry validation', () => {
+  let tmpDir: string;
+  const originalSensitiveSpanAttributeMaxLengthEnv =
+    process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'];
+
+  afterEach(() => {
+    if (originalSensitiveSpanAttributeMaxLengthEnv === undefined) {
+      delete process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'];
+    } else {
+      process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'] =
+        originalSensitiveSpanAttributeMaxLengthEnv;
+    }
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('wraps invalid daemon telemetry configuration as FatalConfigError', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tv-')));
+    process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'] = '';
+
+    const run = runQwenServe({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace: tmpDir,
+      maxSessions: 1,
+    });
+
+    await expect(run).rejects.toThrow(FatalConfigError);
+    await expect(run).rejects.toThrow(/Invalid telemetry configuration:/);
   });
 });
 
