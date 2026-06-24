@@ -54,6 +54,7 @@ import {
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_LANGUAGE_LENGTH,
+  MAX_VOICE_MODEL_LENGTH,
 } from '../validation-limits.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
@@ -1468,7 +1469,7 @@ export class AcpDispatcher {
 
           const voiceModel = params['voiceModel'];
           if (voiceModel !== undefined) {
-            if (typeof voiceModel !== 'string' || !voiceModel.trim()) {
+            if (typeof voiceModel !== 'string') {
               if (id !== undefined) {
                 conn.sendConn(
                   error(
@@ -1480,7 +1481,32 @@ export class AcpDispatcher {
               }
               return;
             }
-            update.voiceModel = voiceModel.trim();
+            const trimmed = voiceModel.trim();
+            if (!trimmed) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`voiceModel` must be a non-empty string',
+                  ),
+                );
+              }
+              return;
+            }
+            if (trimmed.length > MAX_VOICE_MODEL_LENGTH) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
+                  ),
+                );
+              }
+              return;
+            }
+            update.voiceModel = trimmed;
           }
           if (Object.keys(update).length === 0) {
             if (id !== undefined) {

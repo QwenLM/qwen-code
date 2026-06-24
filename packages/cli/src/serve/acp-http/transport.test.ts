@@ -34,6 +34,7 @@ import {
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
+import { MAX_VOICE_MODEL_LENGTH } from '../validation-limits.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
@@ -1925,6 +1926,33 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         data: { errorKind: 'unknown_voice_model' },
       },
     });
+    setSpy.mockRestore();
+  });
+
+  it('rejects overlong _qwen/workspace/voice/set voiceModel values', async () => {
+    const setSpy = vi.spyOn(fakeWorkspace, 'setWorkspaceVoiceSettings');
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 222,
+      method: '_qwen/workspace/voice/set',
+      params: { voiceModel: 'x'.repeat(MAX_VOICE_MODEL_LENGTH + 1) },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message?: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 222,
+      error: {
+        code: -32602,
+        message: `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
+      },
+    });
+    expect(setSpy).not.toHaveBeenCalled();
     setSpy.mockRestore();
   });
 
