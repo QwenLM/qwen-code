@@ -2557,16 +2557,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   'cancelled',
               );
             } else {
+              const failureText =
+                finalText || `Agent terminated with mode: ${terminateMode}`;
               registry.fail(
                 hookOpts.agentId,
-                finalText || `Agent terminated with mode: ${terminateMode}`,
+                failureText,
                 completionStats,
+                finalText || undefined,
               );
               patchAgentMeta(metaPath, {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
-                lastError:
-                  finalText || `Agent terminated with mode: ${terminateMode}`,
+                lastError: failureText,
               });
             }
           } catch (error) {
@@ -2613,7 +2615,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   'cancelled',
               );
             } else {
-              registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+              const partialResult = bgSubagent?.getFinalText() || undefined;
+              registry.fail(
+                hookOpts.agentId,
+                errorMsg,
+                getCompletionStats(),
+                partialResult,
+              );
               patchAgentMeta(metaPath, {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
