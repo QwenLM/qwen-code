@@ -60,6 +60,29 @@ export function collectProviderModelsForProtocol(
   return out;
 }
 
+function findProviderIdForModel(
+  modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
+  protocol: string,
+  modelProvider: ProviderModelConfig | undefined,
+): string | undefined {
+  if (!modelProviders || !modelProvider) {
+    return undefined;
+  }
+  for (const [providerId, models] of Object.entries(modelProviders)) {
+    if (!Array.isArray(models)) {
+      continue;
+    }
+    if (resolveProviderProtocol(providerId, providerProtocol) !== protocol) {
+      continue;
+    }
+    if (models.includes(modelProvider)) {
+      return providerId;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Build user-visible warnings for modelProviders entries that carry models but
  * are dropped at registration: an unknown provider id with no providerProtocol
@@ -79,7 +102,17 @@ function buildSkippedProviderWarnings(
     if (!Array.isArray(models) || models.length === 0) {
       continue;
     }
-    if (resolveProviderProtocol(providerId, providerProtocol) !== undefined) {
+    const protocol = resolveProviderProtocol(providerId, providerProtocol);
+    if (
+      protocol === AuthType.QWEN_OAUTH &&
+      providerId !== AuthType.QWEN_OAUTH
+    ) {
+      warnings.push(
+        `Warning: modelProviders provider "${providerId}" maps to "qwen-oauth" via providerProtocol, but qwen-oauth uses hard-coded models only; its ${models.length} model(s) are ignored.`,
+      );
+      continue;
+    }
+    if (protocol !== undefined) {
       continue;
     }
     const mapped = providerProtocol?.[providerId];
@@ -109,7 +142,7 @@ function getIgnoredTopLevelGenerationConfigFields(
 }
 
 function buildIgnoredTopLevelGenerationConfigWarning(
-  authType: AuthType,
+  providerId: string,
   modelProvider: ProviderModelConfig,
   ignoredFields: string[],
 ): string | undefined {
@@ -125,7 +158,7 @@ function buildIgnoredTopLevelGenerationConfigWarning(
   const fieldReference = isSingular ? 'this field' : 'these fields';
   const pronoun = isSingular ? 'it' : 'them';
 
-  return `Warning: ${fieldList} ${verb} ignored for provider model "${modelProvider.id}" from modelProviders.${authType}. Move ${fieldReference} to modelProviders.${authType}[].generationConfig for that model if you want ${pronoun} to apply.`;
+  return `Warning: ${fieldList} ${verb} ignored for provider model "${modelProvider.id}" from modelProviders.${providerId}. Move ${fieldReference} to modelProviders.${providerId}[].generationConfig for that model if you want ${pronoun} to apply.`;
 }
 
 export interface CliGenerationConfigInputs {
@@ -347,7 +380,12 @@ export function resolveCliGenerationConfig(
   const ignoredGenerationConfigWarning =
     authType && modelProvider
       ? buildIgnoredTopLevelGenerationConfigWarning(
-          authType,
+          findProviderIdForModel(
+            settings.modelProviders,
+            settings.providerProtocol,
+            authType,
+            modelProvider,
+          ) ?? authType,
           modelProvider,
           getIgnoredTopLevelGenerationConfigFields(
             settings.model?.generationConfig as

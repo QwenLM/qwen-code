@@ -480,6 +480,38 @@ describe('modelConfigUtils', () => {
       ).toBe(true);
     });
 
+    it('warns when a custom provider maps to qwen-oauth', () => {
+      const settings = makeMockSettings({
+        model: { name: 'some-model' },
+        modelProviders: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: AuthType.QWEN_OAUTH,
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'some-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'modelProviders provider "idealab" maps to "qwen-oauth"',
+          ),
+        ]),
+      );
+    });
+
     it('should find modelProvider from settings.model.name when argv.model is not provided', () => {
       const argv = {};
       const modelProvider: ProviderModelConfig = {
@@ -870,6 +902,53 @@ describe('modelConfigUtils', () => {
       expect(result.warnings[0]).toContain(
         'modelProviders.openai[].generationConfig',
       );
+    });
+
+    it('names the custom provider in ignored generationConfig warnings', () => {
+      const argv = {};
+      const modelProvider: ProviderModelConfig = {
+        id: 'qwen3.6-27b',
+        name: 'qwen3.6-27b',
+        generationConfig: {},
+      };
+      const settings = makeMockSettings({
+        model: {
+          name: 'qwen3.6-27b',
+          generationConfig: {
+            contextWindowSize: 192000,
+          } as Record<string, unknown>,
+        },
+        modelProviders: {
+          idealab: [modelProvider],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: AuthType.USE_OPENAI,
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.6-27b',
+          apiKey: '',
+          baseUrl: '',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.warnings[0]).toContain(
+        'provider model "qwen3.6-27b" from modelProviders.idealab',
+      );
+      expect(result.warnings[0]).toContain(
+        'modelProviders.idealab[].generationConfig',
+      );
+      expect(result.warnings[0]).not.toContain('modelProviders.openai');
     });
 
     it('should not warn for top-level generationConfig on runtime models', () => {
