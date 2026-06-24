@@ -256,6 +256,61 @@ describe('<ToolGroupMessage />', () => {
       expect(forceShowCount).toBe(1);
     });
 
+    it('canceled collapsible tool renders individually (not absorbed into summary)', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'r2',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Canceled,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // Successful ReadFile → summary line
+      expect(frame).toContain('Read 1 file');
+      // Canceled ReadFile → individual ToolMessage (partial output visible)
+      expect(frame).toContain('MockTool[r2]');
+    });
+
+    it('mixed group with memory counts renders memory badge', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'config.yaml',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 's1',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={2}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Recalled 2 memories');
+      // Collapsible tool still summarized
+      expect(frame).toContain('Read 1 file');
+      // Non-collapsible tool rendered individually
+      expect(frame).toContain('MockTool[s1]');
+    });
+
     it('renders tool call awaiting confirmation', () => {
       const toolCalls = [
         createToolCall({

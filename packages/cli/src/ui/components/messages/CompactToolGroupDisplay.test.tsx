@@ -219,6 +219,16 @@ describe('buildToolSummary', () => {
     ];
     expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran 1 command');
   });
+
+  it('legacy display names map to correct categories', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'SearchFiles', description: 'pattern' }),
+      make({ callId: 'c2', name: 'ReadFolder', description: '/src' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe(
+      'Searched 1 pattern, listed 1 directory',
+    );
+  });
 });
 
 describe('isCollapsibleTool', () => {
@@ -244,5 +254,17 @@ describe('isCollapsibleTool', () => {
   it('returns false for unknown tool names', () => {
     expect(isCollapsibleTool('CustomMcpTool')).toBe(false);
     expect(isCollapsibleTool('unknown')).toBe(false);
+  });
+
+  it('handles legacy display names from ToolDisplayNamesMigration', () => {
+    // Legacy search tools → collapsible
+    expect(isCollapsibleTool('SearchFiles')).toBe(true);
+    expect(isCollapsibleTool('FindFiles')).toBe(true);
+    // Legacy list tool → collapsible
+    expect(isCollapsibleTool('ReadFolder')).toBe(true);
+    // Legacy agent tool → non-collapsible
+    expect(isCollapsibleTool('Task')).toBe(false);
+    // Legacy todo tool → non-collapsible
+    expect(isCollapsibleTool('TodoWrite')).toBe(false);
   });
 });
