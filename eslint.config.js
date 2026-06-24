@@ -220,6 +220,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
+      // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
+      'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
     ],
     languageOptions: {
       globals: {
