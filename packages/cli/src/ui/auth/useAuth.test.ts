@@ -41,9 +41,8 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
 }));
 
 const createSettings = () => ({
-  merged: {
-    modelProviders: {},
-  },
+  merged: { modelProviders: {} },
+  getValue: vi.fn().mockReturnValue(undefined),
   setValue: vi.fn(),
   recomputeMerged: vi.fn(),
   forScope: vi.fn(() => ({

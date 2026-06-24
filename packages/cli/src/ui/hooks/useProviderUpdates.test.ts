@@ -46,6 +46,7 @@ describe('useProviderUpdates', () => {
       modelProviders: {} as Record<string, unknown>,
       [PROVIDER_METADATA_NS]: {} as Record<string, unknown>,
     } as Record<string, unknown>,
+    getValue: vi.fn().mockReturnValue(undefined),
     setValue: vi.fn(),
     forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
     isTrusted: true,
