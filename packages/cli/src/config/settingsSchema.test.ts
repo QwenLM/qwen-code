@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '@qwen-code/qwen-code-core';
+import {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+} from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
@@ -194,8 +198,8 @@ describe('SettingsSchema', () => {
           'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.',
         type: 'integer',
         minimum: 1,
-        maximum: 100 * 1024 * 1024,
-        default: 1024 * 1024,
+        maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+        default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
       });
     });
 
