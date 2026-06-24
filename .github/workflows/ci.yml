@@ -6,7 +6,9 @@ on:
   push:
     branches:
       - 'main'
-      - 'release/**'
+      # No 'release/**' here: release.yml's commits to the release branch would
+      # fire a redundant full CI run that blocks the release PR's merge queue.
+      # Kept under pull_request below for backport PRs.
   pull_request:
     branches:
       - 'main'
@@ -270,28 +272,19 @@ jobs:
           name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
 
-  test_platforms:
-    name: 'Test (${{ matrix.os }}, Node ${{ matrix.node-version }})'
+  # macOS/Windows: slowest/costliest runners, rare platform regressions — skip
+  # on PR, run on push to `main` and in the merge queue. Two named jobs, not a
+  # matrix: a skipped matrix job reports one collapsed check name, never the
+  # per-OS required contexts, so PRs would sit "Expected" forever and never
+  # enter the queue. A skipped named job reports under its exact name and
+  # satisfies the required check (same as the Integration Tests job).
+  test_macos:
+    name: 'Test (macos-latest, Node 22.x)'
     needs: 'classify_pr'
-    # macOS/Windows are the slowest, costliest runners and platform-specific
-    # regressions are rare per push, so rerunning them on every review iteration
-    # is mostly wasted. Skip on PR pushes; they still run on push to `main` (and
-    # in the merge queue, once enabled), catching platform breakage before it
-    # ships without sitting on every PR's critical path.
     if: "${{ !cancelled() && github.event_name != 'pull_request' }}"
-    runs-on: '${{ fromJSON(matrix.runner) }}'
+    runs-on: 'macos-latest'
     permissions:
       contents: 'read'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: 'macos-latest'
-            runner: '["macos-latest"]'
-            node-version: '22.x'
-          - os: 'windows-latest'
-            runner: '["windows-2022"]'
-            node-version: '22.x'
     steps:
       # See the Ubuntu gate's checkout: on PRs use the immutable refs/pull/N/head
       # to avoid merge-ref rebuild lag; other events keep github.ref.
@@ -302,11 +295,57 @@ jobs:
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
 
-      - name: 'Set up Node.js ${{ matrix.node-version }}'
+      - name: 'Set up Node.js 22.x'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
-          node-version: '${{ matrix.node-version }}'
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Run tests and generate reports'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          NO_COLOR: true
+        run: 'npm run test:ci'
+
+  # Windows counterpart of test_macos (see that job's note). Runner is
+  # windows-2022; the check name keeps the windows-latest label so it matches
+  # the required-status-check context.
+  test_windows:
+    name: 'Test (windows-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'pull_request' }}"
+    runs-on: 'windows-2022'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+
+      - name: 'Set up Node.js 22.x'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org/'
