@@ -39,11 +39,10 @@ import {
   isPermissionRuleType,
   normalizePermissionRules,
   PermissionRulesValidationError,
+  readPermissionRuleSet,
 } from '../../config/permission-settings.js';
-import {
-  EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
-  WorkspaceVoiceError,
-} from '../../services/voice-service.js';
+import { loadSettings } from '../../config/settings.js';
+import { WorkspaceVoiceError } from '../../services/voice-service.js';
 import { SetupGithubError, setupGithub } from '../../services/setup-github.js';
 import {
   createSetupGithubFileOps,
@@ -52,11 +51,8 @@ import {
   sanitizeSetupGithubResult,
   setupGithubEventData,
 } from '../routes/workspace-setup-github.js';
-import {
-  MAX_TRUST_REASON_LENGTH,
-  MAX_VOICE_LANGUAGE_LENGTH,
-  MAX_VOICE_MODEL_LENGTH,
-} from '../validation-limits.js';
+import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
+import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
@@ -71,7 +67,6 @@ import {
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
-  WorkspaceVoiceSettingsUpdate,
 } from '../workspace-service/types.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
@@ -1380,7 +1375,16 @@ export class AcpDispatcher {
 
           let rules: string[];
           try {
-            rules = normalizePermissionRules(params['rules']);
+            const settings = loadSettings(this.boundWorkspace);
+            const scopeSettings =
+              scope === 'workspace'
+                ? settings.workspace.settings
+                : settings.user.settings;
+            const existingRules =
+              readPermissionRuleSet(scopeSettings)[ruleType];
+            rules = normalizePermissionRules(params['rules'], {
+              existingRules,
+            });
           } catch (err) {
             if (err instanceof PermissionRulesValidationError) {
               if (id !== undefined) {
@@ -1424,113 +1428,10 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/voice/set`: {
-          const update: WorkspaceVoiceSettingsUpdate = {};
-          const enabled = params['enabled'];
-          if (enabled !== undefined) {
-            if (typeof enabled !== 'boolean') {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(id, RPC.INVALID_PARAMS, '`enabled` must be a boolean'),
-                );
-              }
-              return;
-            }
-            update.enabled = enabled;
-          }
-
-          const mode = params['mode'];
-          if (mode !== undefined) {
-            if (mode !== 'hold' && mode !== 'tap') {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(
-                    id,
-                    RPC.INVALID_PARAMS,
-                    '`mode` must be either "hold" or "tap"',
-                  ),
-                );
-              }
-              return;
-            }
-            update.mode = mode;
-          }
-
-          const language = params['language'];
-          if (language !== undefined) {
-            if (typeof language !== 'string') {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(id, RPC.INVALID_PARAMS, '`language` must be a string'),
-                );
-              }
-              return;
-            }
-            const trimmed = language.trim();
-            if (trimmed.length > MAX_VOICE_LANGUAGE_LENGTH) {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(
-                    id,
-                    RPC.INVALID_PARAMS,
-                    `\`language\` exceeds the ${MAX_VOICE_LANGUAGE_LENGTH}-character limit`,
-                  ),
-                );
-              }
-              return;
-            }
-            update.language = trimmed;
-          }
-
-          const voiceModel = params['voiceModel'];
-          if (voiceModel !== undefined) {
-            if (typeof voiceModel !== 'string') {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(
-                    id,
-                    RPC.INVALID_PARAMS,
-                    '`voiceModel` must be a non-empty string',
-                  ),
-                );
-              }
-              return;
-            }
-            const trimmed = voiceModel.trim();
-            if (!trimmed) {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(
-                    id,
-                    RPC.INVALID_PARAMS,
-                    '`voiceModel` must be a non-empty string',
-                  ),
-                );
-              }
-              return;
-            }
-            if (trimmed.length > MAX_VOICE_MODEL_LENGTH) {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(
-                    id,
-                    RPC.INVALID_PARAMS,
-                    `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
-                  ),
-                );
-              }
-              return;
-            }
-            update.voiceModel = trimmed;
-          }
-          if (Object.keys(update).length === 0) {
+          const update = parseWorkspaceVoiceUpdateParams(params);
+          if ('error' in update) {
             if (id !== undefined) {
-              conn.sendConn(
-                error(
-                  id,
-                  RPC.INVALID_PARAMS,
-                  EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
-                ),
-              );
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, update.error));
             }
             return;
           }

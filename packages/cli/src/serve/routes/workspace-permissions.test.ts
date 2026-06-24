@@ -344,6 +344,66 @@ describe('workspace permissions routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
+  it('POST preserves already-stored malformed permission rules', async () => {
+    const acpResponse = {
+      v: 1,
+      user: {
+        path: path.join(h.home, 'settings.json'),
+        rules: { allow: ['Bash(git *', 'Bash(git status)'], ask: [], deny: [] },
+      },
+      workspace: {
+        path: path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+        rules: { allow: [], ask: [], deny: [] },
+      },
+      merged: { allow: ['Bash(git *', 'Bash(git status)'], ask: [], deny: [] },
+      isTrusted: true,
+    };
+    h.setWorkspacePermissionRules.mockResolvedValueOnce(acpResponse);
+    await writeJson(path.join(h.home, 'settings.json'), {
+      permissions: {
+        allow: ['Bash(git *'],
+      },
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['Bash(git *', 'Bash(git status)'],
+      });
+
+    expect(res.status).toBe(200);
+    expect(h.setWorkspacePermissionRules).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['Bash(git *', 'Bash(git status)'],
+      },
+    );
+  });
+
+  it('POST still rejects newly malformed permission rules', async () => {
+    await writeJson(path.join(h.home, 'settings.json'), {
+      permissions: {
+        allow: ['Bash(git status)'],
+      },
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['Bash(git status)', 'Bash(git *'],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_rules');
+    expect(h.setWorkspacePermissionRules).not.toHaveBeenCalled();
+  });
+
   it('POST returns 409 when no ACP child is running', async () => {
     const res = await request(h.app)
       .post('/workspace/permissions')

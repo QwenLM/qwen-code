@@ -3558,7 +3558,7 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
-    it('throws and logs when setValue persistence is refused', () => {
+    it('logs without throwing when setValue persistence is refused', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -3578,9 +3578,7 @@ describe('Settings Loading and Merging', () => {
 
       expect(() =>
         settings.setValue(SettingScope.User, 'mcpServers', {}),
-      ).toThrow(
-        /saveSettings: updateSettingsFilePreservingFormat returned false/,
-      );
+      ).not.toThrow();
 
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
         expect.stringContaining(

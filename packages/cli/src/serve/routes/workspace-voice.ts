@@ -17,10 +17,12 @@ import {
 import {
   buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
+  EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
   transcribeWorkspaceVoiceAudio,
   validateWorkspaceVoiceState,
   voiceSettingsScopeToWire,
   WorkspaceVoiceError,
+  type WorkspaceVoiceStateUpdate,
   type WorkspaceVoiceSettingsWrite,
   type WorkspaceVoiceTranscriptionInput,
   type WorkspaceVoiceTranscriptionResult,
@@ -30,7 +32,6 @@ import {
   isVoiceEnabled,
   isVoiceMode,
   readVoiceModel,
-  type VoiceMode,
 } from '../../services/voice-settings.js';
 import {
   MAX_VOICE_LANGUAGE_LENGTH,
@@ -77,13 +78,6 @@ export interface WorkspaceVoiceRouteDeps {
   transcribe?: WorkspaceVoiceTranscriber;
 }
 
-interface ParsedVoiceUpdate {
-  enabled?: boolean;
-  mode?: VoiceMode;
-  language?: string;
-  voiceModel?: string;
-}
-
 function sendVoiceError(res: Response, err: unknown): boolean {
   if (err instanceof WorkspaceVoiceError) {
     res.status(err.status).json({ error: err.message, code: err.code });
@@ -113,10 +107,10 @@ function broadcastVoiceWrite(
   }
 }
 
-function parseVoiceUpdate(
+export function parseWorkspaceVoiceUpdateParams(
   body: Record<string, unknown>,
-): ParsedVoiceUpdate | { error: string; code: string } {
-  const parsed: ParsedVoiceUpdate = {};
+): WorkspaceVoiceStateUpdate | { error: string; code: string } {
+  const parsed: WorkspaceVoiceStateUpdate = {};
   if ('enabled' in body) {
     if (typeof body['enabled'] !== 'boolean') {
       return { error: '`enabled` must be a boolean', code: 'invalid_enabled' };
@@ -170,13 +164,19 @@ function parseVoiceUpdate(
     }
     parsed.voiceModel = voiceModel;
   }
+  if (Object.keys(parsed).length === 0) {
+    return {
+      error: EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
+      code: 'invalid_voice_update',
+    };
+  }
   return parsed;
 }
 
 async function persistVoiceUpdate(
   deps: WorkspaceVoiceRouteDeps,
   settings: LoadedSettings,
-  update: ParsedVoiceUpdate,
+  update: WorkspaceVoiceStateUpdate,
   clientId: string | undefined,
 ): Promise<void> {
   if (!deps.persistSettings && !deps.persistSetting) {
@@ -231,9 +231,10 @@ function normalizeContentType(req: Request): string | undefined {
 function requestAbortSignal(req: Request, res: Response): AbortSignal {
   const controller = new AbortController();
   const abort = () => controller.abort();
-  req.on('aborted', abort);
-  req.on('close', abort);
-  res.on('close', abort);
+  req.once('aborted', abort);
+  res.once('close', () => {
+    if (!res.writableEnded) abort();
+  });
   return controller.signal;
 }
 
@@ -299,7 +300,7 @@ export function registerWorkspaceVoiceRoutes(
         return;
       }
 
-      const parsed = parseVoiceUpdate(deps.safeBody(req));
+      const parsed = parseWorkspaceVoiceUpdateParams(deps.safeBody(req));
       if ('error' in parsed) {
         res.status(400).json(parsed);
         return;

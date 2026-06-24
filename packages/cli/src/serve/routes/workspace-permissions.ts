@@ -10,6 +10,7 @@ import {
   isPermissionRuleType,
   normalizePermissionRules,
   PermissionRulesValidationError,
+  readPermissionRuleSet,
   type PermissionSettingsScope,
   type QwenPermissionSettings,
 } from '../../config/permission-settings.js';
@@ -86,7 +87,13 @@ export function registerWorkspacePermissionsRoutes(
 
       let rules: string[];
       try {
-        rules = normalizePermissionRules(body['rules']);
+        const settings = loadSettings(boundWorkspace);
+        const scopeSettings =
+          permissionScope === 'workspace'
+            ? settings.workspace.settings
+            : settings.user.settings;
+        const existingRules = readPermissionRuleSet(scopeSettings)[ruleType];
+        rules = normalizePermissionRules(body['rules'], { existingRules });
       } catch (err) {
         if (err instanceof PermissionRulesValidationError) {
           res.status(400).json({

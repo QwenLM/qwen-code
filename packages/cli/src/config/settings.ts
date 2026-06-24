@@ -518,7 +518,9 @@ export class LoadedSettings {
     for (let i = 0; i < scopeList.length; i++) {
       const scope = scopeList[i]!;
       try {
-        saveSettings(this.forScope(scope));
+        saveSettings(this.forScope(scope), undefined, undefined, {
+          throwOnWriteFailure: true,
+        });
       } catch (err) {
         for (const uncommittedScope of scopeList.slice(i)) {
           this.reloadScopeFromDisk(uncommittedScope);
@@ -1062,6 +1064,7 @@ export function saveSettings(
     unknown
   >,
   replacePath: readonly string[] = [],
+  opts: { throwOnWriteFailure?: boolean } = {},
 ): void {
   try {
     // Ensure the directory exists
@@ -1079,7 +1082,10 @@ export function saveSettings(
     );
     if (!written) {
       const message = `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`;
-      throw new Error(message);
+      if (opts.throwOnWriteFailure) {
+        throw new Error(message);
+      }
+      debugLogger.error(message);
     }
   } catch (error) {
     debugLogger.error('Error saving user settings file.');
