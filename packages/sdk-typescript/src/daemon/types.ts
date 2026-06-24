@@ -988,6 +988,12 @@ export interface DaemonSessionStatsToolByName {
   };
 }
 
+export interface DaemonSessionStatsSkillByName {
+  count: number;
+  success: number;
+  fail: number;
+}
+
 /** Returned from `GET /session/:id/stats`. */
 export interface DaemonSessionStatsStatus {
   v: 1;
@@ -1007,6 +1013,12 @@ export interface DaemonSessionStatsStatus {
   files: {
     totalLinesAdded: number;
     totalLinesRemoved: number;
+  };
+  skills?: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, DaemonSessionStatsSkillByName>;
   };
 }
 

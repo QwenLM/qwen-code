@@ -87,6 +87,7 @@ import type {
   ServeSessionContextUsageStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionStatsStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
@@ -364,6 +365,7 @@ interface FakeBridgeOpts {
   sessionSupportedCommandsImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
+  sessionStatsImpl?: (sessionId: string) => Promise<ServeSessionStatsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
   cancelSessionTaskImpl?: (
@@ -545,6 +547,7 @@ interface FakeBridge extends AcpSessionBridge {
   sessionContextCalls: string[];
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
+  sessionStatsCalls: string[];
   sessionTasksCalls: string[];
   sessionLspCalls: string[];
   cancelSessionTaskCalls: Array<{
@@ -654,6 +657,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const extensionEvents: FakeBridge['extensionEvents'] = [];
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
+  const sessionStatsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
   const sessionLspCalls: string[] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
@@ -820,6 +824,34 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       availableCommands: [],
       availableSkills: [],
+    }));
+  const sessionStatsImpl =
+    opts.sessionStatsImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      sessionStartTimeMs: 1_700_000_000_000,
+      durationMs: 0,
+      promptCount: 0,
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+      skills: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      },
     }));
   const sessionTasksImpl =
     opts.sessionTasksImpl ??
@@ -1010,6 +1042,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextCalls,
     sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
+    sessionStatsCalls,
     sessionTasksCalls,
     sessionLspCalls,
     cancelSessionTaskCalls,
@@ -1199,6 +1232,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionSupportedCommandsStatus(sessionId) {
       sessionSupportedCommandsCalls.push(sessionId);
       return sessionSupportedCommandsImpl(sessionId);
+    },
+    async getSessionStatsStatus(sessionId) {
+      sessionStatsCalls.push(sessionId);
+      return sessionStatsImpl(sessionId);
     },
     async getSessionTasksStatus(sessionId) {
       sessionTasksCalls.push(sessionId);
@@ -4193,6 +4230,35 @@ describe('createServeApp', () => {
         ],
         availableSkills: ['review'],
       };
+      const stats: ServeSessionStatsStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        sessionStartTimeMs: 1_700_000_000_000,
+        durationMs: 1200,
+        promptCount: 2,
+        models: {},
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          byName: {},
+        },
+        files: {
+          totalLinesAdded: 0,
+          totalLinesRemoved: 0,
+        },
+        skills: {
+          totalCalls: 3,
+          totalSuccess: 2,
+          totalFail: 1,
+          byName: {
+            review: { count: 2, success: 1, fail: 1 },
+            testing: { count: 1, success: 1, fail: 0 },
+          },
+        },
+      };
       const tasks: ServeSessionTasksStatus = {
         v: 1,
         sessionId: 's-1',
@@ -4236,6 +4302,7 @@ describe('createServeApp', () => {
       const bridge = fakeBridge({
         sessionContextImpl: async () => context,
         sessionSupportedCommandsImpl: async () => commands,
+        sessionStatsImpl: async () => stats,
         sessionTasksImpl: async () => tasks,
         sessionLspImpl: async () => lsp,
       });
@@ -4251,6 +4318,9 @@ describe('createServeApp', () => {
       const commandsRes = await request(app)
         .get('/session/s-1/supported-commands')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const statsRes = await request(app)
+        .get('/session/s-1/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
       const tasksRes = await request(app)
         .get('/session/s-1/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -4262,12 +4332,15 @@ describe('createServeApp', () => {
       expect(contextRes.body).toEqual(context);
       expect(commandsRes.status).toBe(200);
       expect(commandsRes.body).toEqual(commands);
+      expect(statsRes.status).toBe(200);
+      expect(statsRes.body).toEqual(stats);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);
       expect(lspRes.status).toBe(200);
       expect(lspRes.body).toEqual(lsp);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
+      expect(bridge.sessionStatsCalls).toEqual(['s-1']);
       expect(bridge.sessionTasksCalls).toEqual(['s-1']);
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
     });
@@ -4370,6 +4443,9 @@ describe('createServeApp', () => {
         sessionSupportedCommandsImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
+        sessionStatsImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
         sessionTasksImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
@@ -4389,6 +4465,9 @@ describe('createServeApp', () => {
       const commandsRes = await request(app)
         .get('/session/missing/supported-commands')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const statsRes = await request(app)
+        .get('/session/missing/stats')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
       const tasksRes = await request(app)
         .get('/session/missing/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -4400,6 +4479,8 @@ describe('createServeApp', () => {
       expect(contextRes.body.sessionId).toBe('missing');
       expect(commandsRes.status).toBe(404);
       expect(commandsRes.body.sessionId).toBe('missing');
+      expect(statsRes.status).toBe(404);
+      expect(statsRes.body.sessionId).toBe('missing');
       expect(tasksRes.status).toBe(404);
       expect(tasksRes.body.sessionId).toBe('missing');
       expect(lspRes.status).toBe(404);

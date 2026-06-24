@@ -651,6 +651,7 @@ export default {
   'toggle vim mode on/off': '切換 vim 模式開關',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
   'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show skill-specific usage statistics.': '顯示技能相關的使用統計資訊',
   'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
   'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
   'Export token usage statistics to CSV or JSON.':
