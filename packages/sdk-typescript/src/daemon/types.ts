@@ -1101,6 +1101,27 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
+export type DaemonPermissionScope = 'workspace';
+export type DaemonPermissionRuleType = 'allow' | 'ask' | 'deny';
+
+export interface DaemonPermissionRuleSet {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+export interface DaemonWorkspacePermissionScopeState {
+  rules: DaemonPermissionRuleSet;
+}
+
+export interface DaemonWorkspacePermissionsStatus {
+  v: 1;
+  user: DaemonWorkspacePermissionScopeState;
+  workspace: DaemonWorkspacePermissionScopeState;
+  merged: DaemonPermissionRuleSet;
+  isTrusted: boolean;
+}
+
 /**
  * Result body of `POST /workspace/init`.
  *
