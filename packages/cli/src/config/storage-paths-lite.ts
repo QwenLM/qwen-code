@@ -7,6 +7,8 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+// Keep this literal in sync with core's QWEN_DIR. This lite module must not
+// import @qwen-code/qwen-code-core because it runs before serve listener ready.
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
 
 export function resolveConfigPathLite(dir: string, cwd?: string): string {

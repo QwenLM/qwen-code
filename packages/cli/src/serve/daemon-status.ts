@@ -662,20 +662,22 @@ function rollupStatus(issues: readonly DaemonStatusIssue[]): DaemonStatusLevel {
   return 'ok';
 }
 
-function allowOriginMode(
+export function allowOriginMode(
   allowOrigins: readonly string[] | undefined,
 ): 'none' | 'specific' | 'any' {
   if (!allowOrigins || allowOrigins.length === 0) return 'none';
   return allowOrigins.includes('*') ? 'any' : 'specific';
 }
 
-function listenerMaxConnections(value: number | undefined): number | null {
+export function listenerMaxConnections(
+  value: number | undefined,
+): number | null {
   if (value === undefined) return DEFAULT_LISTENER_MAX_CONNECTIONS;
   if (value === 0 || value === Infinity) return null;
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function positiveFiniteOrNull(value: number | undefined): number | null {
+export function positiveFiniteOrNull(value: number | undefined): number | null {
   return value !== undefined && Number.isFinite(value) && value > 0
     ? value
     : null;

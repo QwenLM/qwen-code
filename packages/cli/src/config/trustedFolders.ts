@@ -10,7 +10,6 @@ import {
   atomicWriteFileSync,
   FatalConfigError,
   getErrorMessage,
-  isWithinRoot,
   ideContextStore,
   Storage,
 } from '@qwen-code/qwen-code-core';
@@ -19,6 +18,11 @@ import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
 import { applyUpdates } from '../utils/commentJson.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  arePathsEquivalent,
+  getPathComparisonVariants,
+  isWithinRoot,
+} from './path-comparison.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -128,26 +132,6 @@ export class LoadedTrustedFolders {
     this.user.config[path] = trustLevel;
     saveTrustedFolders(this.user);
   }
-}
-
-function getPathComparisonVariants(rawPath: string): Set<string> {
-  const variants = new Set<string>([path.normalize(path.resolve(rawPath))]);
-  try {
-    variants.add(path.normalize(fs.realpathSync(rawPath)));
-  } catch {
-    // Non-existent paths still compare by their resolved lexical form.
-  }
-  return variants;
-}
-
-function arePathsEquivalent(left: string, right: string): boolean {
-  const rightVariants = getPathComparisonVariants(right);
-  for (const leftVariant of getPathComparisonVariants(left)) {
-    if (rightVariants.has(leftVariant)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 let loadedTrustedFolders: LoadedTrustedFolders | undefined;

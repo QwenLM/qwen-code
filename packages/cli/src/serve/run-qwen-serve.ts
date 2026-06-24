@@ -67,7 +67,10 @@ import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import {
+  allowOriginMode,
+  listenerMaxConnections,
   parseDaemonStatusDetail,
+  positiveFiniteOrNull,
   type DaemonStatusIssue,
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
@@ -82,11 +85,12 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
+const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 20;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const DEFAULT_EVENT_RING_SIZE = 8000;
-const DEFAULT_LISTENER_MAX_CONNECTIONS = 256;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
@@ -479,6 +483,11 @@ export interface RunQwenServeDeps {
    * the runtime bridge and routes are mounted.
    */
   resolveOnListen?: boolean;
+  /**
+   * Bounds background runtime mounting after the listener is ready. Defaults to
+   * QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS, then 120s. Use 0 to disable.
+   */
+  runtimeStartupTimeoutMs?: number;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -567,25 +576,6 @@ async function loadServeRuntimeModules() {
     createWorkspaceProvidersStatusProvider:
       workspaceProvidersStatusModule.createWorkspaceProvidersStatusProvider,
   };
-}
-
-function allowOriginMode(
-  allowOrigins: readonly string[] | undefined,
-): 'none' | 'specific' | 'any' {
-  if (!allowOrigins || allowOrigins.length === 0) return 'none';
-  return allowOrigins.includes('*') ? 'any' : 'specific';
-}
-
-function listenerMaxConnections(value: number | undefined): number | null {
-  if (value === undefined) return DEFAULT_LISTENER_MAX_CONNECTIONS;
-  if (value === 0 || value === Infinity) return null;
-  return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function positiveFiniteOrNull(value: number | undefined): number | null {
-  return value !== undefined && Number.isFinite(value) && value > 0
-    ? value
-    : null;
 }
 
 function advertisedMaxSessions(value: number | undefined): number | null {
@@ -723,6 +713,7 @@ function installSameOriginOriginStrip(
 
 export function createLazyBridgeProxy(
   getBridge: () => AcpSessionBridge | undefined,
+  getStartupError: () => string | undefined = () => undefined,
 ): AcpSessionBridge {
   return new Proxy(
     {},
@@ -730,6 +721,12 @@ export function createLazyBridgeProxy(
       get(_target, prop) {
         const bridge = getBridge();
         if (!bridge) {
+          const startupError = getStartupError();
+          if (startupError) {
+            throw new Error(
+              `Daemon bridge runtime is not available: ${startupError}`,
+            );
+          }
           throw new Error('Daemon bridge runtime is still starting.');
         }
         const value = Reflect.get(bridge, prop, bridge) as unknown;
@@ -737,6 +734,22 @@ export function createLazyBridgeProxy(
       },
     },
   ) as AcpSessionBridge;
+}
+
+function resolveRuntimeStartupTimeoutMs(override: number | undefined): number {
+  if (override !== undefined) {
+    return Number.isFinite(override) && override > 0 ? override : 0;
+  }
+  const raw = process.env[RUNTIME_STARTUP_TIMEOUT_ENV];
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS;
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '0') return 0;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS;
 }
 
 export async function waitForRuntimeStartingForShutdown(
@@ -1434,13 +1447,19 @@ export async function runQwenServe(
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
   let markRuntimeFailed!: (err: Error) => void;
+  let runtimeStartupSettled = false;
   const runtimeReady = new Promise<void>((resolve, reject) => {
     markRuntimeReady = resolve;
     markRuntimeFailed = reject;
   });
   void runtimeReady.catch(() => {});
 
-  const handleBridge = deps.bridge ?? createLazyBridgeProxy(() => bridgeRef);
+  const handleBridge =
+    deps.bridge ??
+    createLazyBridgeProxy(
+      () => bridgeRef,
+      () => runtimeStartupError,
+    );
 
   const buildRuntime = async (): Promise<{
     app: Application;
@@ -1701,6 +1720,7 @@ export async function runQwenServe(
     runtimeAppForCleanup = runtime.app;
     runtimeApp = runtime.app;
     bridgeRef = runtime.bridge;
+    runtimeStartupSettled = true;
     markRuntimeReady();
   }
 
@@ -1846,6 +1866,56 @@ export async function runQwenServe(
 
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
+      let runtimeStartupTimer: NodeJS.Timeout | undefined;
+      const runtimeStartupTimeoutMs = resolveRuntimeStartupTimeoutMs(
+        deps.runtimeStartupTimeoutMs,
+      );
+      const clearRuntimeStartupTimer = (): void => {
+        if (!runtimeStartupTimer) return;
+        clearTimeout(runtimeStartupTimer);
+        runtimeStartupTimer = undefined;
+      };
+      const shutdownBridgeAfterFailedStartup = async (
+        bridge: AcpSessionBridge | undefined,
+      ): Promise<void> => {
+        if (!bridge || deps.bridge) return;
+        try {
+          await bridge.shutdown();
+        } catch (shutdownErr) {
+          daemonLog.error(
+            'bridge shutdown after runtime startup error failed',
+            shutdownErr instanceof Error ? shutdownErr : null,
+          );
+        } finally {
+          if (bridgeRef === bridge) {
+            bridgeRef = undefined;
+          }
+        }
+      };
+      const failRuntimeStartup = async (
+        err: unknown,
+        bridgeForCleanup?: AcpSessionBridge,
+      ): Promise<void> => {
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (runtimeStartupSettled) {
+          await shutdownBridgeAfterFailedStartup(bridgeForCleanup);
+          return;
+        }
+        runtimeStartupSettled = true;
+        clearRuntimeStartupTimer();
+        const message = error.message;
+        runtimeStartupError = message;
+        if (
+          startup.preheat.status === 'scheduled' ||
+          startup.preheat.status === 'running'
+        ) {
+          startup.preheat.status = 'failed';
+          startup.preheat.error = message;
+        }
+        writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
+        markRuntimeFailed(error);
+        await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
+      };
       const startBridgePreheat = (bridge: AcpSessionBridge): void => {
         startup.preheat.status = 'running';
         const preheatStartedAt = performance.now();
@@ -1872,12 +1942,17 @@ export async function runQwenServe(
       const startRuntime = (): void => {
         if (runtimeStarting) return;
         runtimeStarting = buildRuntime()
-          .then((runtime) => {
+          .then(async (runtime) => {
+            if (runtimeStartupSettled) {
+              await shutdownBridgeAfterFailedStartup(runtime.bridge);
+              return;
+            }
             bridgeRef = runtime.bridge;
             runtimeAppForCleanup = runtime.app;
             if (shuttingDown) {
-              markRuntimeFailed(
+              await failRuntimeStartup(
                 new Error('Daemon runtime stopped before mounting.'),
+                runtime.bridge,
               );
               return;
             }
@@ -1889,38 +1964,21 @@ export async function runQwenServe(
             if (shouldPreheat) {
               startBridgePreheat(runtime.bridge);
             }
+            runtimeStartupSettled = true;
+            clearRuntimeStartupTimer();
             markRuntimeReady();
           })
-          .catch(async (err) => {
-            const message = err instanceof Error ? err.message : String(err);
-            runtimeStartupError = message;
-            if (
-              startup.preheat.status === 'scheduled' ||
-              startup.preheat.status === 'running'
-            ) {
-              startup.preheat.status = 'failed';
-              startup.preheat.error = message;
-            }
-            writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
-            markRuntimeFailed(
-              err instanceof Error ? err : new Error(String(err)),
+          .catch((err) => failRuntimeStartup(err));
+        if (runtimeStartupTimeoutMs > 0) {
+          runtimeStartupTimer = setTimeout(() => {
+            void failRuntimeStartup(
+              new Error(
+                `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
+              ),
             );
-            const bridgeForCleanup = deps.bridge ? undefined : bridgeRef;
-            if (bridgeForCleanup) {
-              try {
-                await bridgeForCleanup.shutdown();
-              } catch (shutdownErr) {
-                daemonLog.error(
-                  'bridge shutdown after runtime startup error failed',
-                  shutdownErr instanceof Error ? shutdownErr : null,
-                );
-              } finally {
-                if (bridgeRef === bridgeForCleanup) {
-                  bridgeRef = undefined;
-                }
-              }
-            }
-          });
+          }, runtimeStartupTimeoutMs);
+          runtimeStartupTimer.unref();
+        }
       };
 
       // Forward declaration so handle.close can detach the listener after

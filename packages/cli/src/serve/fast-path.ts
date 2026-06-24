@@ -121,7 +121,7 @@ function isTruthyEnv(value: string | undefined): boolean {
 }
 
 function writeStderrLine(line: string): void {
-  process.stderr.write(`${line}\n`);
+  process.stderr.write(line.endsWith('\n') ? line : `${line}\n`);
 }
 
 function setServeOption(

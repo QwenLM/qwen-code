@@ -21,6 +21,10 @@ import {
   getSystemSettingsPath,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/storage-paths-lite.js';
+import {
+  getPathComparisonVariants,
+  isWithinRoot,
+} from '../config/path-comparison.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 
@@ -42,21 +46,19 @@ const TRUST_FOLDER = 'TRUST_FOLDER';
 const TRUST_PARENT = 'TRUST_PARENT';
 const DO_NOT_TRUST = 'DO_NOT_TRUST';
 let homeEnvBootstrapped = false;
-
-export function getGlobalQwenDirFastPath(): string {
-  return getGlobalQwenDirLite();
-}
+let cachedTrustedFoldersPath: string | undefined;
+let cachedTrustedFolders: Record<string, string> | undefined;
 
 function getTrustedFoldersPathFastPath(): string {
   return (
     process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] ??
-    path.join(getGlobalQwenDirFastPath(), 'trustedFolders.json')
+    path.join(getGlobalQwenDirLite(), 'trustedFolders.json')
   );
 }
 
 function getUserLevelEnvPathsFastPath(): Set<string> {
   const homeDir = os.homedir();
-  const globalQwenDir = getGlobalQwenDirFastPath();
+  const globalQwenDir = getGlobalQwenDirLite();
   return new Set([
     path.normalize(path.join(homeDir, '.env')),
     path.normalize(path.join(globalQwenDir, '.env')),
@@ -73,7 +75,7 @@ export function preResolveServeFastPathHomeEnvOverrides(): void {
   }
 
   const initialQwenHome = process.env['QWEN_HOME'];
-  const initialQwenDir = getGlobalQwenDirFastPath();
+  const initialQwenDir = getGlobalQwenDirLite();
   readHomeEnvIntoFastPath(path.join(initialQwenDir, '.env'));
   if (!initialQwenHome) {
     readHomeEnvIntoFastPath(path.join(path.dirname(initialQwenDir), '.env'));
@@ -81,7 +83,7 @@ export function preResolveServeFastPathHomeEnvOverrides(): void {
 
   const discoveredQwenHome = process.env['QWEN_HOME'];
   if (discoveredQwenHome && discoveredQwenHome !== initialQwenHome) {
-    const discoveredDir = getGlobalQwenDirFastPath();
+    const discoveredDir = getGlobalQwenDirLite();
     if (discoveredDir !== initialQwenDir) {
       readHomeEnvIntoFastPath(path.join(discoveredDir, '.env'));
     }
@@ -105,10 +107,12 @@ function readHomeEnvIntoFastPath(file: string): void {
 /** Test-only: reset the home-env bootstrap latch. */
 export function resetServeFastPathHomeEnvBootstrapForTesting(): void {
   homeEnvBootstrapped = false;
+  cachedTrustedFoldersPath = undefined;
+  cachedTrustedFolders = undefined;
 }
 
 function getHomeEnvFallbackVarsFastPath(): Record<string, string> {
-  const globalQwenDir = getGlobalQwenDirFastPath();
+  const globalQwenDir = getGlobalQwenDirLite();
   const candidates = [path.join(globalQwenDir, '.env')];
   if (!process.env['QWEN_HOME']) {
     candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
@@ -145,7 +149,7 @@ function findEnvFilesFastPath(
   }
   const isTrusted = isWorkspaceTrustedFastPath(settings, realStartDir);
 
-  const globalQwenDir = getGlobalQwenDirFastPath();
+  const globalQwenDir = getGlobalQwenDirLite();
   const legacyQwenDir = path.normalize(
     path.join(homeDir, SETTINGS_DIRECTORY_NAME),
   );
@@ -283,29 +287,16 @@ export function loadServeFastPathEnvironment(
   }
 }
 
-function isWithinRootFastPath(childPath: string, parentPath: string): boolean {
-  const relativePath = path.relative(parentPath, childPath);
-  return (
-    relativePath === '' ||
-    (!relativePath.startsWith(`..${path.sep}`) &&
-      relativePath !== '..' &&
-      !path.isAbsolute(relativePath))
-  );
-}
-
-function getPathComparisonVariants(rawPath: string): Set<string> {
-  const variants = new Set<string>([path.normalize(path.resolve(rawPath))]);
-  try {
-    variants.add(path.normalize(fs.realpathSync(rawPath)));
-  } catch {
-    // Non-existent paths still compare by their resolved lexical form.
-  }
-  return variants;
-}
-
 function readTrustedFoldersFastPath(): Record<string, string> {
   const trustedFoldersPath = getTrustedFoldersPathFastPath();
-  if (!fs.existsSync(trustedFoldersPath)) return {};
+  if (cachedTrustedFolders && cachedTrustedFoldersPath === trustedFoldersPath) {
+    return cachedTrustedFolders;
+  }
+  if (!fs.existsSync(trustedFoldersPath)) {
+    cachedTrustedFoldersPath = trustedFoldersPath;
+    cachedTrustedFolders = {};
+    return cachedTrustedFolders;
+  }
 
   let parsed: unknown;
   try {
@@ -330,7 +321,9 @@ function readTrustedFoldersFastPath(): Record<string, string> {
       out[rulePath] = trustLevel;
     }
   }
-  return out;
+  cachedTrustedFoldersPath = trustedFoldersPath;
+  cachedTrustedFolders = out;
+  return cachedTrustedFolders;
 }
 
 function isPathTrustedFastPath(location: string): boolean | undefined {
@@ -352,7 +345,7 @@ function isPathTrustedFastPath(location: string): boolean | undefined {
   for (const trustedPath of trustedPaths) {
     for (const locationVariant of locationVariants) {
       for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
-        if (isWithinRootFastPath(locationVariant, trustedVariant)) {
+        if (isWithinRoot(locationVariant, trustedVariant)) {
           return true;
         }
       }
@@ -671,7 +664,7 @@ export function loadServeFastPathSettings(
   const system = readSettingsSummary(getSystemSettingsPath());
   const systemDefaults = readSettingsSummary(getSystemDefaultsPath());
   const user = readSettingsSummary(
-    path.join(getGlobalQwenDirFastPath(), 'settings.json'),
+    path.join(getGlobalQwenDirLite(), 'settings.json'),
   );
   const initialTrustCheckSettings = mergeFastPathSettings(system, user);
   const isTrusted =

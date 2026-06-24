@@ -26,6 +26,7 @@ import type {
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { Storage } from '@qwen-code/qwen-code-core';
+import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
@@ -599,10 +600,19 @@ describe('runQwenServe runtime startup failures', () => {
 
   it('proxies bridge access only after the runtime bridge is ready', async () => {
     const holder: { bridge?: HttpAcpBridge } = {};
-    const proxy = createLazyBridgeProxy(() => holder.bridge);
+    let runtimeStartupError: string | undefined;
+    const proxy = createLazyBridgeProxy(
+      () => holder.bridge,
+      () => runtimeStartupError,
+    );
 
     expect(() => proxy.getDaemonStatusSnapshot()).toThrow(
       'Daemon bridge runtime is still starting.',
+    );
+
+    runtimeStartupError = 'runtime boom';
+    expect(() => proxy.getDaemonStatusSnapshot()).toThrow(
+      'Daemon bridge runtime is not available: runtime boom',
     );
 
     const getDaemonStatusSnapshot = vi.fn(function (this: HttpAcpBridge) {
@@ -613,10 +623,78 @@ describe('runQwenServe runtime startup failures', () => {
             channelLive: false,
           };
     });
+    runtimeStartupError = undefined;
     holder.bridge = { getDaemonStatusSnapshot } as unknown as HttpAcpBridge;
 
     expect(proxy.getDaemonStatusSnapshot()).toBe(BASE_BRIDGE_SNAPSHOT);
     expect(getDaemonStatusSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails runtimeReady and health when runtime startup times out', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.TelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.TelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const bridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
+    } as unknown as HttpAcpBridge;
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true, runtimeStartupTimeoutMs: 1 },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow(
+        'Daemon runtime startup timed out after 1ms.',
+      );
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(503);
+      expect(await healthRes.json()).toMatchObject({
+        status: 'degraded',
+        error: 'Daemon runtime startup timed out after 1ms.',
+      });
+      expect(() => handle.bridge.getDaemonStatusSnapshot()).toThrow(
+        'Daemon bridge runtime is not available: Daemon runtime startup timed out after 1ms.',
+      );
+
+      resolveTelemetry?.({ enabled: false });
+      await vi.waitFor(() => {
+        expect(bridge.shutdown).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      await handle.close();
+    }
   });
 
   it('reports bootstrap status and capabilities when fast path resolves on listen', async () => {

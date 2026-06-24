@@ -17,7 +17,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import { join } from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 
 import {
   bootstrapServeFastPathEnvironment,
@@ -26,11 +26,15 @@ import {
   waitForServeRuntimeOrExit,
 } from './fast-path.js';
 import {
-  getGlobalQwenDirFastPath,
+  loadServeFastPathEnvironment,
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   resetServeFastPathHomeEnvBootstrapForTesting,
 } from './fast-path-settings.js';
+import {
+  getGlobalQwenDirLite,
+  SETTINGS_DIRECTORY_NAME,
+} from '../config/storage-paths-lite.js';
 import {
   resetTrustedFoldersForTesting,
   TrustLevel,
@@ -85,7 +89,9 @@ function buildServeCommandParser(): Argv {
   );
 }
 
-function pickServeFastPathComparable(settings: Settings): ServeFastPathSettings {
+function pickServeFastPathComparable(
+  settings: Settings,
+): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   if (settings.env) {
     out.env = settings.env;
@@ -369,7 +375,7 @@ describe('serve fast path argument parsing', () => {
       }
     ).getOptions();
     const longOptionNames = Object.keys(options.key).filter(
-      (name) => name.length > 1 && !(options.alias[name]?.length),
+      (name) => name.length > 1 && !options.alias[name]?.length,
     );
     const sampleArgvByOption = new Map<string, string[]>([
       ['port', ['--port', '0']],
@@ -547,6 +553,10 @@ describe('serve fast path argument parsing', () => {
 });
 
 describe('serve fast path environment bootstrap', () => {
+  it('keeps the lite settings directory name in sync with core QWEN_DIR', () => {
+    expect(SETTINGS_DIRECTORY_NAME).toBe(QWEN_DIR);
+  });
+
   it('matches Storage.getGlobalQwenDir path resolution', () => {
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-storage-cwd-')),
@@ -570,7 +580,7 @@ describe('serve fast path environment bootstrap', () => {
         process.env['QWEN_HOME'] = qwenHome;
       }
 
-      expect(getGlobalQwenDirFastPath()).toBe(Storage.getGlobalQwenDir());
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
     }
   });
 
@@ -780,10 +790,7 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(qwenHome, '.env'),
-      [
-        'QWEN_SERVER_TOKEN=from-home-env',
-        'QWEN_SERVE_RATE_LIMIT=1',
-      ].join('\n'),
+      ['QWEN_SERVER_TOKEN=from-home-env', 'QWEN_SERVE_RATE_LIMIT=1'].join('\n'),
     );
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
@@ -1115,6 +1122,37 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('caches trusted folders during a single fast-path bootstrap', () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-cache-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({ [tempWorkspace]: TrustLevel.TRUST_FOLDER }),
+    );
+    writeFileSync(join(tempWorkspace, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({ [tempWorkspace]: TrustLevel.DO_NOT_TRUST }),
+    );
+
+    loadServeFastPathEnvironment(settings, tempWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
 
   it('matches Cloud Shell default project behavior for empty env values', async () => {

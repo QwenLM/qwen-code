@@ -20,7 +20,7 @@ initCpuProfiler();
 // --- Global Entry Point ---
 
 function writeStderrLine(line: string): void {
-  process.stderr.write(`${line}\n`);
+  process.stderr.write(line.endsWith('\n') ? line : `${line}\n`);
 }
 
 // Suppress known race conditions in @lydell/node-pty.
