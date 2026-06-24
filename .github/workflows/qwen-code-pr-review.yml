@@ -621,12 +621,13 @@ jobs:
           startsWith(github.event.comment.body, '@qwen-code /resolve ') ||
           startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', '\n'))))
       )
-    # Self-hosted ECS pool, matching review-pr. NOTE: unlike review-pr (which only
-    # checks out trusted base and never builds PR code), this job's verification
-    # gate runs the untrusted PR's build/typecheck/lint/test on a reused workspace.
-    # That isolation tradeoff is accepted deliberately; the cleanup step below keeps
-    # stale per-run artifacts from leaking between PRs.
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    # Prefer the self-hosted ECS pool, but honor the MAINTAINER_ECS_RUNNER_DISABLED
+    # kill-switch (like the review path): if ECS is toggled off, fall back to an
+    # ephemeral hosted runner so /resolve still works. NOTE: this job's verification
+    # gate runs the untrusted PR's build/typecheck/lint/test; on the reused ECS
+    # workspace the cleanup step below keeps stale per-run artifacts from leaking
+    # between PRs (hosted runners are ephemeral, so they need no such cleanup).
+    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 90
     concurrency:
       group: 'qwen-resolve-${{ github.event.issue.number || github.event.inputs.pr_number }}'
@@ -858,8 +859,8 @@ jobs:
 
             ## Required work
 
-            1. Inspect the current branch and the existing diff against `origin/${{ steps.prepare.outputs.base_ref }}`.
-            2. Run `git merge origin/${{ steps.prepare.outputs.base_ref }}`.
+            1. Read context.md for the base branch name, then inspect the current branch and its existing diff against `origin/<base branch>`.
+            2. Run `git merge origin/<base branch>` using the base branch name from context.md.
             3. Resolve every conflict by understanding both sides. Do not blindly take ours or theirs.
             4. Only modify files that actually conflicted. Do not edit unrelated files: a separate CI step checks the change scope and rejects out-of-scope edits.
             5. Re-read the final diff as a reviewer. A separate CI step runs build, typecheck, lint, and tests without credentials, so you do not need to run them here.
@@ -969,7 +970,9 @@ jobs:
           # Scope guard: merging base into head may only change files that base
           # itself changed (conflict resolutions live in those same files).
           # Anything edited outside that set is out of scope — a prompt-injection
-          # symptom — so fail closed and list the offending files.
+          # symptom — so fail closed and list the offending files. Granularity is
+          # deliberately file-level, not per-hunk: real containment is sandbox +
+          # same-repo guard + no agent token; this is one defense-in-depth layer.
           merge_base="$(git merge-base "origin/${BASE_REF}" "origin/${HEAD_REF}")"
           base_changed="$(git diff --name-only "${merge_base}" "origin/${BASE_REF}" | sort -u)"
           agent_changed="$(git diff --name-only "origin/${HEAD_REF}" HEAD | sort -u)"
@@ -1077,7 +1080,11 @@ jobs:
 
           append_safe_file() {
             cleaned="${WORKDIR}/safe-$(basename "$1")"
-            sed 's/<[^>]*>//g' "$1" > "$cleaned"
+            # Strip only dangerous HTML elements, not every `<...>` — the agent's
+            # summary contains TS generics (Map<string, number>), JSX, and `<`/`>`
+            # comparisons that a blanket strip would garble. GitHub sanitizes comment
+            # HTML anyway, so this is belt-and-suspenders against active content.
+            sed -E 's#</?(script|iframe|object|embed|form|style|link|meta)[^>]*>##gi' "$1" > "$cleaned"
             # head -c truncates at a byte boundary, which can split a multi-byte
             # UTF-8 character and emit a broken tail in the comment. Drop any
             # incomplete trailing sequence the byte cut leaves behind.

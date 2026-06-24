@@ -127,6 +127,18 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).toContain('Unresolved index conflicts remain');
   });
 
+  it('pins the core security controls on resolve-pr', () => {
+    // Checkout must not persist GITHUB_TOKEN into .git/config.
+    expect(resolveJob).toContain('persist-credentials: false');
+    // The verification gate runs untrusted PR code with no GitHub token.
+    expect(resolveJob).toContain("GITHUB_TOKEN: ''");
+    // The agent runs sandboxed.
+    expect(resolveJob).toContain('"sandbox": true');
+    // PR-controlled lifecycle scripts never run during install/refresh.
+    expect(resolveJob).toContain('npm ci --ignore-scripts');
+    expect(resolveJob).toContain('npm install --ignore-scripts');
+  });
+
   it('runs the agent without any GitHub credentials', () => {
     const agentStep = resolveJob.slice(
       resolveJob.indexOf("- name: 'Resolve conflicts'"),
