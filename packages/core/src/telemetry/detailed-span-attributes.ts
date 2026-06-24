@@ -34,7 +34,7 @@ export function truncateContent(
   return {
     content:
       content.slice(0, maxSize) +
-      '\n\n[TRUNCATED - Content exceeds configured span attribute limit]',
+      `\n\n[TRUNCATED - Content exceeds configured limit of ${maxSize} characters]`,
     truncated: true,
   };
 }

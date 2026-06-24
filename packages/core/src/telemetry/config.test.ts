@@ -203,7 +203,7 @@ describe('telemetry/config helpers', () => {
         resolveTelemetrySettings({
           settings: { sensitiveSpanAttributeMaxLength: 0 },
         }),
-      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength/i);
+      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength.*got 0/i);
 
       await expect(
         resolveTelemetrySettings({
@@ -211,7 +211,7 @@ describe('telemetry/config helpers', () => {
             sensitiveSpanAttributeMaxLength: 1.5,
           },
         }),
-      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength/i);
+      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength.*got 1\.5/i);
     });
 
     it('rejects invalid sensitive span max length env values', async () => {
@@ -221,7 +221,9 @@ describe('telemetry/config helpers', () => {
             QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '',
           },
         }),
-      ).rejects.toThrow(/QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH/);
+      ).rejects.toThrow(
+        /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*got ''/,
+      );
 
       await expect(
         resolveTelemetrySettings({
@@ -229,7 +231,19 @@ describe('telemetry/config helpers', () => {
             QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 'abc',
           },
         }),
-      ).rejects.toThrow(/QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH/);
+      ).rejects.toThrow(
+        /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*got 'abc'/,
+      );
+
+      await expect(
+        resolveTelemetrySettings({
+          env: {
+            QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '1e3',
+          },
+        }),
+      ).rejects.toThrow(
+        /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*got '1e3'/,
+      );
     });
 
     it('falls back to OTEL_EXPORTER_OTLP_ENDPOINT when GEMINI var is missing', async () => {

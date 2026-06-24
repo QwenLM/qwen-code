@@ -113,6 +113,13 @@ describe('detailed-span-attributes', () => {
       expect(result.truncated).toBe(true);
       expect(result.content.startsWith('x'.repeat(50))).toBe(true);
       expect(result.content).toContain('[TRUNCATED');
+      expect(result.content).toContain('configured limit of 50 characters');
+    });
+
+    it('does not truncate content exactly at the limit', () => {
+      const result = truncateContent('a'.repeat(50), 50);
+      expect(result.truncated).toBe(false);
+      expect(result.content).toBe('a'.repeat(50));
     });
 
     it('does not truncate 70KB content with the default 1MiB limit', () => {

@@ -43,28 +43,33 @@ export function parseTelemetryTargetValue(
   return undefined;
 }
 
-function parsePositiveIntegerEnvValue(
+function parseTelemetryPositiveIntegerEnvValue(
   envName: string,
   value: string | undefined,
 ): number | undefined {
   if (value === undefined) return undefined;
-  const parsed = Number(value.trim());
-  if (!Number.isInteger(parsed) || parsed < 1) {
+
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(parsed) || parsed < 1) {
     throw new FatalConfigError(
-      `Invalid ${envName}: must be a positive integer`,
+      `Invalid ${envName}: must be a positive integer, got '${value}'`,
     );
   }
+
   return parsed;
 }
 
-function parsePositiveIntegerSetting(
+function parseTelemetryPositiveIntegerSetting(
   settingName: string,
   value: unknown,
 ): number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
     throw new FatalConfigError(
-      `Invalid ${settingName}: must be a positive integer`,
+      `Invalid ${settingName}: must be a positive integer, got ${JSON.stringify(
+        value,
+      )}`,
     );
   }
   return value;
@@ -143,11 +148,11 @@ export async function resolveTelemetrySettings(options: {
     false;
 
   const sensitiveSpanAttributeMaxLength =
-    parsePositiveIntegerEnvValue(
+    parseTelemetryPositiveIntegerEnvValue(
       'QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH',
       env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'],
     ) ??
-    parsePositiveIntegerSetting(
+    parseTelemetryPositiveIntegerSetting(
       'telemetry.sensitiveSpanAttributeMaxLength',
       settings.sensitiveSpanAttributeMaxLength,
     ) ??
