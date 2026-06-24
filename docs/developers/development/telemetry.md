@@ -99,8 +99,10 @@ two things happen:
    payload before Qwen Code adds labels such as `[USER PROMPT]` or the
    truncation marker, and it is measured as JavaScript string length rather
    than UTF-8 bytes. Non-ASCII content can therefore occupy more bytes after
-   OTLP export. `*_truncated` and `*_original_length` flags surface when
-   truncation occurs.
+   OTLP export. For most payload types, truncation adds both `*_truncated`
+   and `*_original_length`. System prompts also set `system_prompt_truncated`
+   when truncated, but use the always-present `system_prompt_length` for the
+   original length.
 
 2. **Log-to-span bridge spans** (used when HTTP traces are exported without a
    logs endpoint) keep their existing `prompt`, `function_args`, and
