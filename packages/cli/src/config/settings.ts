@@ -1628,7 +1628,6 @@ export function saveSettings(
     );
     if (!written) {
       const message = `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`;
-      debugLogger.error(message);
       throw new Error(message);
     }
   } catch (error) {

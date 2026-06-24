@@ -17,6 +17,7 @@ import {
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
+import type { DaemonGithubSetupCompletedData } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
