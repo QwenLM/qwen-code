@@ -39,7 +39,7 @@ import {
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
-  resolveOwnsModel,
+  findExistingProviderModels,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -1357,11 +1357,6 @@ function resolveProviderDocumentationUrl(
   return undefined;
 }
 
-function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
-  const record = toRecord(value);
-  return typeof record['id'] === 'string';
-}
-
 function readSettingsEnv(
   settings: LoadedSettings,
   envKey: string | undefined,
@@ -1370,35 +1365,6 @@ function readSettingsEnv(
   const env = toRecord((settings.merged as Record<string, unknown>)['env']);
   const value = env[envKey];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function readProviderModels(
-  settings: LoadedSettings,
-  protocol: string,
-): ProviderModelConfig[] {
-  const modelProviders = toRecord(
-    (settings.merged as Record<string, unknown>)['modelProviders'],
-  );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
-}
-
-function findExistingProviderModels(
-  config: ProviderConfig,
-  settings: LoadedSettings,
-):
-  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
-  | undefined {
-  const ownsModel = resolveOwnsModel(config);
-  if (!ownsModel) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
-  for (const protocol of protocols) {
-    const models = readProviderModels(settings, protocol).filter(ownsModel);
-    if (models.length > 0) return { protocol, models };
-  }
-  return undefined;
 }
 
 function resolveProviderEnvKey(
@@ -1434,7 +1400,12 @@ function readExistingProviderConfig(
   config: ProviderConfig,
   settings: LoadedSettings,
 ): Record<string, unknown> | undefined {
-  const existing = findExistingProviderModels(config, settings);
+  const existing = findExistingProviderModels(
+    config,
+    (settings.merged as Record<string, unknown>)['modelProviders'] as
+      | Record<string, unknown>
+      | undefined,
+  );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
   const baseUrl =
@@ -2424,34 +2395,37 @@ function parsePoolDrainMs(envValue: string | undefined): number {
  * invokes `tryReserve`/`release`; this helper produces the controller
  * and wires the event callback.
  */
-function createWorkspaceMcpBudget(
+export function createWorkspaceMcpBudget(
   onEvent: (event: McpBudgetEvent) => void,
 ): WorkspaceMcpBudget | undefined {
   const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
-  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly.
-  // Use `Number(...)` + `Number.isInteger` so the pool and the manager
+  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly: only plain
+  // decimal digits set a budget. A loose `Number(...)` would silently accept
+  // `0x10`=16, `1e2`=100, and `1.0`=1 (all pass `isInteger`); the strict
+  // `/^\d+$/` + `isSafeInteger` check rejects them so the pool and the manager
   // honor the same env values.
-  const budget =
-    rawBudget !== undefined && rawBudget !== '' ? Number(rawBudget) : undefined;
+  let budget: number | undefined;
+  if (rawBudget !== undefined && rawBudget !== '') {
+    const trimmed = rawBudget.trim();
+    const parsed = Number(trimmed);
+    if (/^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) && parsed > 0) {
+      budget = parsed;
+    } else {
+      process.stderr.write(
+        `qwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=` +
+          `'${rawBudget}' (expected positive integer); ` +
+          `MCP budget enforcement disabled for this child.\n`,
+      );
+    }
+  }
   const mode: McpBudgetMode = (() => {
     if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
       return rawMode;
     }
-    return budget !== undefined &&
-      Number.isFinite(budget) &&
-      Number.isInteger(budget) &&
-      budget > 0
-      ? 'warn'
-      : 'off';
+    return budget !== undefined ? 'warn' : 'off';
   })();
-  if (
-    mode === 'off' ||
-    budget === undefined ||
-    !Number.isFinite(budget) ||
-    !Number.isInteger(budget) ||
-    budget <= 0
-  ) {
+  if (mode === 'off' || budget === undefined) {
     return undefined;
   }
   return new WorkspaceMcpBudget({
