@@ -6,7 +6,9 @@ on:
   push:
     branches:
       - 'main'
-      - 'release/**'
+      # No 'release/**' here: release.yml's commits to the release branch would
+      # fire a redundant full CI run that blocks the release PR's merge queue.
+      # Kept under pull_request below for backport PRs.
   pull_request:
     branches:
       - 'main'
