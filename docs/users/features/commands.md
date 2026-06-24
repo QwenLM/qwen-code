@@ -107,6 +107,10 @@ Commands for managing AI tools and models.
 | `/lsp`           | Show LSP server status                        | `/lsp`                                                                        |
 | `/trust`         | Manage folder trust settings                  | `/trust`                                                                      |
 
+> [!warning]
+>
+> Only install extensions (`/extensions install`) from sources you trust. Extensions can bundle MCP servers, skills, and commands that run with the same permissions as Qwen Code itself — they can access your files, API keys, and conversation data. `/extensions install` does not prompt for confirmation.
+
 ### 1.5 Built-in Skills
 
 These commands invoke bundled skills that provide specialized workflows.
