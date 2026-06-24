@@ -83,44 +83,62 @@ A private async generator wraps the **raw SDK chunk stream** before
 async function* withStreamInactivityTimeout(
   source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   idleMs: number,
-  onTimeout: () => void, // aborts perRequestAc → frees the socket
+  abortRequest: () => void, // aborts perRequestAc → frees the socket
   parentSignal: AbortSignal | undefined,
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
   const it = source[Symbol.asyncIterator]();
-  while (true) {
-    const nextPromise = it.next();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        // User cancel takes precedence over our timeout relabel.
-        // Use a plain Error (NOT DOMException): error redaction clones via
-        // Object.create(getPrototypeOf(err)), which corrupts a DOMException
-        // (its `name` is an internal-slot getter the clone lacks). `name ===
-        // 'AbortError'` satisfies isAbortError.
-        if (parentSignal?.aborted) {
-          const abortErr = new Error('Aborted');
-          abortErr.name = 'AbortError';
-          reject(abortErr);
-        } else {
-          onTimeout(); // abort perRequestAc → fetch tears down
-          reject(makeInactivityTimeoutError(idleMs)); // code: 'ETIMEDOUT'
-        }
-      }, idleMs);
-      timer.unref?.();
-    });
-    let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
-    try {
-      result = await Promise.race([nextPromise, timeout]);
-    } catch (err) {
-      // After we abort, the orphaned nextPromise rejects with AbortError;
-      // swallow it so it is not an unhandled rejection.
-      void Promise.resolve(nextPromise).catch(() => {});
-      throw err;
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
+  const streamStartedAt = Date.now();
+  let chunksReceived = 0;
+  try {
+    while (true) {
+      const nextPromise = it.next();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          // User cancel takes precedence over our timeout relabel.
+          // Use a plain Error (NOT DOMException): error redaction clones via
+          // Object.create(getPrototypeOf(err)), which corrupts a DOMException
+          // (its `name` is an internal-slot getter the clone lacks). `name ===
+          // 'AbortError'` satisfies isAbortError.
+          if (parentSignal?.aborted) {
+            const abortErr = new Error('Aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          } else {
+            abortRequest(); // abort perRequestAc → fetch tears down
+            reject(
+              new StreamInactivityTimeoutError(
+                idleMs,
+                chunksReceived,
+                Date.now() - streamStartedAt,
+              ),
+            ); // code: 'ETIMEDOUT'
+          }
+        }, idleMs);
+        timer.unref?.();
+      });
+      let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+      try {
+        result = await Promise.race([nextPromise, timeout]);
+      } catch (err) {
+        // After we abort, the orphaned nextPromise rejects with AbortError;
+        // swallow it so it is not an unhandled rejection.
+        void Promise.resolve(nextPromise).catch(() => {});
+        throw err;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (result.done) return;
+      chunksReceived += 1;
+      yield result.value; // a chunk arrived → next loop starts a fresh timer
     }
-    if (result.done) return;
-    yield result.value; // a chunk arrived → next loop starts a fresh timer
+  } finally {
+    abortRequest();
+    try {
+      await it.return?.();
+    } catch {
+      // The abort above is the cleanup that matters; ignore return failures.
+    }
   }
 }
 ```
@@ -130,27 +148,36 @@ a long-thinking model that streams reasoning is never wrongly aborted; only true
 silence (no chunk for `idleMs`) trips it.
 
 ```ts
-function makeInactivityTimeoutError(idleMs: number): Error {
-  return Object.assign(
-    new Error(`No stream activity for ${idleMs}ms (inactivity timeout)`),
-    { code: 'ETIMEDOUT' as const },
-  );
+class StreamInactivityTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly idleMs: number,
+    readonly chunksReceived: number,
+    readonly streamLifetimeMs: number,
+  ) {
+    super(`No stream activity for ${idleMs}ms (inactivity timeout)`);
+    this.name = 'StreamInactivityTimeoutError';
+  }
 }
 ```
 
 ### 3. Wiring in `executeStream`
 
-After Stage 1 creates `stream`, wrap it before Stage 2 (both the
-`perRequestAc`-present and absent branches):
+After Stage 1 creates `stream`, wrap it before Stage 2. Streaming requests
+always use a per-request controller so the watchdog can abort the SDK request
+even when the caller did not provide a parent signal:
 
 ```ts
-const idleMs = this.resolveStreamIdleTimeoutMs();
+const idleMs =
+  this.contentGeneratorConfig.streamIdleTimeoutMs ??
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS;
 const guarded =
   idleMs > 0
     ? withStreamInactivityTimeout(
         stream,
         idleMs,
-        () => perRequestAc?.abort(),
+        () => perRequestAc.abort(),
         parentSignal,
       )
     : stream;
@@ -193,3 +220,6 @@ In `pipeline.test.ts`, with `vi.useFakeTimers()` and a controllable mock stream
    on timer advance (passthrough).
 6. **Custom `streamIdleTimeoutMs`** → the configured value is honored (trips at
    the configured ms, not the default).
+7. **Orphaned SDK `next()` rejection** → after the watchdog aborts the request,
+   a later SDK `AbortError` rejection from the pending `next()` is swallowed and
+   does not emit `unhandledRejection`.

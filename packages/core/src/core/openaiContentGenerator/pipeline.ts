@@ -21,6 +21,9 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './constants.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -43,7 +46,11 @@ export class StreamContentError extends Error {
 export class StreamInactivityTimeoutError extends Error {
   readonly code = 'ETIMEDOUT' as const;
 
-  constructor(idleMs: number) {
+  constructor(
+    readonly idleMs: number,
+    readonly chunksReceived: number,
+    readonly streamLifetimeMs: number,
+  ) {
     super(`No stream activity for ${idleMs}ms (inactivity timeout)`);
     this.name = 'StreamInactivityTimeoutError';
   }
@@ -64,6 +71,8 @@ async function* withStreamInactivityTimeout(
   parentSignal: AbortSignal | undefined,
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
   const it = source[Symbol.asyncIterator]();
+  const streamStartedAt = Date.now();
+  let chunksReceived = 0;
   try {
     while (true) {
       const nextPromise = it.next();
@@ -78,7 +87,13 @@ async function* withStreamInactivityTimeout(
             reject(abortErr);
           } else {
             abortRequest();
-            reject(new StreamInactivityTimeoutError(idleMs));
+            reject(
+              new StreamInactivityTimeoutError(
+                idleMs,
+                chunksReceived,
+                Date.now() - streamStartedAt,
+              ),
+            );
           }
         }, idleMs);
         timer.unref?.();
@@ -95,6 +110,7 @@ async function* withStreamInactivityTimeout(
         if (timer !== undefined) clearTimeout(timer);
       }
       if (result.done) return;
+      chunksReceived += 1;
       yield result.value;
     }
   } finally {
@@ -334,7 +350,12 @@ export class ContentGenerationPipeline {
       // Bypass handleError: it strips `code` from timeout errors, which would
       // prevent classifyRetryError from recognizing retryable ETIMEDOUT.
       if (error instanceof StreamInactivityTimeoutError) {
-        throw error;
+        debugLogger.warn('OpenAI stream inactivity timeout', {
+          idleMs: error.idleMs,
+          chunksReceived: error.chunksReceived,
+          streamLifetimeMs: error.streamLifetimeMs,
+        });
+        throw redactProxyError(error);
       }
 
       // Use shared error handling logic

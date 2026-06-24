@@ -3100,7 +3100,63 @@ describe('ContentGenerationPipeline', () => {
       const err = await captured;
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
+      expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('swallows the orphaned SDK next() rejection after an idle timeout', async () => {
+      const pendingSdkNext: {
+        reject?: (err: unknown) => void;
+      } = {};
+      const stream = {
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+              return new Promise((_res, rej) => {
+                pendingSdkNext.reject = rej;
+              });
+            },
+            return(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+              return Promise.resolve({
+                done: true,
+                value: undefined as never,
+              });
+            },
+          };
+        },
+      };
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(stream);
+      const unhandled: unknown[] = [];
+      const handler = (err: unknown) => unhandled.push(err);
+      process.on('unhandledRejection', handler);
+
+      try {
+        const p = buildPipeline(1000);
+        const gen = await p.executeStream(streamingRequest(), 'id');
+        const captured = (async () => {
+          for await (const _ of gen) {
+            /* drain */
+          }
+        })().catch((e: unknown) => e);
+
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(await captured).toMatchObject({
+          code: 'ETIMEDOUT',
+          chunksReceived: 0,
+        });
+
+        const sdkAbort = new Error('aborted by SDK');
+        sdkAbort.name = 'AbortError';
+        expect(pendingSdkNext.reject).toBeDefined();
+        pendingSdkNext.reject!(sdkAbort);
+        pendingSdkNext.reject = undefined;
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
     });
 
     it('aborts the SDK signal on idle timeout without a parent abort signal', async () => {
@@ -3144,7 +3200,10 @@ describe('ContentGenerationPipeline', () => {
       })();
       const captured = consume.catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(1000);
-      expect(await captured).toMatchObject({ code: 'ETIMEDOUT' });
+      expect(await captured).toMatchObject({
+        code: 'ETIMEDOUT',
+        chunksReceived: 1,
+      });
       expect(results).toHaveLength(1);
     });
 
