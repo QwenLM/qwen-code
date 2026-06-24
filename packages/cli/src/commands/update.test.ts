@@ -34,7 +34,7 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 
 const { updateCommand } = await import('./update.js');
 
-const updateArgs: ArgumentsCamelCase<Record<string, never>> = {
+const updateArgs: ArgumentsCamelCase<object> = {
   _: [],
   $0: 'qwen',
 };
