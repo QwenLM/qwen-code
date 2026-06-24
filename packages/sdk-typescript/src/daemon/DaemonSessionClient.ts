@@ -323,6 +323,14 @@ export class DaemonSessionClient {
     });
   }
 
+  /**
+   * Submit a prompt and return as soon as the daemon accepts it.
+   *
+   * This is admission-only: it does not reserve a client-side prompt slot,
+   * register the prompt in `_pendingPrompts`, or wait for the matching
+   * `turn_complete` / `turn_error` SSE event. Callers that need final turn
+   * results should use `prompt()` or manage SSE terminal events themselves.
+   */
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,

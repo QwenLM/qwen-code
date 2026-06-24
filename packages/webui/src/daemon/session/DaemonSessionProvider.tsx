@@ -801,6 +801,16 @@ export function DaemonSessionProvider({
                       setPromptStatus('idle');
                     }
                   }
+                } else if (event.type === 'prompt_cancelled') {
+                  if (restoredActivePrompt) {
+                    settleRestoredActivePrompt();
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                    if (!hasSessionActivePrompt()) {
+                      setPromptStatus('idle');
+                    }
+                  }
                 }
 
                 const replayComplete = uiEvents.some(
@@ -916,6 +926,7 @@ export function DaemonSessionProvider({
                     uiEvent.originatorClientId !== activeSession.clientId)
                 ) {
                   settleRestoredActivePrompt();
+                  restoredPromptSettled = true;
                   setPromptStatus('idle');
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                   activePromptsRef.current.delete(activeSession.sessionId);

@@ -2306,6 +2306,7 @@ describe('DaemonSessionProvider', () => {
     const events = vi.fn(async function* restoredPromptThenStreamEnd(
       opts: { signal?: AbortSignal } = {},
     ) {
+      for (const event of [] as DaemonEvent[]) yield event;
       if (events.mock.calls.length === 1) {
         streamEnded.resolve();
         return;
@@ -2561,11 +2562,59 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
+  it('settles restored active prompts from prompt_cancelled during epoch replay', async () => {
+    const replayCompleted = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      events: async function* restoredPromptEpochReplayCancelled() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        } satisfies DaemonEvent;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'prompt_cancelled',
+          data: { sessionId: 'session-1', reason: 'user_cancel' },
+        } satisfies DaemonEvent;
+        yield {
+          id: 8,
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 1, lastReplayedEventId: 8 },
+        } satisfies DaemonEvent;
+        replayCompleted.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await replayCompleted.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+  });
+
   it('keeps restored active prompts streaming after retriable SSE errors', async () => {
     const streamFailed = createDeferred<void>();
     const session = createMockSession({
       hasActivePrompt: true,
       events: async function* restoredPromptThenRetriableError() {
+        for (const event of [] as DaemonEvent[]) yield event;
         streamFailed.resolve();
         throw new Error('network reset');
       },
