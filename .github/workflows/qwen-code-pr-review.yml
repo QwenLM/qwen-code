@@ -979,7 +979,11 @@ jobs:
               continue
             fi
             echo "Testing ${package_path}..."
-            npm run test --workspace "${package_path}" --if-present
+            if ! npm run test --workspace "${package_path}" --if-present; then
+              echo "Tests failed in ${package_path} after conflict resolution."
+              echo "outcome=failed" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
           done
 
           echo "outcome=fixed" >> "$GITHUB_OUTPUT"
