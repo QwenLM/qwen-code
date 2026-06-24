@@ -155,12 +155,10 @@ function isPrivateNetworkIp(hostname: string): boolean {
     );
   }
   if (isIP(host) === 6) {
-    return (
-      host === '::' ||
-      host.startsWith('fe80:') ||
-      host.startsWith('fc') ||
-      host.startsWith('fd')
-    );
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '', 16);
+    const isLinkLocal = firstHextet >= 0xfe80 && firstHextet <= 0xfebf;
+    const isUniqueLocal = (firstHextet & 0xfe00) === 0xfc00;
+    return host === '::' || isLinkLocal || isUniqueLocal;
   }
   return false;
 }

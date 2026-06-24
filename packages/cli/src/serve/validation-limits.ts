@@ -6,3 +6,4 @@
 
 export const MAX_TRUST_REASON_LENGTH = 1024;
 export const MAX_VOICE_LANGUAGE_LENGTH = 1024;
+export const MAX_VOICE_MODEL_LENGTH = 256;

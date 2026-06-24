@@ -3586,6 +3586,67 @@ describe('Settings Loading and Merging', () => {
         ),
       );
     });
+
+    it('re-syncs uncommitted scopes from disk when setValues persistence fails', () => {
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(
+          p.toString(),
+        ),
+      );
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        general: { voice: { language: 'en' } },
+      };
+      const workspaceSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        general: { voice: { enabled: false } },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify(userSettingsContent);
+          }
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify(workspaceSettingsContent);
+          }
+          return '{}';
+        },
+      );
+      const updateSettingsFile =
+        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      updateSettingsFile.mockImplementation((file: string) => {
+        if (file === MOCK_WORKSPACE_SETTINGS_PATH) {
+          throw new Error('workspace save failed');
+        }
+        return true;
+      });
+      const committed: SettingScope[] = [];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(() =>
+        settings.setValues(
+          [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.language',
+              value: 'zh',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.enabled',
+              value: true,
+            },
+          ],
+          (scope) => committed.push(scope),
+        ),
+      ).toThrow('workspace save failed');
+
+      expect(committed).toEqual([SettingScope.User]);
+      expect(settings.user.settings.general?.voice?.language).toBe('zh');
+      expect(settings.workspace.settings.general?.voice?.enabled).toBe(false);
+      expect(settings.merged.general?.voice?.enabled).toBe(false);
+    });
   });
 
   describe('loadEnvironment', () => {

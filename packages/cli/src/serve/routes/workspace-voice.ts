@@ -32,7 +32,10 @@ import {
   readVoiceModel,
   type VoiceMode,
 } from '../../services/voice-settings.js';
-import { MAX_VOICE_LANGUAGE_LENGTH } from '../validation-limits.js';
+import {
+  MAX_VOICE_LANGUAGE_LENGTH,
+  MAX_VOICE_MODEL_LENGTH,
+} from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   WorkspaceSettingsPartialPersistError,
@@ -156,6 +159,12 @@ function parseVoiceUpdate(
     if (!voiceModel) {
       return {
         error: '`voiceModel` must be a non-empty string',
+        code: 'invalid_voice_model',
+      };
+    }
+    if (voiceModel.length > MAX_VOICE_MODEL_LENGTH) {
+      return {
+        error: `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
         code: 'invalid_voice_model',
       };
     }
@@ -388,6 +397,16 @@ export function registerWorkspaceVoiceRoutes(
       }
       const requestedVoiceModel =
         typeof queryVoiceModel === 'string' ? queryVoiceModel.trim() : '';
+      if (
+        requestedVoiceModel &&
+        requestedVoiceModel.length > MAX_VOICE_MODEL_LENGTH
+      ) {
+        res.status(400).json({
+          error: `\`voiceModel\` exceeds the ${MAX_VOICE_MODEL_LENGTH}-character limit`,
+          code: 'invalid_voice_model',
+        });
+        return;
+      }
       const voiceModel = requestedVoiceModel || readVoiceModel(settings);
       if (!voiceModel) {
         res.status(400).json({

@@ -380,6 +380,10 @@ describe('voice-transcriber', () => {
       'https://169.254.169.254/v1',
       'https://0.0.0.0/v1',
       'https://[fe80::1]/v1',
+      'https://[fea0::1]/v1',
+      'https://[febf::ff]/v1',
+      'https://[fc00::1]/v1',
+      'https://[fd12::1]/v1',
       'https://[::ffff:169.254.169.254]/v1',
     ]) {
       const config = createConfig([
@@ -399,6 +403,25 @@ describe('voice-transcriber', () => {
         }),
       ).toThrow(/private-network baseUrl/);
     }
+  });
+
+  it('does not over-block public-looking IPv6 literals with fc prefix', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Public ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://[fc::1]/v1',
+      },
+    ]);
+
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).not.toThrow();
   });
 
   it('rejects voice model hosts that resolve to private-network IPs', async () => {

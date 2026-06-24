@@ -56,9 +56,15 @@ const setupGithubMocks = vi.hoisted(() => {
   };
 });
 
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
 vi.mock('../../services/setup-github.js', () => ({
   setupGithub: setupGithubMocks.setupGithub,
   SetupGithubError: setupGithubMocks.SetupGithubError,
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
 }));
 
 const baseOpts: ServeOptions = {
@@ -172,6 +178,7 @@ describe('POST /workspace/setup-github', () => {
 
   beforeEach(async () => {
     setupGithubMocks.setupGithub.mockReset();
+    mockWriteStderrLine.mockClear();
     h = await makeHarness({ token: 'secret' });
   });
 
@@ -430,6 +437,9 @@ describe('POST /workspace/setup-github', () => {
       code: 'github_setup_failed',
       status: 500,
     });
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('[setup-github] unexpected error:'),
+    );
   });
 
   it('maps release lookup failure to 502', async () => {

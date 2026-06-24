@@ -557,8 +557,17 @@ export class LoadedSettings {
       scopes.add(write.scope);
     }
     this._merged = this.computeMergedSettings();
-    for (const scope of scopes) {
-      saveSettings(this.forScope(scope));
+    const scopeList = Array.from(scopes);
+    for (let i = 0; i < scopeList.length; i++) {
+      const scope = scopeList[i]!;
+      try {
+        saveSettings(this.forScope(scope));
+      } catch (err) {
+        for (const uncommittedScope of scopeList.slice(i)) {
+          this.reloadScopeFromDisk(uncommittedScope);
+        }
+        throw err;
+      }
       onScopeCommitted?.(scope);
     }
   }

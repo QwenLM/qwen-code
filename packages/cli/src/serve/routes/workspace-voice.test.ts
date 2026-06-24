@@ -338,6 +338,20 @@ describe('workspace voice routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
+  it('POST rejects overlong voiceModel values', async () => {
+    await writeVoiceModelSettings(h);
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ voiceModel: 'x'.repeat(257) });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_voice_model');
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
   it('POST broadcasts settings_changed for persisted voice settings', async () => {
     await writeVoiceModelSettings(h);
     const broadcastSettingsChanged = vi.fn();
@@ -786,6 +800,21 @@ describe('workspace voice routes', () => {
       .post(
         '/workspace/voice/transcribe?voiceModel=qwen3-asr-flash&voiceModel=other',
       )
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1]));
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_voice_model');
+    expect(h.transcribe).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/voice/transcribe rejects overlong voiceModel query parameters', async () => {
+    await writeVoiceModelSettings(h);
+
+    const res = await request(h.app)
+      .post(`/workspace/voice/transcribe?voiceModel=${'x'.repeat(257)}`)
       .set('Host', hostHeader)
       .set('Authorization', 'Bearer secret')
       .set('Content-Type', 'audio/wav')

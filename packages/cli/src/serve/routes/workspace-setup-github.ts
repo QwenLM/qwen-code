@@ -19,6 +19,7 @@ import {
 import { loadSettings, type Settings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { applyReadHeaders } from './workspace-file-read.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const ROUTE = 'POST /workspace/setup-github';
 
@@ -276,6 +277,11 @@ function sendSetupGithubError(
     });
     return;
   }
+  writeStderrLine(
+    `[setup-github] unexpected error: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
   res.status(500).json({
     error: 'An internal error occurred during GitHub setup.',
     code: 'github_setup_failed',
