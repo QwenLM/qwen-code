@@ -4,14 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync } from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
-import { resolveBundleDir } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
+export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
@@ -39,46 +37,6 @@ export const WEB_SHELL_CSP = [
   "base-uri 'none'",
   "frame-ancestors 'none'",
 ].join('; ');
-
-/**
- * Locate the built Web Shell assets directory (the one containing
- * `index.html` + `assets/`). Returns `undefined` when the assets are not
- * present — e.g. a `--cli-only` build, or running before `npm run build`
- * produced `packages/web-shell/dist` — so the caller can degrade to
- * API-only instead of crashing.
- */
-export function resolveWebShellDir(): string | undefined {
-  const selfDir = path.dirname(fileURLToPath(import.meta.url));
-  // Require BOTH index.html and assets/: a partial build (index.html without
-  // its hashed chunks) would otherwise pass and serve a shell whose every
-  // script/style 404s. copy_bundle_assets.js applies the same two-part check.
-  const hasShell = (dir: string): boolean =>
-    existsSync(path.join(dir, 'index.html')) &&
-    existsSync(path.join(dir, 'assets'));
-
-  // esbuild bundle: this module is hoisted into dist/cli.js (or a
-  // dist/chunks/*.js shared chunk). `resolveBundleDir` strips the `chunks/`
-  // segment so we land on dist/, where copy_bundle_assets.js drops the UI as
-  // dist/web-shell/.
-  const bundled = path.join(resolveBundleDir(import.meta.url), 'web-shell');
-  if (hasShell(bundled)) return bundled;
-
-  // Non-bundled runs sit at different depths under the repo: tsx on source
-  // (packages/cli/src/serve/), per-package `tsc` output
-  // (packages/cli/dist/src/serve/), and the integration daemon harness
-  // (packages/cli/dist/index.js). Walk up from this module to find a sibling
-  // packages/web-shell/dist instead of hard-coding one `..` depth — which
-  // only matched the tsx case and left the transpiled layouts serving no UI.
-  let dir = selfDir;
-  for (let i = 0; i < 10; i++) {
-    const candidate = path.join(dir, 'packages', 'web-shell', 'dist');
-    if (hasShell(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return undefined;
-}
 
 /**
  * True when the request is a top-level document navigation (address-bar
