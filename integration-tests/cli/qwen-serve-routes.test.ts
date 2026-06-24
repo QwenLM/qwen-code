@@ -276,6 +276,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_settings',
+      'workspace_permissions',
       'workspace_init',
       'workspace_mcp_restart',
       'session_recap',

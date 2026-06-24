@@ -51,7 +51,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     {
       name: 'mcp',
       description: t('local.mcp'),
-      argumentHint: 'desc|nodesc|schema|auth|noauth',
+      argumentHint: 'desc|nodesc|schema',
     },
     { name: 'skills', description: t('local.skills') },
     { name: 'status', description: t('local.status') },

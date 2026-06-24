@@ -261,6 +261,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_branch',
   ),
   'workspace_settings',
+  'workspace_permissions',
   'workspace_init',
   'workspace_mcp_restart',
   'session_recap',
@@ -1589,6 +1590,20 @@ describe('createServeApp', () => {
           continue;
         }
         if (feature === 'workspace_settings') {
+          expect(predicate({ persistSettingAvailable: true })).toBe(true);
+          expect(predicate({ persistSettingAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistSettingAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_permissions') {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);

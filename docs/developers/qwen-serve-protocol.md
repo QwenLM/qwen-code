@@ -1602,7 +1602,14 @@ After a successful vote, every connected client sees `permission_resolved` with 
 
 The daemon brokers an OAuth 2.0 Device Authorization Grant (RFC 8628) so a remote SDK client can trigger a login whose tokens land on the **daemon** filesystem — not on the client. The daemon polls the IdP itself; the client's only job is to display the verification URL + user code and (optionally) subscribe to SSE for completion events.
 
-Capability tag: `auth_device_flow` (always advertised). Supported providers in v1: `qwen-oauth`.
+Capability tag: `auth_device_flow` (always advertised). Supported providers in
+v1: `qwen-oauth`.
+
+> [!note]
+>
+> Qwen OAuth free tier was discontinued on 2026-04-15. Treat `qwen-oauth` as the
+> legacy v1 provider identifier in this protocol; new clients should prefer a
+> currently supported auth provider when one is available.
 
 **Runtime locality.** The daemon never spawns a browser — even if it can. The client decides whether to call `open(verificationUri)` locally; on a headless pod (the canonical Mode B deployment) the user opens the URL on whatever device they have a browser on. See `docs/users/qwen-serve.md` for the recommended UX.
 

@@ -2688,6 +2688,273 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('workspace permissions helpers', () => {
+    const permissionsStatus = {
+      v: 1 as const,
+      user: {
+        rules: {
+          allow: ['ShellTool(git status)'],
+          ask: [],
+          deny: [],
+        },
+      },
+      workspace: {
+        rules: {
+          allow: ['ShellTool(npm test)'],
+          ask: [],
+          deny: ['ReadFileTool(**/.env)'],
+        },
+      },
+      merged: {
+        allow: ['ShellTool(git status)', 'ShellTool(npm test)'],
+        ask: [],
+        deny: ['ReadFileTool(**/.env)'],
+      },
+      isTrusted: true,
+    };
+
+    it('workspacePermissions calls GET /workspace/permissions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspacePermissions({ clientId: 'client-1' }),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('setWorkspacePermissionRules posts scope ruleType and rules', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspacePermissionRules(
+          'workspace',
+          'deny',
+          ['ReadFileTool(**/.env)'],
+          { clientId: 'client-2' },
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(calls[0]?.headers['content-type']).toContain('application/json');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-2');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['ReadFileTool(**/.env)'],
+      });
+    });
+
+    it('addWorkspacePermissionRule deduplicates against scope-local rules', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          ' ShellTool(npm test) ',
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('removeWorkspacePermissionRule preserves missing rule as no-op', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'ask',
+          'ShellTool(yarn test)',
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('removeWorkspacePermissionRule propagates GET failures without POSTing', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(500, { error: 'failed to load permissions' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+
+    it('addWorkspacePermissionRule POSTs when rule is absent', async () => {
+      const updatedStatus = {
+        ...permissionsStatus,
+        workspace: {
+          ...permissionsStatus.workspace,
+          rules: {
+            ...permissionsStatus.workspace.rules,
+            allow: ['ShellTool(npm test)', 'ShellTool(npm run build)'],
+          },
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, updatedStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).resolves.toEqual(updatedStatus);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['ShellTool(npm test)', 'ShellTool(npm run build)'],
+      });
+    });
+
+    it('addWorkspacePermissionRule propagates GET failures without POSTing', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(500, { error: 'failed to load permissions' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+
+    it('addWorkspacePermissionRule propagates POST failures after GET', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(500, { error: 'failed to update permissions' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+
+    it('removeWorkspacePermissionRule POSTs when rule exists', async () => {
+      const updatedStatus = {
+        ...permissionsStatus,
+        workspace: {
+          ...permissionsStatus.workspace,
+          rules: {
+            ...permissionsStatus.workspace.rules,
+            deny: [],
+          },
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, updatedStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).resolves.toEqual(updatedStatus);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: [],
+      });
+    });
+
+    it('removeWorkspacePermissionRule propagates POST failures after GET', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(500, { error: 'failed to update permissions' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+  });
+
   describe('workspace memory + agents helpers (issue #4175 PR 16)', () => {
     it('GETs /workspace/memory and parses the snapshot', async () => {
       const snapshot = {
