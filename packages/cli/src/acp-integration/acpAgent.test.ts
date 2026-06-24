@@ -206,6 +206,41 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
       provider.ownsModel ??
       ((model: { envKey?: string }) => model.envKey === provider.envKey),
   ),
+  findExistingProviderModels: vi.fn(
+    (
+      provider: {
+        envKey?: string | ((...args: unknown[]) => string);
+        protocol: string;
+        protocolOptions?: string[];
+        ownsModel?: (model: { envKey?: string }) => boolean;
+      },
+      modelProviders: Record<string, unknown> | undefined,
+    ) => {
+      const ownsModel =
+        provider.ownsModel ??
+        (typeof provider.envKey === 'string'
+          ? (model: { envKey?: string }) => model.envKey === provider.envKey
+          : undefined);
+      if (!ownsModel || !modelProviders) return undefined;
+      const protocols =
+        provider.protocolOptions && provider.protocolOptions.length > 0
+          ? provider.protocolOptions
+          : [provider.protocol];
+      for (const protocol of protocols) {
+        const raw = modelProviders[protocol];
+        if (!Array.isArray(raw)) continue;
+        const models = raw.filter(
+          (m): m is { id: string; envKey?: string } =>
+            typeof m === 'object' &&
+            m !== null &&
+            typeof (m as { id?: unknown }).id === 'string' &&
+            ownsModel(m),
+        );
+        if (models.length > 0) return { protocol, models };
+      }
+      return undefined;
+    },
+  ),
   ExtensionManager: vi.fn().mockImplementation(() => ({
     refreshCache: mockExtensionManagerState.refreshCache,
     getLoadedExtensions: vi.fn(() => mockExtensionManagerState.extensions),
@@ -527,6 +562,7 @@ import {
   normalizeCoreSettingValue,
   extractFilesFromTarGz,
   fetchAllowedGitHub,
+  createWorkspaceMcpBudget,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -7254,5 +7290,42 @@ describe('sessionLanguage multi-session propagation', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+});
+
+describe('createWorkspaceMcpBudget — env parsing', () => {
+  const KEY = 'QWEN_SERVE_MCP_CLIENT_BUDGET';
+  const MODE = 'QWEN_SERVE_MCP_BUDGET_MODE';
+  const onEvent = vi.fn();
+
+  afterEach(() => {
+    delete process.env[KEY];
+    delete process.env[MODE];
+    vi.clearAllMocks();
+  });
+
+  it('accepts a plain positive decimal integer', () => {
+    process.env[KEY] = '100';
+    expect(createWorkspaceMcpBudget(onEvent)).toBeDefined();
+  });
+
+  it('accepts a trimmed decimal integer', () => {
+    process.env[KEY] = '  42  ';
+    expect(createWorkspaceMcpBudget(onEvent)).toBeDefined();
+  });
+
+  // Mirrors McpClientManager.readBudgetFromEnv: a loose Number() would coerce
+  // these (0x10=16, 1e2=100, 1.0=1) and silently set a budget. The strict
+  // /^\d+$/ + isSafeInteger parse must reject them.
+  it.each(['0x10', '1e2', '1.0', '0b101', '5 abc', 'abc', '-5', '0', ' '])(
+    'rejects non-decimal-integer value %j',
+    (raw) => {
+      process.env[KEY] = raw;
+      expect(createWorkspaceMcpBudget(onEvent)).toBeUndefined();
+    },
+  );
+
+  it('returns undefined when the budget env var is unset', () => {
+    expect(createWorkspaceMcpBudget(onEvent)).toBeUndefined();
   });
 });
