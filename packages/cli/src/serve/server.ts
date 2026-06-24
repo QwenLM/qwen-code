@@ -73,6 +73,7 @@ import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
   buildDaemonStatusResponse,
+  type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from './daemon-status.js';
 import {
@@ -793,8 +794,9 @@ export interface ServeAppDeps {
    * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
-  statusProvider?: DaemonStatusProvider;
+  startup?: DaemonStartupSnapshot;
   workspace?: DaemonWorkspaceService;
+  statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
     workspace: string,
     toolName: string,
@@ -925,15 +927,15 @@ function resolveDaemonTelemetryRoute(
     if (req.method === 'GET') return { route: 'GET /workspace/settings' };
     if (req.method === 'POST') return { route: 'POST /workspace/settings' };
   }
+  if (path === '/workspace/permissions') {
+    if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
+    if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
+  }
   if (path === '/workspace/trust') {
     if (req.method === 'GET') return { route: 'GET /workspace/trust' };
   }
   if (req.method === 'POST' && path === '/workspace/trust/request') {
     return { route: 'POST /workspace/trust/request' };
-  }
-  if (path === '/workspace/permissions') {
-    if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
-    if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
   }
   if (path === '/workspace/voice') {
     if (req.method === 'GET') return { route: 'GET /workspace/voice' };
@@ -1138,6 +1140,15 @@ export function createServeApp(
     injected: deps.fsFactory,
     trusted: false,
   });
+  let cachedVoiceTranscriptionAvailable: boolean | undefined;
+  const invalidateServeFeaturesCache = () => {
+    cachedVoiceTranscriptionAvailable = undefined;
+  };
+  const getCachedVoiceTranscriptionAvailable = () => {
+    cachedVoiceTranscriptionAvailable ??=
+      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+    return cachedVoiceTranscriptionAvailable;
+  };
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
@@ -1159,16 +1170,6 @@ export function createServeApp(
       // readTextFile pick up trust / TOCTOU / audit.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
     });
-
-  let cachedVoiceTranscriptionAvailable: boolean | undefined;
-  const invalidateServeFeaturesCache = () => {
-    cachedVoiceTranscriptionAvailable = undefined;
-  };
-  const getCachedVoiceTranscriptionAvailable = () => {
-    cachedVoiceTranscriptionAvailable ??=
-      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
-    return cachedVoiceTranscriptionAvailable;
-  };
 
   // Allow same-origin requests from the demo page. Browsers send an
   // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
@@ -1301,16 +1302,16 @@ export function createServeApp(
             'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
           );
         }),
-      ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
-      ...(deps.persistSettings
-        ? { persistSettings: deps.persistSettings }
-        : {}),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
+      ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
+      ...(deps.persistSettings
+        ? { persistSettings: deps.persistSettings }
+        : {}),
       publishWorkspaceEvent: (event) => {
         if (
           event.type === 'settings_changed' ||
@@ -1365,14 +1366,14 @@ export function createServeApp(
         },
       );
     });
-  const createExtensionManager = () => {
-    const trustState = getWorkspaceTrustStatus(
-      loadSettings(boundWorkspace).merged,
-      boundWorkspace,
-    ).effective.state;
-    return new ExtensionManager({
+  const createExtensionManager = () =>
+    new ExtensionManager({
       workspaceDir: boundWorkspace,
-      isWorkspaceTrusted: trustState === 'trusted',
+      isWorkspaceTrusted:
+        getWorkspaceTrustStatus(
+          loadSettings(boundWorkspace).merged,
+          boundWorkspace,
+        ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -1385,7 +1386,6 @@ export function createServeApp(
         );
       },
     });
-  };
   const validateExtensionMutationClient = (
     req: Request,
     res: Response,
@@ -2080,10 +2080,10 @@ export function createServeApp(
         ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
         : {}),
       persistSettingAvailable: deps.persistSetting !== undefined,
-      voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
+      voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
       // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
       // on). A configured token no longer suppresses it — the browser carries
       // the bearer token via the WS subprotocol, which the upgrade listener
@@ -2109,6 +2109,7 @@ export function createServeApp(
           bridge,
           workspace,
           daemonLog,
+          startup: deps.startup,
           qwenCodeVersion: deps.qwenCodeVersion,
           acpHandle: acpHandleRef.current,
           rateLimiter,
@@ -2909,8 +2910,6 @@ export function createServeApp(
         });
         return;
       }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
       const view = deviceFlowRegistry.get(id);
       if (!view) {
         res.status(404).json({
@@ -2919,6 +2918,8 @@ export function createServeApp(
         });
         return;
       }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
       // Debug-mode breadcrumb when verification fields are redacted
       // due to caller-clientId mismatch.
       if (!callerIsDeviceFlowInitiator(view, clientId) && isServeDebugMode()) {

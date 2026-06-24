@@ -10,7 +10,6 @@ import {
   atomicWriteFileSync,
   FatalConfigError,
   getErrorMessage,
-  isWithinRoot,
   ideContextStore,
   Storage,
 } from '@qwen-code/qwen-code-core';
@@ -19,6 +18,11 @@ import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
 import { applyUpdates } from '../utils/commentJson.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  arePathsEquivalent,
+  getPathComparisonVariants,
+  isWithinRoot,
+} from './path-comparison.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -114,15 +118,26 @@ export class LoadedTrustedFolders {
       }
     }
 
+    const locationVariants = getPathComparisonVariants(location);
     for (const trustedPath of trustedPaths) {
-      if (isWithinRoot(location, trustedPath)) {
-        return true;
+      for (const locationVariant of locationVariants) {
+        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
+          if (isWithinRoot(locationVariant, trustedVariant)) {
+            return true;
+          }
+        }
       }
     }
 
     for (const untrustedPath of untrustedPaths) {
-      if (path.normalize(location) === path.normalize(untrustedPath)) {
-        return false;
+      for (const locationVariant of locationVariants) {
+        for (const untrustedVariant of getPathComparisonVariants(
+          untrustedPath,
+        )) {
+          if (locationVariant === untrustedVariant) {
+            return false;
+          }
+        }
       }
     }
 
@@ -263,21 +278,31 @@ export function isFolderTrustEnabled(settings: Settings): boolean {
   return folderTrustSetting;
 }
 
+function isWithinRootAcrossVariants(childPath: string, parentPath: string) {
+  for (const childVariant of getPathComparisonVariants(childPath)) {
+    for (const parentVariant of getPathComparisonVariants(parentPath)) {
+      if (isWithinRoot(childVariant, parentVariant)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function getExplicitTrustLevel(
   trustConfig: Record<string, TrustLevel>,
   workspaceCwd: string,
 ): TrustLevel | null {
-  const normalizedWorkspace = path.normalize(workspaceCwd);
   for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
     if (
       trustLevel === TrustLevel.TRUST_FOLDER &&
-      isWithinRoot(workspaceCwd, rulePath)
+      isWithinRootAcrossVariants(workspaceCwd, rulePath)
     ) {
       return trustLevel;
     }
     if (
       trustLevel === TrustLevel.TRUST_PARENT &&
-      isWithinRoot(workspaceCwd, path.dirname(rulePath))
+      isWithinRootAcrossVariants(workspaceCwd, path.dirname(rulePath))
     ) {
       return trustLevel;
     }
@@ -285,12 +310,50 @@ function getExplicitTrustLevel(
   for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
     if (
       trustLevel === TrustLevel.DO_NOT_TRUST &&
-      path.normalize(rulePath) === normalizedWorkspace
+      arePathsEquivalent(workspaceCwd, rulePath)
     ) {
       return trustLevel;
     }
   }
   return null;
+}
+
+function loadTrustedFoldersWithOverrides(
+  trustConfig?: Record<string, TrustLevel>,
+): LoadedTrustedFolders {
+  const folders = loadTrustedFolders();
+
+  if (trustConfig) {
+    folders.user.config = trustConfig;
+  }
+
+  if (folders.errors.length > 0) {
+    const errorMessages = folders.errors.map(
+      (error) => `Error in ${error.path}: ${error.message}`,
+    );
+    throw new FatalConfigError(
+      `${errorMessages.join('\n')}\nPlease fix the configuration file and try again.`,
+    );
+  }
+  return folders;
+}
+
+function trustStatusToResult(status: WorkspaceTrustStatus): TrustResult {
+  if (status.effective.source === 'disabled') {
+    return { isTrusted: true, source: undefined };
+  }
+  return {
+    isTrusted:
+      status.effective.state === 'trusted'
+        ? true
+        : status.effective.state === 'untrusted'
+          ? false
+          : undefined,
+    source:
+      status.effective.source === 'file' || status.effective.source === 'ide'
+        ? status.effective.source
+        : undefined,
+  };
 }
 
 export function getWorkspaceTrustStatus(
@@ -310,7 +373,10 @@ export function getWorkspaceTrustStatus(
   }
 
   const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (ideTrust !== undefined) {
+  if (
+    ideTrust !== undefined &&
+    arePathsEquivalent(workspaceCwd, process.cwd())
+  ) {
     return {
       v: 1,
       workspaceCwd,
@@ -324,22 +390,7 @@ export function getWorkspaceTrustStatus(
     };
   }
 
-  // Fall back to the local user configuration
-  const folders = loadTrustedFolders();
-
-  if (trustConfig) {
-    folders.user.config = trustConfig;
-  }
-
-  if (folders.errors.length > 0) {
-    const errorMessages = folders.errors.map(
-      (error) => `Error in ${error.path}: ${error.message}`,
-    );
-    throw new FatalConfigError(
-      `${errorMessages.join('\n')}\nPlease fix the configuration file and try again.`,
-    );
-  }
-
+  const folders = loadTrustedFoldersWithOverrides(trustConfig);
   const isTrusted = folders.isPathTrusted(workspaceCwd);
   const state: WorkspaceTrustState =
     isTrusted === true
@@ -363,29 +414,29 @@ export function getWorkspaceTrustStatus(
   };
 }
 
-function trustStatusToResult(status: WorkspaceTrustStatus): TrustResult {
-  if (status.effective.source === 'disabled') {
-    return { isTrusted: true, source: undefined };
-  }
-  return {
-    isTrusted:
-      status.effective.state === 'trusted'
-        ? true
-        : status.effective.state === 'untrusted'
-          ? false
-          : undefined,
-    source:
-      status.effective.source === 'file' || status.effective.source === 'ide'
-        ? status.effective.source
-        : undefined,
-  };
-}
-
 export function isWorkspaceTrusted(
   settings: Settings,
   trustConfig?: Record<string, TrustLevel>,
+  workspacePath?: string,
 ): TrustResult {
+  if (!isFolderTrustEnabled(settings)) {
+    return { isTrusted: true, source: undefined };
+  }
+
+  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  if (
+    ideTrust !== undefined &&
+    (workspacePath === undefined ||
+      arePathsEquivalent(workspacePath, process.cwd()))
+  ) {
+    return { isTrusted: ideTrust, source: 'ide' };
+  }
+
   return trustStatusToResult(
-    getWorkspaceTrustStatus(settings, process.cwd(), trustConfig),
+    getWorkspaceTrustStatus(
+      settings,
+      workspacePath ?? process.cwd(),
+      trustConfig,
+    ),
   );
 }
