@@ -574,4 +574,57 @@ describe('qwen serve — PATCH /session/:id/metadata', () => {
     expect(res.status).toBe(400);
     await client.closeSession(session.sessionId);
   });
+
+  // Validates the three real-daemon behaviors that DaemonSessionClient's
+  // clientId self-heal relies on (see
+  // docs/superpowers/specs/2026-06-24-daemon-clientid-self-heal-design.md).
+  // Model-free: prompt admission (where invalid_client_id is decided) runs
+  // before any model call, so promptNonBlocking returns 202 on acceptance
+  // without reaching the (unreachable, fake) model.
+  it('rejects an unregistered prompt clientId and re-registers via resume', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const prompt = { prompt: [{ type: 'text', text: 'hi' }] };
+
+    // (1) An unregistered clientId (e.g. one held across a daemon restart) is
+    //     rejected at admission with 400 invalid_client_id — the exact signal
+    //     the SDK self-heals on.
+    const rejected = await client
+      .promptNonBlocking(
+        session.sessionId,
+        prompt,
+        undefined,
+        'client-never-registered',
+      )
+      .catch((err: unknown) => err);
+    expect(rejected).toBeInstanceOf(DaemonHttpError);
+    expect((rejected as DaemonHttpError).status).toBe(400);
+    expect((rejected as DaemonHttpError).body).toMatchObject({
+      code: 'invalid_client_id',
+    });
+
+    // (2) resume re-registers and mints a fresh, valid clientId.
+    const reattached = await client.resumeSession(session.sessionId, {
+      workspaceCwd: REPO_ROOT,
+    });
+    expect(reattached.clientId).toBeTypeOf('string');
+    expect(reattached.clientId).not.toBe('client-never-registered');
+
+    // (3) Retrying admission with the fresh clientId is accepted (202),
+    //     proving reattach + retry recovers the turn end-to-end.
+    const accepted = await client.promptNonBlocking(
+      session.sessionId,
+      prompt,
+      undefined,
+      reattached.clientId,
+    );
+    expect(accepted).toMatchObject({ promptId: expect.any(String) });
+
+    // The accepted turn dispatches to the unreachable fake model
+    // asynchronously; cancel so nothing lingers past the test.
+    await client.cancel(session.sessionId, reattached.clientId).catch(() => {});
+    await client.closeSession(session.sessionId);
+  });
 });
