@@ -1937,7 +1937,7 @@ describe('Server Config (config.ts)', () => {
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
     const config = new Config({
       ...baseParams,
-      enableManagedAutoMemory: false,
+      bareMode: true,
       generationConfig: { contextWindowSize: 1000 },
     });
 

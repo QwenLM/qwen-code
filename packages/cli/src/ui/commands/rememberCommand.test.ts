@@ -29,11 +29,11 @@ describe('rememberCommand', () => {
     });
   });
 
-  it('returns submit_prompt for managed auto-memory', () => {
+  it('routes to managed memory when available', () => {
     const context = createMockCommandContext({
       services: {
         config: {
-          getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+          isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
           getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
         },
       },
@@ -45,11 +45,11 @@ describe('rememberCommand', () => {
     });
   });
 
-  it('returns submit_prompt for non-managed memory (QWEN.md fallback)', () => {
+  it('falls back to QWEN.md in bare mode', () => {
     const context = createMockCommandContext({
       services: {
         config: {
-          getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
+          isManagedMemoryAvailable: vi.fn().mockReturnValue(false),
           getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
         },
       },

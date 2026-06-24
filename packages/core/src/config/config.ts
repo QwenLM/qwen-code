@@ -2172,7 +2172,7 @@ export class Config {
           ),
         },
       );
-    if (this.getManagedAutoMemoryEnabled()) {
+    if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
       // section out of the system prompt. Project-level read still bubbles
@@ -4263,6 +4263,10 @@ export class Config {
 
   getManagedAutoMemoryEnabled(): boolean {
     return this.enableManagedAutoMemory && !this.getBareMode();
+  }
+
+  isManagedMemoryAvailable(): boolean {
+    return !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
