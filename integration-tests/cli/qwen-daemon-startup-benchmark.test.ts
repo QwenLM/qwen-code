@@ -58,6 +58,7 @@ const TOKEN = 'daemon-startup-benchmark-token';
 const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(DEFAULT_REPO_ROOT, 'dist/cli.js');
+// Keep in sync with DaemonStartupPreheatStatus in daemon-status.ts.
 const PREHEAT_STATUSES = [
   'external_bridge',
   'not_scheduled',
