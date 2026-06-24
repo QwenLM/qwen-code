@@ -53,6 +53,7 @@ export interface CreateDaemonSessionActionsArgs {
   heartbeatSupportedRef: RefBox<boolean>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
+  hasSessionActivePrompt: () => boolean;
   addNotice: AddDaemonSessionNotice;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
@@ -72,6 +73,7 @@ export function createDaemonSessionActions({
   heartbeatSupportedRef,
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
+  hasSessionActivePrompt,
   addNotice,
   setConnection,
   setPromptStatus,
@@ -204,7 +206,7 @@ export function createDaemonSessionActions({
         }
         if (
           sessionRef.current?.sessionId === sessionId &&
-          !activePromptsRef.current.has(sessionId)
+          !hasSessionActivePrompt()
         ) {
           setPromptStatus('idle');
         }
@@ -246,7 +248,7 @@ export function createDaemonSessionActions({
         }
         if (
           sessionRef.current?.sessionId === session.sessionId &&
-          !activePromptsRef.current.has(session.sessionId)
+          !hasSessionActivePrompt()
         ) {
           setPromptStatus('idle');
         }

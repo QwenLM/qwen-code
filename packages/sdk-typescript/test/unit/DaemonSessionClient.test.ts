@@ -312,6 +312,7 @@ describe('DaemonSessionClient', () => {
           attached: true,
           clientId: 'client-1',
           state: { modes: null },
+          hasActivePrompt: true,
           lastEventId: 99,
         });
       }
@@ -326,6 +327,7 @@ describe('DaemonSessionClient', () => {
 
     expect(session.attached).toBe(true);
     expect(session.clientId).toBe('client-1');
+    expect(session.hasActivePrompt).toBe(true);
     expect(session.state).toEqual({ modes: null });
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
     expect(session.replaySnapshot.liveJournal).toHaveLength(0);

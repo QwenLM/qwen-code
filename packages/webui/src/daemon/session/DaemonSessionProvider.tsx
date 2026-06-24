@@ -279,6 +279,7 @@ export function DaemonSessionProvider({
   );
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
+  const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
 
   useEffect(() => {
     if (!autoConnect) return undefined;
@@ -502,6 +503,7 @@ export function DaemonSessionProvider({
             restoredActivePrompt ||
             activePromptsRef.current.has(activeSession.sessionId);
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
+          hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
           const [providerResult, commandResult, contextResult] =
@@ -802,6 +804,9 @@ export function DaemonSessionProvider({
                     }
                   }
                 } else if (event.type === 'prompt_cancelled') {
+                  epochReplayUiEvents.push(
+                    assistantDoneFromTurnEvent(event, 'cancelled'),
+                  );
                   if (restoredActivePrompt) {
                     settleRestoredActivePrompt();
                     clearPassiveAssistantDoneTimer(
@@ -867,6 +872,7 @@ export function DaemonSessionProvider({
                   activePromptsRef.current.delete(closedSessionId);
                   session = undefined;
                   sessionRef.current = undefined;
+                  hasCurrentSessionActivePromptRef.current = () => false;
                   break;
                 }
 
@@ -925,11 +931,16 @@ export function DaemonSessionProvider({
                   (restoredActivePrompt ||
                     uiEvent.originatorClientId !== activeSession.clientId)
                 ) {
+                  store.dispatch(
+                    assistantDoneFromTurnEvent(event, 'cancelled'),
+                  );
                   settleRestoredActivePrompt();
                   restoredPromptSettled = true;
-                  setPromptStatus('idle');
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                   activePromptsRef.current.delete(activeSession.sessionId);
+                  if (!hasSessionActivePrompt()) {
+                    setPromptStatus('idle');
+                  }
                 } else if (uiEvent.type === 'session.replay_complete') {
                   setConnection((c) => ({ ...c, catchingUp: undefined }));
                   if (store.getSnapshot().awaitingResync) {
@@ -1022,6 +1033,7 @@ export function DaemonSessionProvider({
                   resyncRequested = true;
                   session = undefined;
                   sessionRef.current = undefined;
+                  hasCurrentSessionActivePromptRef.current = () => false;
                   setConnection((current) => ({
                     ...current,
                     status: 'connecting',
@@ -1325,6 +1337,8 @@ export function DaemonSessionProvider({
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
         passiveAssistantDoneTimerRef,
+        hasSessionActivePrompt: () =>
+          hasCurrentSessionActivePromptRef.current(),
         getCreateSessionRequest: () => ({
           ...createSessionRequestRef.current,
           sessionScope: 'thread',
