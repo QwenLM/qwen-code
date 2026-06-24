@@ -5,7 +5,7 @@
  */
 
 import type { Mock } from 'vitest';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
@@ -2948,6 +2948,245 @@ describe('ContentGenerationPipeline', () => {
       const bExtra = (b as unknown as { extra_body: { call_index: number } })
         .extra_body;
       expect(aExtra).not.toEqual(bExtra);
+    });
+  });
+
+  describe('stream inactivity timeout', () => {
+    // A stream whose `next()` is gated by the test: it stays pending until
+    // `push()` / `end()` is called, letting us simulate a silent (stalled)
+    // stream under fake timers.
+    function gatedStream() {
+      let resolveNext:
+        | ((r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => void)
+        | null = null;
+      const buffered: OpenAI.Chat.ChatCompletionChunk[] = [];
+      let ended = false;
+      const deliver = (r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => {
+        const r2 = resolveNext;
+        resolveNext = null;
+        r2?.(r);
+      };
+      return {
+        push(chunk: OpenAI.Chat.ChatCompletionChunk) {
+          if (resolveNext) deliver({ done: false, value: chunk });
+          else buffered.push(chunk);
+        },
+        end() {
+          ended = true;
+          if (resolveNext) deliver({ done: true, value: undefined as never });
+        },
+        stream: {
+          [Symbol.asyncIterator]() {
+            return {
+              next(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+                if (buffered.length) {
+                  return Promise.resolve({
+                    done: false,
+                    value: buffered.shift()!,
+                  });
+                }
+                if (ended) {
+                  return Promise.resolve({
+                    done: true,
+                    value: undefined as never,
+                  });
+                }
+                return new Promise((res) => {
+                  resolveNext = res;
+                });
+              },
+            };
+          },
+        },
+      };
+    }
+
+    function chunk(text: string): OpenAI.Chat.ChatCompletionChunk {
+      return {
+        id: 'c',
+        choices: [{ delta: { content: text } }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+    }
+
+    function streamingRequest(signal?: AbortSignal): GenerateContentParameters {
+      return {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
+        ...(signal ? { config: { abortSignal: signal } } : {}),
+      } as GenerateContentParameters;
+    }
+
+    function buildPipeline(streamIdleTimeoutMs?: number) {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      return new ContentGenerationPipeline(mockConfig);
+    }
+
+    beforeEach(() => {
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        () => {
+          const r = new GenerateContentResponse();
+          r.candidates = [
+            { content: { parts: [{ text: 'x' }], role: 'model' } },
+          ];
+          return r;
+        },
+      );
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('aborts and throws ETIMEDOUT when the stream is silent past the idle timeout', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const expectation = await expect(consume).rejects.toMatchObject({
+        code: 'ETIMEDOUT',
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      await expectation;
+    });
+
+    it('delivers chunks then throws ETIMEDOUT when the stream stalls after some output', async () => {
+      const gated = gatedStream();
+      gated.push(chunk('hello')); // one chunk, then silence
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const results: GenerateContentResponse[] = [];
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      const expectation = await expect(consume).rejects.toMatchObject({
+        code: 'ETIMEDOUT',
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      await expectation;
+      expect(results).toHaveLength(1);
+    });
+
+    it('resets the timer on each chunk and completes a slow-but-active stream', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const results: GenerateContentResponse[] = [];
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      // Three chunks, each 800ms apart (< 1000ms idle) → total 2400ms but
+      // never idle for a full second, so the watchdog must not trip.
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(chunk('a'));
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(chunk('b'));
+      await vi.advanceTimersByTimeAsync(800);
+      gated.end();
+      await consume;
+      expect(results).toHaveLength(2);
+      // Late advance after completion must not produce a delayed throw.
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    it('propagates a user AbortError (not ETIMEDOUT) when the parent signal is aborted', async () => {
+      const ac = new AbortController();
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(ac.signal), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = (await captured) as { name?: string; code?: string };
+      expect(err.name).toBe('AbortError');
+      expect(err.code).not.toBe('ETIMEDOUT');
+    });
+
+    it('is disabled when streamIdleTimeoutMs <= 0 (no timeout fires)', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(0);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(600000);
+      expect(settled).toBe(false);
+      gated.end(); // unblock so the test doesn't leak a pending stream
+      await consume;
+    });
+
+    it('honors a custom streamIdleTimeoutMs value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(5000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Not yet at 5000ms → must not have tripped.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(settled).toBe(false);
+      // Cross 5000ms → trips.
+      await vi.advanceTimersByTimeAsync(1000);
+      await consume;
+      expect(settled).toBe(true);
     });
   });
 });

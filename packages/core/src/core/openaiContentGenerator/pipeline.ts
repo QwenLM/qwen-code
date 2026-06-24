@@ -20,6 +20,7 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './constants.js';
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -31,6 +32,68 @@ export class StreamContentError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'StreamContentError';
+  }
+}
+
+/**
+ * Synthesizes the read-timeout the transport layer failed to emit when a
+ * streaming response returns 200 then goes silent. `code: 'ETIMEDOUT'` makes
+ * `classifyRetryError` treat it as a retryable transport error — identical to a
+ * real socket timeout — so the existing stream-transport retry handles it.
+ */
+function makeStreamInactivityTimeoutError(idleMs: number): Error {
+  return Object.assign(
+    new Error(`No stream activity for ${idleMs}ms (inactivity timeout)`),
+    { code: 'ETIMEDOUT' as const },
+  );
+}
+
+/**
+ * Wraps a streaming chunk source with an inactivity watchdog. If no chunk
+ * arrives for `idleMs`, `onTimeout()` is invoked (to abort the underlying
+ * request and free the socket) and the iterator throws — a user `AbortError`
+ * when the parent signal was cancelled, otherwise a retryable ETIMEDOUT. The
+ * timer resets on every chunk (including thinking/reasoning deltas), so an
+ * actively streaming model is never interrupted.
+ */
+async function* withStreamInactivityTimeout(
+  source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+  idleMs: number,
+  onTimeout: () => void,
+  parentSignal: AbortSignal | undefined,
+): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+  const it = source[Symbol.asyncIterator]();
+  while (true) {
+    const nextPromise = it.next();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        if (parentSignal?.aborted) {
+          // Plain Error (not DOMException) so error redaction's prototype
+          // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
+          const abortErr = new Error('Aborted');
+          abortErr.name = 'AbortError';
+          reject(abortErr);
+        } else {
+          onTimeout();
+          reject(makeStreamInactivityTimeoutError(idleMs));
+        }
+      }, idleMs);
+      timer.unref?.();
+    });
+    let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+    try {
+      result = await Promise.race([nextPromise, timeout]);
+    } catch (err) {
+      // Once onTimeout() aborts the request, the orphaned next() rejects with
+      // an AbortError; swallow it so it is not an unhandled rejection.
+      void Promise.resolve(nextPromise).catch(() => {});
+      throw err;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (result.done) return;
+    yield result.value;
   }
 }
 
@@ -111,19 +174,36 @@ export class ContentGenerationPipeline {
           throw e;
         }
 
+        // Inactivity watchdog: the SDK `timeout` only bounds connect + first
+        // response, so a stream that returns 200 then goes silent is otherwise
+        // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
+        // chunks. `<= 0` disables it.
+        const idleMs =
+          this.contentGeneratorConfig.streamIdleTimeoutMs ??
+          DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+        const guarded =
+          idleMs > 0
+            ? withStreamInactivityTimeout(
+                stream,
+                idleMs,
+                () => perRequestAc?.abort(),
+                parentSignal,
+              )
+            : stream;
+
         // Stage 2: Process stream with conversion and logging.
         // When a per-request controller exists, wrap in an async generator
         // that aborts it once the stream is fully consumed or abandoned, so
         // the child signal's reverse-cleanup fires and the parent listener
         // is released.
         if (!perRequestAc) {
-          return this.processStreamWithLogging(stream, context, request);
+          return this.processStreamWithLogging(guarded, context, request);
         }
         // Capture the narrowed controller so the closure below sees a non-
         // nullable type (TS does not propagate narrowing into nested funcs).
         const ac = perRequestAc;
         const innerStream = this.processStreamWithLogging(
-          stream,
+          guarded,
           context,
           request,
         );
