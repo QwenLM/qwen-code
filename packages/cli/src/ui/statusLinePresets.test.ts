@@ -32,7 +32,7 @@ describe('statusLinePresets', () => {
     ).toEqual({
       type: 'preset',
       useThemeColors: false,
-      items: ['model', 'git-branch'],
+      items: ['git-branch', 'model'],
     });
   });
 
@@ -77,7 +77,7 @@ describe('statusLinePresets', () => {
         'model',
         'context-remaining',
       ]),
-    ).toEqual(['model', 'git-branch', 'context-remaining', 'run-state']);
+    ).toEqual(['git-branch', 'model', 'context-remaining', 'run-state']);
   });
 
   it('formats model reasoning directly', () => {
@@ -163,7 +163,7 @@ describe('statusLinePresets', () => {
         data,
       ),
     ).toEqual([
-      'qwen3-code-plus high · qwen3-code-plus · git:(feature/pr-4087-statusline) · Context 75% left · 1.2k total in · 340 total out · /repo/project · project · #4087 · +12 -3 · Context 25% used · Ready · v1.2.3 · 1.0k window · 250 used · session-123',
+      '\u279c  project git:(feature/pr-4087-statusline) · qwen3-code-plus high · qwen3-code-plus · Context 75% left · 1.2k total in · 340 total out · /repo/project · #4087 · +12 -3 · Context 25% used · Ready · v1.2.3 · 1.0k window · 250 used · session-123',
     ]);
   });
 

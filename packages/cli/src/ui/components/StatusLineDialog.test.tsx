@@ -94,13 +94,16 @@ describe('StatusLineDialog', () => {
     expect(frame).toContain('git-branch');
     expect(frame).toContain('context-remaining');
     expect(frame).toContain('current-dir');
+    expect(frame.indexOf('project-name')).toBeLessThan(
+      frame.indexOf('git-branch'),
+    );
+    expect(frame.indexOf('git-branch')).toBeLessThan(
+      frame.indexOf('model-with-reasoning'),
+    );
     expect(frame.indexOf('model-with-reasoning')).toBeLessThan(
       frame.indexOf('model-only'),
     );
     expect(frame.indexOf('model-only')).toBeLessThan(
-      frame.indexOf('git-branch'),
-    );
-    expect(frame.indexOf('git-branch')).toBeLessThan(
       frame.indexOf('context-remaining'),
     );
     expect(frame.indexOf('context-remaining')).toBeLessThan(
@@ -138,9 +141,9 @@ describe('StatusLineDialog', () => {
       type: 'preset',
       useThemeColors: true,
       items: [
-        'model-with-reasoning',
-        'git-branch',
         'project-name',
+        'git-branch',
+        'model-with-reasoning',
         'context-used',
       ],
     });
@@ -187,7 +190,7 @@ describe('StatusLineDialog', () => {
     await press(' ');
 
     expect(lastFrame()).toContain(
-      'Qwen3 Code Plus high · git:(feature/pr-4087-statusline) · project · Context 25% used',
+      '\u279c  project git:(feature/pr-4087-statusline) · Qwen3 Code Plus high · Context 25% used',
     );
 
     await press('\r');
@@ -196,9 +199,9 @@ describe('StatusLineDialog', () => {
       type: 'preset',
       useThemeColors: true,
       items: [
-        'model-with-reasoning',
-        'git-branch',
         'project-name',
+        'git-branch',
+        'model-with-reasoning',
         'context-used',
       ],
     });
