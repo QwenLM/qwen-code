@@ -104,7 +104,6 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     id: 'context-remaining',
     label: 'context-remaining',
     description: 'Percentage of context window remaining',
-    defaultSelected: true,
   },
   {
     id: 'total-input-tokens',
@@ -120,12 +119,12 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     id: 'current-dir',
     label: 'current-dir',
     description: 'Current working directory',
-    defaultSelected: true,
   },
   {
     id: 'project-name',
     label: 'project-name',
     description: 'Project name when available',
+    defaultSelected: true,
   },
   {
     id: 'pull-request-number',
@@ -262,17 +261,22 @@ export function getRunStateLabel(state: StreamingState): string {
   }
 }
 
+function stripProviderPrefix(name: string): string {
+  return name.replace(/^\[[^\]]*\]\s*/, '');
+}
+
 export function formatModelWithReasoning(
   modelDisplayName: string,
   reasoning: StatusLinePresetReasoning,
 ): string {
+  const cleanName = stripProviderPrefix(modelDisplayName);
   if (reasoning === false) {
-    return `${modelDisplayName} reasoning off`;
+    return `${cleanName} reasoning off`;
   }
   if (reasoning?.effort) {
-    return `${modelDisplayName} ${reasoning.effort}`;
+    return `${cleanName} ${reasoning.effort}`;
   }
-  return modelDisplayName;
+  return cleanName;
 }
 
 export function inferPullRequestNumber(
@@ -351,7 +355,7 @@ export function buildStatusLinePresetParts(
         );
         break;
       case 'model':
-        parts.push(data.modelDisplayName);
+        parts.push(stripProviderPrefix(data.modelDisplayName));
         break;
       case 'context-remaining':
         if (data.contextWindowSize > 0) {
@@ -368,7 +372,7 @@ export function buildStatusLinePresetParts(
         break;
       case 'git-branch':
         if (data.branch) {
-          parts.push(data.branch);
+          parts.push(`git:(${data.branch})`);
         }
         break;
       case 'project-name':
@@ -430,6 +434,6 @@ export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
-  const line = buildStatusLinePresetParts(config, data).join(' | ');
+  const line = buildStatusLinePresetParts(config, data).join(' \u00b7 ');
   return line ? [line] : [];
 }

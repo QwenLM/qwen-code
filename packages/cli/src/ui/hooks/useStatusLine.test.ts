@@ -205,7 +205,7 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(child_process.exec).not.toHaveBeenCalled();
       expect(result.current.lines).toEqual([
-        'Test Model | main | Context 99.9% left | /test/dir | Context 0.1% used',
+        'Test Model · git:(main) · dir · Context 0.1% used',
       ]);
     });
 
@@ -347,7 +347,7 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
 
       expect(child_process.exec).not.toHaveBeenCalled();
-      expect(result.current.lines).toEqual(['Test Model high | Test Model']);
+      expect(result.current.lines).toEqual(['Test Model high · Test Model']);
     });
 
     it('refreshes when status line settings are saved in the same process', async () => {
@@ -382,7 +382,7 @@ describe('useStatusLine', () => {
         vi.advanceTimersByTime(300);
       });
 
-      expect(result.current.lines).toEqual(['Test Model | #4118']);
+      expect(result.current.lines).toEqual(['Test Model · #4118']);
     });
 
     it('reloads status line settings from disk when streaming becomes idle', async () => {

@@ -133,7 +133,7 @@ describe('statusLinePresets', () => {
         data,
       ),
     ).toEqual([
-      'qwen3-code-plus | Context 75% left | /repo/project | #4087 | +12 -3 | Ready',
+      'qwen3-code-plus · Context 75% left · /repo/project · #4087 · +12 -3 · Ready',
     ]);
   });
 
@@ -163,7 +163,7 @@ describe('statusLinePresets', () => {
         data,
       ),
     ).toEqual([
-      'qwen3-code-plus high | qwen3-code-plus | feature/pr-4087-statusline | Context 75% left | 1.2k total in | 340 total out | /repo/project | project | #4087 | +12 -3 | Context 25% used | Ready | v1.2.3 | 1.0k window | 250 used | session-123',
+      'qwen3-code-plus high · qwen3-code-plus · git:(feature/pr-4087-statusline) · Context 75% left · 1.2k total in · 340 total out · /repo/project · project · #4087 · +12 -3 · Context 25% used · Ready · v1.2.3 · 1.0k window · 250 used · session-123',
     ]);
   });
 
@@ -192,7 +192,7 @@ describe('statusLinePresets', () => {
         },
         data,
       ),
-    ).toEqual(['qwen3-code-plus high | qwen3-code-plus']);
+    ).toEqual(['qwen3-code-plus high · qwen3-code-plus']);
   });
 
   it('shows when reasoning is disabled', () => {
@@ -248,6 +248,33 @@ describe('statusLinePresets', () => {
         data,
       ),
     ).toEqual(['qwen3-code-plus']);
+  });
+
+  it('strips provider prefix from model display name', () => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: '[ModelStudio Standard] glm-5.2',
+      currentDir: '/repo/project',
+      branch: undefined,
+      contextWindowSize: 0,
+      currentUsage: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+      streamingState: StreamingState.Idle,
+    });
+
+    expect(
+      buildStatusLinePresetLines(
+        {
+          type: 'preset',
+          items: ['model', 'model-with-reasoning'],
+        },
+        data,
+      ),
+    ).toEqual(['glm-5.2 · glm-5.2']);
   });
 
   it('renders an explicit pull request number before branch-name inference', () => {

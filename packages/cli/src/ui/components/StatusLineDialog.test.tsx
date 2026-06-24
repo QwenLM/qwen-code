@@ -140,8 +140,7 @@ describe('StatusLineDialog', () => {
       items: [
         'model-with-reasoning',
         'git-branch',
-        'context-remaining',
-        'current-dir',
+        'project-name',
         'context-used',
       ],
     });
@@ -188,7 +187,7 @@ describe('StatusLineDialog', () => {
     await press(' ');
 
     expect(lastFrame()).toContain(
-      'Qwen3 Code Plus high | feature/pr-4087-statusline | Context 75% left',
+      'Qwen3 Code Plus high · git:(feature/pr-4087-statusline) · project · Context 25% used',
     );
 
     await press('\r');
@@ -199,8 +198,7 @@ describe('StatusLineDialog', () => {
       items: [
         'model-with-reasoning',
         'git-branch',
-        'context-remaining',
-        'current-dir',
+        'project-name',
         'context-used',
       ],
     });
