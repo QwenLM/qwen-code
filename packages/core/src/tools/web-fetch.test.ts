@@ -64,12 +64,27 @@ describe('WebFetchTool', () => {
       },
     );
 
-    it.each(['ftp://example.com', 'http:example.com', 'http:/example.com'])(
-      'should reject invalid or unsupported url schemes: %s',
-      (url) => {
+    it.each([
+      [
+        'ftp://example.com',
+        "The 'url' must be a valid URL starting with http:// or https://.",
+      ],
+      [
+        'http:example.com',
+        "The 'url' must be a valid URL starting with http:// or https://.",
+      ],
+      [
+        'http:/example.com',
+        "The 'url' must be a valid URL starting with http:// or https://.",
+      ],
+      ['https://', "The 'url' is malformed and could not be parsed."],
+      ['http://[::1', "The 'url' is malformed and could not be parsed."],
+    ])(
+      'should reject invalid or unsupported urls: %s',
+      (url, expectedError) => {
         const tool = new WebFetchTool(mockConfig);
         expect(() => tool.build({ url, prompt: 'summarize this' })).toThrow(
-          "The 'url' must be a valid URL starting with http:// or https://.",
+          expectedError,
         );
       },
     );
