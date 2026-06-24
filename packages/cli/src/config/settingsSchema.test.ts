@@ -191,9 +191,10 @@ describe('SettingsSchema', () => {
         telemetrySchema.properties?.sensitiveSpanAttributeMaxLength,
       ).toEqual({
         description:
-          'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Set lower if your collector or backend rejects large span attributes.',
+          'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.',
         type: 'integer',
         minimum: 1,
+        maximum: 100 * 1024 * 1024,
         default: 1024 * 1024,
       });
     });

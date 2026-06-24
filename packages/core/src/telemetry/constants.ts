@@ -45,6 +45,7 @@ export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
 
 export const DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH = 1024 * 1024;
+export const SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT = 100 * 1024 * 1024;
 
 // Prompt Suggestion Events
 export const EVENT_PROMPT_SUGGESTION = 'qwen-code.prompt_suggestion';

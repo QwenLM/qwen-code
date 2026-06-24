@@ -10,7 +10,10 @@ import {
   parseTelemetryTargetValue,
   resolveTelemetrySettings,
 } from './config.js';
-import { TelemetryTarget } from './index.js';
+import {
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  TelemetryTarget,
+} from './index.js';
 
 describe('telemetry/config helpers', () => {
   describe('parseBooleanEnvFlag', () => {
@@ -212,6 +215,23 @@ describe('telemetry/config helpers', () => {
           },
         }),
       ).rejects.toThrow(/sensitiveSpanAttributeMaxLength.*got 1\.5/i);
+
+      await expect(
+        resolveTelemetrySettings({
+          settings: {
+            sensitiveSpanAttributeMaxLength:
+              SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1,
+          },
+        }),
+      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength.*104857600/i);
+
+      await expect(
+        resolveTelemetrySettings({
+          settings: {
+            sensitiveSpanAttributeMaxLength: Number.NaN,
+          },
+        }),
+      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength.*got NaN/i);
     });
 
     it('rejects invalid sensitive span max length env values', async () => {
@@ -243,6 +263,39 @@ describe('telemetry/config helpers', () => {
         }),
       ).rejects.toThrow(
         /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*got '1e3'/,
+      );
+
+      await expect(
+        resolveTelemetrySettings({
+          env: {
+            QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '0',
+          },
+        }),
+      ).rejects.toThrow(
+        /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*got '0'/,
+      );
+
+      await expect(
+        resolveTelemetrySettings({
+          env: {
+            QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH:
+              '9007199254740992',
+          },
+        }),
+      ).rejects.toThrow(
+        /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*got '9007199254740992'/,
+      );
+
+      await expect(
+        resolveTelemetrySettings({
+          env: {
+            QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: String(
+              SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1,
+            ),
+          },
+        }),
+      ).rejects.toThrow(
+        /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*104857600/,
       );
     });
 

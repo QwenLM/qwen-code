@@ -9,7 +9,6 @@ import type { Span } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
 
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
 
@@ -26,7 +25,7 @@ function isEnabled(config: Config): boolean {
 
 export function truncateContent(
   content: string,
-  maxSize: number = DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  maxSize: number,
 ): { content: string; truncated: boolean } {
   if (content.length <= maxSize) {
     return { content, truncated: false };

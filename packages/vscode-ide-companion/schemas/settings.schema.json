@@ -476,9 +476,10 @@
           "default": false
         },
         "sensitiveSpanAttributeMaxLength": {
-          "description": "Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Set lower if your collector or backend rejects large span attributes.",
+          "description": "Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.",
           "type": "integer",
           "minimum": 1,
+          "maximum": 104857600,
           "default": 1048576
         },
         "resourceAttributes": {

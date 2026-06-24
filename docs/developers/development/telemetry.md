@@ -54,21 +54,21 @@ observability framework — Qwen Code's observability system provides:
 All telemetry behavior is controlled through your `.qwen/settings.json` file.
 These settings can be overridden by environment variables or CLI flags.
 
-| Setting                           | Environment Variable                                 | CLI Flag                                                 | Description                                                                                                                                  | Values            | Default                 |
-| --------------------------------- | ---------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ----------------------- |
-| `enabled`                         | `QWEN_TELEMETRY_ENABLED`                             | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                                                                                                                  | `true`/`false`    | `false`                 |
-| `target`                          | `QWEN_TELEMETRY_TARGET`                              | `--telemetry-target <local\|gcp>` _(deprecated)_         | Informational destination label; does not control exporter routing — set `otlpEndpoint` or `outfile` to configure where data is sent         | `"gcp"`/`"local"` | `"local"`               |
-| `otlpEndpoint`                    | `QWEN_TELEMETRY_OTLP_ENDPOINT`                       | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                                                                                                                      | URL string        | `http://localhost:4317` |
-| `otlpProtocol`                    | `QWEN_TELEMETRY_OTLP_PROTOCOL`                       | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                                                                                                                      | `"grpc"`/`"http"` | `"grpc"`                |
-| `otlpTracesEndpoint`              | `QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT`                | -                                                        | Per-signal endpoint override for traces (HTTP only)                                                                                          | URL string        | -                       |
-| `otlpLogsEndpoint`                | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                  | -                                                        | Per-signal endpoint override for logs (HTTP only)                                                                                            | URL string        | -                       |
-| `otlpMetricsEndpoint`             | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`               | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                         | URL string        | -                       |
-| `outfile`                         | `QWEN_TELEMETRY_OUTFILE`                             | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides OTLP export)                                                                                               | file path         | -                       |
-| `logPrompts`                      | `QWEN_TELEMETRY_LOG_PROMPTS`                         | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                                                                                                            | `true`/`false`    | `true`                  |
-| `includeSensitiveSpanAttributes`  | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES`   | -                                                        | Include user prompts, system prompts, tool I/O, and model output as native span attributes (in addition to log-to-span bridge spans)         | `true`/`false`    | `false`                 |
-| `sensitiveSpanAttributeMaxLength` | `QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH` | -                                                        | Maximum JavaScript string length for each sensitive native span attribute content payload. Set lower if your backend rejects large attributes. | positive integer  | `1048576`               |
-| `resourceAttributes`              | `OTEL_RESOURCE_ATTRIBUTES` (+ `OTEL_SERVICE_NAME`)   | -                                                        | Static resource attributes attached to every exported span / log / metric. See [Resource attributes](#resource-attributes) below.            | `key=value,…`     | `{}`                    |
-| `metrics.includeSessionId`        | `QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID`          | -                                                        | Include `session.id` on metric data points. **Disabled by default** to protect metric backends from time-series fan-out.                     | `true`/`false`    | `false`                 |
+| Setting                           | Environment Variable                                 | CLI Flag                                                 | Description                                                                                                                                    | Values            | Default                 |
+| --------------------------------- | ---------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ----------------------- |
+| `enabled`                         | `QWEN_TELEMETRY_ENABLED`                             | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                                                                                                                    | `true`/`false`    | `false`                 |
+| `target`                          | `QWEN_TELEMETRY_TARGET`                              | `--telemetry-target <local\|gcp>` _(deprecated)_         | Informational destination label; does not control exporter routing — set `otlpEndpoint` or `outfile` to configure where data is sent           | `"gcp"`/`"local"` | `"local"`               |
+| `otlpEndpoint`                    | `QWEN_TELEMETRY_OTLP_ENDPOINT`                       | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                                                                                                                        | URL string        | `http://localhost:4317` |
+| `otlpProtocol`                    | `QWEN_TELEMETRY_OTLP_PROTOCOL`                       | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                                                                                                                        | `"grpc"`/`"http"` | `"grpc"`                |
+| `otlpTracesEndpoint`              | `QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT`                | -                                                        | Per-signal endpoint override for traces (HTTP only)                                                                                            | URL string        | -                       |
+| `otlpLogsEndpoint`                | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                  | -                                                        | Per-signal endpoint override for logs (HTTP only)                                                                                              | URL string        | -                       |
+| `otlpMetricsEndpoint`             | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`               | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                           | URL string        | -                       |
+| `outfile`                         | `QWEN_TELEMETRY_OUTFILE`                             | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides OTLP export)                                                                                                 | file path         | -                       |
+| `logPrompts`                      | `QWEN_TELEMETRY_LOG_PROMPTS`                         | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                                                                                                              | `true`/`false`    | `true`                  |
+| `includeSensitiveSpanAttributes`  | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES`   | -                                                        | Include user prompts, system prompts, tool I/O, and model output as native span attributes (in addition to log-to-span bridge spans)           | `true`/`false`    | `false`                 |
+| `sensitiveSpanAttributeMaxLength` | `QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH` | -                                                        | Maximum JavaScript string length for each sensitive native span attribute content payload. Set lower if your backend rejects large attributes. | `1..104857600`    | `1048576`               |
+| `resourceAttributes`              | `OTEL_RESOURCE_ATTRIBUTES` (+ `OTEL_SERVICE_NAME`)   | -                                                        | Static resource attributes attached to every exported span / log / metric. See [Resource attributes](#resource-attributes) below.              | `key=value,…`     | `{}`                    |
+| `metrics.includeSessionId`        | `QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID`          | -                                                        | Include `session.id` on metric data points. **Disabled by default** to protect metric backends from time-series fan-out.                       | `true`/`false`    | `false`                 |
 
 **Note on boolean environment variables:** For the boolean settings (`enabled`,
 `logPrompts`, `includeSensitiveSpanAttributes`), setting the
@@ -93,8 +93,14 @@ two things happen:
    - Model output (`response.model_output`)
 
    Each content payload is truncated at `sensitiveSpanAttributeMaxLength`
-   JavaScript string units. The default is 1 MiB (`1048576`); `*_truncated`
-   and `*_original_length` flags surface when truncation occurs.
+   JavaScript string units. The default is 1 MiB (`1048576`), raised from the
+   previous 60 KiB default; set `61440` to preserve the old cap. The limit
+   must be between `1` and `104857600` (100 MiB). It applies to the content
+   payload before Qwen Code adds labels such as `[USER PROMPT]` or the
+   truncation marker, and it is measured as JavaScript string length rather
+   than UTF-8 bytes. Non-ASCII content can therefore occupy more bytes after
+   OTLP export. `*_truncated` and `*_original_length` flags surface when
+   truncation occurs.
 
 2. **Log-to-span bridge spans** (used when HTTP traces are exported without a
    logs endpoint) keep their existing `prompt`, `function_args`, and
@@ -108,11 +114,12 @@ backend. Treat the backend as a privileged data sink. The flag defaults to
 
 **Cost / payload size:** A heavy turn at the default limit (1 MiB system prompt
 plus 10 tool calls, each up to 1 MiB input + 1 MiB result, plus 1 MiB model
-output) can produce up to ~22 MiB of attribute payload before OTLP compression.
-This is Qwen Code's application-side cap, not a guarantee that every collector
-or backend accepts a single attribute that large. If spans are rejected or
-dropped, lower `sensitiveSpanAttributeMaxLength` (for example, to `61440`) and
-monitor exporter throughput.
+output) can produce up to ~22 MiB of attribute payload before OTLP compression,
+plus up to 1 MiB per emitted tool schema in workspaces with large tool
+definitions. This is Qwen Code's application-side cap, not a guarantee that
+every collector or backend accepts a single attribute that large. If spans are
+rejected or dropped, lower `sensitiveSpanAttributeMaxLength` (for example, to
+`61440`) and monitor exporter throughput.
 
 This setting does not disable sensitive data in OTel logs or other telemetry
 sinks; non-internal API response telemetry can populate `response_text`, so

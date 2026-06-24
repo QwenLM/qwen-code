@@ -28,6 +28,7 @@ import {
   addToolResultAttributes,
   clearDetailedSpanState,
 } from './detailed-span-attributes.js';
+import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
 
 function createMockConfig(): Config {
   return {
@@ -103,7 +104,10 @@ describe('detailed-span-attributes', () => {
 
   describe('truncateContent', () => {
     it('returns content as-is when under limit', () => {
-      const result = truncateContent('hello');
+      const result = truncateContent(
+        'hello',
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      );
       expect(result.content).toBe('hello');
       expect(result.truncated).toBe(false);
     });
@@ -124,14 +128,20 @@ describe('detailed-span-attributes', () => {
 
     it('does not truncate 70KB content with the default 1MiB limit', () => {
       const largeContent = 'a'.repeat(70_000);
-      const result = truncateContent(largeContent);
+      const result = truncateContent(
+        largeContent,
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      );
       expect(result.truncated).toBe(false);
       expect(result.content.length).toBe(largeContent.length);
     });
 
     it('truncates content over the default 1MiB limit', () => {
       const largeContent = 'a'.repeat(1024 * 1024 + 1);
-      const result = truncateContent(largeContent);
+      const result = truncateContent(
+        largeContent,
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      );
       expect(result.truncated).toBe(true);
       expect(result.content.startsWith('a'.repeat(1024 * 1024))).toBe(true);
       expect(result.content).toContain('[TRUNCATED');

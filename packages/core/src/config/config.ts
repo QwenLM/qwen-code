@@ -105,6 +105,7 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_TELEMETRY_TARGET,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   isTelemetrySdkInitialized,
   initializeTelemetry,
   shutdownTelemetry,
@@ -147,7 +148,7 @@ import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
@@ -1119,6 +1120,28 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
 
+function resolveSensitiveSpanAttributeMaxLength(
+  value: number | undefined,
+): number {
+  if (value === undefined) {
+    return DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
+  }
+
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+  ) {
+    throw new FatalConfigError(
+      `Invalid telemetry.sensitiveSpanAttributeMaxLength: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
+        value,
+      )}`,
+    );
+  }
+
+  return value;
+}
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -1445,9 +1468,9 @@ export class Config {
       logPrompts: params.telemetry?.logPrompts ?? true,
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
-      sensitiveSpanAttributeMaxLength:
-        params.telemetry?.sensitiveSpanAttributeMaxLength ??
-        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      sensitiveSpanAttributeMaxLength: resolveSensitiveSpanAttributeMaxLength(
+        params.telemetry?.sensitiveSpanAttributeMaxLength,
+      ),
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
@@ -3925,10 +3948,7 @@ export class Config {
   }
 
   getTelemetrySensitiveSpanAttributeMaxLength(): number {
-    return (
-      this.telemetrySettings.sensitiveSpanAttributeMaxLength ??
-      DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH
-    );
+    return this.telemetrySettings.sensitiveSpanAttributeMaxLength!;
   }
 
   getTelemetryOtlpEndpoint(): string | undefined {

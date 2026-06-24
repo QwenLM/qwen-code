@@ -8,6 +8,7 @@ import type { TelemetrySettings } from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
 import {
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   TelemetryTarget,
 } from './index.js';
 import type { ResourceAttributeWarnings } from './resource-attributes.js';
@@ -43,6 +44,10 @@ export function parseTelemetryTargetValue(
   return undefined;
 }
 
+/**
+ * @throws FatalConfigError when the env var is set but invalid; telemetry
+ * config fails closed instead of silently falling back.
+ */
 function parseTelemetryPositiveIntegerEnvValue(
   envName: string,
   value: string | undefined,
@@ -51,9 +56,14 @@ function parseTelemetryPositiveIntegerEnvValue(
 
   const trimmed = value.trim();
   const parsed = Number(trimmed);
-  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(parsed) || parsed < 1) {
+  if (
+    !/^\d+$/.test(trimmed) ||
+    !Number.isSafeInteger(parsed) ||
+    parsed < 1 ||
+    parsed > SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+  ) {
     throw new FatalConfigError(
-      `Invalid ${envName}: must be a positive integer, got '${value}'`,
+      `Invalid ${envName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got '${value}'`,
     );
   }
 
@@ -65,9 +75,14 @@ function parseTelemetryPositiveIntegerSetting(
   value: unknown,
 ): number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+  ) {
     throw new FatalConfigError(
-      `Invalid ${settingName}: must be a positive integer, got ${JSON.stringify(
+      `Invalid ${settingName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
         value,
       )}`,
     );
