@@ -1044,7 +1044,10 @@ jobs:
           append_safe_file() {
             cleaned="${WORKDIR}/safe-$(basename "$1")"
             sed 's/<[^>]*>//g' "$1" > "$cleaned"
-            head -c 2000 "$cleaned"
+            # head -c truncates at a byte boundary, which can split a multi-byte
+            # UTF-8 character and emit a broken tail in the comment. Drop any
+            # incomplete trailing sequence the byte cut leaves behind.
+            head -c 2000 "$cleaned" | iconv -f UTF-8 -t UTF-8 -c
             echo
           }
 
