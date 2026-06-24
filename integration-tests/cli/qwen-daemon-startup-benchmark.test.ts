@@ -22,11 +22,13 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterAll, describe, expect, it } from 'vitest';
 
+import type { DaemonStartupPreheatStatus } from '../../packages/cli/src/serve/daemon-status.js';
 import {
   DEFAULT_REPO_ROOT,
   gitHead,
   makeTempWorkspace,
   percentiles,
+  sleep,
   type Percentiles,
 } from './_daemon-harness.js';
 import {
@@ -70,17 +72,17 @@ const TOKEN = 'daemon-startup-benchmark-token';
 const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(DEFAULT_REPO_ROOT, 'dist/cli.js');
-// Keep in sync with DaemonStartupPreheatStatus in daemon-status.ts.
-const PREHEAT_STATUSES = [
-  'external_bridge',
-  'not_scheduled',
-  'scheduled',
-  'running',
-  'succeeded',
-  'failed',
-] as const;
-
-type PreheatStatus = (typeof PREHEAT_STATUSES)[number];
+const PREHEAT_STATUS_SET: Record<DaemonStartupPreheatStatus, true> = {
+  external_bridge: true,
+  not_scheduled: true,
+  scheduled: true,
+  running: true,
+  succeeded: true,
+  failed: true,
+};
+const PREHEAT_STATUSES = Object.keys(
+  PREHEAT_STATUS_SET,
+) as DaemonStartupPreheatStatus[];
 
 interface DaemonStartupStatus {
   processStartedAt: string;
@@ -88,7 +90,7 @@ interface DaemonStartupStatus {
   processToListenMs?: number;
   runQwenServeToListenMs?: number;
   preheat?: {
-    status?: PreheatStatus;
+    status?: DaemonStartupPreheatStatus;
     durationMs?: number;
     error?: string;
   };
@@ -106,7 +108,7 @@ interface StartupRun {
   externalCommandToListeningMs: number;
   processToListenMs: number;
   runQwenServeToListenMs: number;
-  preheatStatus: PreheatStatus;
+  preheatStatus: DaemonStartupPreheatStatus;
   port: number;
   stdoutListeningLine: string;
 }
@@ -159,10 +161,6 @@ const LISTENING_RE =
   /^(qwen serve listening on http:\/\/127\.0\.0\.1:(\d+) \(mode=.*\))$/m;
 const STDERR_TIMING_RE =
   /qwen serve: startup timing: processToListenMs=(\d+) runQwenServeToListenMs=(\d+)/;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function signalChildTree(child: ChildProcess, signal: NodeJS.Signals): void {
   if (!child.pid) return;
@@ -316,18 +314,26 @@ async function runStartupIteration(
     });
 
     const timing = await waitForStderrTiming(() => stderr);
-    const status = (await fetch(
-      `http://127.0.0.1:${listening.port}/daemon/status?detail=full`,
-      {
-        headers: { authorization: `Bearer ${TOKEN}` },
-        signal: AbortSignal.timeout(STATUS_FETCH_TIMEOUT_MS),
-      },
-    ).then((res) => {
+    let status: DaemonStatusResponse;
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${listening.port}/daemon/status?detail=full`,
+        {
+          headers: { authorization: `Bearer ${TOKEN}` },
+          signal: AbortSignal.timeout(STATUS_FETCH_TIMEOUT_MS),
+        },
+      );
       if (!res.ok) {
         throw new Error(`/daemon/status returned ${res.status}`);
       }
-      return res.json();
-    })) as DaemonStatusResponse;
+      status = (await res.json()) as DaemonStatusResponse;
+    } catch (err) {
+      throw new Error(
+        `/daemon/status fetch failed on iteration ${iteration} ` +
+          `(port ${listening.port}): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     const startup = status.daemon?.startup;
     const processToListenMs = startup?.processToListenMs;
@@ -343,7 +349,7 @@ async function runStartupIteration(
       expect(runQwenServeToListenMs).toEqual(expect.any(Number));
       expect(processToListenMs).toBeGreaterThanOrEqual(runQwenServeToListenMs!);
       expect(preheatStatus).toEqual(expect.any(String));
-      expect(PREHEAT_STATUSES).toContain(preheatStatus as PreheatStatus);
+      expect(PREHEAT_STATUSES).toContain(preheatStatus);
     };
     if (measured) {
       validateStartupObservation();
@@ -362,9 +368,9 @@ async function runStartupIteration(
       iteration,
       measured,
       externalCommandToListeningMs: listening.externalCommandToListeningMs,
-      processToListenMs: processToListenMs!,
-      runQwenServeToListenMs: runQwenServeToListenMs!,
-      preheatStatus: preheatStatus!,
+      processToListenMs: processToListenMs ?? -1,
+      runQwenServeToListenMs: runQwenServeToListenMs ?? -1,
+      preheatStatus: preheatStatus ?? 'not_scheduled',
       port: listening.port,
       stdoutListeningLine: listening.line,
     };
