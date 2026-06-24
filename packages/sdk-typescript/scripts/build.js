@@ -29,7 +29,9 @@ const rootDir = join(__dirname, '..');
 // (install/update/enable/disable/uninstall/refresh/check update endpoints).
 // Bumped from 122KB to 124KB for daemon fork-session APIs/events.
 // Bumped from 124KB to 125KB for rewind/branch transcript/session APIs.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 125 * 1024;
+// Bumped from 125KB to 126KB for the workspace permissions rules API
+// (workspacePermissions + set/add/remove rule methods + types, ~718 bytes).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 126 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
