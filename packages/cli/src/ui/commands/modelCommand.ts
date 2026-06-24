@@ -145,9 +145,14 @@ function formatUnavailableVisionModelMessage(
 }
 
 // Shown when a user pins a model that isn't known to accept images. The pin is
-// still honored, but the bridge will send images to it, so flag it.
+// still honored, but the bridge will send images to it, so flag it. Reuses the
+// same translated key the model dialog emits (ModelDialog.tsx) so both paths
+// stay i18n-consistent.
 function formatNonVisionModelWarning(modelName: string): string {
-  return `⚠ '${modelName}' is not a known image-capable model; the vision bridge may fail on images. If it does support images, set its modalities to { image: true } in settings.modelProviders.`;
+  return t(
+    "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.",
+    { model: modelName },
+  );
 }
 
 function formatUnavailableVoiceModelMessage(

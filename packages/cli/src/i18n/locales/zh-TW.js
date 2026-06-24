@@ -1237,7 +1237,9 @@ export default {
   'Toggle voice dictation input': '切換語音聽寫輸入',
   'Set the model for voice transcription': '設定語音轉寫模型',
   'Select Fast Model': '選擇快速模型',
+  'Select Vision Model': '選擇視覺模型',
   'Select Voice Model': '選擇語音模型',
+  'Vision Model': '視覺模型',
   'Voice Model': '語音模型',
   'Selected voice model is unavailable.': '所選語音模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":

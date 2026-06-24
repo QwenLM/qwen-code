@@ -731,6 +731,46 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should open the vision model dialog for /model --vision in interactive mode', async () => {
+    const mockConfig = createMockConfig({
+      model: 'qwen-plus',
+      authType: AuthType.USE_OPENAI,
+    });
+    mockContext.services.config = mockConfig as Config;
+
+    const result = await modelCommand.action!(mockContext, '--vision');
+
+    expect(result).toEqual({
+      type: 'dialog',
+      dialog: 'vision-model',
+    });
+  });
+
+  it('should return current vision model outside interactive mode', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--vision' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: { visionModel: 'qwen-vl-max' } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--vision');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current vision model: qwen-vl-max\nUse "/model --vision <model-id>" to set the vision bridge model.',
+    });
+  });
+
   it('should open the voice model dialog for /model --voice in interactive mode', async () => {
     const mockConfig = createMockConfig({
       model: 'qwen-plus',

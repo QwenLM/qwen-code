@@ -1440,7 +1440,9 @@ export default {
   'Set the model for voice transcription':
     'Set the model for voice transcription',
   'Select Fast Model': 'Select Fast Model',
+  'Select Vision Model': 'Select Vision Model',
   'Select Voice Model': 'Select Voice Model',
+  'Vision Model': 'Vision Model',
   'Voice Model': 'Voice Model',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
