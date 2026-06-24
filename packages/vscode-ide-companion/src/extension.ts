@@ -164,7 +164,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const createViewProvider = (): WebViewProvider =>
     chatProviderRegistry!.createViewProvider();
 
-  const supportsSecondarySidebar = registerChatViewProviders({
+  registerChatViewProviders({
     context,
     createViewProvider,
   });
@@ -214,7 +214,6 @@ export async function activate(context: vscode.ExtensionContext) {
     () => chatProviderRegistry?.getEditorProviders() ?? [],
     createWebViewProvider,
     logger,
-    supportsSecondarySidebar,
   );
 
   // Register copy commands for webview context menu

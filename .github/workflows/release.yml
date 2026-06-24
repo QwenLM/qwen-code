@@ -407,6 +407,7 @@ jobs:
       - name: 'Build Standalone Archives'
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
 
       - name: 'Publish @qwen-code/audio-capture'
@@ -570,6 +571,7 @@ jobs:
         )
       }}
     permissions:
+      actions: 'write'
       issues: 'write'
 
     steps:
@@ -579,7 +581,107 @@ jobs:
           GH_REPO: '${{ github.repository }}'
           RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          BUG_LABEL: 'type/bug'
+          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          PREPARE_RESULT: '${{ needs.prepare.result }}'
+          QUALITY_RESULT: '${{ needs.quality.result }}'
+          INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
+          INTEGRATION_DOCKER_RESULT: '${{ needs.integration_docker.result }}'
+          PUBLISH_RESULT: '${{ needs.publish.result }}'
         run: |-
-          gh issue create \
-            --title "Release Failed for ${RELEASE_TAG} on $(date +'%Y-%m-%d')" \
-            --body "The release workflow failed. See the full run for details: ${DETAILS_URL}"
+          failed_jobs="$(
+            for job in \
+              "prepare:${PREPARE_RESULT}" \
+              "quality:${QUALITY_RESULT}" \
+              "integration_none:${INTEGRATION_NONE_RESULT}" \
+              "integration_docker:${INTEGRATION_DOCKER_RESULT}" \
+              "publish:${PUBLISH_RESULT}"; do
+              name="${job%%:*}"
+              result="${job#*:}"
+              if [[ "${result}" == "failure" ]]; then
+                printf -- '- %s\n' "${name}"
+              fi
+            done
+          )"
+          if [[ -z "${failed_jobs}" ]]; then
+            failed_jobs='- unknown'
+          fi
+
+          body_file="$(mktemp)"
+          cat > "${body_file}" <<BODY
+          The release workflow failed.
+
+          Release tag: ${RELEASE_TAG}
+          Run: ${DETAILS_URL}
+
+          Failed job(s):
+          ${failed_jobs}
+          BODY
+
+          # `in:title` is a fuzzy full-text search, so anchor the reuse on an
+          # exact "Release Failed for <tag> on " title prefix — otherwise a tag
+          # that is a prefix of another (v0.18.1 vs v0.18.10) could reuse the
+          # wrong release's issue. Prefer a workflow-owned (github-actions[bot])
+          # match so a same-titled human/foreign issue sorting first can't make
+          # us skip an existing bot issue and open duplicates.
+          existing_issue="$(
+            gh issue list --repo "${GH_REPO}" \
+              --state open \
+              --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
+              --limit 30 \
+              --json number,url,labels,author,title \
+            | jq -c --arg tag "${RELEASE_TAG}" \
+              '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "github-actions[bot]"))[0] // .[0]) // empty'
+          )"
+          if [[ -n "${existing_issue}" ]]; then
+            issue_number="$(jq -r '.number' <<<"${existing_issue}")"
+            issue_url="$(jq -r '.url' <<<"${existing_issue}")"
+            issue_author="$(jq -r '.author.login // ""' <<<"${existing_issue}")"
+            if [[ "${issue_author}" != "github-actions[bot]" ]]; then
+              echo "::warning::Existing ${issue_url} was opened by ${issue_author:-unknown}; creating a workflow-owned issue instead."
+              existing_issue=''
+            elif jq -e \
+              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
+              <<<"${existing_issue}" > /dev/null; then
+              echo "::warning::Release failed but existing ${issue_url} has an autofix exclusion label; no autofix dispatched."
+              exit 0
+            else
+              gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
+                || echo "::warning::Failed to comment on existing issue #${issue_number}; proceeding with dispatch."
+              # Mirror the scheduled scan's exclusions for this release-forced
+              # dispatch: don't send the agent onto an issue a maintainer has
+              # taken over (assignee / linked PR / status/need-information /
+              # status/need-retesting). Fail closed — if the check can't run,
+              # skip the dispatch.
+              still_eligible="$(gh issue list --repo "${GH_REPO}" --state open \
+                --search "\"Release Failed for ${RELEASE_TAG}\" in:title no:assignee -linked:pr -label:status/need-information -label:status/need-retesting" \
+                --json number --jq "any(.[]; .number == ${issue_number})" || echo 'false')"
+              if [[ "${still_eligible}" != "true" ]]; then
+                echo "::warning::Reused ${issue_url} looks maintainer-owned (assignee / linked PR / need-information / need-retesting); skipping autofix dispatch."
+                exit 0
+              fi
+              # Ensure the fallback labels are present so that, if the dispatch
+              # below fails, the scheduled ready-for-agent scan can still find it.
+              gh issue edit "${issue_number}" --repo "${GH_REPO}" \
+                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL}" \
+                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL} on issue #${issue_number}."
+            fi
+          fi
+
+          if [[ -z "${existing_issue}" ]]; then
+            issue_url="$(gh issue create --repo "${GH_REPO}" \
+              --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
+              --body-file "${body_file}" \
+              --label "${BUG_LABEL}" \
+              --label "${READY_FOR_AGENT_LABEL}")"
+            issue_number="${issue_url##*/}"
+          fi
+
+          echo "Using ${issue_url}; dispatching autofix."
+          if ! gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
+            -f phase=issue \
+            -f issue_number="${issue_number}" \
+            -f dry_run=false; then
+            echo "::warning::Autofix dispatch failed; scheduled autofix can still pick up issue #${issue_number}."
+            exit 1
+          fi

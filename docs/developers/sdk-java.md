@@ -308,4 +308,4 @@ A: Yes, use the `setEnv()` method in `TransportOptions` to pass environment vari
 
 ## License
 
-Apache-2.0 - see [LICENSE](./LICENSE) for details.
+Apache-2.0 - see [LICENSE](../../LICENSE) for details.

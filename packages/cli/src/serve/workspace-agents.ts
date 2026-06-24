@@ -21,7 +21,7 @@ import { isServeDebugMode } from './debug-mode.js';
 import {
   InvalidClientIdError,
   type AcpSessionBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 
 /**
  * Pattern for the route-layer `:agentType` URL parameter. Matches the
@@ -1370,5 +1370,5 @@ export function createDaemonSubagentManager(
 
 // Re-export the bridge error type used by route helpers so test files
 // can import it from a single module without reaching into
-// acpSessionBridge directly.
+// acp-session-bridge directly.
 export { InvalidClientIdError };

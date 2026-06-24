@@ -190,6 +190,42 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 
+  it('shows result for Error status in compact mode', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} status={ToolCallStatus.Error} />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
+  it('shows result for Executing status in compact mode', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
+  it('shows result for Pending status in compact mode', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} status={ToolCallStatus.Pending} />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
+  it('shows result when forceShowResult overrides compact collapse', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} forceShowResult />,
+      StreamingState.Idle,
+      true,
+    );
+    expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
   describe('ToolStatusIndicator rendering', () => {
     it('shows ✓ for Success status', () => {
       const { lastFrame } = renderWithContext(

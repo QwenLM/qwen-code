@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
+  buildThinkingFullTextMap,
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
@@ -118,6 +119,51 @@ describe('itemsAfterAreOnlySynthetic', () => {
       ),
     ];
     expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(false);
+  });
+});
+
+describe('buildThinkingFullTextMap', () => {
+  it('returns empty map when no gemini_thought items exist', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'hi' }, 1),
+      mk({ type: 'gemini_content', text: 'hello' }, 2),
+    ];
+    expect(buildThinkingFullTextMap(h).size).toBe(0);
+  });
+
+  it('omits thought items with no continuations', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'gemini_thought', text: 'thinking...' }, 1),
+      mk({ type: 'gemini_content', text: 'answer' }, 2),
+    ];
+    expect(buildThinkingFullTextMap(h).size).toBe(0);
+  });
+
+  it('aggregates consecutive gemini_thought_content into the preceding thought', () => {
+    const thought = mk({ type: 'gemini_thought', text: 'header' }, 1);
+    const h: HistoryItem[] = [
+      thought,
+      mk({ type: 'gemini_thought_content', text: 'part1' }, 2),
+      mk({ type: 'gemini_thought_content', text: 'part2' }, 3),
+      mk({ type: 'gemini_content', text: 'answer' }, 4),
+    ];
+    const map = buildThinkingFullTextMap(h);
+    expect(map.get(thought)).toBe('header\npart1\npart2');
+  });
+
+  it('stops aggregation at the first non-continuation item', () => {
+    const thought1 = mk({ type: 'gemini_thought', text: 't1' }, 1);
+    const thought2 = mk({ type: 'gemini_thought', text: 't2' }, 4);
+    const h: HistoryItem[] = [
+      thought1,
+      mk({ type: 'gemini_thought_content', text: 'c1' }, 2),
+      mk({ type: 'gemini_content', text: 'answer' }, 3),
+      thought2,
+      mk({ type: 'gemini_thought_content', text: 'c2' }, 5),
+    ];
+    const map = buildThinkingFullTextMap(h);
+    expect(map.get(thought1)).toBe('t1\nc1');
+    expect(map.get(thought2)).toBe('t2\nc2');
   });
 });
 

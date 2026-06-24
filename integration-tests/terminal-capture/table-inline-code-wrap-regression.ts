@@ -5,17 +5,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-} from 'node:http';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { TerminalCapture } from './terminal-capture.js';
+import { startFakeOpenAIServer } from '../fake-openai-server.js';
 
 const TERMINAL_COLS = 100;
 const TERMINAL_ROWS = 32;
@@ -33,12 +28,6 @@ const MARKDOWN_RESPONSE = [
   'REGRESSION_TABLE_DONE',
 ].join('\n');
 
-type FakeServer = {
-  baseUrl: string;
-  close: () => Promise<void>;
-  getRequestCount: () => number;
-};
-
 type Summary = {
   repoRoot: string;
   outputDir: string;
@@ -54,116 +43,6 @@ type Summary = {
   expectedPass: boolean;
   screenshots: string[];
 };
-
-function sendJson(res: ServerResponse, body: unknown): void {
-  res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
-
-function sendStream(res: ServerResponse, chunks: unknown[]): void {
-  res.writeHead(200, {
-    'cache-control': 'no-cache, no-transform',
-    connection: 'keep-alive',
-    'content-type': 'text/event-stream; charset=utf-8',
-  });
-  for (const chunk of chunks) {
-    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-  }
-  res.write('data: [DONE]\n\n');
-  res.end();
-}
-
-function chatCompletionId(): string {
-  return `chatcmpl-table-wrap-${Date.now()}`;
-}
-
-function streamWrap(
-  id: string,
-  delta: Record<string, unknown>,
-  finishReason: string | null,
-  usage?: Record<string, unknown>,
-): Record<string, unknown> {
-  return {
-    id,
-    object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
-    model: 'dummy',
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
-    ...(usage ? { usage } : {}),
-  };
-}
-
-function readRequestBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolveRead, rejectRead) => {
-    const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => resolveRead(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', rejectRead);
-  });
-}
-
-async function startFakeOpenAIServer(): Promise<FakeServer> {
-  let requestCount = 0;
-  const server = createServer(async (req, res) => {
-    if (req.method !== 'POST' || !req.url?.endsWith('/chat/completions')) {
-      res.writeHead(404);
-      res.end('not found');
-      return;
-    }
-
-    requestCount += 1;
-    const body = await readRequestBody(req);
-    const parsed = JSON.parse(body) as { stream?: boolean };
-    const id = chatCompletionId();
-    const usage = {
-      prompt_tokens: 24,
-      completion_tokens: 16,
-      total_tokens: 40,
-    };
-
-    if (parsed.stream) {
-      sendStream(res, [
-        streamWrap(id, { role: 'assistant' }, null),
-        streamWrap(id, { content: MARKDOWN_RESPONSE }, null),
-        streamWrap(id, {}, 'stop', usage),
-      ]);
-      return;
-    }
-
-    sendJson(res, {
-      id,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: 'dummy',
-      choices: [
-        {
-          index: 0,
-          message: { role: 'assistant', content: MARKDOWN_RESPONSE },
-          finish_reason: 'stop',
-        },
-      ],
-      usage,
-    });
-  });
-
-  await new Promise<void>((resolveListen) => {
-    server.listen(0, '127.0.0.1', resolveListen);
-  });
-
-  const address = server.address() as AddressInfo | null;
-  if (!address) {
-    throw new Error('failed to start fake OpenAI server');
-  }
-
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}/v1`,
-    close: () =>
-      new Promise<void>((resolveClose) => {
-        server.close(() => resolveClose());
-      }),
-    getRequestCount: () => requestCount,
-  };
-}
 
 function qwenArgs(baseUrl: string): string[] {
   return [
@@ -268,7 +147,14 @@ async function main(): Promise<void> {
   }
   mkdirSync(outputDir, { recursive: true });
 
-  const fakeServer = await startFakeOpenAIServer();
+  const fakeServer = await startFakeOpenAIServer(() => ({
+    content: MARKDOWN_RESPONSE,
+    usage: {
+      prompt_tokens: 24,
+      completion_tokens: 16,
+      total_tokens: 40,
+    },
+  }));
   const homeDir = join(outputDir, 'home');
   mkdirSync(homeDir, { recursive: true });
 
@@ -338,7 +224,7 @@ async function main(): Promise<void> {
       finalScreen.includes(TABLE_NAME_SUFFIX) &&
       !finalScreen.includes(TABLE_NAME);
     const pass =
-      fakeServer.getRequestCount() > 0 &&
+      fakeServer.requests.length > 0 &&
       finalScreenWrappedTableName &&
       foregrounds.length > 0 &&
       uncoloredContinuationOccurrences === 0;
@@ -349,7 +235,7 @@ async function main(): Promise<void> {
     const summary: Summary = {
       repoRoot,
       outputDir,
-      requestCount: fakeServer.getRequestCount(),
+      requestCount: fakeServer.requests.length,
       rawBytes: raw.length,
       finalScreenLines: finalScreen.split('\n').length,
       continuationOccurrences: foregrounds.length,

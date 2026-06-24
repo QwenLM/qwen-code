@@ -21,6 +21,7 @@ import {
 import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
+  DaemonSessionLspStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
@@ -538,6 +539,26 @@ describe('DaemonClient', () => {
         now: 1_700_000_000_000,
         tasks: [],
       };
+      const lsp: DaemonSessionLspStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        workspaceCwd: '/work/a',
+        enabled: true,
+        configuredServers: 1,
+        readyServers: 1,
+        failedServers: 0,
+        inProgressServers: 0,
+        notStartedServers: 0,
+        servers: [
+          {
+            name: 'typescript',
+            status: 'READY',
+            languages: ['typescript'],
+            transport: 'stdio',
+            command: 'typescript-language-server',
+          },
+        ],
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/with%2Fslash/context')) {
           return jsonResponse(200, context);
@@ -547,6 +568,9 @@ describe('DaemonClient', () => {
         }
         if (req.url.endsWith('/session/with%2Fslash/tasks')) {
           return jsonResponse(200, tasks);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/lsp')) {
+          return jsonResponse(200, lsp);
         }
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       });
@@ -561,12 +585,17 @@ describe('DaemonClient', () => {
       await expect(
         client.sessionTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
+      await expect(
+        client.sessionLspStatus('with/slash', 'client-1'),
+      ).resolves.toEqual(lsp);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
         ['GET', 'http://daemon/session/with%2Fslash/tasks'],
+        ['GET', 'http://daemon/session/with%2Fslash/lsp'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',
@@ -998,6 +1027,105 @@ describe('DaemonClient', () => {
         limit: 7,
         pendingCount: 7,
       });
+    });
+
+    it('maps invalid client id responses on non-blocking prompts', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(400, {
+            code: 'invalid_client_id',
+            error: 'unknown client',
+            sessionId: 's-1',
+            clientId: 'client-stale',
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      });
+
+      const result = await client
+        .promptNonBlocking(
+          's-1',
+          {
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          'client-stale',
+        )
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonHttpError);
+      expect(result).toMatchObject({
+        status: 400,
+        body: {
+          code: 'invalid_client_id',
+          sessionId: 's-1',
+          clientId: 'client-stale',
+        },
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-stale');
+    });
+
+    it('releases the local prompt slot after invalid client id responses on blocking prompts', async () => {
+      let promptRequests = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          promptRequests += 1;
+          if (promptRequests === 1) {
+            return jsonResponse(400, {
+              code: 'invalid_client_id',
+              error: 'unknown client',
+              sessionId: 's-1',
+              clientId: 'client-stale',
+            });
+          }
+          return jsonResponse(202, {
+            promptId: `p-${promptRequests}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return sseResponse(
+            `id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-${promptRequests}","stopReason":"end_turn"}}\n\n`,
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      const result = await client
+        .prompt(
+          's-1',
+          {
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          'client-stale',
+        )
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonHttpError);
+      expect(result).toMatchObject({
+        status: 400,
+        body: {
+          code: 'invalid_client_id',
+          sessionId: 's-1',
+          clientId: 'client-stale',
+        },
+      });
+      await expect(
+        client.prompt('s-1', {
+          prompt: [{ type: 'text', text: 'after stale client' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
     });
 
     it('does not reserve a local prompt slot for a pre-aborted signal', async () => {
@@ -2321,6 +2449,33 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('extension operations', () => {
+    it('GETs an extension operation status by id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          operationId: 'op/1',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.extensionOperationStatus('op/1');
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/operations/op%2F1',
+      );
+      expect(calls[0]?.method).toBe('GET');
+      expect(result).toMatchObject({
+        operationId: 'op/1',
+        status: 'succeeded',
+      });
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(
@@ -2629,6 +2784,273 @@ describe('DaemonClient', () => {
       expect(() => requireWorkspaceCwd(caps({ workspaceCwd: '' }))).toThrow(
         DaemonCapabilityMissingError,
       );
+    });
+  });
+
+  describe('workspace permissions helpers', () => {
+    const permissionsStatus = {
+      v: 1 as const,
+      user: {
+        rules: {
+          allow: ['ShellTool(git status)'],
+          ask: [],
+          deny: [],
+        },
+      },
+      workspace: {
+        rules: {
+          allow: ['ShellTool(npm test)'],
+          ask: [],
+          deny: ['ReadFileTool(**/.env)'],
+        },
+      },
+      merged: {
+        allow: ['ShellTool(git status)', 'ShellTool(npm test)'],
+        ask: [],
+        deny: ['ReadFileTool(**/.env)'],
+      },
+      isTrusted: true,
+    };
+
+    it('workspacePermissions calls GET /workspace/permissions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspacePermissions({ clientId: 'client-1' }),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('setWorkspacePermissionRules posts scope ruleType and rules', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspacePermissionRules(
+          'workspace',
+          'deny',
+          ['ReadFileTool(**/.env)'],
+          { clientId: 'client-2' },
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(calls[0]?.headers['content-type']).toContain('application/json');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-2');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['ReadFileTool(**/.env)'],
+      });
+    });
+
+    it('addWorkspacePermissionRule deduplicates against scope-local rules', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          ' ShellTool(npm test) ',
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('removeWorkspacePermissionRule preserves missing rule as no-op', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'ask',
+          'ShellTool(yarn test)',
+        ),
+      ).resolves.toEqual(permissionsStatus);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('removeWorkspacePermissionRule propagates GET failures without POSTing', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(500, { error: 'failed to load permissions' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+
+    it('addWorkspacePermissionRule POSTs when rule is absent', async () => {
+      const updatedStatus = {
+        ...permissionsStatus,
+        workspace: {
+          ...permissionsStatus.workspace,
+          rules: {
+            ...permissionsStatus.workspace.rules,
+            allow: ['ShellTool(npm test)', 'ShellTool(npm run build)'],
+          },
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, updatedStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).resolves.toEqual(updatedStatus);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['ShellTool(npm test)', 'ShellTool(npm run build)'],
+      });
+    });
+
+    it('addWorkspacePermissionRule propagates GET failures without POSTing', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(500, { error: 'failed to load permissions' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+
+    it('addWorkspacePermissionRule propagates POST failures after GET', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(500, { error: 'failed to update permissions' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.addWorkspacePermissionRule(
+          'workspace',
+          'allow',
+          'ShellTool(npm run build)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+    });
+
+    it('removeWorkspacePermissionRule POSTs when rule exists', async () => {
+      const updatedStatus = {
+        ...permissionsStatus,
+        workspace: {
+          ...permissionsStatus.workspace,
+          rules: {
+            ...permissionsStatus.workspace.rules,
+            deny: [],
+          },
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, updatedStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).resolves.toEqual(updatedStatus);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: [],
+      });
+    });
+
+    it('removeWorkspacePermissionRule propagates POST failures after GET', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(500, { error: 'failed to update permissions' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeWorkspacePermissionRule(
+          'workspace',
+          'deny',
+          'ReadFileTool(**/.env)',
+        ),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspace/permissions',
+      });
     });
   });
 

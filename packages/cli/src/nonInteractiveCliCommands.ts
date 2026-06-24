@@ -16,6 +16,7 @@ import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
 import { McpPromptLoader } from './services/McpPromptLoader.js';
 import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
@@ -337,6 +338,7 @@ export const handleSlashCommand = async (
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
     new SkillCommandLoader(config),
+    new SavedWorkflowLoader(config),
     new FileCommandLoader(config),
   ];
 
@@ -515,6 +517,7 @@ export const getAvailableCommands = async (
       new BuiltinCommandLoader(config),
       new BundledSkillLoader(config),
       new SkillCommandLoader(config),
+      new SavedWorkflowLoader(config),
       new FileCommandLoader(config),
     ];
 

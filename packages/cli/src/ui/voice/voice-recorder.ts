@@ -49,7 +49,14 @@ class FallbackVoiceRecorder implements VoiceRecorder {
         this.activeRecorder = recorder;
         return;
       } catch (error) {
-        errors.push(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(message);
+        // Surface each backend failure so a missing native prebuild — which
+        // otherwise silently degrades to the SoX/arecord fallback — is
+        // diagnosable in debug logs instead of invisible. See #5583.
+        debugLogger.warn(
+          `[voice] recorder backend unavailable, trying fallback: ${message}`,
+        );
       }
     }
 

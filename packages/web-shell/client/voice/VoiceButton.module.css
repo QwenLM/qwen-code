@@ -1,0 +1,170 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.root {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Idle / connecting / error: matches ChatEditor's .toolBtn icon buttons. */
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    opacity 0.15s;
+}
+
+.iconBtn:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.iconBtn:focus-visible {
+  outline: 2px solid var(--accent-color, #4a9eff);
+  outline-offset: 1px;
+}
+
+.iconBtn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.iconBtn.error {
+  color: var(--error-color, #d9534f);
+}
+
+.iconBtn.connecting {
+  animation: voicePulse 1s ease-in-out infinite;
+}
+
+/* Recording / transcribing: Codex-style inline pill (waveform · timer · stop). */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 10px 0 9px;
+  border: none;
+  border-radius: 14px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+
+.pill:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.transcribing {
+  cursor: default;
+}
+
+.recDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--error-color, #d9534f);
+  animation: voicePulse 1s ease-in-out infinite;
+}
+
+.wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+}
+
+.bar {
+  width: 2px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: var(--accent-color, #4a9eff);
+  transition: height 0.1s linear;
+}
+
+.time {
+  min-width: 30px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color, rgba(127, 127, 127, 0.4));
+  border-top-color: var(--accent-color, #4a9eff);
+  border-radius: 50%;
+  animation: voiceSpin 0.8s linear infinite;
+}
+
+/* Live interim transcript / error preview, floating above the control. */
+.interim {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 120;
+  width: max-content;
+  max-width: 280px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.interim.error {
+  white-space: normal;
+  border-color: transparent;
+  background: var(--error-color, #d9534f);
+  color: #fff;
+}
+
+@keyframes voicePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes voiceSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}

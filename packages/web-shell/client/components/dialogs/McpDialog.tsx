@@ -1,664 +1,530 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { dp } from './dialogStyles';
-import {
-  useMcp,
-  type DaemonWorkspaceMcpServerStatus,
-  type DaemonWorkspaceMcpToolStatus,
-  type DaemonWorkspaceMcpToolsStatus,
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type {
+  DaemonWorkspaceActions,
+  DaemonWorkspaceMcpServerStatus,
+  DaemonWorkspaceMcpToolStatus,
+  DaemonWorkspaceMcpToolsStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useMcp } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { trimDialogLabel } from '../../utils/dialogLabels';
+import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
+import styles from './McpDialog.module.css';
+
+type DaemonWorkspaceMcpStatus = Awaited<
+  ReturnType<DaemonWorkspaceActions['loadMcpStatus']>
+>;
+
+type McpServerAction = {
+  id: 'reconnect' | 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+  label: string;
+};
+
+type T = ReturnType<typeof useI18n>['t'];
 
 interface McpDialogProps {
+  message: SerializedMcpStatusMessage;
   onClose: () => void;
 }
 
-type McpView = 'servers' | 'server' | 'tools' | 'tool';
-
-interface ServerAction {
-  label: string;
-  hint?: string;
-  disabled?: boolean;
-  run: () => void;
+function extractErrorDetail(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const body = (err as { body?: unknown }).body;
+    if (body && typeof body === 'object') {
+      const data = (body as { data?: unknown }).data;
+      if (data && typeof data === 'object') {
+        const details = (data as { details?: unknown }).details;
+        if (typeof details === 'string' && details) return details;
+      }
+      const error = (body as { error?: unknown }).error;
+      if (typeof error === 'string' && error) return error;
+    }
+    if (err instanceof Error && err.message) return err.message;
+  }
+  return String(err);
 }
 
-interface RestartEntry {
-  entryIndex: number;
-  restarted: boolean;
-  durationMs?: number;
-  reason?: string;
+function statusDisplay(
+  server: DaemonWorkspaceMcpServerStatus,
+  t: T,
+): { text: string; className: string } {
+  if (server.disabled) {
+    return { text: t('mcp.status.disabled'), className: styles.error };
+  }
+  switch (server.mcpStatus) {
+    case 'connected':
+      return { text: t('mcp.status.connected'), className: styles.success };
+    case 'connecting':
+      return { text: t('mcp.status.starting'), className: styles.warning };
+    case 'disconnected':
+    default:
+      return {
+        text: t('mcp.status.disconnectedTitle'),
+        className: styles.error,
+      };
+  }
 }
 
-interface RestartEntriesResult {
-  serverName: string;
-  entries: RestartEntry[];
+function serverGroupLabel(
+  server: DaemonWorkspaceMcpServerStatus,
+  t: T,
+): string {
+  return server.extensionName ? t('mcp.extensionMcp') : t('mcp.userMcp');
 }
 
-function isRestartEntriesResult(
-  result: unknown,
-): result is RestartEntriesResult {
+function oauthAuthMessage(serverName: string, t: T, detail?: string): string {
+  return [
+    `${t('mcp.oauth.server')}: ${serverName}`,
+    '',
+    t('mcp.oauth.starting', { name: serverName }),
+    ...(detail ? ['', detail] : []),
+  ].join('\n');
+}
+
+function schemaObject(
+  tool: DaemonWorkspaceMcpToolStatus,
+): Record<string, unknown> | null {
+  const schema = tool.schema as
+    | { parametersJsonSchema?: unknown; parameters?: unknown }
+    | undefined;
+  const content = schema?.parametersJsonSchema ?? schema?.parameters ?? schema;
+  return content && typeof content === 'object'
+    ? (content as Record<string, unknown>)
+    : null;
+}
+
+function toolAnnotationText(tool: DaemonWorkspaceMcpToolStatus, t: T): string {
+  const annotations = tool.annotations ?? {};
+  const labels: string[] = [];
+  if (annotations['destructiveHint'])
+    labels.push(t('mcp.annotation.destructive'));
+  if (annotations['readOnlyHint']) labels.push(t('mcp.annotation.readOnly'));
+  if (annotations['openWorldHint']) labels.push(t('mcp.annotation.openWorld'));
+  if (annotations['idempotentHint'])
+    labels.push(t('mcp.annotation.idempotent'));
+  return labels.join(', ');
+}
+
+function toolKey(serverName: string, toolName: string): string {
+  return `${serverName}:${toolName}`;
+}
+
+const detailLabel = trimDialogLabel;
+
+function ChevronIcon({ expanded }: { expanded: boolean }) {
   return (
-    typeof result === 'object' &&
-    result !== null &&
-    'entries' in result &&
-    Array.isArray((result as { entries?: unknown }).entries)
+    <svg
+      className={`${styles.chevron} ${expanded ? styles.chevronExpanded : ''}`}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+    >
+      <path
+        d="M6 4.5 9.5 8 6 11.5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
-function getServerStatus(server: DaemonWorkspaceMcpServerStatus): string {
-  if (server.disabled) {
-    return server.disabledReason
-      ? `disabled:${server.disabledReason}`
-      : 'disabled';
+function serverActions(
+  server: DaemonWorkspaceMcpServerStatus,
+  t: T,
+): McpServerAction[] {
+  const actions: McpServerAction[] = [];
+  if (!server.disabled && server.mcpStatus === 'disconnected') {
+    actions.push({ id: 'reconnect', label: t('mcp.action.reconnect') });
   }
-  return server.mcpStatus || 'unknown';
+  actions.push({
+    id: server.disabled ? 'enable' : 'disable',
+    label: server.disabled ? t('mcp.action.enable') : t('mcp.action.disable'),
+  });
+  if (!server.disabled) {
+    actions.push({
+      id: 'authenticate',
+      label: server.hasOAuthTokens
+        ? t('mcp.action.reauth')
+        : t('mcp.action.auth'),
+    });
+    if (server.hasOAuthTokens) {
+      actions.push({ id: 'clear-auth', label: t('mcp.action.clearAuth') });
+    }
+  }
+  return actions;
 }
 
-function statusText(
-  status: string,
-  t: ReturnType<typeof useI18n>['t'],
-): string {
-  if (status.startsWith('disabled:')) {
-    return `✗ ${t('mcp.status.disabled')}:${status.slice('disabled:'.length)}`;
-  }
-  switch (status) {
-    case 'connected':
-      return `✓ ${t('mcp.status.connected')}`;
-    case 'connecting':
-      return `… ${t('mcp.status.connecting')}`;
-    case 'disconnected':
-      return `✗ ${t('mcp.status.disconnected')}`;
-    case 'disabled':
-      return `✗ ${t('mcp.status.disabled')}`;
-    default:
-      return status || t('mcp.status.unknown');
-  }
-}
-
-function statusClass(status: string) {
-  if (status === 'connected') return 'mcp-status-connected';
-  if (status === 'connecting') return 'mcp-status-connecting';
-  if (status === 'disconnected') return 'mcp-status-disconnected';
-  if (status === 'disabled' || status.startsWith('disabled:')) {
-    return 'mcp-status-disabled';
-  }
-  return 'mcp-status-unknown';
-}
-
-function StatusLabel({
-  status,
+function SchemaSummary({
+  tool,
   t,
 }: {
-  status: string;
-  t: ReturnType<typeof useI18n>['t'];
+  tool: DaemonWorkspaceMcpToolStatus;
+  t: T;
 }) {
-  return (
-    <span className={dp('mcp-status', statusClass(status))}>
-      {statusText(status, t)}
-    </span>
-  );
-}
+  const schema = schemaObject(tool);
+  if (!schema) return <div className={styles.muted}>{t('mcp.noSchema')}</div>;
 
-function sourceLabel(
-  server: DaemonWorkspaceMcpServerStatus,
-  t: ReturnType<typeof useI18n>['t'],
-): string {
-  return server.extensionName
-    ? t('mcp.extension', { name: server.extensionName })
-    : t('mcp.settings');
-}
-
-function schemaSummary(
-  schema: Record<string, unknown> | undefined,
-  t: ReturnType<typeof useI18n>['t'],
-): string[] {
-  if (!schema) return [t('mcp.noSchema')];
-  const lines: string[] = [];
-  const properties =
-    schema.properties &&
-    typeof schema.properties === 'object' &&
-    !Array.isArray(schema.properties)
-      ? (schema.properties as Record<string, unknown>)
-      : undefined;
-  const required = Array.isArray(schema.required)
+  const properties = schema['properties'];
+  const required = Array.isArray(schema['required'])
     ? new Set(
-        schema.required.filter(
-          (item): item is string => typeof item === 'string',
+        schema['required'].filter(
+          (name): name is string => typeof name === 'string',
         ),
       )
     : new Set<string>();
 
-  if (!properties || Object.keys(properties).length === 0) {
-    return [JSON.stringify(schema, null, 2)];
+  if (!properties || typeof properties !== 'object') {
+    return (
+      <pre className={styles.schema}>{JSON.stringify(schema, null, 2)}</pre>
+    );
   }
 
-  for (const [name, value] of Object.entries(properties)) {
-    const shape =
-      value && typeof value === 'object' && !Array.isArray(value)
-        ? (value as Record<string, unknown>)
-        : {};
-    const type = typeof shape.type === 'string' ? shape.type : 'value';
-    const desc =
-      typeof shape.description === 'string' && shape.description.length > 0
-        ? ` - ${shape.description}`
-        : '';
-    lines.push(`${required.has(name) ? '*' : ' '} ${name}: ${type}${desc}`);
-  }
-  return lines;
-}
-
-function toolAnnotationText(
-  tool: DaemonWorkspaceMcpToolStatus,
-  t: ReturnType<typeof useI18n>['t'],
-): string {
-  const annotations = tool.annotations ?? {};
-  const hints: string[] = [];
-  if (annotations.destructiveHint) hints.push(t('mcp.annotation.destructive'));
-  if (annotations.readOnlyHint) hints.push(t('mcp.annotation.readOnly'));
-  if (annotations.openWorldHint) hints.push(t('mcp.annotation.openWorld'));
-  if (annotations.idempotentHint) hints.push(t('mcp.annotation.idempotent'));
-  return hints.join(', ');
-}
-
-export function McpDialog({ onClose }: McpDialogProps) {
-  const { t } = useI18n();
-  const { status, loading, error, reload, loadTools, restartServer } = useMcp({
-    autoLoad: true,
-  });
-  const [toolsByServer, setToolsByServer] = useState<
-    Record<string, DaemonWorkspaceMcpToolsStatus>
-  >({});
-  const [view, setView] = useState<McpView>('servers');
-  const [selectedIdx, setSelectedIdx] = useState(0);
-  const [actionIdx, setActionIdx] = useState(0);
-  const [toolIdx, setToolIdx] = useState(0);
-  const [loadingTools, setLoadingTools] = useState<string | null>(null);
-  const [busyServer, setBusyServer] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-
-  const servers: DaemonWorkspaceMcpServerStatus[] = status?.servers ?? [];
-  const selected = servers[selectedIdx];
-  const selectedTools = selected
-    ? (toolsByServer[selected.name]?.tools ?? [])
-    : [];
-  const selectedTool = selectedTools[toolIdx];
-
-  const loadServerTools = useCallback(
-    (serverName: string) => {
-      setLoadingTools(serverName);
-      loadTools(serverName)
-        .then((next) => {
-          setToolsByServer((cur) => ({ ...cur, [serverName]: next }));
-          setMessage(next.errors?.[0]?.error ?? null);
-        })
-        .catch((err: unknown) => {
-          setMessage(err instanceof Error ? err.message : String(err));
-        })
-        .finally(() => setLoadingTools(null));
-    },
-    [loadTools],
-  );
-
-  useEffect(() => {
-    if (error) setMessage(error.message);
-    else if (status?.errors?.[0]?.error) setMessage(status.errors[0].error);
-    else if (status) setMessage(null);
-  }, [status, error]);
-
-  useEffect(() => {
-    if (selectedIdx >= servers.length && servers.length > 0) {
-      setSelectedIdx(servers.length - 1);
-    }
-  }, [selectedIdx, servers.length]);
-
-  useEffect(() => {
-    const activeIndex =
-      view === 'server' ? actionIdx : view === 'tools' ? toolIdx : selectedIdx;
-    const el = listRef.current?.children[activeIndex] as
-      | HTMLElement
-      | undefined;
-    el?.scrollIntoView({ block: 'nearest' });
-  }, [actionIdx, selectedIdx, toolIdx, view]);
-
-  const budgetText = useMemo(() => {
-    if (!status) return '';
-    if (status.clientBudget === undefined)
-      return t('common.clients', { count: status.clientCount ?? 0 });
-    return t('mcp.clientBudget', {
-      count: status.clientCount ?? 0,
-      budget: status.clientBudget,
-      mode: status.budgetMode ?? 'off',
-    });
-  }, [status, t]);
-
-  const footerText = useMemo(() => {
-    if (view === 'servers') {
-      return servers.length === 0
-        ? t('dialog.footer.close')
-        : t('dialog.footer.mcpServers');
-    }
-    if (view === 'tool') return t('dialog.footer.back');
-    return t('dialog.footer.mcpSelect');
-  }, [servers.length, t, view]);
-
-  const handleRestart = useCallback(
-    (serverName: string) => {
-      setBusyServer(serverName);
-      setMessage(null);
-      restartServer(serverName)
-        .then((result) => {
-          if (isRestartEntriesResult(result)) {
-            const restartedCount = result.entries.filter(
-              (entry) => entry.restarted,
-            ).length;
-            const failedReasons = result.entries
-              .filter((entry) => !entry.restarted)
-              .map(
-                (entry) => `#${entry.entryIndex}: ${entry.reason ?? 'unknown'}`,
-              )
-              .join(', ');
-            setMessage(
-              t('mcp.restartEntries', {
-                name: result.serverName,
-                restarted: restartedCount,
-                total: result.entries.length,
-                failedReasons,
-              }),
-            );
-          } else if (result.restarted) {
-            setMessage(
-              t('mcp.restarted', {
-                name: result.serverName,
-                duration: result.durationMs,
-              }),
-            );
-          } else {
-            setMessage(
-              t('mcp.restartSkipped', {
-                name: result.serverName,
-                reason: result.reason ?? '',
-              }),
-            );
-          }
-          reload();
-          loadServerTools(serverName);
-        })
-        .catch((error: unknown) => {
-          setMessage(error instanceof Error ? error.message : String(error));
-        })
-        .finally(() => setBusyServer(null));
-    },
-    [loadServerTools, reload, restartServer, t],
-  );
-
-  const openServer = useCallback(
-    (server: DaemonWorkspaceMcpServerStatus) => {
-      setView('server');
-      setActionIdx(0);
-      if (!toolsByServer[server.name]) {
-        loadServerTools(server.name);
-      }
-    },
-    [loadServerTools, toolsByServer],
-  );
-
-  const actions: ServerAction[] = useMemo(() => {
-    if (!selected) return [];
-    const toolStatus = toolsByServer[selected.name];
-    const toolCount = toolStatus?.tools.length ?? 0;
-    const nextActions: ServerAction[] = [];
-    if (!selected.disabled && (toolStatus || loadingTools === selected.name)) {
-      nextActions.push({
-        label: t('mcp.action.tools'),
-        hint:
-          loadingTools === selected.name
-            ? t('common.loading')
-            : `${toolCount} ${t('mcp.tools')}`,
-        disabled: loadingTools === selected.name || toolCount === 0,
-        run: () => {
-          setView('tools');
-          setToolIdx(0);
-          if (!toolStatus) loadServerTools(selected.name);
-        },
-      });
-    } else if (!selected.disabled) {
-      nextActions.push({
-        label: t('mcp.action.tools'),
-        hint: t('mcp.action.toolsHint'),
-        run: () => {
-          setView('tools');
-          setToolIdx(0);
-          loadServerTools(selected.name);
-        },
-      });
-    }
-    nextActions.push({
-      label: selected.disabled
-        ? t('tools.update.enable')
-        : t('tools.update.disable'),
-      hint: t('mcp.action.authHint'),
-      disabled: true,
-      run: () => setMessage(t('mcp.action.enableMessage')),
-    });
-    if (!selected.disabled) {
-      nextActions.push({
-        label: t('mcp.action.auth'),
-        hint: t('mcp.action.authHint'),
-        disabled: true,
-        run: () => setMessage(t('mcp.action.authMessage')),
-      });
-    }
-    if (!selected.disabled && getServerStatus(selected) === 'disconnected') {
-      nextActions.push({
-        label: t('mcp.action.reconnect'),
-        disabled: busyServer === selected.name,
-        run: () => handleRestart(selected.name),
-      });
-    }
-    return nextActions;
-  }, [
-    busyServer,
-    handleRestart,
-    loadServerTools,
-    loadingTools,
-    selected,
-    toolsByServer,
-    t,
-  ]);
-
-  useEffect(() => {
-    if (actionIdx >= actions.length && actions.length > 0) {
-      setActionIdx(actions.length - 1);
-    }
-  }, [actionIdx, actions.length]);
-
-  useEffect(() => {
-    if (toolIdx >= selectedTools.length && selectedTools.length > 0) {
-      setToolIdx(selectedTools.length - 1);
-    }
-  }, [selectedTools.length, toolIdx]);
-
-  useDelayedGlobalKeyDown(
-    (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        if (view === 'tool') setView('tools');
-        else if (view === 'tools') setView('server');
-        else if (view === 'server') setView('servers');
-        else onClose();
-        return;
-      }
-      if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        if (view === 'server') {
-          setActionIdx((i) => Math.min(i + 1, Math.max(actions.length - 1, 0)));
-        } else if (view === 'tools') {
-          setToolIdx((i) =>
-            Math.min(i + 1, Math.max(selectedTools.length - 1, 0)),
-          );
-        } else if (view === 'servers') {
-          setSelectedIdx((i) =>
-            Math.min(i + 1, Math.max(servers.length - 1, 0)),
-          );
-        }
-        return;
-      }
-      if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        if (view === 'server') setActionIdx((i) => Math.max(i - 1, 0));
-        else if (view === 'tools') setToolIdx((i) => Math.max(i - 1, 0));
-        else if (view === 'servers') setSelectedIdx((i) => Math.max(i - 1, 0));
-        return;
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        if (view === 'servers' && selected) {
-          openServer(selected);
-        } else if (view === 'server') {
-          actions[actionIdx]?.run();
-        } else if (view === 'tools' && selectedTool) {
-          setView('tool');
-        }
-        return;
-      }
-      if (e.key === 'r') {
-        e.preventDefault();
-        if (view === 'servers') reload();
-        else if (selected && view === 'server' && busyServer !== selected.name)
-          handleRestart(selected.name);
-      }
-    },
-    [
-      actionIdx,
-      actions,
-      handleRestart,
-      onClose,
-      openServer,
-      reload,
-      selected,
-      selectedTool,
-      selectedTools.length,
-      servers.length,
-      view,
-    ],
-  );
+  const entries = Object.entries(properties as Record<string, unknown>);
+  if (entries.length === 0) return null;
 
   return (
-    <div className={dp('resume-picker')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>
-          {view === 'servers'
-            ? t('local.mcp')
-            : view === 'tools'
-              ? t('mcp.toolsForServer', {
-                  name: selected?.name ?? 'MCP',
-                })
-              : view === 'tool'
-                ? selectedTool?.name
-                : selected?.name}
-        </span>
-        {view !== 'servers' && (
-          <span className={dp('resume-picker-count')}>{budgetText}</span>
-        )}
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
-      <div className={dp('resume-picker-search')}>
-        <span className={dp('resume-picker-search-hint')}>
-          {message ||
-            (loading
-              ? t('mcp.loadingStatus')
-              : view === 'servers'
-                ? t('mcp.servers', { count: servers.length })
-                : loadingTools === selected?.name
-                  ? t('mcp.loadingTools')
-                  : t('common.enterSelect'))}
-        </span>
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      {view === 'servers' && (
-        <div className={dp('resume-picker-list')} ref={listRef}>
-          {!loading && servers.length === 0 && (
-            <div className={dp('resume-picker-empty')}>{t('mcp.empty')}</div>
-          )}
-          {servers.map((server, i) => (
-            <div
-              key={server.name}
-              className={dp(
-                'resume-picker-item',
-                i === selectedIdx ? 'selected' : undefined,
-              )}
-              onClick={() => openServer(server)}
-              onMouseEnter={() => setSelectedIdx(i)}
-            >
-              <div className={dp('resume-picker-item-row')}>
-                <span className={dp('resume-picker-item-prefix')}>
-                  {i === selectedIdx ? '›' : ' '}
-                </span>
-                <span className={dp('resume-picker-item-title')}>
-                  {server.name}
-                </span>
-                <span className={dp('resume-picker-item-badge')}>
-                  <StatusLabel status={getServerStatus(server)} t={t} />
-                </span>
-              </div>
-              <div className={dp('resume-picker-item-meta')}>
-                {server.transport}
-                {server.extensionName ? ` · ${server.extensionName}` : ''}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {view === 'server' && selected && (
-        <div className={dp('resume-picker-list')} ref={listRef}>
-          <div className={dp('dialog-detail')}>
-            <div>
-              {t('mcp.status')}:{' '}
-              <StatusLabel status={getServerStatus(selected)} t={t} />
-            </div>
-            <div>
-              {t('mcp.source')}: {sourceLabel(selected, t)}
-            </div>
-            <div>
-              {t('mcp.transport')}: {selected.transport}
-            </div>
-            <div>
-              {t('mcp.tools')}:{' '}
-              {loadingTools === selected.name
-                ? t('common.loading')
-                : `${toolsByServer[selected.name]?.tools.length ?? 0} ${t('mcp.tools')}`}
-            </div>
+    <div className={styles.section}>
+      <div className={styles.sectionTitle}>{t('mcp.parameters')}</div>
+      {entries.map(([name, param]) => {
+        const details =
+          param && typeof param === 'object'
+            ? (param as Record<string, unknown>)
+            : {};
+        const type =
+          typeof details['type'] === 'string' ? details['type'] : 'any';
+        const description =
+          typeof details['description'] === 'string'
+            ? details['description']
+            : '';
+        return (
+          <div key={name} className={styles.parameter}>
+            {`- ${name}${required.has(name) ? t('mcp.required') : ''}: ${type}${
+              description ? ` - ${description}` : ''
+            }`}
           </div>
-          {actions.map((action, i) => (
-            <div
-              key={action.label}
-              className={dp(
-                'resume-picker-item',
-                i === actionIdx ? 'selected' : undefined,
-                action.disabled ? 'disabled' : undefined,
-              )}
-              onClick={() => {
-                if (!action.disabled) action.run();
-              }}
-              onMouseEnter={() => setActionIdx(i)}
-            >
-              <span className={dp('resume-picker-item-prefix')}>
-                {i === actionIdx ? '›' : ' '}
-              </span>
-              <span className={dp('resume-picker-item-title')}>
-                {action.label}
-              </span>
-              {action.hint && (
-                <span className={dp('resume-picker-item-badge')}>
-                  {action.hint}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {view === 'tools' && selected && (
-        <div className={dp('resume-picker-list')} ref={listRef}>
-          {!loadingTools && selectedTools.length === 0 && (
-            <div className={dp('resume-picker-empty')}>
-              {t('mcp.emptyTools')}
-            </div>
-          )}
-          {selectedTools.map((tool, i) => {
-            const annotations = toolAnnotationText(tool, t);
-            return (
-              <div
-                key={tool.name}
-                className={dp(
-                  'resume-picker-item',
-                  i === toolIdx ? 'selected' : undefined,
-                )}
-                onClick={() => setView('tool')}
-                onMouseEnter={() => setToolIdx(i)}
-              >
-                <div className={dp('resume-picker-item-row')}>
-                  <span className={dp('resume-picker-item-prefix')}>
-                    {i === toolIdx ? '›' : ' '}
-                  </span>
-                  <span className={dp('resume-picker-item-title')}>
-                    {tool.name}
-                  </span>
-                  {!tool.isValid ? (
-                    <span className={dp('resume-picker-item-badge')}>
-                      {t('common.invalid')}
-                    </span>
-                  ) : annotations ? (
-                    <span className={dp('resume-picker-item-badge')}>
-                      {annotations}
-                    </span>
-                  ) : null}
-                </div>
-                {!tool.isValid && (
-                  <div className={dp('resume-picker-item-meta')}>
-                    {tool.invalidReason || t('common.invalid')}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {view === 'tool' && selectedTool && <ToolDetail tool={selectedTool} />}
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-footer')}>{footerText}</div>
+        );
+      })}
     </div>
   );
 }
 
-function ToolDetail({ tool }: { tool: DaemonWorkspaceMcpToolStatus }) {
-  const { t } = useI18n();
+function Field({ label, value }: { label: string; value: string }) {
   return (
-    <div className={dp('resume-picker-list')}>
-      <div className={dp('dialog-detail')}>
-        <div>
-          {t('mcp.name')}: {tool.name}
+    <div className={styles.field}>
+      <span className={styles.label}>{label}</span>
+      <span className={styles.value}>{value}</span>
+    </div>
+  );
+}
+
+function ToolDetail({ tool, t }: { tool: DaemonWorkspaceMcpToolStatus; t: T }) {
+  const annotations = toolAnnotationText(tool, t);
+  return (
+    <div className={styles.toolDetail}>
+      {!tool.isValid ? (
+        <div className={styles.section}>
+          <div className={`${styles.sectionTitle} ${styles.error}`}>
+            {t('mcp.invalidToolWarning')}
+          </div>
+          <div className={styles.muted}>
+            {detailLabel(t('mcp.invalidReasonLabel'))}{' '}
+            {tool.invalidReason || t('mcp.status.unknown')}
+          </div>
+          <div className={styles.muted}>{t('mcp.invalidToolHelp')}</div>
         </div>
-        {tool.serverToolName && (
-          <div>
-            {t('mcp.serverTool')}: {tool.serverToolName}
+      ) : null}
+      {tool.description ? (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>
+            {detailLabel(t('mcp.description'))}
           </div>
-        )}
-        {!tool.isValid && (
-          <div>
-            {t('mcp.status')}: {tool.invalidReason || t('common.invalid')}
-          </div>
-        )}
-        {tool.description && (
-          <div>
-            {t('mcp.description')}: {tool.description}
-          </div>
-        )}
-      </div>
-      <div className={dp('dialog-detail')}>
-        <div>{t('mcp.inputSchema')}</div>
-        {schemaSummary(tool.schema, t).map((line, i) => (
-          <div key={`${tool.name}-schema-${i}`}>{line}</div>
-        ))}
-      </div>
-      {tool.annotations && (
-        <div className={dp('dialog-detail')}>
-          <div>{t('mcp.annotations')}</div>
-          <pre>{JSON.stringify(tool.annotations, null, 2)}</pre>
+          <div className={styles.description}>{tool.description.trim()}</div>
+        </div>
+      ) : (
+        <div className={styles.muted}>{t('mcp.noDescription')}</div>
+      )}
+      {annotations ? (
+        <Field label={detailLabel(t('mcp.annotations'))} value={annotations} />
+      ) : null}
+      <SchemaSummary tool={tool} t={t} />
+    </div>
+  );
+}
+
+export function McpDialog({ message }: McpDialogProps) {
+  const { t } = useI18n();
+  const mcp = useMcp({ autoLoad: false });
+  const [status, setStatus] = useState<DaemonWorkspaceMcpStatus>(
+    message.status,
+  );
+  const [toolsByServer, setToolsByServer] = useState<
+    Record<string, DaemonWorkspaceMcpToolsStatus>
+  >(message.toolsByServer);
+  const servers = useMemo(() => status.servers ?? [], [status.servers]);
+  const [expandedServers, setExpandedServers] = useState<Set<string>>(
+    new Set(),
+  );
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [actionMessage, setActionMessage] = useState<{
+    serverName: string;
+    text: string;
+  } | null>(null);
+  const [busyServer, setBusyServer] = useState<string | null>(null);
+
+  useEffect(() => {
+    setExpandedServers((current) => {
+      const validNames = new Set(servers.map((server) => server.name));
+      return new Set([...current].filter((name) => validNames.has(name)));
+    });
+  }, [servers]);
+
+  const connectingCount = servers.filter(
+    (server) => !server.disabled && server.mcpStatus === 'connecting',
+  ).length;
+
+  const groupedServers = useMemo(() => {
+    const groups: Array<{
+      label: string;
+      items: Array<{
+        server: DaemonWorkspaceMcpServerStatus;
+        tools: DaemonWorkspaceMcpToolStatus[];
+      }>;
+    }> = [];
+    for (const server of servers) {
+      const label = serverGroupLabel(server, t);
+      const item = {
+        server,
+        tools: toolsByServer[server.name]?.tools ?? [],
+      };
+      const group = groups.find((candidate) => candidate.label === label);
+      if (group) group.items.push(item);
+      else groups.push({ label, items: [item] });
+    }
+    return groups;
+  }, [servers, t, toolsByServer]);
+
+  const reloadServer = useCallback(
+    async (serverName: string) => {
+      const nextStatus = await mcp.reload();
+      if (!nextStatus) return;
+      setStatus(nextStatus);
+      const nextServer = nextStatus.servers?.find(
+        (server) => server.name === serverName,
+      );
+      if (!nextServer) return;
+      const nextTools = await mcp.loadTools(nextServer.name);
+      setToolsByServer((current) => ({
+        ...current,
+        [nextServer.name]: nextTools,
+      }));
+    },
+    [mcp],
+  );
+
+  const runAction = useCallback(
+    async (server: DaemonWorkspaceMcpServerStatus, action: McpServerAction) => {
+      if (busyServer) return;
+      setExpandedServers(new Set([server.name]));
+      setBusyServer(server.name);
+      setActionMessage({
+        serverName: server.name,
+        text:
+          action.id === 'authenticate'
+            ? oauthAuthMessage(server.name, t)
+            : t('mcp.action.running', { action: action.label }),
+      });
+      try {
+        let nextActionMessage: string | null = null;
+        if (action.id === 'reconnect') {
+          await mcp.restartServer(server.name);
+        } else {
+          const result = await mcp.manageServer(server.name, action.id);
+          const details = [
+            ...(result.messages ?? []),
+            ...(result.authUrl ? [result.authUrl] : []),
+          ].join('\n');
+          if (details) {
+            nextActionMessage =
+              action.id === 'authenticate'
+                ? oauthAuthMessage(server.name, t, details)
+                : details;
+          }
+        }
+        await reloadServer(server.name);
+        setActionMessage({
+          serverName: server.name,
+          text:
+            nextActionMessage ?? t('mcp.action.done', { action: action.label }),
+        });
+      } catch (err) {
+        setActionMessage({
+          serverName: server.name,
+          text:
+            action.id === 'authenticate'
+              ? oauthAuthMessage(server.name, t, extractErrorDetail(err))
+              : t('mcp.action.failed', { error: extractErrorDetail(err) }),
+        });
+      } finally {
+        setBusyServer(null);
+      }
+    },
+    [busyServer, mcp, reloadServer, t],
+  );
+
+  const toggleServer = useCallback((serverName: string) => {
+    setExpandedServers((current) => {
+      return current.has(serverName) ? new Set() : new Set([serverName]);
+    });
+    setExpandedTools(new Set());
+  }, []);
+
+  const toggleTool = useCallback((serverName: string, toolName: string) => {
+    const key = toolKey(serverName, toolName);
+    setExpandedTools((current) => {
+      return current.has(key) ? new Set() : new Set([key]);
+    });
+  }, []);
+
+  return (
+    <div className={styles.layout} data-keyboard-scope>
+      {connectingCount > 0 ? (
+        <div className={styles.notice}>
+          {t('mcp.starting', { count: connectingCount })}
+          <div className={styles.muted}>{t('mcp.startingNote')}</div>
+        </div>
+      ) : null}
+
+      {servers.length === 0 ? (
+        <div className={styles.empty}>{t('mcp.empty')}</div>
+      ) : (
+        <div className={styles.list}>
+          {groupedServers.map((group) => (
+            <div key={group.label} className={styles.group}>
+              {group.label !== t('mcp.extensionMcp') ? (
+                <div className={styles.groupTitle}>{group.label}</div>
+              ) : null}
+              {group.items.map(({ server, tools }) => {
+                const display = statusDisplay(server, t);
+                const expanded = expandedServers.has(server.name);
+                const actions = serverActions(server, t);
+                const toolCount = toolsByServer[server.name]?.tools.length ?? 0;
+                return (
+                  <div key={server.name} className={styles.server}>
+                    <div
+                      className={`${styles.serverCard} ${
+                        expanded ? styles.serverCardExpanded : ''
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        className={`${styles.row} ${styles.serverRow} ${
+                          expanded ? styles.expandedRow : ''
+                        }`}
+                        onClick={() => toggleServer(server.name)}
+                        aria-label={
+                          expanded ? t('mcp.collapse') : t('mcp.expand')
+                        }
+                      >
+                        <span className={styles.rowMain}>
+                          <span className={styles.rowIcon} aria-hidden="true" />
+                          <span
+                            className={`${styles.name} ${styles.serverName}`}
+                          >
+                            {server.name}
+                          </span>
+                        </span>
+                        <span
+                          className={`${styles.status} ${display.className}`}
+                        >
+                          {display.text}
+                        </span>
+                        <span className={`${styles.badge} ${styles.toolCount}`}>
+                          {t(
+                            toolCount === 1
+                              ? 'mcp.toolCount'
+                              : 'mcp.toolsCount',
+                            {
+                              count: toolCount,
+                            },
+                          )}
+                        </span>
+                        <span className={styles.chevronCell} aria-hidden="true">
+                          <ChevronIcon expanded={expanded} />
+                        </span>
+                      </button>
+
+                      {expanded ? (
+                        <div className={styles.serverDetail}>
+                          {actions.length > 0 ? (
+                            <div className={styles.serverDetailHeader}>
+                              <div className={styles.serverActions}>
+                                {actions.map((action) => (
+                                  <button
+                                    key={action.id}
+                                    type="button"
+                                    className={styles.button}
+                                    onClick={() =>
+                                      void runAction(server, action)
+                                    }
+                                    disabled={busyServer !== null}
+                                  >
+                                    {action.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                          {actionMessage?.serverName === server.name ? (
+                            <pre className={styles.message}>
+                              {actionMessage.text}
+                            </pre>
+                          ) : null}
+                          {tools.length === 0 ? (
+                            <div className={styles.emptyTools}>
+                              {t('mcp.emptyTools')}
+                            </div>
+                          ) : (
+                            <div className={styles.tools}>
+                              {tools.map((tool) => {
+                                const key = toolKey(server.name, tool.name);
+                                const toolExpanded = expandedTools.has(key);
+                                return (
+                                  <div key={tool.name} className={styles.tool}>
+                                    <button
+                                      type="button"
+                                      className={`${styles.row} ${styles.toolRow} ${
+                                        toolExpanded ? styles.expandedRow : ''
+                                      } ${!tool.isValid ? styles.disabled : ''}`}
+                                      onClick={() =>
+                                        toggleTool(server.name, tool.name)
+                                      }
+                                    >
+                                      <span
+                                        className={styles.rowIcon}
+                                        aria-hidden="true"
+                                      />
+                                      <span className={styles.name}>
+                                        {tool.name}
+                                      </span>
+                                      <ChevronIcon expanded={toolExpanded} />
+                                    </button>
+                                    {toolExpanded ? (
+                                      <ToolDetail tool={tool} t={t} />
+                                    ) : null}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>
