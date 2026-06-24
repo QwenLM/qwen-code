@@ -115,7 +115,10 @@ function buildSkippedProviderWarnings(
     if (protocol !== undefined) {
       continue;
     }
-    const mapped = providerProtocol?.[providerId];
+    const mapped =
+      providerProtocol && Object.hasOwn(providerProtocol, providerId)
+        ? providerProtocol[providerId]
+        : undefined;
     warnings.push(
       mapped !== undefined
         ? `Warning: providerProtocol["${providerId}"] = "${mapped}" is not a known protocol (expected one of: ${known}); its ${models.length} model(s) are ignored.`

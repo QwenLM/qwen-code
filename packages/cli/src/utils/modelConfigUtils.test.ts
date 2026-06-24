@@ -480,6 +480,38 @@ describe('modelConfigUtils', () => {
       ).toBe(true);
     });
 
+    it('warns when providerProtocol maps to an unknown protocol', () => {
+      const settings = makeMockSettings({
+        model: { name: 'some-model' },
+        modelProviders: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: 'not-a-protocol',
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'some-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'providerProtocol["idealab"] = "not-a-protocol" is not a known protocol',
+          ),
+        ]),
+      );
+    });
+
     it('warns when a custom provider maps to qwen-oauth', () => {
       const settings = makeMockSettings({
         model: { name: 'some-model' },

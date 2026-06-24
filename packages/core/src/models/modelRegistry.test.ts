@@ -1018,6 +1018,11 @@ describe('resolveProviderProtocol', () => {
     expect(resolveProviderProtocol('idealab', map)).toBe(AuthType.USE_OPENAI);
   });
 
+  it('ignores inherited providerProtocol mappings', () => {
+    const map = Object.create({ idealab: 'openai' }) as ProviderProtocolConfig;
+    expect(resolveProviderProtocol('idealab', map)).toBeUndefined();
+  });
+
   it('lets an explicit mapping override an id that looks built-in', () => {
     // "openai" as a key, but the operator routes it to the gemini protocol.
     const map: ProviderProtocolConfig = { openai: 'gemini' };

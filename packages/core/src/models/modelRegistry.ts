@@ -56,7 +56,10 @@ export function resolveProviderProtocol(
   providerId: string,
   providerProtocol?: ProviderProtocolConfig,
 ): AuthType | undefined {
-  const explicit = providerProtocol?.[providerId];
+  const explicit =
+    providerProtocol && Object.hasOwn(providerProtocol, providerId)
+      ? providerProtocol[providerId]
+      : undefined;
   if (explicit !== undefined) {
     return validateAuthTypeKey(explicit);
   }
