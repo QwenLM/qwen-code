@@ -202,6 +202,7 @@ import {
   type ThinkingViewerData,
 } from './contexts/ThinkingViewerContext.js';
 import { ThinkingViewer } from './components/ThinkingViewer.js';
+import { TranscriptView } from './components/TranscriptView.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -485,6 +486,22 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
   const closeThinkingViewer = useCallback(() => {
     setThinkingViewerData(null);
+  }, []);
+
+  // Transcript full-detail screen (Ctrl+O). Freezes a snapshot of the
+  // conversation: committed history is stored as a length (sliced at render so
+  // we don't clone the whole array), while the streaming `pendingHistoryItems`
+  // are stored as a shallow copy (the pending region is transient and gets
+  // rewritten/cleared, so a copy is needed to pin that moment's shape).
+  const [transcriptFreeze, setTranscriptFreeze] = useState<{
+    historyLength: number;
+    pendingItems: HistoryItemWithoutId[];
+  } | null>(null);
+  const isTranscriptOpen = transcriptFreeze != null;
+  const isTranscriptOpenRef = useRef(isTranscriptOpen);
+  isTranscriptOpenRef.current = isTranscriptOpen;
+  const closeTranscript = useCallback(() => {
+    setTranscriptFreeze(null);
   }, []);
 
   // Alt+T inline expansion toggle for thinking blocks
@@ -954,6 +971,15 @@ export const AppContainer = (props: AppContainerProps) => {
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
   const refreshStatic = useCallback(() => {
+    // While the transcript (alt-screen) owns the whole screen, suppress static
+    // refreshes (e.g. resize-settle repaints) so they don't write into / reorder
+    // the normal-buffer scrollback that is currently hidden behind the alt
+    // screen. Mirrors ThinkingViewer's overlay model. On transcript close the
+    // AlternateScreen unmount restores the normal buffer; the next legitimate
+    // refreshStatic (model change, Alt+T, etc.) repaints as usual.
+    if (isTranscriptOpenRef.current) {
+      return;
+    }
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
     }
@@ -1988,6 +2014,13 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
+  const openTranscript = useCallback(() => {
+    setTranscriptFreeze({
+      historyLength: historyManager.history.length,
+      pendingItems: [...pendingHistoryItems],
+    });
+  }, [historyManager.history, pendingHistoryItems]);
+
   const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
     [historyManager.history, pendingHistoryItems],
@@ -2511,6 +2544,23 @@ export const AppContainer = (props: AppContainerProps) => {
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
+
+  // Anti-deadlock: the transcript takes over the whole screen via alt-screen,
+  // so any blocking confirmation/dialog (or a tool awaiting confirmation) would
+  // be invisible and unanswerable behind it. Auto-close the transcript whenever
+  // one appears so the user can see and respond. `dialogsVisible` already
+  // aggregates every blocking request surfaced by DialogManager
+  // (shellConfirmationRequest / loopDetectionConfirmationRequest /
+  // confirmationRequest / confirmUpdateExtensionRequests / providerUpdateRequest
+  // and friends); WaitingForConfirmation covers the inline tool-approval path.
+  const needsBlockingInput =
+    dialogsVisible || streamingState === StreamingState.WaitingForConfirmation;
+  useEffect(() => {
+    if (needsBlockingInput && isTranscriptOpenRef.current) {
+      closeTranscript();
+    }
+  }, [needsBlockingInput, closeTranscript]);
+
   const shouldShowStickyTodos =
     stickyTodos !== null &&
     !dialogsVisible &&
@@ -3112,6 +3162,24 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
+      // Transcript full-detail screen owns all input while open. This MUST be
+      // the first branch — earlier than QUIT(Ctrl+C) / EXIT(Ctrl+D) / ESCAPE
+      // (and its vim-INSERT guard) — so Ctrl+C/Esc close the transcript
+      // instead of triggering quit / being swallowed by vim. TranscriptView's
+      // own ScrollableList handles the scroll keys; we swallow everything else
+      // here so a single broadcast keypress isn't double-handled.
+      if (isTranscriptOpenRef.current) {
+        if (
+          keyMatchers[Command.ESCAPE](key) ||
+          key.name === 'q' ||
+          keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.TOGGLE_TRANSCRIPT](key)
+        ) {
+          closeTranscript();
+        }
+        return;
+      }
+
       // ThinkingViewer owns all input while open.
       // Ctrl+C / Ctrl+D close the viewer and fall through to quit/exit.
       if (thinkingViewerData) {
@@ -3126,6 +3194,13 @@ export const AppContainer = (props: AppContainerProps) => {
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
+        return;
+      }
+
+      // Ctrl+O: open the transcript full-detail screen. (Close while open is
+      // handled by the transcript guard at the very top of this handler.)
+      if (keyMatchers[Command.TOGGLE_TRANSCRIPT](key)) {
+        openTranscript();
         return;
       }
 
@@ -3377,6 +3452,8 @@ export const AppContainer = (props: AppContainerProps) => {
       thinkingViewerData,
       closeThinkingViewer,
       setThoughtExpanded,
+      openTranscript,
+      closeTranscript,
     ],
   );
 
@@ -3431,6 +3508,9 @@ export const AppContainer = (props: AppContainerProps) => {
     if (!isConfigInitialized) return;
     if (streamingState !== StreamingState.Idle) return;
     if (dialogsVisible) return;
+    // Don't silently auto-submit queued messages while the transcript is open
+    // (it isn't part of `dialogsVisible`). Resume draining once it closes.
+    if (isTranscriptOpenRef.current) return;
     if (messageQueue.length === 0) return;
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
@@ -3448,6 +3528,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isConfigInitialized,
     streamingState,
     dialogsVisible,
+    // Re-run the drain when the transcript closes so queued messages resume.
+    isTranscriptOpen,
     messageQueue,
     drainQueue,
     popNextSegment,
@@ -3932,7 +4014,25 @@ export const AppContainer = (props: AppContainerProps) => {
                 <TerminalOutputProvider value={writeRaw}>
                   <ThinkingViewerProvider value={thinkingViewerValue}>
                     <ShellFocusContext.Provider value={isFocused}>
-                      {thinkingViewerData ? (
+                      {transcriptFreeze ? (
+                        <TranscriptView
+                          items={[
+                            ...historyManager.history.slice(
+                              0,
+                              transcriptFreeze.historyLength,
+                            ),
+                            // Pending snapshot gets negative ids (mirrors
+                            // MainContent's `id: -(i+1)`) so keys never collide
+                            // with committed history items.
+                            ...transcriptFreeze.pendingItems.map((item, i) => ({
+                              ...item,
+                              id: -(i + 1),
+                            })),
+                          ]}
+                          onClose={closeTranscript}
+                          useAlternateScreen={!useTerminalBuffer}
+                        />
+                      ) : thinkingViewerData ? (
                         <ThinkingViewer
                           data={thinkingViewerData}
                           onClose={closeThinkingViewer}

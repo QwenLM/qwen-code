@@ -151,6 +151,12 @@ interface ToolGroupMessageProps {
    * generation is disabled, still in-flight, or failed.
    */
   compactLabel?: string;
+  /**
+   * Transcript full-detail mode (Ctrl+O). When true: never collapse to the
+   * partition summary (render each tool), force every tool's result block, and
+   * lift the per-tool terminal-height truncation. Default false.
+   */
+  fullDetail?: boolean;
 }
 
 // Main component maps the tools using ToolMessage
@@ -166,6 +172,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   memoryReadCount,
   isUserInitiated,
   compactLabel,
+  fullDetail = false,
 }) => {
   const config = useConfig();
 
@@ -349,6 +356,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   //     `MainContent.isForceExpandGroup` (no `isPending` gate either).
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const showCompact =
+    !fullDetail &&
     allComplete &&
     !hasConfirmingTool &&
     !hasSubagentPendingConfirmation &&
@@ -379,15 +387,19 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
   const countOneLineToolCalls =
     inlineToolCalls.length - countToolCallsWithResults;
-  const availableTerminalHeightPerToolMessage = availableTerminalHeight
-    ? Math.max(
-        Math.floor(
-          (availableTerminalHeight - staticHeight - countOneLineToolCalls) /
-            Math.max(1, countToolCallsWithResults),
-        ),
-        1,
-      )
-    : undefined;
+  // In transcript full-detail mode, lift the per-tool height truncation so
+  // each tool's output renders in full (combined with forceShowResult below).
+  const availableTerminalHeightPerToolMessage = fullDetail
+    ? undefined
+    : availableTerminalHeight
+      ? Math.max(
+          Math.floor(
+            (availableTerminalHeight - staticHeight - countOneLineToolCalls) /
+              Math.max(1, countToolCallsWithResults),
+          ),
+          1,
+        )
+      : undefined;
 
   return (
     <Box flexDirection="column" width={contentWidth} gap={0}>
@@ -447,6 +459,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
                 forceShowResult={
+                  fullDetail ||
                   isUserInitiated ||
                   tool.status === ToolCallStatus.Confirming ||
                   tool.status === ToolCallStatus.Error ||

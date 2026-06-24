@@ -466,6 +466,9 @@ export default {
   'Delete {{name}}': '删除 {{name}}',
   'Unknown Step': '未知步骤',
   'Esc to close': '按 Esc 关闭',
+  Transcript: '完整记录',
+  'to close': '关闭',
+  'to scroll': '滚动',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter 选择，↑↓ 导航，Esc 关闭',
   'Esc to go back': '按 Esc 返回',

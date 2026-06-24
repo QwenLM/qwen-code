@@ -79,6 +79,9 @@ export enum Command {
   // Thinking expansion
   TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
 
+  // Transcript full-detail screen (Ctrl+O)
+  TOGGLE_TRANSCRIPT = 'toggleTranscript',
+
   // Scroll commands
   SCROLL_UP = 'scrollUp',
   SCROLL_DOWN = 'scrollDown',
@@ -240,6 +243,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // Thinking expansion
   [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
+
+  // Transcript full-detail screen
+  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

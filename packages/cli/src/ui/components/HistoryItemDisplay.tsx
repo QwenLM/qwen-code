@@ -95,6 +95,13 @@ interface HistoryItemDisplayProps {
   thoughtExpanded?: boolean;
   /** Aggregated text from this thought + its continuation items. */
   thinkingFullText?: string;
+  /**
+   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * thinking blocks render expanded and tool groups render every tool with
+   * its result, untruncated. Default false (main view stays at the partition
+   * baseline).
+   */
+  fullDetail?: boolean;
 }
 
 /**
@@ -210,11 +217,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   sourceCopyIndexOffsets,
   thoughtExpanded,
   thinkingFullText,
+  fullDetail = false,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
   const contextThoughtExpanded = useThoughtExpanded();
-  const resolvedThoughtExpanded = thoughtExpanded ?? contextThoughtExpanded;
+  const resolvedThoughtExpanded =
+    fullDetail || (thoughtExpanded ?? contextThoughtExpanded);
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -354,6 +363,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
           compactLabel={compactLabel}
+          fullDetail={fullDetail}
         />
       )}
       {/*

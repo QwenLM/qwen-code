@@ -483,6 +483,9 @@ export default {
   'Delete {{name}}': 'Delete {{name}}',
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
+  Transcript: 'Transcript',
+  'to close': 'to close',
+  'to scroll': 'to scroll',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter to select, ↑↓ to navigate, Esc to close',
   'Esc to go back': 'Esc to go back',
