@@ -6853,9 +6853,19 @@ class QwenAgent implements Agent {
             const config = session.getConfig();
             const authType = config.getAuthType();
 
-            if (changed.has('modelProviders')) {
+            // Long-lived ACP sessions never restart, so honor providerProtocol
+            // changes here too (its requiresRestart only gates the TUI path) and
+            // always pass the current map so a modelProviders-only reload doesn't
+            // re-register against a stale protocol mapping.
+            if (
+              changed.has('modelProviders') ||
+              changed.has('providerProtocol')
+            ) {
               try {
-                config.reloadModelProvidersConfig(newMerged.modelProviders);
+                config.reloadModelProvidersConfig(
+                  newMerged.modelProviders,
+                  newMerged.providerProtocol,
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,

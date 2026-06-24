@@ -12,6 +12,7 @@ import type {
   AuthType,
   ChatCompressionSettings,
   ModelProvidersConfig,
+  ProviderProtocolConfig,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -299,7 +300,20 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {} as ModelProvidersConfig,
     description:
-      'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
+      'Model providers configuration keyed by provider id (a built-in AuthType such as "openai" or "gemini", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.REPLACE,
+  },
+
+  // Maps a custom modelProviders provider id to its SDK protocol (AuthType).
+  providerProtocol: {
+    type: 'object',
+    label: 'Provider Protocols',
+    category: 'Model',
+    requiresRestart: true,
+    default: {} as ProviderProtocolConfig,
+    description:
+      'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },

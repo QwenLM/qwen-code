@@ -190,6 +190,7 @@ const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 import {
   ModelsConfig,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type AvailableModel,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
@@ -924,8 +925,10 @@ export interface ConfigParameters {
    * watches it to process messages as if the user typed them.
    */
   inputFile?: string;
-  /** Model providers configuration grouped by authType */
+  /** Model providers configuration grouped by provider id */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Maps custom provider ids to their SDK protocol (AuthType) */
+  providerProtocolConfig?: ProviderProtocolConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -1183,6 +1186,7 @@ export class Config {
 
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
+  private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -1512,6 +1516,7 @@ export class Config {
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
+    this.providerProtocolConfig = params.providerProtocolConfig;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -1576,6 +1581,7 @@ export class Config {
     this.modelsConfig = new ModelsConfig({
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
+      providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
@@ -2294,11 +2300,17 @@ export class Config {
    * Should be called before refreshAuth when settings.json has been updated.
    *
    * @param modelProvidersConfig - The updated model providers configuration
+   * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
+   *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    this.modelsConfig.reloadModelProvidersConfig(modelProvidersConfig);
+    this.modelsConfig.reloadModelProvidersConfig(
+      modelProvidersConfig,
+      providerProtocolConfig,
+    );
   }
 
   /**

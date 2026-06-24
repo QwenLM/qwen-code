@@ -2655,4 +2655,35 @@ describe('ModelsConfig', () => {
       );
     });
   });
+
+  describe('providerProtocolConfig wiring', () => {
+    it('threads providerProtocolConfig into the registry so custom ids resolve', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+        providerProtocolConfig: { idealab: 'openai' },
+      });
+
+      // A wire-name typo anywhere in the options->registry chain would make this
+      // empty, so this guards the end-to-end plumbing the unit registry tests miss.
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
+          .map((m) => m.id),
+      ).toContain('qwen3.7-max');
+    });
+
+    it('skips a custom id when no providerProtocolConfig is supplied', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+      });
+
+      expect(
+        modelsConfig.getAvailableModelsForAuthType(AuthType.USE_OPENAI),
+      ).toEqual([]);
+    });
+  });
 });

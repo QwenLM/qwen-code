@@ -17,6 +17,7 @@ import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 import { ModelRegistry } from './modelRegistry.js';
 import {
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type ResolvedModelConfig,
   type AvailableModel,
   type ModelSwitchMetadata,
@@ -51,6 +52,8 @@ export interface ModelsConfigOptions {
   initialAuthType?: AuthType;
   /** Model providers configuration */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Maps custom provider ids to their SDK protocol (AuthType). */
+  providerProtocolConfig?: ProviderProtocolConfig;
   /** Generation config from CLI/settings */
   generationConfig?: Partial<ContentGeneratorConfig>;
   /** Source tracking for generation config */
@@ -144,7 +147,10 @@ export class ModelsConfig {
   }
 
   constructor(options: ModelsConfigOptions = {}) {
-    this.modelRegistry = new ModelRegistry(options.modelProvidersConfig);
+    this.modelRegistry = new ModelRegistry(
+      options.modelProvidersConfig,
+      options.providerProtocolConfig,
+    );
     this.onModelChange = options.onModelChange;
 
     // Initialize generation config
@@ -1368,10 +1374,16 @@ export class ModelsConfig {
    * This enables hot-reloading of modelProviders settings without restarting the CLI.
    *
    * @param modelProvidersConfig - The updated model providers configuration
+   * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
+   *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    this.modelRegistry.reloadModels(modelProvidersConfig);
+    this.modelRegistry.reloadModels(
+      modelProvidersConfig,
+      providerProtocolConfig,
+    );
   }
 }

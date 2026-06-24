@@ -10,8 +10,11 @@ import {
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
   resolveModelConfig,
+  resolveProviderProtocol,
   type ModelConfigSourcesInput,
+  type ModelProvidersConfig,
   type ProviderModelConfig,
+  type ProviderProtocolConfig,
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
@@ -28,6 +31,66 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
   [AuthType.QWEN_OAUTH]: [],
 };
+
+/**
+ * Collect every modelProviders entry whose provider id resolves (via
+ * providerProtocol) to the given protocol, in declaration order. Mirrors
+ * {@link ModelRegistry}: a built-in key resolves to itself, a custom id resolves
+ * through providerProtocol. Lets credential/metadata lookups find a custom
+ * provider's models under their resolved protocol instead of only the protocol
+ * key. For built-in-only configs this equals `modelProviders[protocol]`.
+ */
+export function collectProviderModelsForProtocol(
+  modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
+  protocol: string,
+): ProviderModelConfig[] {
+  if (!modelProviders) {
+    return [];
+  }
+  const out: ProviderModelConfig[] = [];
+  for (const [providerId, models] of Object.entries(modelProviders)) {
+    if (!Array.isArray(models)) {
+      continue;
+    }
+    if (resolveProviderProtocol(providerId, providerProtocol) === protocol) {
+      out.push(...models);
+    }
+  }
+  return out;
+}
+
+/**
+ * Build user-visible warnings for modelProviders entries that carry models but
+ * are dropped at registration: an unknown provider id with no providerProtocol
+ * mapping, or a mapping to an unknown protocol. Without this the models silently
+ * vanish from selection (the registry only logs at debug level).
+ */
+function buildSkippedProviderWarnings(
+  modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
+): string[] {
+  if (!modelProviders) {
+    return [];
+  }
+  const warnings: string[] = [];
+  const known = Object.values(AuthType).join(', ');
+  for (const [providerId, models] of Object.entries(modelProviders)) {
+    if (!Array.isArray(models) || models.length === 0) {
+      continue;
+    }
+    if (resolveProviderProtocol(providerId, providerProtocol) !== undefined) {
+      continue;
+    }
+    const mapped = providerProtocol?.[providerId];
+    warnings.push(
+      mapped !== undefined
+        ? `Warning: providerProtocol["${providerId}"] = "${mapped}" is not a known protocol (expected one of: ${known}); its ${models.length} model(s) are ignored.`
+        : `Warning: modelProviders provider "${providerId}" is not a built-in protocol (${known}) and has no providerProtocol mapping; its ${models.length} model(s) are ignored. Add providerProtocol["${providerId}"] (e.g. "openai") to enable them.`,
+    );
+  }
+  return warnings;
+}
 
 function getIgnoredTopLevelGenerationConfigFields(
   settingsGenerationConfig: Partial<ContentGeneratorConfig> | undefined,
@@ -185,8 +248,15 @@ export function resolveCliGenerationConfig(
   let modelProvider: ProviderModelConfig | undefined;
   let disambiguationWarning: string | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
-    const providers = settings.modelProviders[authType];
-    if (providers && Array.isArray(providers)) {
+    // Merge across all provider ids that route to this protocol (built-in key
+    // or custom id via providerProtocol), so a custom provider's envKey/metadata
+    // is honored, not just entries stored under the protocol key itself.
+    const providers = collectProviderModelsForProtocol(
+      settings.modelProviders,
+      settings.providerProtocol,
+      authType,
+    );
+    if (providers.length > 0) {
       // When multiple providers share the same id, disambiguate by the
       // persisted settings.model.baseUrl (written by the model picker). This
       // only applies when the model itself came from settings.model.name.
@@ -317,6 +387,10 @@ export function resolveCliGenerationConfig(
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]
         : []),
+      ...buildSkippedProviderWarnings(
+        settings.modelProviders,
+        settings.providerProtocol,
+      ),
     ],
   };
 }

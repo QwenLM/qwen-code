@@ -9,9 +9,10 @@ import {
   ModelRegistry,
   QWEN_OAUTH_MODELS,
   modelRegistryKey,
+  resolveProviderProtocol,
 } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig } from './types.js';
+import type { ModelProvidersConfig, ProviderProtocolConfig } from './types.js';
 
 describe('ModelRegistry', () => {
   describe('initialization', () => {
@@ -991,5 +992,223 @@ describe('malformed modelProviders tolerance', () => {
 
     // Must not throw "models is not iterable"; the malformed entry is skipped.
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('skips a non-array value for a custom-mapped provider id without throwing', () => {
+    const registry = new ModelRegistry(
+      {
+        idealab: { protocol: 'openai', models: [{ id: 'qwen3.7-max' }] },
+      } as unknown as ModelProvidersConfig,
+      { idealab: 'openai' },
+    );
+
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+});
+
+describe('resolveProviderProtocol', () => {
+  it('returns the built-in protocol when the provider id is itself one', () => {
+    expect(resolveProviderProtocol('openai')).toBe(AuthType.USE_OPENAI);
+    expect(resolveProviderProtocol('gemini')).toBe(AuthType.USE_GEMINI);
+    expect(resolveProviderProtocol('anthropic')).toBe(AuthType.USE_ANTHROPIC);
+  });
+
+  it('honors an explicit providerProtocol mapping for a custom id', () => {
+    const map: ProviderProtocolConfig = { idealab: 'openai' };
+    expect(resolveProviderProtocol('idealab', map)).toBe(AuthType.USE_OPENAI);
+  });
+
+  it('lets an explicit mapping override an id that looks built-in', () => {
+    // "openai" as a key, but the operator routes it to the gemini protocol.
+    const map: ProviderProtocolConfig = { openai: 'gemini' };
+    expect(resolveProviderProtocol('openai', map)).toBe(AuthType.USE_GEMINI);
+  });
+
+  it('returns undefined for an unknown id with no mapping (typo guard)', () => {
+    expect(resolveProviderProtocol('idealab')).toBeUndefined();
+    expect(resolveProviderProtocol('typo-key', { other: 'openai' })).toBe(
+      undefined,
+    );
+  });
+
+  it('ignores an explicit mapping to an unknown protocol', () => {
+    const map: ProviderProtocolConfig = { idealab: 'not-a-protocol' };
+    expect(resolveProviderProtocol('idealab', map)).toBeUndefined();
+  });
+});
+
+describe('providerProtocol mapping (custom provider ids)', () => {
+  it('registers a custom provider under its mapped protocol', () => {
+    const registry = new ModelRegistry(
+      {
+        idealab: [{ id: 'qwen3.7-max', baseUrl: 'https://idealab.example/v1' }],
+      } as unknown as ModelProvidersConfig,
+      { idealab: 'openai' },
+    );
+
+    const openai = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(openai.map((m) => m.id)).toEqual(['qwen3.7-max']);
+    // The model is reachable via the resolved protocol + baseUrl.
+    expect(
+      registry.getModel(
+        AuthType.USE_OPENAI,
+        'qwen3.7-max',
+        'https://idealab.example/v1',
+      ),
+    ).toBeDefined();
+  });
+
+  it('merges a built-in provider and a custom provider sharing one protocol', () => {
+    const registry = new ModelRegistry(
+      {
+        openai: [{ id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' }],
+        idealab: [{ id: 'qwen3.7-max', baseUrl: 'https://idealab.example/v1' }],
+      } as unknown as ModelProvidersConfig,
+      { idealab: 'openai' },
+    );
+
+    const ids = registry
+      .getModelsForAuthType(AuthType.USE_OPENAI)
+      .map((m) => m.id)
+      .sort();
+    expect(ids).toEqual(['gpt-4o', 'qwen3.7-max']);
+  });
+
+  it('still skips a custom provider id with no mapping (backward compatible)', () => {
+    const registry = new ModelRegistry({
+      openai: [{ id: 'gpt-4o' }],
+      idealab: [{ id: 'qwen3.7-max' }],
+    } as unknown as ModelProvidersConfig);
+
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_OPENAI).map((m) => m.id),
+    ).toEqual(['gpt-4o']);
+    // idealab had no providerProtocol entry, so its models are not registered.
+    expect(
+      registry.getModel(AuthType.USE_OPENAI, 'qwen3.7-max'),
+    ).toBeUndefined();
+  });
+
+  it('routes a custom provider to a non-openai protocol when mapped', () => {
+    const registry = new ModelRegistry(
+      {
+        'my-vertex': [{ id: 'gemini-2.5-pro' }],
+      } as unknown as ModelProvidersConfig,
+      { 'my-vertex': 'gemini' },
+    );
+
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_GEMINI).map((m) => m.id),
+    ).toEqual(['gemini-2.5-pro']);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('persists the mapping across reloadModels when none is supplied', () => {
+    const registry = new ModelRegistry(
+      { idealab: [{ id: 'qwen3.7-max' }] } as unknown as ModelProvidersConfig,
+      { idealab: 'openai' },
+    );
+
+    // Hot reload carrying only modelProviders (the existing reload callers).
+    registry.reloadModels({
+      idealab: [{ id: 'qwen3.7-max' }, { id: 'qwen3.7-coder' }],
+    } as unknown as ModelProvidersConfig);
+
+    expect(
+      registry
+        .getModelsForAuthType(AuthType.USE_OPENAI)
+        .map((m) => m.id)
+        .sort(),
+    ).toEqual(['qwen3.7-coder', 'qwen3.7-max']);
+  });
+
+  it('updates the mapping when reloadModels supplies a new one', () => {
+    const registry = new ModelRegistry(
+      { idealab: [{ id: 'qwen3.7-max' }] } as unknown as ModelProvidersConfig,
+      { idealab: 'openai' },
+    );
+
+    registry.reloadModels(
+      { idealab: [{ id: 'qwen3.7-max' }] } as unknown as ModelProvidersConfig,
+      { idealab: 'gemini' },
+    );
+
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_GEMINI).map((m) => m.id),
+    ).toEqual(['qwen3.7-max']);
+  });
+
+  it('clears the protocol bucket when a previously-mapped provider is dropped', () => {
+    const registry = new ModelRegistry(
+      { idealab: [{ id: 'qwen3.7-max' }] } as unknown as ModelProvidersConfig,
+      { idealab: 'openai' },
+    );
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toHaveLength(1);
+
+    // Reload with idealab entirely absent; the openai bucket must empty out.
+    registry.reloadModels({} as ModelProvidersConfig);
+
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('passing an empty providerProtocol to reloadModels REPLACES (clears) the map', () => {
+    const registry = new ModelRegistry(
+      { idealab: [{ id: 'qwen3.7-max' }] } as unknown as ModelProvidersConfig,
+      { idealab: 'openai' },
+    );
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toHaveLength(1);
+
+    // `{}` is a value, not "no argument": it replaces the map, so idealab no
+    // longer resolves and its models are dropped (documented footgun guard).
+    registry.reloadModels(
+      { idealab: [{ id: 'qwen3.7-max' }] } as unknown as ModelProvidersConfig,
+      {},
+    );
+
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('silently ignores a custom provider explicitly mapped to qwen-oauth', () => {
+    const registry = new ModelRegistry(
+      {
+        'my-alias': [{ id: 'secret-model' }],
+      } as unknown as ModelProvidersConfig,
+      { 'my-alias': 'qwen-oauth' },
+    );
+
+    // Hard-coded QWEN_OAUTH bucket untouched; the aliased model is not added.
+    expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH)).toHaveLength(
+      QWEN_OAUTH_MODELS.length,
+    );
+    expect(
+      registry.getModel(AuthType.QWEN_OAUTH, 'secret-model'),
+    ).toBeUndefined();
+  });
+
+  it('first-wins when two custom providers contribute the same id+baseUrl to one protocol', () => {
+    const registry = new ModelRegistry(
+      {
+        providerA: [
+          {
+            id: 'shared',
+            name: 'From A',
+            baseUrl: 'https://api.example.com/v1',
+          },
+        ],
+        providerB: [
+          {
+            id: 'shared',
+            name: 'From B',
+            baseUrl: 'https://api.example.com/v1',
+          },
+        ],
+      } as unknown as ModelProvidersConfig,
+      { providerA: 'openai', providerB: 'openai' },
+    );
+
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models).toHaveLength(1);
+    expect(models[0].label).toBe('From A');
   });
 });

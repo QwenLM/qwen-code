@@ -415,6 +415,71 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('finds a custom-id provider via providerProtocol (honors its envKey/metadata)', () => {
+      const argv = { model: 'qwen3.7-max' };
+      const modelProvider: ProviderModelConfig = {
+        id: 'qwen3.7-max',
+        name: 'Idealab Max',
+        envKey: 'IDEALAB_KEY',
+        generationConfig: { samplingParams: { temperature: 0.5 } },
+      };
+      // Stored under the custom key `idealab`, NOT under `openai`.
+      const settings = makeMockSettings({
+        modelProviders: {
+          idealab: [modelProvider],
+        } as unknown as Settings['modelProviders'],
+        providerProtocol: {
+          idealab: 'openai',
+        } as unknown as Settings['providerProtocol'],
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'qwen3.7-max', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv,
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      // Without the reverse lookup, modelProviders['openai'] is empty and the
+      // custom provider's envKey would be lost.
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({ modelProvider }),
+      );
+    });
+
+    it('warns when a provider id has models but no resolvable protocol', () => {
+      const settings = makeMockSettings({
+        model: { name: 'some-model' },
+        modelProviders: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as Settings['modelProviders'],
+        // No providerProtocol entry for `idealab`.
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'some-model', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(
+        result.warnings.some(
+          (w) => w.includes('idealab') && w.includes('providerProtocol'),
+        ),
+      ).toBe(true);
+    });
+
     it('should find modelProvider from settings.model.name when argv.model is not provided', () => {
       const argv = {};
       const modelProvider: ProviderModelConfig = {
