@@ -3119,13 +3119,11 @@ describe('ContentGenerationPipeline', () => {
           /* drain */
         }
       })();
-      const expectation = expect(consume).rejects.toMatchObject({
-        code: 'ETIMEDOUT',
-      });
+      const captured = consume.catch((e: unknown) => e);
       expect(sdkSignal).toBeInstanceOf(AbortSignal);
       expect(sdkSignal?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1000);
-      await expectation;
+      expect(await captured).toMatchObject({ code: 'ETIMEDOUT' });
       expect(sdkSignal?.aborted).toBe(true);
     });
 
@@ -3144,11 +3142,9 @@ describe('ContentGenerationPipeline', () => {
       const consume = (async () => {
         for await (const r of gen) results.push(r);
       })();
-      const expectation = expect(consume).rejects.toMatchObject({
-        code: 'ETIMEDOUT',
-      });
+      const captured = consume.catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(1000);
-      await expectation;
+      expect(await captured).toMatchObject({ code: 'ETIMEDOUT' });
       expect(results).toHaveLength(1);
     });
 
