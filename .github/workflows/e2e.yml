@@ -1,11 +1,14 @@
 name: 'E2E Tests'
 
 on:
+  # E2E runs post-merge on `main` (per-commit signal) only. It is intentionally
+  # NOT in the merge queue yet: it is slow and currently flaky, so gating the
+  # serial queue on it would stall every merge. Promote it to `merge_group` +
+  # required once it is reliable.
   push:
     branches:
       - 'main'
       - 'feat/e2e/**'
-  merge_group:
 
 concurrency:
   # Key on the head ref so a `push` to a `feat/e2e/**` branch and a
@@ -13,11 +16,10 @@ concurrency:
   # other instead of running the matrix twice for the same change.
   group: |-
     ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  # Cancel superseded PR / feature-branch runs, but let every `main`
-  # commit finish (complete per-commit e2e signal, matching ci.yml) and
-  # never cancel merge-queue runs.
+  # Cancel superseded feature-branch runs, but let every `main` commit finish
+  # (complete per-commit e2e signal, matching ci.yml).
   cancel-in-progress: |-
-    ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
+    ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' }}
 
 jobs:
   e2e-test-linux:
