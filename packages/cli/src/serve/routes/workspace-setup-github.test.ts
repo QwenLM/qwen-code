@@ -244,10 +244,11 @@ describe('POST /workspace/setup-github', () => {
     setupGithubMocks.setupGithub.mockImplementationOnce(
       async (opts: {
         fileOps: {
+          assertCanWrite?(): void;
           ensureWorkflowDirectory(gitRepoRoot: string): Promise<void>;
         };
       }) => {
-        await opts.fileOps.ensureWorkflowDirectory(h.workspace);
+        opts.fileOps.assertCanWrite?.();
         return setupResult();
       },
     );
@@ -476,7 +477,7 @@ describe('POST /workspace/setup-github', () => {
           sourcePath: 'qwen-assistant/qwen-invoke.yml',
           path: '.github/workflows/qwen-invoke.yml',
           status: 'failed',
-          error: 'disk full',
+          error: `ENOSPC: open ${h.workspace}/.github/workflows/qwen-invoke.yml`,
         },
       ],
     };
@@ -501,6 +502,8 @@ describe('POST /workspace/setup-github', () => {
     expect(res.body.result.workflows[1]).toMatchObject({
       path: '.github/workflows/qwen-invoke.yml',
       status: 'failed',
+      error: 'ENOSPC: open <workspace>/.github/workflows/qwen-invoke.yml',
     });
+    expect(res.body.result.workflows[1].error).not.toContain(h.workspace);
   });
 });

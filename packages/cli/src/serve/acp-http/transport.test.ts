@@ -2085,7 +2085,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           sourcePath: 'qwen-invoke.yml',
           path: '.github/workflows/qwen-invoke.yml',
           status: 'failed',
-          error: 'disk full',
+          error: 'ENOSPC: open /ws/.github/workflows/qwen-invoke.yml',
         },
       ],
       gitignore: { path: '.gitignore', status: 'created' },
@@ -2115,6 +2115,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: number;
       error?: { code: number; data?: unknown };
     }>;
+    const sanitizedPartial = {
+      ...partial,
+      workflows: [
+        {
+          ...partial.workflows[0],
+          error: 'ENOSPC: open <workspace>/.github/workflows/qwen-invoke.yml',
+        },
+      ],
+    };
 
     expect(frames[0]).toMatchObject({
       id: 222,
@@ -2123,7 +2132,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         data: {
           errorKind: 'github_workflow_write_failed',
           partial: true,
-          result: partial,
+          result: sanitizedPartial,
         },
       },
     });

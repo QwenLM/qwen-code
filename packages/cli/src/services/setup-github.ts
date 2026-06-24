@@ -28,6 +28,7 @@ export const GITHUB_WORKFLOW_PATHS = [
 ];
 
 const GITIGNORE_ENTRIES = ['.qwen/', 'gha-creds-*.json'];
+export const MAX_WORKFLOW_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 
 export type GithubSetupGitignoreStatus =
   | 'created'
@@ -41,6 +42,7 @@ export interface GithubSetupWriteMetadata {
 }
 
 export interface SetupGithubFileOps {
+  assertCanWrite?(): void;
   ensureWorkflowDirectory(gitRepoRoot: string): Promise<void>;
   writeTextFile(
     gitRepoRoot: string,
@@ -112,6 +114,8 @@ export class SetupGithubError extends Error {
 }
 
 const nodeFileOps: SetupGithubFileOps = {
+  assertCanWrite(): void {},
+
   async ensureWorkflowDirectory(gitRepoRoot: string): Promise<void> {
     await fsp.mkdir(path.join(gitRepoRoot, '.github', 'workflows'), {
       recursive: true,
@@ -182,6 +186,8 @@ export async function setupGithub(
       );
     }
   }
+
+  fileOps.assertCanWrite?.();
 
   let releaseTag: string;
   try {
@@ -354,7 +360,10 @@ async function downloadWorkflows(options: {
             `Invalid response code downloading ${endpoint}: ${response.status} - ${response.statusText}`,
           );
         }
-        return { sourcePath: workflow, content: await response.text() };
+        return {
+          sourcePath: workflow,
+          content: await readResponseTextWithLimit(response, workflow),
+        };
       }),
     );
   } catch (error) {
@@ -367,6 +376,55 @@ async function downloadWorkflows(options: {
       502,
     );
   }
+}
+
+async function readResponseTextWithLimit(
+  response: Response,
+  sourcePath: string,
+): Promise<string> {
+  const contentLength = response.headers.get('content-length');
+  if (contentLength !== null) {
+    const parsedLength = Number(contentLength);
+    if (
+      Number.isFinite(parsedLength) &&
+      parsedLength > MAX_WORKFLOW_DOWNLOAD_BYTES
+    ) {
+      throw new Error(
+        `${sourcePath} exceeds download limit of ${MAX_WORKFLOW_DOWNLOAD_BYTES} bytes`,
+      );
+    }
+  }
+
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_WORKFLOW_DOWNLOAD_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error(
+          `${sourcePath} exceeds download limit of ${MAX_WORKFLOW_DOWNLOAD_BYTES} bytes`,
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
 }
 
 async function resolveSecretsUrl(cwd: string): Promise<string | undefined> {

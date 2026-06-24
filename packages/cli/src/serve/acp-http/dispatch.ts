@@ -49,6 +49,7 @@ import {
   createSetupGithubFileOps,
   resolveSetupGithubProxy,
   sanitizeSetupGithubMessage,
+  sanitizeSetupGithubResult,
   setupGithubEventData,
 } from '../routes/workspace-setup-github.js';
 import {
@@ -1591,7 +1592,15 @@ export class AcpDispatcher {
                   {
                     errorKind: err.code,
                     ...(err.partial
-                      ? { partial: true, result: err.partialResult }
+                      ? {
+                          partial: true,
+                          result: err.partialResult
+                            ? sanitizeSetupGithubResult(
+                                err.partialResult,
+                                this.boundWorkspace,
+                              )
+                            : null,
+                        }
                       : {}),
                   },
                 ),

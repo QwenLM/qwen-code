@@ -132,7 +132,7 @@ export function createSetupGithubFileOps(
     ...(originatorClientId ? { originatorClientId } : {}),
   });
   return {
-    async ensureWorkflowDirectory(gitRepoRoot: string): Promise<void> {
+    assertCanWrite(): void {
       try {
         factory.assertCanWrite();
       } catch (error) {
@@ -144,6 +144,8 @@ export function createSetupGithubFileOps(
           403,
         );
       }
+    },
+    async ensureWorkflowDirectory(gitRepoRoot: string): Promise<void> {
       await ensureDirectoryWithoutSymlink(gitRepoRoot, [
         '.github',
         'workflows',
@@ -260,6 +262,34 @@ export function sanitizeSetupGithubMessage(
   return message.split(boundWorkspace).join('<workspace>');
 }
 
+export function sanitizeSetupGithubResult(
+  result: SetupGithubResult,
+  boundWorkspace: string,
+): SetupGithubResult {
+  return {
+    ...result,
+    workflows: result.workflows.map((workflow) => ({
+      ...workflow,
+      ...(workflow.error
+        ? {
+            error: sanitizeSetupGithubMessage(workflow.error, boundWorkspace),
+          }
+        : {}),
+    })),
+    gitignore: {
+      ...result.gitignore,
+      ...(result.gitignore.error
+        ? {
+            error: sanitizeSetupGithubMessage(
+              result.gitignore.error,
+              boundWorkspace,
+            ),
+          }
+        : {}),
+    },
+  };
+}
+
 function sendSetupGithubError(
   res: Response,
   error: unknown,
@@ -272,7 +302,12 @@ function sendSetupGithubError(
       code: error.code,
       status: error.status,
       ...(error.partial
-        ? { partial: true, result: error.partialResult ?? null }
+        ? {
+            partial: true,
+            result: error.partialResult
+              ? sanitizeSetupGithubResult(error.partialResult, boundWorkspace)
+              : null,
+          }
         : {}),
     });
     return;

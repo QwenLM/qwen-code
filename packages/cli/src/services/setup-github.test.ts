@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as gitUtils from '../utils/gitUtils.js';
 import {
   GITHUB_WORKFLOW_PATHS,
+  MAX_WORKFLOW_DOWNLOAD_BYTES,
   SetupGithubError,
   setupGithub,
   updateGitignore,
@@ -129,6 +130,38 @@ describe('setupGithub service', () => {
     );
   });
 
+  it('checks write permission before release lookup and downloads', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const fileOps: SetupGithubFileOps = {
+      assertCanWrite: vi.fn(() => {
+        throw new SetupGithubError(
+          'github_setup_untrusted_workspace',
+          'workspace is not trusted',
+          403,
+        );
+      }),
+      ensureWorkflowDirectory: vi.fn(async () => {}),
+      writeTextFile: vi.fn(async () => ({ sizeBytes: 1 })),
+      readTextFile: vi.fn(async () => undefined),
+    };
+
+    await expect(
+      setupGithub({
+        cwd: scratchDir,
+        workspaceRoot: scratchDir,
+        fetchImpl,
+        fileOps,
+      }),
+    ).rejects.toMatchObject({
+      code: 'github_setup_untrusted_workspace',
+      status: 403,
+    });
+
+    expect(fileOps.assertCanWrite).toHaveBeenCalled();
+    expect(gitUtils.getLatestGitHubRelease).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('does not write when workflow download fails', async () => {
     const fetchImpl = vi
       .fn()
@@ -136,6 +169,42 @@ describe('setupGithub service', () => {
       .mockResolvedValueOnce(
         new Response('missing', { status: 404, statusText: 'Not Found' }),
       ) as unknown as typeof fetch;
+
+    await expect(
+      setupGithub({ cwd: scratchDir, workspaceRoot: scratchDir, fetchImpl }),
+    ).rejects.toMatchObject({
+      code: 'github_workflow_download_failed',
+      status: 502,
+    });
+    await expect(
+      fsp.access(path.join(scratchDir, '.github')),
+    ).rejects.toBeDefined();
+  });
+
+  it('rejects oversized workflow downloads before writing', async () => {
+    const oversizedChunk = new Uint8Array(MAX_WORKFLOW_DOWNLOAD_BYTES + 1);
+    let callCount = 0;
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        callCount += 1;
+        if (callCount === 1) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(oversizedChunk);
+                controller.close();
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      },
+    ) as unknown as typeof fetch;
 
     await expect(
       setupGithub({ cwd: scratchDir, workspaceRoot: scratchDir, fetchImpl }),
