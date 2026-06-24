@@ -299,6 +299,16 @@ describe('telemetry/config helpers', () => {
       await expect(
         resolveTelemetrySettings({
           env: {
+            QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '   ',
+          },
+        }),
+      ).rejects.toThrow(
+        /QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH.*got ' {3}'/,
+      );
+
+      await expect(
+        resolveTelemetrySettings({
+          env: {
             QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 'abc',
           },
         }),

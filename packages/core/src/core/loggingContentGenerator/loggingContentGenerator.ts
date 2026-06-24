@@ -947,7 +947,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
   private extractResponseText(
     response: GenerateContentResponse | undefined,
-    maxLength?: number,
+    maxLength: number,
   ): string | undefined {
     const parts = response?.candidates?.[0]?.content?.parts;
     if (!parts?.length) {
@@ -957,18 +957,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     let text = '';
     let hasText = false;
     let truncated = false;
-    const maxPrefixLength =
-      maxLength === undefined
-        ? undefined
-        : Math.max(0, maxLength - RESPONSE_TEXT_TRUNCATION_SUFFIX.length);
+    const maxPrefixLength = Math.max(
+      0,
+      maxLength - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
+    );
     const appendText = (partText: string) => {
       hasText = true;
       if (truncated) {
-        return;
-      }
-
-      if (maxPrefixLength === undefined) {
-        text += partText;
         return;
       }
 

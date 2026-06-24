@@ -117,7 +117,9 @@ describe('detailed-span-attributes', () => {
       const result = truncateContent(largeContent);
 
       expect(result.truncated).toBe(true);
-      expect(result.content.startsWith('a'.repeat(1024 * 1024))).toBe(true);
+      expect(result.content.length).toBe(
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      );
       expect(result.content).toContain(
         'configured limit of 1048576 characters',
       );
@@ -127,9 +129,7 @@ describe('detailed-span-attributes', () => {
       const result = truncateContent('abc', 3, 6);
 
       expect(result.truncated).toBe(true);
-      expect(result.content).toBe(
-        'abc\n\n[TRUNCATED - Content exceeds configured limit of 3 characters]',
-      );
+      expect(result.content).toBe('abc');
     });
 
     it('throws when originalLength is shorter than the provided content', () => {
@@ -137,11 +137,17 @@ describe('detailed-span-attributes', () => {
     });
 
     it('truncates content over limit', () => {
+      const result = truncateContent('x'.repeat(200), 100);
+      expect(result.truncated).toBe(true);
+      expect(result.content.length).toBe(100);
+      expect(result.content).toContain('[TRUNCATED');
+      expect(result.content).toContain('configured limit of 100 characters');
+    });
+
+    it('keeps truncated content within small configured limits', () => {
       const result = truncateContent('x'.repeat(100), 50);
       expect(result.truncated).toBe(true);
-      expect(result.content.startsWith('x'.repeat(50))).toBe(true);
-      expect(result.content).toContain('[TRUNCATED');
-      expect(result.content).toContain('configured limit of 50 characters');
+      expect(result.content).toBe('x'.repeat(50));
     });
 
     it('does not truncate content exactly at the limit', () => {
@@ -174,7 +180,9 @@ describe('detailed-span-attributes', () => {
         DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
       );
       expect(result.truncated).toBe(true);
-      expect(result.content.startsWith('a'.repeat(1024 * 1024))).toBe(true);
+      expect(result.content.length).toBe(
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      );
       expect(result.content).toContain('[TRUNCATED');
     });
   });
@@ -242,24 +250,18 @@ describe('detailed-span-attributes', () => {
 
     const userSpan = createMockSpan();
     addUserPromptAttributes(config, userSpan, 'abcdef');
-    expect(userSpan.attrs['new_context']).toEqual(
-      expect.stringContaining('[USER PROMPT]\nabc\n\n[TRUNCATED'),
-    );
+    expect(userSpan.attrs['new_context']).toBe('[USER PROMPT]\nabc');
     expect(userSpan.attrs['new_context_truncated']).toBe(true);
 
     const systemSpan = createMockSpan();
     addSystemPromptAttributes(config, systemSpan, 'abcdef');
-    expect(systemSpan.attrs['system_prompt']).toEqual(
-      expect.stringContaining('abc\n\n[TRUNCATED'),
-    );
+    expect(systemSpan.attrs['system_prompt']).toBe('abc');
     expect(systemSpan.attrs['system_prompt_truncated']).toBe(true);
 
     const toolSchemaSpan = createMockSpan();
     const toolDeclaration = { name: 'Read', description: 'abcdef' };
     addToolSchemaAttributes(config, toolSchemaSpan, [toolDeclaration]);
-    expect(toolSchemaSpan.events[0]!.attributes['tool_definition']).toEqual(
-      expect.stringContaining('[TRUNCATED'),
-    );
+    expect(toolSchemaSpan.events[0]!.attributes['tool_definition']).toBe('{"n');
     expect(
       toolSchemaSpan.events[0]!.attributes['tool_definition_truncated'],
     ).toBe(true);
@@ -269,23 +271,19 @@ describe('detailed-span-attributes', () => {
 
     const modelSpan = createMockSpan();
     addModelOutputAttributes(config, modelSpan, 'abcdef');
-    expect(modelSpan.attrs['response.model_output']).toEqual(
-      expect.stringContaining('abc\n\n[TRUNCATED'),
-    );
+    expect(modelSpan.attrs['response.model_output']).toBe('abc');
     expect(modelSpan.attrs['response.model_output_truncated']).toBe(true);
 
     const toolInputSpan = createMockSpan();
     addToolInputAttributes(config, toolInputSpan, 'Bash', 'abcdef');
-    expect(toolInputSpan.attrs['tool_input']).toEqual(
-      expect.stringContaining('[TOOL INPUT: Bash]\nabc\n\n[TRUNCATED'),
-    );
+    expect(toolInputSpan.attrs['tool_input']).toBe('[TOOL INPUT: Bash]\nabc');
     expect(toolInputSpan.attrs['tool_input_truncated']).toBe(true);
     expect(toolInputSpan.attrs['tool_input_original_length']).toBe(6);
 
     const toolResultSpan = createMockSpan();
     addToolResultAttributes(config, toolResultSpan, 'Read', 'abcdef');
-    expect(toolResultSpan.attrs['tool_result']).toEqual(
-      expect.stringContaining('[TOOL RESULT: Read]\nabc\n\n[TRUNCATED'),
+    expect(toolResultSpan.attrs['tool_result']).toBe(
+      '[TOOL RESULT: Read]\nabc',
     );
     expect(toolResultSpan.attrs['tool_result_truncated']).toBe(true);
     expect(toolResultSpan.attrs['tool_result_original_length']).toBe(6);
@@ -462,9 +460,7 @@ describe('detailed-span-attributes', () => {
       mockState.maxLength = 3;
       addModelOutputAttributes(config, span, 'abc', 6);
 
-      expect(span.attrs['response.model_output']).toBe(
-        'abc\n\n[TRUNCATED - Content exceeds configured limit of 3 characters]',
-      );
+      expect(span.attrs['response.model_output']).toBe('abc');
       expect(span.attrs['response.model_output_truncated']).toBe(true);
       expect(span.attrs['response.model_output_original_length']).toBe(6);
     });

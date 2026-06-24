@@ -50,10 +50,15 @@ export function truncateContent(
   if (originalLength <= maxSize && content.length <= maxSize) {
     return { content, truncated: false };
   }
+  const suffix = `\n\n[TRUNCATED - Content exceeds configured limit of ${maxSize} characters]`;
+  if (suffix.length >= maxSize) {
+    return {
+      content: content.slice(0, maxSize),
+      truncated: true,
+    };
+  }
   return {
-    content:
-      content.slice(0, maxSize) +
-      `\n\n[TRUNCATED - Content exceeds configured limit of ${maxSize} characters]`,
+    content: content.slice(0, maxSize - suffix.length) + suffix,
     truncated: true,
   };
 }
