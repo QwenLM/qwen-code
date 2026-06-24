@@ -574,7 +574,9 @@ describe('qwen serve — PATCH /session/:id/metadata', () => {
     expect(res.status).toBe(400);
     await client.closeSession(session.sessionId);
   });
+});
 
+describe('qwen serve — prompt clientId admission', () => {
   // Validates the three real-daemon behaviors that DaemonSessionClient's
   // clientId self-heal relies on (see
   // docs/superpowers/specs/2026-06-24-daemon-clientid-self-heal-design.md).

@@ -1459,15 +1459,58 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(session.clientId).toBe('client-1');
   });
 
-  it('propagates a reattach failure', async () => {
+  it('does not re-register or retry on 400 with a different error code', async () => {
+    let promptCalls = 0;
     let resumeCalls = 0;
     const { fetch } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/resume')) {
         resumeCalls++;
-        return jsonResponse(404, { error: 'session gone' });
+        return jsonResponse(200, { clientId: 'client-2' });
       }
       if (req.url.endsWith('/session/s-1/prompt')) {
-        return invalidClientIdResponse();
+        promptCalls++;
+        return jsonResponse(400, {
+          code: 'validation_error',
+          error: 'bad request',
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { code: 'validation_error' },
+    });
+    expect(promptCalls).toBe(1);
+    expect(resumeCalls).toBe(0);
+    expect(session.clientId).toBe('client-1');
+  });
+
+  it('propagates a reattach failure and clears the in-flight guard', async () => {
+    let promptCalls = 0;
+    let resumeCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        if (resumeCalls === 1) {
+          return jsonResponse(404, { error: 'session gone' });
+        }
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        if (promptCalls <= 2) return invalidClientIdResponse();
+        return jsonResponse(200, { stopReason: 'end_turn' });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
     });
@@ -1479,6 +1522,13 @@ describe('DaemonSessionClient clientId self-heal', () => {
     ).rejects.toThrow('POST /session/:id/resume: session gone');
     expect(resumeCalls).toBe(1);
     expect(session.clientId).toBe('client-1');
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'retry' }] }),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(resumeCalls).toBe(2);
+    expect(promptCalls).toBe(3);
+    expect(session.clientId).toBe('client-2');
   });
 
   it('coalesces concurrent reattach into a single re-registration', async () => {
