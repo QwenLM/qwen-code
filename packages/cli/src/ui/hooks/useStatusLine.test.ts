@@ -205,7 +205,7 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(child_process.exec).not.toHaveBeenCalled();
       expect(result.current.lines).toEqual([
-        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 Context 0.1% used',
+        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
       ]);
     });
 

@@ -359,7 +359,7 @@ function formatPresetItem(
       return data.currentDir;
     case 'context-used':
       if (data.contextWindowSize > 0 && data.usedPercentage > 0) {
-        return `Context ${formatPercent(data.usedPercentage)} used`;
+        return `${formatTokenCount(data.contextWindowSize)} Context ${formatPercent(data.usedPercentage)} used`;
       }
       return undefined;
     case 'git-branch':
