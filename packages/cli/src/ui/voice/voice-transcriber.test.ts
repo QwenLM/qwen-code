@@ -600,6 +600,7 @@ describe('voice-transcriber', () => {
     expect((init.headers as Record<string, string>)['Authorization']).toBe(
       'Bearer sk-test',
     );
+    expect(init.redirect).toBe('manual');
     const body = JSON.parse(init.body as string);
     expect(body.model).toBe('qwen3-asr-flash');
     const userMsg = body.messages.find(
@@ -920,6 +921,41 @@ describe('voice-transcriber', () => {
       ),
     ).resolves.toBe('hi');
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects redirected ASR responses without following them', async () => {
+    const response = {
+      ok: false,
+      status: 307,
+      statusText: 'Temporary Redirect',
+      text: vi.fn(),
+    };
+    const fetchFn = vi.fn().mockResolvedValue(response);
+
+    await expect(
+      transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      ),
+    ).rejects.toThrow('Voice transcription request redirected.');
+
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(init.redirect).toBe('manual');
+    expect(response.text).not.toHaveBeenCalled();
   });
 
   it('drops an echoed keyterm list instead of inserting it', async () => {

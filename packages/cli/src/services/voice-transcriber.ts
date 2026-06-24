@@ -507,6 +507,7 @@ async function transcribeViaQwenAsr(
       {
         method: 'POST',
         headers,
+        redirect: 'manual',
         body: JSON.stringify({
           model: voiceConfig.model,
           messages,
@@ -522,6 +523,10 @@ async function transcribeViaQwenAsr(
       );
     }
     throw error;
+  }
+
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error('Voice transcription request redirected.');
   }
 
   if (!response.ok) {
