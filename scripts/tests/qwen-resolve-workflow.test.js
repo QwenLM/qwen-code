@@ -62,6 +62,12 @@ describe('qwen resolve workflow', () => {
     expect(workflow).toContain('push_failed=false');
     expect(workflow).toContain('push_failed=true');
     expect(workflow).toContain('Check the [workflow run]');
+    // Report-skipped-request must run even when the prepare step crashes — its
+    // always() gate is what lets the EXIT-trap decision=failed actually report.
+    expect(resolveJob).toContain('Report skipped request');
+    expect(resolveJob).toContain(
+      "always() && (steps.prepare.outputs.decision == 'skip'",
+    );
   });
 
   it('fails unknown conflict detection explicitly', () => {
@@ -114,6 +120,11 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).toContain(
       'Branch unchanged and no no-action.md was written',
     );
+    expect(resolveJob).toContain(
+      'The conflict-resolution agent step did not succeed',
+    );
+    expect(resolveJob).toContain('address-summary.md is missing');
+    expect(resolveJob).toContain('Unresolved index conflicts remain');
   });
 
   it('runs the agent without any GitHub credentials', () => {
