@@ -127,9 +127,11 @@ function setStatusLineConfig(
         useThemeColors?: boolean;
         hideContextIndicator?: boolean;
       }
+    | null
     | undefined,
 ) {
-  mockSettings.merged = config ? { ui: { statusLine: config } } : {};
+  mockSettings.merged =
+    config === undefined ? {} : { ui: { statusLine: config } };
 }
 
 describe('useStatusLine', () => {
@@ -199,7 +201,16 @@ describe('useStatusLine', () => {
   // --- getStatusLineConfig validation (tested through the hook) ---
 
   describe('config validation', () => {
-    it('returns null when no statusLine config is set', () => {
+    it('renders the default preset when no statusLine config is set', () => {
+      const { result } = renderHook(() => useStatusLine());
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual([
+        'Test Model | main | Context 99.9% left | /test/dir | Context 0.1% used',
+      ]);
+    });
+
+    it('renders no lines when statusLine is explicitly null (opt-out)', () => {
+      setStatusLineConfig(null);
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
@@ -422,8 +433,8 @@ describe('useStatusLine', () => {
       expect(lastExecCommand).toBe('echo from-settings');
     });
 
-    it('ignores a stale preset override when settings no longer have status line config', () => {
-      setStatusLineConfig(undefined);
+    it('ignores a stale preset override when status line is disabled (null)', () => {
+      setStatusLineConfig(null);
       mockUIState.statusLineConfigOverride = {
         type: 'preset',
         items: ['model'],
@@ -764,10 +775,10 @@ describe('useStatusLine', () => {
     });
   });
 
-  // --- Config removal clears output ---
+  // --- Explicit opt-out via `ui.statusLine: null` ---
 
   describe('config removal', () => {
-    it('clears output when config is removed', async () => {
+    it('clears output when status line is explicitly disabled (null)', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result, rerender } = renderHook(() => useStatusLine());
 
@@ -776,14 +787,14 @@ describe('useStatusLine', () => {
       });
       expect(result.current.lines).toEqual(['hello']);
 
-      // Remove config
-      setStatusLineConfig(undefined);
+      // Explicit opt-out
+      setStatusLineConfig(null);
       rerender();
 
       expect(result.current.lines).toEqual([]);
     });
 
-    it('cancels pending debounce and kills child when config is removed', async () => {
+    it('cancels pending debounce and kills child when status line is disabled (null)', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { rerender } = renderHook(() => useStatusLine());
       expect(child_process.exec).toHaveBeenCalledTimes(1);
@@ -792,8 +803,8 @@ describe('useStatusLine', () => {
       mockUIState.currentModel = 'new-model';
       rerender();
 
-      // Remove config before debounce fires
-      setStatusLineConfig(undefined);
+      // Disable before debounce fires
+      setStatusLineConfig(null);
       rerender();
 
       expect(mockKill).toHaveBeenCalled();
