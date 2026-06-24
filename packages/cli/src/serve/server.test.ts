@@ -2262,6 +2262,7 @@ describe('createServeApp', () => {
         path.join(os.tmpdir(), 'qwen-permissions-readonly-'),
       );
       try {
+        const expectedWorkspaceCwd = await fsp.realpath(wsRoot);
         const bridge = fakeBridge();
         const invokeWorkspaceCommand = vi.fn(async () => {
           throw new SessionNotFoundError('workspace-command:qwen/permissions');
@@ -2294,6 +2295,7 @@ describe('createServeApp', () => {
         expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
           'qwen/permissions/setRules',
           {
+            cwd: expectedWorkspaceCwd,
             scope: 'user',
             ruleType: 'allow',
             rules: ['Bash(git status)'],
