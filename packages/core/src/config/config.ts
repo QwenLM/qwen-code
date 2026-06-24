@@ -430,7 +430,7 @@ export interface TelemetrySettings {
   resourceAttributeWarnings?: string[];
 }
 
-type ResolvedTelemetrySettings = TelemetrySettings & {
+export type ResolvedTelemetrySettings = TelemetrySettings & {
   sensitiveSpanAttributeMaxLength: number;
 };
 

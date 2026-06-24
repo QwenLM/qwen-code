@@ -698,9 +698,9 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-starting-route-')),
     );
     let resolveTelemetry:
-      | ((settings: qwenCore.TelemetrySettings) => void)
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
       | undefined;
-    const telemetryPromise = new Promise<qwenCore.TelemetrySettings>(
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
       },
@@ -745,7 +745,10 @@ describe('runQwenServe runtime startup failures', () => {
         code: 'daemon_runtime_starting',
       });
     } finally {
-      resolveTelemetry?.({ enabled: false });
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
       await handle.close();
     }
   });
@@ -854,9 +857,9 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
     );
     let resolveTelemetry:
-      | ((settings: qwenCore.TelemetrySettings) => void)
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
       | undefined;
-    const telemetryPromise = new Promise<qwenCore.TelemetrySettings>(
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
       },
@@ -907,7 +910,10 @@ describe('runQwenServe runtime startup failures', () => {
         'Daemon bridge runtime is not available: Daemon runtime startup timed out after 1ms.',
       );
 
-      resolveTelemetry?.({ enabled: false });
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
       await vi.waitFor(() => {
         expect(bridge.shutdown).toHaveBeenCalledTimes(1);
       });

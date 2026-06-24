@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { TelemetrySettings } from '../config/config.js';
+import type {
+  ResolvedTelemetrySettings,
+  TelemetrySettings,
+} from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
 import {
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
@@ -106,7 +109,7 @@ export async function resolveTelemetrySettings(options: {
   argv?: TelemetryArgOverrides;
   env?: Record<string, string | undefined>;
   settings?: TelemetrySettings;
-}): Promise<TelemetrySettings> {
+}): Promise<ResolvedTelemetrySettings> {
   const argv = options.argv ?? {};
   const env = options.env ?? {};
   const settings = options.settings ?? {};

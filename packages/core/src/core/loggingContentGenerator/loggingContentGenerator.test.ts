@@ -22,7 +22,10 @@ import {
   logApiResponse,
   logApiError,
 } from '../../telemetry/loggers.js';
-import { addModelOutputAttributes } from '../../telemetry/index.js';
+import {
+  addModelOutputAttributes,
+  isTelemetrySdkInitialized,
+} from '../../telemetry/index.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
 
@@ -326,6 +329,7 @@ const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
 describe('LoggingContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
     activeOtelContext.current = 'root';
     loggingSpanRecords.length = 0;
     loggingSpanNamesWithSetStatusFailure.clear();
@@ -875,6 +879,36 @@ describe('LoggingContentGenerator', () => {
     expect(vi.mocked(addModelOutputAttributes).mock.calls.at(-1)?.[2]).toBe(
       longText,
     );
+  });
+
+  it('skips sensitive model output attributes when telemetry SDK is not initialized', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-safe', 'test-model', [{ text: 'secret' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ includeSensitiveSpanAttributes: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-no-sdk');
+
+    expect(addModelOutputAttributes).not.toHaveBeenCalled();
   });
 
   it('passes uncapped stream response text to sensitive model output attributes', async () => {

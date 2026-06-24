@@ -159,8 +159,10 @@ describe('telemetry/config helpers', () => {
 
     it('defaults sensitiveSpanAttributeMaxLength to 1MiB', async () => {
       const resolved = await resolveTelemetrySettings({});
+      const resolvedMaxLength: number =
+        resolved.sensitiveSpanAttributeMaxLength;
 
-      expect(resolved.sensitiveSpanAttributeMaxLength).toBe(1024 * 1024);
+      expect(resolvedMaxLength).toBe(1024 * 1024);
     });
 
     it('parses includeSensitiveSpanAttributes from settings and env', async () => {
@@ -277,9 +279,9 @@ describe('telemetry/config helpers', () => {
           typeof resolveTelemetrySettings
         >[0]['settings'];
 
-        await expect(
-          resolveTelemetrySettings({ settings }),
-        ).rejects.toThrow(/sensitiveSpanAttributeMaxLength/i);
+        await expect(resolveTelemetrySettings({ settings })).rejects.toThrow(
+          /sensitiveSpanAttributeMaxLength/i,
+        );
       },
     );
 
