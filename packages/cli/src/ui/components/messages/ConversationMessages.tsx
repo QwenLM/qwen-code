@@ -321,6 +321,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   const durationSuffix =
     durationMs != null ? ` ${formatDuration(durationMs)}` : '';
 
+  const toggleKeyHint = process.platform === 'darwin' ? '\u2325+t' : 'alt+t';
+
   if (!isPending && !expanded) {
     const label =
       durationMs != null
@@ -329,7 +331,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Text dimColor italic>
         {THINKING_ICON}
-        {label} {t('(alt+t to expand)')}
+        {label} {t(`(${toggleKeyHint} to expand)`)}
       </Text>
     );
   }
@@ -370,7 +372,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     <Box flexDirection="column">
       <Text dimColor italic>
         {THINKING_ICON}
-        {expandedLabel} {t('(alt+t to collapse)')}
+        {expandedLabel} {t(`(${toggleKeyHint} to collapse)`)}
       </Text>
       <Box paddingLeft={2} flexDirection="column">
         <MarkdownDisplay
