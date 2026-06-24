@@ -273,7 +273,12 @@ jobs:
   test_platforms:
     name: 'Test (${{ matrix.os }}, Node ${{ matrix.node-version }})'
     needs: 'classify_pr'
-    if: '${{ !cancelled() }}'
+    # macOS/Windows are the slowest, costliest runners and platform-specific
+    # regressions are rare per push, so rerunning them on every review iteration
+    # is mostly wasted. Skip on PR pushes; they still run on push to `main` (and
+    # in the merge queue, once enabled), catching platform breakage before it
+    # ships without sitting on every PR's critical path.
+    if: "${{ !cancelled() && github.event_name != 'pull_request' }}"
     runs-on: '${{ fromJSON(matrix.runner) }}'
     permissions:
       contents: 'read'
@@ -374,7 +379,10 @@ jobs:
   codeql:
     name: 'CodeQL'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    # Security findings rarely change push-to-push, so a slow scan on every PR
+    # push is poor value. Skip on PR pushes; CodeQL still runs on push to `main`
+    # (and in the merge queue, once enabled) as the pre-/post-merge backstop.
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && github.event_name != 'pull_request' }}"
     runs-on: 'ubuntu-latest'
     # Analysis normally finishes in ~7-9 min (22 min worst case observed). Without
     # an explicit cap, a hosted runner that drops its heartbeat mid-analysis leaves
