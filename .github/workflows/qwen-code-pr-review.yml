@@ -876,8 +876,19 @@ jobs:
         env:
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
           HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
+          RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'
         run: |-
           set -euo pipefail
+
+          # The agent step runs under always(); if it failed at the infrastructure
+          # level (API timeout, model quota, action crash) the branch is unmodified
+          # and the merge-tree check below would misreport "still has conflicts".
+          # Surface the real cause instead.
+          if [ "$RESOLVE_OUTCOME" != "success" ]; then
+            echo "The conflict-resolution agent step did not succeed (outcome=${RESOLVE_OUTCOME}): API/quota/infrastructure error or cancellation. Check its logs."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           if [ -s "${WORKDIR}/failure.md" ]; then
             echo "Agent reported failure:"
