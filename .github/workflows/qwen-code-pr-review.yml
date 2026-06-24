@@ -626,10 +626,13 @@ jobs:
     concurrency:
       group: 'qwen-resolve-${{ github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: false
+    # Least-privilege: every write in this job (push, PR comments, the
+    # acknowledge reaction) uses an explicit PAT, so the implicit GITHUB_TOKEN
+    # needs no write scopes. Keeping it read-only guarantees the PR-controlled
+    # build/lint/test that run later in this job can never reach a writable
+    # ambient token.
     permissions:
       contents: 'read'
-      issues: 'write'
-      pull-requests: 'write'
     env:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/qwen-resolve'
@@ -638,7 +641,9 @@ jobs:
       - name: 'Acknowledge resolve request'
         if: "github.event_name == 'issue_comment'"
         env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # Explicit PAT (not the implicit GITHUB_TOKEN): the job token is
+          # contents:read only, so the reaction write goes through the bot PAT.
+          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           gh api \
@@ -864,6 +869,10 @@ jobs:
         # ${{ ... }}: branch names legally contain `$(...)`/backticks, so textual
         # interpolation into run: would be a command-injection vector.
         env:
+          # PR-controlled build/lint/test run in this step. persist-credentials:false
+          # already keeps the checkout token off disk; this empty value is the
+          # belt-and-suspenders guarantee that no GITHUB_TOKEN sits in their env.
+          GITHUB_TOKEN: ''
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
           HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
           RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'
