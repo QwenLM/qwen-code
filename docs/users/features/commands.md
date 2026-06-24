@@ -91,7 +91,7 @@ Commands for managing AI tools and models.
 | `/extensions`    | Manage extensions                             | `/extensions list`, `/extensions manage`                                      |
 | → `list`         | List installed extensions                     | `/extensions list`                                                            |
 | → `manage`       | Manage installed extensions (interactive)     | `/extensions manage`                                                          |
-| → `explore`      | Open extensions page in browser               | `/extensions explore <source>`                                                |
+| → `explore`      | Open extensions page in browser               | `/extensions explore <Gemini\|ClaudeCode>`                                    |
 | → `install`      | Install an extension from a git repo or path  | `/extensions install <repo-or-path>`                                          |
 | `/memory`        | Open the Memory Manager dialog                | `/memory`                                                                     |
 | `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`                                            |
