@@ -4241,7 +4241,13 @@ export class CoreToolScheduler {
     const pendingTools = this.toolCalls.filter(
       (call) =>
         call.status === 'awaiting_approval' &&
-        call.request.callId !== triggeringCallId,
+        call.request.callId !== triggeringCallId &&
+        // A tool bounced by a PreToolUse 'ask' must NOT be auto-approved as a
+        // side effect of approving a sibling: the hook explicitly requested
+        // confirmation, and re-execution skips the hook — auto-approving here
+        // would silently defeat the hook's gate. It requires its own explicit
+        // user confirmation.
+        !this.bouncedAwaitingApproval.has(call.request.callId),
     ) as WaitingToolCall[];
 
     for (const pendingTool of pendingTools) {

@@ -6913,6 +6913,95 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(getBlockedSpans()).toHaveLength(1);
   });
 
+  it("a sibling's ProceedAlways must not auto-approve a bounced ask", async () => {
+    toolSpanRecords.length = 0;
+    // Both tools bounce on a PreToolUse 'ask'. Approving toolB with
+    // ProceedAlways runs autoApproveCompatiblePendingTools, which must NOT
+    // auto-approve the bounced toolA — its hook 'ask' requires explicit
+    // confirmation, otherwise the hook gate is silently defeated.
+    const aExecute = vi.fn().mockResolvedValue({
+      llmContent: 'A',
+      returnDisplay: 'A',
+    });
+    const bExecute = vi.fn().mockResolvedValue({
+      llmContent: 'B',
+      returnDisplay: 'B',
+    });
+    const tools = [
+      new MockTool({ name: 'toolA', execute: aExecute }),
+      new MockTool({ name: 'toolB', execute: bExecute }),
+    ];
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (req: { eventName?: string }) => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output:
+            req.eventName === 'PreToolUse'
+              ? { decision: 'ask', reason: 'confirm' }
+              : {},
+        })),
+    };
+    const { scheduler, onToolCallsUpdate } = buildScheduler({
+      tools,
+      messageBus,
+      disableHooks: false,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'a',
+          name: 'toolA',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'b',
+          name: 'toolB',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // Both tools bounce to awaiting_approval.
+    await vi.waitFor(() => {
+      const awaiting = onToolCallsUpdate.mock.calls
+        .flatMap((c) => c[0] as ToolCall[])
+        .filter((tc) => tc.status === 'awaiting_approval')
+        .map((tc) => tc.request.callId);
+      expect(awaiting).toContain('a');
+      expect(awaiting).toContain('b');
+    });
+
+    const toolBWaiting = onToolCallsUpdate.mock.calls
+      .flatMap((c) => c[0] as ToolCall[])
+      .find(
+        (tc) => tc.request.callId === 'b' && tc.status === 'awaiting_approval',
+      ) as WaitingToolCall;
+    // Programmatic ProceedAlways on toolB runs autoApproveCompatiblePendingTools
+    // synchronously inside handleConfirmationResponse (awaited here).
+    await toolBWaiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlways,
+    );
+
+    // toolA's hook 'ask' must still gate it: autoApprove skipped the bounced
+    // tool, so it never ran (and stays awaiting the user's own confirmation).
+    // toolB also doesn't run yet — the batch waits while toolA is non-terminal.
+    expect(aExecute).not.toHaveBeenCalled();
+    const latestA = onToolCallsUpdate.mock.calls
+      .flatMap((c) => c[0] as ToolCall[])
+      .filter((tc) => tc.request.callId === 'a')
+      .at(-1);
+    expect(latestA?.status).toBe('awaiting_approval');
+  });
+
   it('blocked_on_user span ends with cancel when the user rejects (#3731 Phase 2)', async () => {
     // Reuses MockEditTool — same setup as the existing edit-cancellation
     // test in `CoreToolScheduler edit cancellation`, just instrumented for
