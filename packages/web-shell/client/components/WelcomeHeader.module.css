@@ -29,7 +29,6 @@
 .panel {
   min-width: 280px;
   max-width: 60ch;
-  border: 1px solid var(--border-color);
   padding: 7px 10px;
   display: flex;
   flex-direction: column;
@@ -77,7 +76,7 @@
   color: var(--text-dimmed);
 }
 
-.terminalLabel {
+.shellLabel {
   flex-shrink: 0;
   white-space: nowrap;
 }

@@ -39,7 +39,7 @@ import {
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
-  resolveOwnsModel,
+  findExistingProviderModels,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -66,7 +66,6 @@ import type {
   AgentParams,
   ApprovalMode,
   Config,
-  ConversationRecord,
   DeviceAuthorizationData,
   HookConfig,
   McpBudgetEvent,
@@ -75,6 +74,7 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
+  ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -132,6 +132,14 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import {
+  buildPermissionSettings,
+  normalizePermissionRules,
+  PermissionRulesValidationError,
+  PERMISSION_RULE_TYPES,
+  readPermissionRuleSet,
+  type PermissionRuleSet,
+} from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
 import { z } from 'zod';
@@ -277,71 +285,6 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
 export const AUTH_PREFLIGHT_WAIVED_AUTH_TYPES: ReadonlySet<string> = new Set([
   'qwen-oauth',
 ]);
-
-type PermissionRuleType = 'allow' | 'ask' | 'deny';
-
-interface PermissionRuleSet {
-  allow: string[];
-  ask: string[];
-  deny: string[];
-}
-
-interface PermissionSettingsScopeState {
-  path: string;
-  rules: PermissionRuleSet;
-}
-
-interface QwenPermissionSettings {
-  user: PermissionSettingsScopeState;
-  workspace: PermissionSettingsScopeState;
-  merged: PermissionRuleSet;
-  isTrusted: boolean;
-}
-
-const PERMISSION_RULE_TYPES: PermissionRuleType[] = ['allow', 'ask', 'deny'];
-
-function readPermissionRuleSet(settings: unknown): PermissionRuleSet {
-  const permissions =
-    settings && typeof settings === 'object'
-      ? (
-          settings as {
-            permissions?: Partial<Record<PermissionRuleType, unknown>>;
-          }
-        ).permissions
-      : undefined;
-
-  const readRules = (type: PermissionRuleType): string[] => {
-    const value = permissions?.[type];
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === 'string')
-      : [];
-  };
-
-  return {
-    allow: readRules('allow'),
-    ask: readRules('ask'),
-    deny: readRules('deny'),
-  };
-}
-
-function normalizePermissionRules(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    throw RequestError.invalidParams(undefined, 'rules must be an array');
-  }
-  return Array.from(
-    new Set(
-      value.map((item) => {
-        if (typeof item !== 'string' || !item.trim()) {
-          throw RequestError.invalidParams(
-            undefined,
-            'rules must contain only non-empty strings',
-          );
-        }
-        return item.trim();
-      }),
-    ),
-  );
-}
 
 type QwenMemorySettings = {
   enableManagedAutoMemory: boolean;
@@ -1414,11 +1357,6 @@ function resolveProviderDocumentationUrl(
   return undefined;
 }
 
-function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
-  const record = toRecord(value);
-  return typeof record['id'] === 'string';
-}
-
 function readSettingsEnv(
   settings: LoadedSettings,
   envKey: string | undefined,
@@ -1427,35 +1365,6 @@ function readSettingsEnv(
   const env = toRecord((settings.merged as Record<string, unknown>)['env']);
   const value = env[envKey];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function readProviderModels(
-  settings: LoadedSettings,
-  protocol: string,
-): ProviderModelConfig[] {
-  const modelProviders = toRecord(
-    (settings.merged as Record<string, unknown>)['modelProviders'],
-  );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
-}
-
-function findExistingProviderModels(
-  config: ProviderConfig,
-  settings: LoadedSettings,
-):
-  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
-  | undefined {
-  const ownsModel = resolveOwnsModel(config);
-  if (!ownsModel) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
-  for (const protocol of protocols) {
-    const models = readProviderModels(settings, protocol).filter(ownsModel);
-    if (models.length > 0) return { protocol, models };
-  }
-  return undefined;
 }
 
 function resolveProviderEnvKey(
@@ -1491,7 +1400,12 @@ function readExistingProviderConfig(
   config: ProviderConfig,
   settings: LoadedSettings,
 ): Record<string, unknown> | undefined {
-  const existing = findExistingProviderModels(config, settings);
+  const existing = findExistingProviderModels(
+    config,
+    (settings.merged as Record<string, unknown>)['modelProviders'] as
+      | Record<string, unknown>
+      | undefined,
+  );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
   const baseUrl =
@@ -2823,10 +2737,7 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    const session = await this.createAndStoreSession(
-      config,
-      sessionData?.conversation,
-    );
+    const session = await this.createAndStoreSession(config, sessionData);
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2865,7 +2776,11 @@ class QwenAgent implements Agent {
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    const session = await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(
+      config,
+      config.getResumedSessionData(),
+      { replayHistory: false },
+    );
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -3032,23 +2947,6 @@ class QwenAgent implements Agent {
   private loadPermissionSettings(cwd: string): LoadedSettings {
     this.settings = loadSettings(cwd);
     return this.settings;
-  }
-
-  private buildPermissionSettings(
-    settings: LoadedSettings,
-  ): QwenPermissionSettings {
-    return {
-      user: {
-        path: settings.user.path,
-        rules: readPermissionRuleSet(settings.user.settings),
-      },
-      workspace: {
-        path: settings.workspace.path,
-        rules: readPermissionRuleSet(settings.workspace.settings),
-      },
-      merged: readPermissionRuleSet(settings.merged),
-      isTrusted: settings.isTrusted,
-    };
   }
 
   private async buildCoreSettings(
@@ -5138,6 +5036,7 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
+        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -5147,6 +5046,7 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
+            .filter(({ idx }) => idx < rewindableTurnCount)
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
               return {
@@ -6324,10 +6224,13 @@ class QwenAgent implements Agent {
           );
         }
 
+        const rewindFiles = params['rewindFiles'] !== false;
         const historyBeforeRewind = session.captureHistorySnapshot();
         let rewindResult;
         try {
-          rewindResult = session.rewindToTurn(turnIndex as number);
+          rewindResult = session.rewindToTurn(turnIndex as number, {
+            rewindFiles,
+          });
         } catch (err) {
           if (err instanceof RequestError) {
             const msg = err.message;
@@ -6347,7 +6250,6 @@ class QwenAgent implements Agent {
 
         let filesChanged: string[] = [];
         let filesFailed: string[] = [];
-        const rewindFiles = params['rewindFiles'] !== false;
         if (rewindFiles && promptId) {
           const fhs = session.getConfig().getFileHistoryService();
           try {
@@ -6788,7 +6690,7 @@ class QwenAgent implements Agent {
       }
       case 'qwen/permissions/getSettings': {
         const settings = this.loadPermissionSettings(cwd);
-        return this.buildPermissionSettings(settings) as unknown as Record<
+        return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;
@@ -6811,9 +6713,24 @@ class QwenAgent implements Agent {
 
         const settings = this.loadPermissionSettings(cwd);
         const before = readPermissionRuleSet(settings.merged);
-        const rules = normalizePermissionRules(params['rules']);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
+        const scopeSettings =
+          scope === 'workspace'
+            ? settings.workspace.settings
+            : settings.user.settings;
+        const existingRules = readPermissionRuleSet(scopeSettings)[ruleType];
+        let rules: string[];
+        try {
+          rules = normalizePermissionRules(params['rules'], {
+            existingRules,
+          });
+        } catch (error) {
+          if (error instanceof PermissionRulesValidationError) {
+            throw RequestError.invalidParams(undefined, error.message);
+          }
+          throw error;
+        }
 
         settings.setValue(settingScope, `permissions.${ruleType}`, rules);
         // `setValue` already recomputed the in-memory merged view, so read the
@@ -6822,7 +6739,7 @@ class QwenAgent implements Agent {
         // could mutate settings between the two loads).
         const after = readPermissionRuleSet(settings.merged);
         this.syncLivePermissionManagers(before, after);
-        return this.buildPermissionSettings(settings) as unknown as Record<
+        return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;
@@ -7158,7 +7075,8 @@ class QwenAgent implements Agent {
 
   private async createAndStoreSession(
     config: Config,
-    conversation?: ConversationRecord,
+    sessionData?: ResumedSessionData,
+    options: { replayHistory?: boolean } = {},
   ): Promise<Session> {
     const sessionId = config.getSessionId();
     const geminiClient = config.getGeminiClient();
@@ -7182,8 +7100,14 @@ class QwenAgent implements Agent {
       await session.sendAvailableCommandsUpdate();
     }, 0);
 
-    if (conversation && conversation.messages) {
-      await session.replayHistory(conversation.messages);
+    if (sessionData?.fileHistorySnapshots?.length) {
+      config
+        .getFileHistoryService()
+        .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+    }
+
+    if (options.replayHistory !== false && sessionData?.conversation.messages) {
+      await session.replayHistory(sessionData.conversation.messages);
     }
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages

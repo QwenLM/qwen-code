@@ -2813,12 +2813,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
-      let originatorClientId: string | undefined;
-      try {
-        originatorClientId = resolveTrustedClientId(entry, context?.clientId);
-      } catch (err) {
-        return Promise.reject(err);
-      }
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -4611,7 +4609,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
-              { sessionId, promptId: req.promptId, rewindFiles: true },
+              {
+                sessionId,
+                promptId: req.promptId,
+                rewindFiles: req.rewindFiles !== false,
+              },
             ),
             initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.sessionRewind,

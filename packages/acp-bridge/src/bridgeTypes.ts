@@ -40,6 +40,7 @@ export interface RewindSnapshotInfo {
 
 export interface RewindRequest {
   promptId: string;
+  rewindFiles?: boolean;
 }
 
 export interface RewindResponse {
@@ -303,10 +304,10 @@ export interface AcpSessionBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `PromptQueueFullError` and pre-aborted signals throw
-   * synchronously so HTTP routes can reject before returning 202. Deferred
-   * failures such as `SessionNotFoundError` may be returned as rejected
-   * promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject before
+   * returning 202. Deferred failures such as `SessionNotFoundError` may be
+   * returned as rejected promises.
    */
   sendPrompt(
     sessionId: string,

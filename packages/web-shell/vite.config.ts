@@ -73,6 +73,12 @@ export default defineConfig(({ command }) => ({
       '/stat': daemonProxy,
       '/list': daemonProxy,
       '/glob': daemonProxy,
+      // Voice dictation is a WebSocket (`/voice/stream`); `ws: true` makes the
+      // dev proxy forward the HTTP upgrade to the daemon. Scope it to the exact
+      // path — a bare `/voice` prefix would shadow the client's own
+      // `client/voice/*` source modules (e.g. `/voice/voiceModels.ts`), which
+      // vite must serve, and blanks the page.
+      '/voice/stream': { ...daemonProxy, ws: true },
     },
   },
 }));

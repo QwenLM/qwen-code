@@ -221,9 +221,9 @@ describe('qwen serve — capabilities envelope', () => {
     // `packages/cli/src/serve/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
     //
-    // Conditional tags absent under this suite's spawn flags (no
-    // `--require-auth` / `--allow-origin` / deadline env vars /
-    // rate-limit opt-in): `require_auth`, `allow_origin`,
+    // Conditional tags absent under this suite's spawn flags (token auth /
+    // no `--require-auth` / no `--allow-origin` / no deadline env vars /
+    // no rate-limit opt-in): `require_auth`, `allow_origin`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`, `rate_limit`.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
@@ -276,6 +276,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_settings',
+      'workspace_permissions',
       'workspace_init',
       'workspace_mcp_restart',
       'session_recap',
@@ -292,6 +293,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_extensions',
       'session_branch',
       'workspace_reload',
+      'voice_transcribe',
     ]);
   });
 });
