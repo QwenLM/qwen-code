@@ -208,6 +208,7 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from './contexts/BackgroundTaskViewContext.js';
+import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -1584,7 +1585,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
-  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const {
+    dialogOpen: bgTasksDialogOpen,
+    entries: bgTaskEntries,
+    livePanelFocused: bgLivePanelFocused,
+  } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
@@ -2536,6 +2541,20 @@ export const AppContainer = (props: AppContainerProps) => {
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
+  // The LiveAgentPanel renders inside `mainControlsRef` and grows as
+  // background agents launch / change status. Its per-second elapsed-time
+  // tick is internal and never reaches AppContainer, so without an explicit
+  // roster signal the measurement effect below would not re-run when the
+  // panel grows — leaving `controlsHeight` stale, `availableTerminalHeight`
+  // too large, and the pending region free to overflow the terminal (which,
+  // in non-VP mode, forces the view back to the bottom with a flicker on
+  // every repaint). This key changes exactly on height-affecting roster
+  // changes and is stable across the elapsed-time tick. See #5798.
+  const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
+    bgTaskEntries,
+    bgLivePanelFocused,
+  );
+
   useLayoutEffect(() => {
     if (!mainControlsRef.current) {
       setControlsHeight((previousHeight) =>
@@ -2557,6 +2576,7 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     dialogsVisible,
     stickyTodosLayoutKey,
+    liveAgentPanelLayoutKey,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
