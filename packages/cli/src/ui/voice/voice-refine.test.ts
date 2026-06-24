@@ -62,6 +62,16 @@ describe('refineVoiceTranscript', () => {
     expect(out).toBe('please quit');
   });
 
+  it('falls back to raw when refinement introduces an at command', async () => {
+    mockRunSideQuery.mockResolvedValue({ text: '@workspace' });
+    const out = await refineVoiceTranscript(
+      config,
+      'workspace',
+      new AbortController().signal,
+    );
+    expect(out).toBe('workspace');
+  });
+
   it('keeps a slash command the user actually dictated', async () => {
     mockRunSideQuery.mockResolvedValue({ text: '/quit' });
     const out = await refineVoiceTranscript(

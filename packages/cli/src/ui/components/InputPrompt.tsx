@@ -328,14 +328,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     [config, settings],
   );
   // Refine the transcript with the fast model before inserting. On by default,
-  // but skipped when the user opted out or no fast model is configured. Memoized
-  // so getFastModel() doesn't re-scan the model registry on every keystroke.
-  const voiceRefineEnabled = useMemo(
-    () =>
-      settings.merged.general?.voice?.refineTranscript !== false &&
-      config.getFastModel() != null,
-    [config, settings.merged.general?.voice?.refineTranscript],
-  );
+  // but skipped when the user opted out or no fast model is configured.
+  const voiceRefineEnabled =
+    settings.merged.general?.voice?.refineTranscript !== false &&
+    config.getFastModel() != null;
   const refineVoice = useCallback(
     (raw: string, signal: AbortSignal) =>
       refineVoiceTranscript(config, raw, signal),

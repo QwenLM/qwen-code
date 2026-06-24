@@ -72,9 +72,11 @@ export async function refineVoiceTranscript(
       return raw;
     }
     // Reject implausible cleanups: a model that misfires (or is steered by the
-    // transcript) could introduce a leading slash-command — auto-submitted in
+    // transcript) could introduce a leading command sigil — auto-submitted in
     // tap mode — or balloon the text. Fall back to the user's actual words.
-    const introducedCommand = refined.startsWith('/') && !raw.startsWith('/');
+    const introducedCommand =
+      (refined.startsWith('/') && !raw.startsWith('/')) ||
+      (refined.startsWith('@') && !raw.startsWith('@'));
     const ballooned = refined.length > raw.length * MAX_GROWTH_FACTOR;
     if (introducedCommand || ballooned) {
       debugLogger.warn('[voice] refinement looks unsafe; using raw', {
