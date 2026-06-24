@@ -2274,6 +2274,8 @@ export default {
     'Failed to authenticate with Coding Plan: {{error}}',
   '中国 (China)': '中国 (China)',
   '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  'Get or set any setting by dot-path key':
+    'Get or set any setting by dot-path key',
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Select region for Coding Plan:',
