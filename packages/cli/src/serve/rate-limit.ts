@@ -92,7 +92,7 @@ function resolveTier(method: string, path: string): RateLimitTier | null {
 // Key Extraction
 // ---------------------------------------------------------------------------
 
-// Keep in sync with server.ts CLIENT_ID_RE / MAX_CLIENT_ID_LENGTH.
+// Keep in sync with server/request-helpers.ts CLIENT_ID_RE / MAX_CLIENT_ID_LENGTH.
 const MAX_CLIENT_ID_LENGTH = 128;
 const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 
