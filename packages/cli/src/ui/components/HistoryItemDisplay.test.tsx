@@ -29,7 +29,7 @@ vi.mock('../hooks/useMouseEvents.js', () => ({
   useMouseEvents: vi.fn(),
 }));
 
-const toggleKeyHint = process.platform === 'darwin' ? '\u2325+t' : 'alt+t';
+const toggleKeyHint = process.platform === 'darwin' ? 'option+t' : 'alt+t';
 
 describe('<HistoryItemDisplay />', () => {
   const mockConfig = {

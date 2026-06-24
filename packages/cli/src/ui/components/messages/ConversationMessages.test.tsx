@@ -7,7 +7,7 @@
 import { render } from 'ink-testing-library';
 import { ThinkMessage, ThinkMessageContent } from './ConversationMessages.js';
 
-const toggleKeyHint = process.platform === 'darwin' ? '\u2325+t' : 'alt+t';
+const toggleKeyHint = process.platform === 'darwin' ? 'option+t' : 'alt+t';
 
 describe('<ThinkMessage />', () => {
   const defaultProps = {
