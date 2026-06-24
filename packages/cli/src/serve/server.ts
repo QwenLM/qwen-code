@@ -133,6 +133,7 @@ import {
   type DaemonWorkspaceService,
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
+import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
@@ -776,7 +777,7 @@ export interface ServeAppDeps {
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
-  ) => Promise<void>;
+  ) => Promise<void | import('../config/settings.js').LoadedSettings>;
 }
 
 function resolveDaemonTelemetryRoute(
@@ -882,6 +883,10 @@ function resolveDaemonTelemetryRoute(
   if (path === '/workspace/settings') {
     if (req.method === 'GET') return { route: 'GET /workspace/settings' };
     if (req.method === 'POST') return { route: 'POST /workspace/settings' };
+  }
+  if (path === '/workspace/permissions') {
+    if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
+    if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
   }
   return undefined;
 }
@@ -2660,7 +2665,26 @@ export function createServeApp(
       boundWorkspace,
       mutate,
       safeBody,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      broadcastSettingsChanged: (key, value, scope, clientId) => {
+        bridge.publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: { key, value, scope },
+          ...(clientId ? { originatorClientId: clientId } : {}),
+        });
+      },
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, bridge),
+    });
+    registerWorkspacePermissionsRoutes(app, {
+      boundWorkspace,
+      mutate,
+      safeBody,
       persistSetting,
+      invokeWorkspaceCommand: (method, params) =>
+        bridge.invokeWorkspaceCommand(method, params),
       broadcastSettingsChanged: (key, value, scope, clientId) => {
         bridge.publishWorkspaceEvent({
           type: 'settings_changed',
