@@ -106,6 +106,25 @@ describe('runVisionBridge', () => {
     expect(JSON.stringify(callOptions.contents)).toContain('PAYLOAD64');
   });
 
+  it('tells the bridge model to describe, not answer the user request', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    await runVisionBridge({
+      config,
+      parts: ['What is the error code?', image()],
+      signal: signal(),
+    });
+    const callOptions = mockSideQuery.mock.calls[0][1];
+    // The system role frames the job as transcription, explicitly not answering,
+    // so the bridge output is context for the primary model rather than a second
+    // competing answer the user would see twice.
+    expect(String(callOptions.systemInstruction)).toMatch(/do NOT answer/i);
+    const contents = JSON.stringify(callOptions.contents);
+    // The user intent is still carried (for focus) but as a hint, not a question.
+    expect(contents).toContain('What is the error code?');
+    expect(contents).toMatch(/Focus hint/);
+    expect(contents).toMatch(/do NOT answer/i);
+  });
+
   it('caps the intent so large @-file context is not dumped to the bridge model', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
     await runVisionBridge({
