@@ -364,6 +364,16 @@ describe('standalone-update', () => {
         ),
       ).toBe(true);
     });
+
+    it('accepts fs stats entries from tar filter typing', () => {
+      const dest = path.join(tempDir, 'extract');
+      const filePath = path.join(tempDir, 'entry.txt');
+      fs.writeFileSync(filePath, 'entry');
+
+      expect(
+        isSafeTarEntry('qwen-code/bin/qwen', fs.statSync(filePath), dest),
+      ).toBe(true);
+    });
   });
 
   describe('rollbackStandaloneUpdate — concurrent lock protection', () => {

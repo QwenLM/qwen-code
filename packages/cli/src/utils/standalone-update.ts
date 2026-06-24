@@ -11,8 +11,10 @@ import * as path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { spawn, execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
+import type { Stats } from 'node:fs';
 import { fetch } from 'undici';
 import * as tar from 'tar';
+import type { ReadEntry } from 'tar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { verifySignature } from './standalone-update-verify.js';
 
@@ -35,6 +37,7 @@ const VALID_TARGETS = new Set([
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
 type UndiciResponse = Awaited<ReturnType<typeof fetch>>;
+type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
 function normalizeVersion(version: string): string {
   if (!SEMVER_RE.test(version)) {
@@ -218,20 +221,22 @@ export function isSafeTarLinkTarget(
 
 export function isSafeTarEntry(
   entryPath: string,
-  entry: { type?: string; linkpath?: unknown },
+  entry: TarFilterEntry,
   resolvedDest: string,
 ): boolean {
   if (!isSafeTarEntryPath(entryPath)) return false;
+  const entryType = 'type' in entry ? entry.type : undefined;
+  const linkPath = 'linkpath' in entry ? entry.linkpath : undefined;
 
   // Reject hardlinks outright. tar resolves hardlink linkpath relative to the
   // extraction root, not the entry directory, so sharing symlink target logic
   // would allow traversal outside resolvedDest.
-  if (entry.type === 'Link') {
+  if (entryType === 'Link') {
     return false;
   }
 
-  if (entry.type === 'SymbolicLink' && entry.linkpath !== undefined) {
-    return isSafeTarLinkTarget(entryPath, String(entry.linkpath), resolvedDest);
+  if (entryType === 'SymbolicLink' && linkPath !== undefined) {
+    return isSafeTarLinkTarget(entryPath, String(linkPath), resolvedDest);
   }
 
   return true;
