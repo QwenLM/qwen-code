@@ -130,11 +130,11 @@ function readUserKeyterms(settings: LoadedSettings): string[] {
     if (!resolved) {
       return [];
     }
-    const filePath = canonicalizeKeytermsFile(resolved);
-    if (!filePath) {
+    const file = canonicalizeKeytermsFile(resolved);
+    if (!file) {
       return [];
     }
-    const content = readRegularFileNoFollow(filePath);
+    const content = readRegularFileNoFollow(file);
     if (content === undefined) {
       return [];
     }
@@ -148,6 +148,16 @@ interface ResolvedKeytermsFile {
   filePath: string;
   workspaceRoot: string;
   mustBeInWorkspace: boolean;
+}
+
+interface KeytermsFileSetting {
+  path: string;
+  scope: 'system' | 'user';
+}
+
+interface ValidatedKeytermsFile {
+  filePath: string;
+  stat: fs.Stats;
 }
 
 /**
@@ -167,12 +177,12 @@ function resolveKeytermsFile(
   const workspaceRoot = path.dirname(qwenDir);
   const configured = readKeytermsFileSetting(settings);
   if (configured) {
-    const expanded = resolvePath(configured);
+    const expanded = resolvePath(configured.path);
     const isAbsolute = path.isAbsolute(expanded);
     return {
       filePath: isAbsolute ? expanded : path.resolve(workspaceRoot, expanded),
       workspaceRoot,
-      mustBeInWorkspace: !isAbsolute,
+      mustBeInWorkspace: configured.scope === 'system' || !isAbsolute,
     };
   }
   return {
@@ -186,7 +196,7 @@ function canonicalizeKeytermsFile({
   filePath,
   workspaceRoot,
   mustBeInWorkspace,
-}: ResolvedKeytermsFile): string | undefined {
+}: ResolvedKeytermsFile): ValidatedKeytermsFile | undefined {
   const stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
   if (
     !stat ||
@@ -204,10 +214,13 @@ function canonicalizeKeytermsFile({
       return undefined;
     }
   }
-  return realFilePath;
+  return { filePath: realFilePath, stat };
 }
 
-function readRegularFileNoFollow(filePath: string): string | undefined {
+function readRegularFileNoFollow({
+  filePath,
+  stat: expectedStat,
+}: ValidatedKeytermsFile): string | undefined {
   let fd: number | undefined;
   try {
     const flags =
@@ -217,6 +230,8 @@ function readRegularFileNoFollow(filePath: string): string | undefined {
     fd = fs.openSync(filePath, flags);
     const stat = fs.fstatSync(fd);
     if (
+      stat.dev !== expectedStat.dev ||
+      stat.ino !== expectedStat.ino ||
       !stat.isFile() ||
       stat.nlink > 1 ||
       stat.size > MAX_KEYTERMS_FILE_BYTES
@@ -235,17 +250,21 @@ function readRegularFileNoFollow(filePath: string): string | undefined {
 function parseKeyterms(content: string): string[] {
   return content
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith('#'));
+    .map((line) => line.replace(/#.*$/, '').trim())
+    .filter((line) => line.length > 0);
 }
 
-function readKeytermsFileSetting(settings: LoadedSettings): string | undefined {
+function readKeytermsFileSetting(
+  settings: LoadedSettings,
+): KeytermsFileSetting | undefined {
   // Intentionally skip workspace scope: repos could plant absolute paths that
   // exfiltrate local files through the remote ASR provider.
-  return (
-    readKeytermsFileSettingFromScope(settings.system?.settings) ??
-    readKeytermsFileSettingFromScope(settings.user?.settings)
-  );
+  const system = readKeytermsFileSettingFromScope(settings.system?.settings);
+  if (system) {
+    return { path: system, scope: 'system' };
+  }
+  const user = readKeytermsFileSettingFromScope(settings.user?.settings);
+  return user ? { path: user, scope: 'user' } : undefined;
 }
 
 function readKeytermsFileSettingFromScope(

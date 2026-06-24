@@ -90,10 +90,11 @@ describe('buildVoiceKeyterms', () => {
     it('ignores blank lines and "#" comments (including indented comments)', () => {
       fs.writeFileSync(
         path.join(qwenDir, 'voice-keyterms.txt'),
-        '# project terms\n\n  Kubernetes  \n   # indented comment\n',
+        '# project terms\n\n  Kubernetes # container orchestration  \n   # indented comment\n',
       );
       const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
       expect(terms).toContain('Kubernetes');
+      expect(terms).not.toContain('Kubernetes # container orchestration');
       expect(terms).not.toContain('# project terms');
       expect(terms).not.toContain('# indented comment');
     });
@@ -160,6 +161,23 @@ describe('buildVoiceKeyterms', () => {
       );
       expect(terms).toContain('SystemTerm');
       expect(terms).not.toContain('UserTerm');
+    });
+
+    it('does not read a system-scoped absolute keytermsFile outside the workspace', () => {
+      const outsideDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'voice-keyterms-outside-'),
+      );
+      const secret = path.join(outsideDir, 'secret.txt');
+      fs.writeFileSync(secret, 'SystemScopeSecret\n');
+      try {
+        const terms = buildVoiceKeyterms(
+          makeSettings(workspaceDir, { systemKeytermsFile: secret }),
+        );
+        expect(terms).not.toContain('SystemScopeSecret');
+        expect(terms).toContain('TypeScript'); // globals only
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
     });
 
     it('dedupes case-insensitively and keeps the global casing', () => {
