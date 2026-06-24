@@ -61,11 +61,19 @@ Use this index to locate the right document for the user's question. Load only t
 | Headless / non-interactive mode             | `docs/features/headless.md`        |
 | LSP integration                             | `docs/features/lsp.md`             |
 | Token caching                               | `docs/features/token-caching.md`   |
-| Language / i18n                             | `docs/features/language.md`        |
-| Arena mode                                  | `docs/features/arena.md`           |
-| Status line                                 | `docs/features/status-line.md`     |
-| Scheduled tasks (cron/loop)                 | `docs/features/scheduled-tasks.md` |
-| Worktree                                    | `docs/features/worktree.md`        |
+| Language / i18n                             | `docs/features/language.md`             |
+| Arena mode                                  | `docs/features/arena.md`                |
+| Status line                                 | `docs/features/status-line.md`          |
+| Scheduled tasks (cron/loop)                 | `docs/features/scheduled-tasks.md`      |
+| Worktree                                    | `docs/features/worktree.md`             |
+| Code review (`/review`)                     | `docs/features/code-review.md`          |
+| Structured output (JSON schema)             | `docs/features/structured-output.md`    |
+| Dual output                                 | `docs/features/dual-output.md`          |
+| Tool-use summaries                          | `docs/features/tool-use-summaries.md`   |
+| Followup suggestions                        | `docs/features/followup-suggestions.md` |
+| Markdown rendering                          | `docs/features/markdown-rendering.md`   |
+| Contextual tips                             | `docs/features/tips.md`                 |
+| Channels (Telegram/WeChat/DingTalk/etc.)    | `docs/features/channels/overview.md`    |
 
 ### IDE Integration
 

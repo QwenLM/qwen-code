@@ -67,8 +67,10 @@ import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
+import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
   buildDaemonStatusResponse,
+  type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from './daemon-status.js';
 import {
@@ -133,6 +135,7 @@ import {
   type DaemonWorkspaceService,
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
+import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
@@ -764,6 +767,7 @@ export interface ServeAppDeps {
    * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
+  startup?: DaemonStartupSnapshot;
   workspace?: DaemonWorkspaceService;
   persistDisabledTools?: (
     workspace: string,
@@ -776,7 +780,7 @@ export interface ServeAppDeps {
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
-  ) => Promise<void>;
+  ) => Promise<void | import('../config/settings.js').LoadedSettings>;
 }
 
 function resolveDaemonTelemetryRoute(
@@ -882,6 +886,10 @@ function resolveDaemonTelemetryRoute(
   if (path === '/workspace/settings') {
     if (req.method === 'GET') return { route: 'GET /workspace/settings' };
     if (req.method === 'POST') return { route: 'POST /workspace/settings' };
+  }
+  if (path === '/workspace/permissions') {
+    if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
+    if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
   }
   return undefined;
 }
@@ -1286,9 +1294,12 @@ export function createServeApp(
   const createExtensionManager = () =>
     new ExtensionManager({
       workspaceDir: boundWorkspace,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(boundWorkspace).merged,
-      ),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(
+          loadSettings(boundWorkspace).merged,
+          undefined,
+          boundWorkspace,
+        ).isTrusted ?? true,
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -1998,6 +2009,11 @@ export function createServeApp(
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
+      // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
+      // on). A configured token no longer suppresses it — the browser carries
+      // the bearer token via the WS subprotocol, which the upgrade listener
+      // verifies (acp-http/index.ts).
+      voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 
@@ -2018,6 +2034,7 @@ export function createServeApp(
           bridge,
           workspace,
           daemonLog,
+          startup: deps.startup,
           qwenCodeVersion: deps.qwenCodeVersion,
           acpHandle: acpHandleRef.current,
           rateLimiter,
@@ -2660,7 +2677,26 @@ export function createServeApp(
       boundWorkspace,
       mutate,
       safeBody,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      broadcastSettingsChanged: (key, value, scope, clientId) => {
+        bridge.publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: { key, value, scope },
+          ...(clientId ? { originatorClientId: clientId } : {}),
+        });
+      },
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, bridge),
+    });
+    registerWorkspacePermissionsRoutes(app, {
+      boundWorkspace,
+      mutate,
+      safeBody,
       persistSetting,
+      invokeWorkspaceCommand: (method, params) =>
+        bridge.invokeWorkspaceCommand(method, params),
       broadcastSettingsChanged: (key, value, scope, clientId) => {
         bridge.publishWorkspaceEvent({
           type: 'settings_changed',
@@ -3434,6 +3470,13 @@ export function createServeApp(
           ...(clientId !== undefined ? { clientId } : {}),
           limit: err.limit,
           pendingCount: err.pendingCount,
+        });
+      }
+      if (daemonLog && err instanceof InvalidClientIdError) {
+        daemonLog.warn('prompt admission rejected: invalid client id', {
+          sessionId,
+          promptId,
+          ...(clientId !== undefined ? { clientId } : {}),
         });
       }
       sendBridgeError(res, err, {
@@ -4876,6 +4919,15 @@ export function createServeApp(
     token: opts.token,
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
+    // Browser captures audio and streams raw PCM here; the daemon transcribes
+    // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
+    // listener's loopback/CSRF/bearer checks.
+    extraWsRoutes: [
+      {
+        path: '/voice/stream',
+        onConnection: createVoiceWsConnectionHandler(boundWorkspace),
+      },
+    ],
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;

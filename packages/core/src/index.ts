@@ -83,6 +83,9 @@ export * from './tools/tools.js';
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
+// Shared MCP resource content formatter (used by the `@` injection path and
+// the read_mcp_resource tool).
+export * from './tools/mcp-resource-content.js';
 // pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
@@ -136,6 +139,10 @@ export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
 export type { GrepTool, GrepToolParams } from './tools/grep.js';
 export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';
 export type { LspTool, LspToolParams, LspOperation } from './tools/lsp.js';
+export type {
+  ReadMcpResourceTool,
+  ReadMcpResourceToolParams,
+} from './tools/read-mcp-resource.js';
 export type {
   ShellTool,
   ShellToolParams,

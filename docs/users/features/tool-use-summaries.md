@@ -174,5 +174,5 @@ If you do not want the extra cost, turn the feature off via `experimental.emitTo
 
 ## Related
 
-- [Compact Mode](../configuration/settings#ui.compactMode) — toggle with `Ctrl+O`; the summary replaces the generic tool-group header when compact mode is on.
+- [Compact Mode](../configuration/settings#ui) — toggle with `Ctrl+O`; the summary replaces the generic tool-group header when compact mode is on.
 - [Followup Suggestions](./followup-suggestions) — another fast-model-driven UX enhancement that shares the same `fastModel` setting.

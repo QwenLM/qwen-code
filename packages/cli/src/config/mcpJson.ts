@@ -6,7 +6,10 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import {
+  type MCPServerConfig,
+  normalizeClaudeMcpServer,
+} from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 
 /** Project-scoped MCP config filename, read from the workspace root. */
@@ -81,8 +84,10 @@ export function loadProjectMcpServers(
       errors.push(`${filePath}: server "${name}" is not an object — skipped`);
       continue;
     }
+    // `.mcp.json` is the Claude Code convention, so entries may use Claude's
+    // `type`-based transport shape; normalize them to Qwen's field-based shape.
     servers[name] = {
-      ...(value as MCPServerConfig),
+      ...normalizeClaudeMcpServer(value as MCPServerConfig),
       scope: 'project',
     };
   }

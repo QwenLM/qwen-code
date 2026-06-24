@@ -32,6 +32,7 @@ import type {
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
+import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -1190,6 +1191,7 @@ export function App({
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
+  const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -1717,6 +1719,12 @@ export function App({
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
+  const currentVoiceModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'voiceModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
@@ -2380,6 +2388,26 @@ export function App({
               if (promptBlocked) return enqueuePrompt(text, images);
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --fast'),
+              );
+              return true;
+            }
+            if (modelArg === '--voice') {
+              store.appendLocalUserMessage(text);
+              workspaceActions
+                .loadProviders()
+                .then((status) => {
+                  setVoiceModels(extractVoiceModels(status));
+                  setModelDialogMode('voice');
+                })
+                .catch((error: unknown) =>
+                  reportError(error, t('model.setVoice')),
+                );
+              return true;
+            }
+            if (modelArg.startsWith('--voice ')) {
+              if (promptBlocked) return enqueuePrompt(text, images);
+              sendPrompt(text, images).catch((error: unknown) =>
+                reportError(error, 'Failed to send /model --voice'),
               );
               return true;
             }
@@ -3191,12 +3219,32 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') return;
+      if (streamingState !== 'idle') {
+        enqueuePrompt(`/model --fast ${modelId}`);
+        return;
+      }
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [sendPrompt, streamingState, reportError],
+    [enqueuePrompt, sendPrompt, streamingState, reportError],
+  );
+
+  // Persist via the prompt channel (like `/model --fast`): the daemon's command
+  // processor writes `voiceModel` to settings. The `/workspace/settings` route
+  // is token-gated, but browser voice runs on loopback-no-token — so this is
+  // the path that actually works there. The daemon's /voice/stream reads it back.
+  const handleVoiceModelSelect = useCallback(
+    (modelId: string) => {
+      if (streamingState !== 'idle') {
+        enqueuePrompt(`/model --voice ${modelId}`);
+        return;
+      }
+      sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
+        reportError(error, t('model.setVoice'));
+      });
+    },
+    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
   );
 
   const commands = useMemo(() => {
@@ -3330,16 +3378,24 @@ export function App({
               title={
                 modelDialogMode === 'fast'
                   ? t('model.setFast')
-                  : t('model.select')
+                  : modelDialogMode === 'voice'
+                    ? t('model.setVoice')
+                    : t('model.select')
               }
               size="lg"
               onClose={() => setModelDialogMode(null)}
             >
               <ModelDialog
                 mode={modelDialogMode}
+                models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                currentModelId={
+                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                }
                 onSelect={(modelId) => {
                   if (modelDialogMode === 'fast') {
                     handleFastModelSelect(modelId);
+                  } else if (modelDialogMode === 'voice') {
+                    handleVoiceModelSelect(modelId);
                   } else {
                     handleModelSelect(modelId);
                   }
