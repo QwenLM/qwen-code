@@ -123,6 +123,35 @@ describe('claude MCP import', () => {
     );
   });
 
+  it('normalizes Claude transport types into Qwen URL fields', () => {
+    writeJson(path.join(homeDir, '.claude.json'), {
+      mcpServers: {
+        httpServer: { type: 'http', url: 'https://example.com/mcp' },
+        sseServer: { type: 'sse', url: 'https://example.com/sse' },
+        stdioServer: { type: 'stdio', command: 'node', args: ['s.js'] },
+      },
+    });
+
+    const settings = createSettings();
+    importClaudeMcpServers({
+      source: 'claude-code',
+      scope: 'user',
+      settings,
+      cwd: projectDir,
+      homeDir,
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'mcpServers',
+      {
+        httpServer: { httpUrl: 'https://example.com/mcp' },
+        sseServer: { url: 'https://example.com/sse' },
+        stdioServer: { type: 'stdio', command: 'node', args: ['s.js'] },
+      },
+    );
+  });
+
   it('imports Claude Code current-project MCP servers into project scope', () => {
     writeJson(path.join(homeDir, '.claude.json'), {
       mcpServers: {

@@ -331,36 +331,44 @@ ${systemPrompt}
 }
 
 /**
- * Maps Claude `.mcp.json` server entries to Qwen's MCPServerConfig shape.
+ * Maps a single Claude `.mcp.json` server entry to Qwen's MCPServerConfig shape.
  * Claude discriminates transport with a `type` field (`http`/`sse`/`stdio`),
  * whereas Qwen keys off which field is set: `httpUrl` (streamable HTTP),
  * `url` (SSE) or `command` (stdio). A Claude `type: 'http'` entry therefore
  * has to move its `url` to `httpUrl`, and the now-meaningless `type` is dropped.
+ */
+export function normalizeClaudeMcpServer(
+  raw: MCPServerConfig,
+): MCPServerConfig {
+  const server = raw as unknown as Record<string, unknown>;
+  // stdio / already-Qwen-shaped configs pass through unchanged.
+  if (server['command'] || server['httpUrl'] || server['tcp']) {
+    return raw;
+  }
+  if (typeof server['url'] === 'string') {
+    const rest = { ...server };
+    delete rest['type'];
+    delete rest['url'];
+    return {
+      ...rest,
+      ...(server['type'] === 'http'
+        ? { httpUrl: server['url'] }
+        : { url: server['url'] }),
+    } as unknown as MCPServerConfig;
+  }
+  return raw;
+}
+
+/**
+ * Maps Claude `.mcp.json` server entries to Qwen's MCPServerConfig shape.
+ * @see normalizeClaudeMcpServer for the per-server transport mapping.
  */
 function normalizeClaudeMcpServers(
   servers: Record<string, MCPServerConfig>,
 ): Record<string, MCPServerConfig> {
   const normalized: Record<string, MCPServerConfig> = {};
   for (const [name, raw] of Object.entries(servers)) {
-    const server = raw as unknown as Record<string, unknown>;
-    // stdio / already-Qwen-shaped configs pass through unchanged.
-    if (server['command'] || server['httpUrl'] || server['tcp']) {
-      normalized[name] = raw;
-      continue;
-    }
-    if (typeof server['url'] === 'string') {
-      const rest = { ...server };
-      delete rest['type'];
-      delete rest['url'];
-      normalized[name] = {
-        ...rest,
-        ...(server['type'] === 'http'
-          ? { httpUrl: server['url'] }
-          : { url: server['url'] }),
-      } as unknown as MCPServerConfig;
-      continue;
-    }
-    normalized[name] = raw;
+    normalized[name] = normalizeClaudeMcpServer(raw);
   }
   return normalized;
 }
