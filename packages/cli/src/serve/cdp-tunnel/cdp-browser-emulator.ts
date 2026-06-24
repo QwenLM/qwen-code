@@ -72,8 +72,18 @@ export class CdpBrowserEmulator {
 
   constructor(
     private readonly cb: CdpEmulatorCallbacks,
-    private readonly tab: CdpTabInfo = {},
+    private tab: CdpTabInfo = {},
   ) {}
+
+  /**
+   * Refresh the synthetic tab/page targetInfo (url/title). Called once the
+   * extension acks `cdp_attach` with the real tab's metadata, so puppeteer's
+   * `page.url()` / `page.title()` reflect the actual page rather than the
+   * `about:blank` placeholder used before attach.
+   */
+  setTabInfo(info: CdpTabInfo): void {
+    this.tab = { ...this.tab, ...info };
+  }
 
   private tabTargetInfo() {
     return {
