@@ -232,6 +232,10 @@ function readRegularFileNoFollow({
     if (
       stat.dev !== expectedStat.dev ||
       stat.ino !== expectedStat.ino ||
+      stat.mode !== expectedStat.mode ||
+      stat.size !== expectedStat.size ||
+      stat.mtimeMs !== expectedStat.mtimeMs ||
+      stat.ctimeMs !== expectedStat.ctimeMs ||
       !stat.isFile() ||
       stat.nlink > 1 ||
       stat.size > MAX_KEYTERMS_FILE_BYTES
