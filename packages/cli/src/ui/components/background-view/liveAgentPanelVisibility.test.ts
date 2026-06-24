@@ -109,6 +109,29 @@ describe('getLiveAgentPanelLayoutKey', () => {
 // only then shrinks the panel — the "safe" direction the key intentionally
 // does not track.
 describe('isLiveAgentPanelVisibleEntry (eviction window)', () => {
+  it('returns false for non-agent entries', () => {
+    expect(isLiveAgentPanelVisibleEntry(shellEntry(), 1000)).toBe(false);
+  });
+
+  it('keeps running agents visible unconditionally (no endTime)', () => {
+    expect(
+      isLiveAgentPanelVisibleEntry(agentEntry({ status: 'running' }), 1000),
+    ).toBe(true);
+  });
+
+  it('keeps paused agents visible unconditionally (no endTime)', () => {
+    expect(
+      isLiveAgentPanelVisibleEntry(agentEntry({ status: 'paused' }), 1000),
+    ).toBe(true);
+  });
+
+  it('returns false for a terminal agent missing endTime (guards NaN)', () => {
+    // nowMs - undefined would be NaN, and NaN <= window is false — assert the
+    // explicit endTime guard short-circuits before that comparison.
+    const entry = agentEntry({ status: 'completed' });
+    expect(isLiveAgentPanelVisibleEntry(entry, 1000)).toBe(false);
+  });
+
   it('keeps a terminal agent visible within the window, evicts after', () => {
     const entry = agentEntry({ status: 'completed', endTime: 1000 });
     expect(isLiveAgentPanelVisibleEntry(entry, 1000)).toBe(true);

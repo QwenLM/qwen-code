@@ -2541,15 +2541,10 @@ export const AppContainer = (props: AppContainerProps) => {
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
-  // The LiveAgentPanel renders inside `mainControlsRef` and grows as
-  // background agents launch / change status. Its per-second elapsed-time
-  // tick is internal and never reaches AppContainer, so without an explicit
-  // roster signal the measurement effect below would not re-run when the
-  // panel grows — leaving `controlsHeight` stale, `availableTerminalHeight`
-  // too large, and the pending region free to overflow the terminal (which,
-  // in non-VP mode, forces the view back to the bottom with a flicker on
-  // every repaint). This key changes exactly on height-affecting roster
-  // changes and is stable across the elapsed-time tick. See #5798.
+  // Re-measure the footer whenever the LiveAgentPanel's height can change
+  // (agents launching / finishing / focus), so `controlsHeight` — and thus
+  // `availableTerminalHeight` — never goes stale below the composer. See
+  // getLiveAgentPanelLayoutKey for the full rationale (#5798).
   const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
     bgTaskEntries,
     bgLivePanelFocused,
