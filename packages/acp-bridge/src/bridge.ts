@@ -43,6 +43,7 @@ import {
   STATUS_SCHEMA_VERSION,
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
+  type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
 } from './status.js';
 import {
@@ -1614,6 +1615,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           transportClosed,
         ]);
         publishModelSwitched(entry, modelId, originatorClientId);
+        broadcastWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key: 'model.name',
+            value: modelId,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
         succeeded = true;
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
@@ -2804,12 +2813,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
-      let originatorClientId: string | undefined;
-      try {
-        originatorClientId = resolveTrustedClientId(entry, context?.clientId);
-      } catch (err) {
-        return Promise.reject(err);
-      }
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -3770,6 +3777,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getSessionLspStatus(sessionId) {
+      return requestSessionStatus<ServeSessionLspStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      );
+    },
+
     async cancelSessionTask(sessionId, taskId, taskKind) {
       return requestSessionStatus<{ cancelled: boolean }>(
         sessionId,
@@ -3944,6 +3958,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // the agent's authoritative canonical id and re-publishes if it
           // differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
+          broadcastWorkspaceEvent({
+            type: 'settings_changed',
+            data: {
+              key: 'model.name',
+              value: req.modelId,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
           succeeded = true;
           return result;
         } finally {
@@ -3983,8 +4005,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
         throw err;
       }
-      // model_switched is published inside the work callback above (while the
-      // suppress flag is still set), mirroring applyModelServiceId.
       return response;
     },
 
@@ -4589,7 +4609,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
-              { sessionId, promptId: req.promptId, rewindFiles: true },
+              {
+                sessionId,
+                promptId: req.promptId,
+                rewindFiles: req.rewindFiles !== false,
+              },
             ),
             initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.sessionRewind,

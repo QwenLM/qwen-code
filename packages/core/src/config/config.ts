@@ -18,10 +18,13 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
+import { selectVisionBridgeModel } from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
@@ -152,6 +155,7 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
@@ -795,6 +799,7 @@ export interface ConfigParameters {
   fileFiltering?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
+    customIgnoreFiles?: string[];
     enableRecursiveFileSearch?: boolean;
     enableFuzzySearch?: boolean;
   };
@@ -1246,6 +1251,7 @@ export class Config {
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
+    customIgnoreFiles: string[];
     enableRecursiveFileSearch: boolean;
     enableFuzzySearch: boolean;
   };
@@ -1458,6 +1464,9 @@ export class Config {
     this.fileFiltering = {
       respectGitIgnore: params.fileFiltering?.respectGitIgnore ?? true,
       respectQwenIgnore: params.fileFiltering?.respectQwenIgnore ?? true,
+      customIgnoreFiles: params.fileFiltering?.customIgnoreFiles ?? [
+        ...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+      ],
       enableRecursiveFileSearch:
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
@@ -2563,6 +2572,20 @@ export class Config {
   }
 
   /**
+   * Resolve the effective input modalities of the current primary model. The
+   * content generator config always carries resolved modalities (name-based
+   * detection fills them in, defaulting unknown models to text-only), which is
+   * the same source the file reader uses to decide media support. Used to
+   * decide whether the vision bridge should run.
+   *
+   * @returns The resolved input modalities. Unknown models are treated as
+   * text-only so bridge features can conservatively adapt image inputs.
+   */
+  getEffectiveInputModalities(): InputModalities {
+    return this.getContentGeneratorConfig()?.modalities ?? {};
+  }
+
+  /**
    * Get the human-readable display name for the currently selected model.
    * Resolves the model id to its name from the model registry.
    * Falls back to the raw model id when the model is not found.
@@ -2638,6 +2661,27 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  /**
+   * Pick an image-capable model from the registered models to use as the
+   * vision bridge model. This lets the bridge work out-of-the-box when the user
+   * already has a vision model on the SAME provider as their text-only primary
+   * (see {@link selectVisionBridgeModel} — it never reaches across providers).
+   * `runSideQuery` resolves the chosen model's credentials by id.
+   *
+   * @returns A same-provider image-capable model, or `undefined`.
+   */
+  getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
+    const contentGeneratorConfig = this.getContentGeneratorConfig();
+    return selectVisionBridgeModel(
+      this.getModel(),
+      this.getAllConfiguredModels(),
+      {
+        authType: contentGeneratorConfig?.authType,
+        baseUrl: contentGeneratorConfig?.baseUrl,
+      },
+    );
   }
 
   /**
@@ -4079,6 +4123,7 @@ export class Config {
     return {
       respectGitIgnore: this.fileFiltering.respectGitIgnore,
       respectQwenIgnore: this.fileFiltering.respectQwenIgnore,
+      customIgnoreFiles: [...this.fileFiltering.customIgnoreFiles],
     };
   }
 
@@ -4145,7 +4190,10 @@ export class Config {
 
   getFileService(): FileDiscoveryService {
     if (!this.fileDiscoveryService) {
-      this.fileDiscoveryService = new FileDiscoveryService(this.targetDir);
+      this.fileDiscoveryService = new FileDiscoveryService(
+        this.targetDir,
+        this.fileFiltering.customIgnoreFiles,
+      );
     }
     return this.fileDiscoveryService;
   }

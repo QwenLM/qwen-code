@@ -15,6 +15,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
@@ -1542,7 +1543,13 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: 5 as number,
             description:
-              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+              'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            jsonSchemaOverride: {
+              type: 'integer',
+              default: 5,
+              description:
+                'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            },
             showInDialog: false,
           },
           toolResultsTotalCharsThreshold: {
@@ -1581,8 +1588,20 @@ const SETTINGS_SCHEMA = {
             category: 'Context',
             requiresRestart: true,
             default: true,
-            description: 'Respect .qwenignore files when searching',
+            description:
+              'Respect .qwenignore and configured custom ignore files when searching',
             showInDialog: true,
+          },
+          customIgnoreFiles: {
+            type: 'array',
+            label: 'Custom Ignore Files',
+            category: 'Context',
+            requiresRestart: true,
+            default: [...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES] as string[],
+            description:
+              'Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.',
+            showInDialog: false,
+            items: { type: 'string' },
           },
           enableRecursiveFileSearch: {
             type: 'boolean',
@@ -2576,6 +2595,11 @@ const SETTINGS_SCHEMA = {
     // This is an advanced safety valve for runaway hook loops, not a common
     // interactive preference.
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'integer',
+      minimum: 1,
+      default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    },
   },
 
   hooks: {

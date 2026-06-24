@@ -49,6 +49,7 @@ class CronCreateInvocation extends BaseToolInvocation<
     const scheduler = this.config.getCronScheduler();
     const recurring = this.params.recurring !== false;
     const durable = this.params.durable === true;
+    const prompt = this.params.prompt.trim();
 
     try {
       // Validate cron expression before creating the job
@@ -59,12 +60,8 @@ class CronCreateInvocation extends BaseToolInvocation<
       nextFireTime(this.params.cron, new Date());
 
       const job = durable
-        ? await scheduler.createDurable(
-            this.params.cron,
-            this.params.prompt,
-            recurring,
-          )
-        : scheduler.create(this.params.cron, this.params.prompt, recurring);
+        ? await scheduler.createDurable(this.params.cron, prompt, recurring)
+        : scheduler.create(this.params.cron, prompt, recurring);
 
       const display = humanReadableCron(job.cronExpr);
       const returnDisplay = `Scheduled ${job.id} (${display})${durable ? ' [durable]' : ''}`;
@@ -163,6 +160,15 @@ export class CronCreateTool extends BaseDeclarativeTool<
     params: CronCreateParams,
   ): ToolInvocation<CronCreateParams, ToolResult> {
     return new CronCreateInvocation(this.config, params);
+  }
+
+  protected override validateToolParamValues(
+    params: CronCreateParams,
+  ): string | null {
+    if (!params.prompt || params.prompt.trim() === '') {
+      return 'Parameter "prompt" must be a non-empty string.';
+    }
+    return null;
   }
 
   /**

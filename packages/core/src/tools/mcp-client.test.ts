@@ -17,16 +17,20 @@ import {
 } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
+import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
+import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   addMCPStatusChangeListener,
+  connectToMcpServer,
   createStreamableHttpCompatibilityFetch,
   createTransport,
   discoverPrompts,
   discoverResources,
   getAllMCPServerStatuses,
+  getMcpOAuthDialogInstruction,
   getMCPServerStatus,
   hasNetworkTransport,
   isEnabled,
@@ -86,6 +90,583 @@ describe('mcp-client', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.env = ORIGINAL_ENV;
+  });
+
+  describe('getMcpOAuthDialogInstruction', () => {
+    it('builds an authenticate instruction for the named MCP server', () => {
+      expect(getMcpOAuthDialogInstruction('authenticate', 'foo')).toBe(
+        "In interactive Qwen Code sessions, open the /mcp dialog to authenticate with MCP server 'foo'. For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-* or settings.json, then authenticate once in an interactive session before connecting.",
+      );
+    });
+
+    it('builds a re-authenticate instruction for the named MCP server', () => {
+      expect(getMcpOAuthDialogInstruction('re-authenticate', 'foo')).toBe(
+        "In interactive Qwen Code sessions, open the /mcp dialog to re-authenticate with MCP server 'foo'. For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-* or settings.json, then re-authenticate once in an interactive session before connecting.",
+      );
+    });
+  });
+
+  describe('connectToMcpServer', () => {
+    afterEach(() => {
+      vi.mocked(MCPOAuthProvider).mockReset();
+      vi.mocked(MCPOAuthTokenStorage).mockReset();
+    });
+
+    function setupHttpOAuthRetry(connectError: Error) {
+      const connect = vi
+        .fn()
+        .mockRejectedValueOnce(connectError)
+        .mockResolvedValueOnce(undefined);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect,
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ clientId: 'client-id' });
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const authenticate = vi.fn().mockResolvedValue(undefined);
+      const getValidToken = vi.fn().mockResolvedValue('access-token');
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            authenticate,
+            getValidToken,
+          }) as unknown as MCPOAuthProvider,
+      );
+      const discoverOAuthConfig = vi
+        .spyOn(OAuthUtils, 'discoverOAuthConfig')
+        .mockResolvedValue({
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        });
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      return {
+        authenticate,
+        connect,
+        discoverOAuthConfig,
+        getCredentials,
+        getValidToken,
+        workspaceContext,
+      };
+    }
+
+    it('reports rejected stored OAuth tokens for SSE servers', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue({
+              clientId: 'client-id',
+            }),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken: vi.fn().mockResolvedValue('stored-token'),
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth token for SSE server 'sse-server' was rejected. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+    });
+
+    it('reports unusable stored OAuth tokens for SSE servers', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce(null);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+    });
+
+    it('reports unusable SSE OAuth tokens when token validation fails', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' });
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const getValidToken = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockRejectedValue(new Error('Token store unavailable'));
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken,
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+        getMcpOAuthDialogInstruction('re-authenticate', 'sse-server');
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        "Failed to validate stored OAuth token for SSE server 'sse-server': Token store unavailable",
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('logs unusable SSE OAuth tokens when stored credentials disappear', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce(null);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+    });
+
+    it('reports SSE OAuth guidance when credentials fail to re-read after 401', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockRejectedValueOnce(new Error('Corrupt token file'));
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+        getMcpOAuthDialogInstruction('re-authenticate', 'sse-server');
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        "Failed to re-read stored OAuth credentials for SSE server 'sse-server' after 401: Corrupt token file",
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports missing OAuth configuration for SSE servers without stored credentials', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "401 error received for SSE server 'sse-server' without OAuth configuration. " +
+          getMcpOAuthDialogInstruction('authenticate', 'sse-server'),
+      );
+    });
+
+    it('continues connecting when the SSE OAuth credential pre-read fails', async () => {
+      const connect = vi.fn();
+      const getCredentials = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Corrupt token file'))
+        .mockResolvedValue(null);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect,
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+      expect(connect).toHaveBeenCalledOnce();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "Failed to pre-read stored OAuth credentials for SSE server 'sse-server': Corrupt token file",
+      );
+    });
+
+    it('reports OAuth guidance when automatic OAuth handling fails', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(
+              'HTTP 401 Unauthorized\nwww-authenticate: Bearer realm="example", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+            ),
+          ),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockResolvedValue(null);
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "Failed to handle automatic OAuth for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('retries HTTP connections after base-url OAuth discovery without www-authenticate', async () => {
+      const {
+        authenticate,
+        connect,
+        discoverOAuthConfig,
+        getValidToken,
+        workspaceContext,
+      } = setupHttpOAuthRetry(new Error('HTTP 401 Unauthorized'));
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(authenticate).toHaveBeenCalledWith(
+        'http-server',
+        {
+          enabled: true,
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        },
+        'http://test-server/mcp',
+      );
+      expect(getValidToken).toHaveBeenCalledWith('http-server', {
+        clientId: 'client-id',
+      });
+      expect(connect).toHaveBeenCalledTimes(2);
+      const oauthTransport = connect.mock.calls[1][0] as {
+        _requestInit?: { headers?: Record<string, string> };
+      };
+      expect(oauthTransport._requestInit?.headers).toMatchObject({
+        Authorization: 'Bearer access-token',
+      });
+    });
+
+    it('falls back to base-url OAuth discovery when www-authenticate lacks resource metadata', async () => {
+      const { authenticate, connect, discoverOAuthConfig, workspaceContext } =
+        setupHttpOAuthRetry(
+          new Error(
+            'HTTP 401 Unauthorized\nwww-authenticate: Bearer realm="example"',
+          ),
+        );
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(authenticate).toHaveBeenCalledWith(
+        'http-server',
+        {
+          enabled: true,
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        },
+        'http://test-server/mcp',
+      );
+      expect(connect).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports OAuth guidance when post-discovery transport creation fails', async () => {
+      const config = { httpUrl: 'http://test-server/mcp' };
+      const { connect, discoverOAuthConfig, getValidToken, workspaceContext } =
+        setupHttpOAuthRetry(new Error('HTTP 401 Unauthorized'));
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getValidToken.mockImplementation(async () => {
+        config.httpUrl = 'not a valid URL';
+        return 'access-token';
+      });
+      const oauthMessage =
+        "Failed to create OAuth transport for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer('http-server', config, false, workspaceContext),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports OAuth guidance when post-discovery token lookup fails', async () => {
+      const { getValidToken, workspaceContext } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getValidToken.mockResolvedValue(null);
+      const oauthMessage =
+        "Failed to get OAuth token for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports OAuth guidance when post-discovery credentials are unavailable', async () => {
+      const { getCredentials, workspaceContext } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getCredentials.mockReset();
+      getCredentials.mockResolvedValue(null);
+      const oauthMessage =
+        "Failed to get stored credentials for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('wraps OAuth discovery errors with remediation guidance', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 404 }),
+      );
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockRejectedValue(
+        new Error('Discovery timed out'),
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "OAuth discovery failed for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server') +
+        ' Original error: Discovery timed out';
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
   });
 
   describe('McpClient', () => {
@@ -1466,6 +2047,81 @@ describe('mcp-client', () => {
     });
 
     describe('authenticated Streamable HTTP compatibility fetch', () => {
+      afterEach(() => {
+        vi.mocked(MCPOAuthProvider).mockReset();
+        vi.mocked(MCPOAuthTokenStorage).mockReset();
+      });
+
+      it('throws the /mcp instruction when OAuth has no valid token', async () => {
+        const getValidToken = vi.fn().mockResolvedValue(null);
+        vi.mocked(MCPOAuthProvider).mockImplementation(
+          () =>
+            ({
+              getValidToken,
+            }) as unknown as MCPOAuthProvider,
+        );
+
+        await expect(
+          createTransport(
+            'oauth-test-server',
+            {
+              httpUrl: 'http://test-server',
+              oauth: {
+                enabled: true,
+                clientId: 'client-id',
+              },
+            },
+            false,
+          ),
+        ).rejects.toThrow(
+          getMcpOAuthDialogInstruction('authenticate', 'oauth-test-server'),
+        );
+        expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
+          enabled: true,
+          clientId: 'client-id',
+        });
+      });
+
+      it('warns when stored OAuth credentials cannot produce a token', async () => {
+        const getCredentials = vi.fn().mockResolvedValue({
+          clientId: 'client-id',
+        });
+        const getValidToken = vi.fn().mockResolvedValue(null);
+        vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+          () =>
+            ({
+              getCredentials,
+            }) as unknown as MCPOAuthTokenStorage,
+        );
+        vi.mocked(MCPOAuthProvider).mockImplementation(
+          () =>
+            ({
+              getValidToken,
+            }) as unknown as MCPOAuthProvider,
+        );
+
+        const transport = await createTransport(
+          'oauth-test-server',
+          {
+            httpUrl: 'http://test-server',
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        expect(getCredentials).toHaveBeenCalledWith('oauth-test-server');
+        expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
+          clientId: 'client-id',
+        });
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          "Stored OAuth credentials exist for server 'oauth-test-server' but no valid token could be obtained. Transport will be created without authentication; expect a 401. " +
+            getMcpOAuthDialogInstruction(
+              're-authenticate',
+              'oauth-test-server',
+            ),
+        );
+      });
+
       it('wires the compatibility fetch for OAuth httpUrl transports', async () => {
         const getValidToken = vi.fn().mockResolvedValue('oauth-token');
         vi.mocked(MCPOAuthProvider).mockImplementation(

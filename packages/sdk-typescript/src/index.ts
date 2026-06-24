@@ -101,6 +101,8 @@ export {
   type DaemonSessionClosedReason,
   type DaemonSessionClientOptions,
   type DaemonSessionContextStatus,
+  type DaemonLspServerStatus,
+  type DaemonSessionLspStatus,
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionProcessTaskLifecycleStatus,

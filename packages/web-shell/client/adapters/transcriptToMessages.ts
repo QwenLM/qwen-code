@@ -39,12 +39,17 @@ type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock & {
 };
 
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
-  meta?: Record<string, unknown>;
+  meta?: {
+    source?: unknown;
+    qwenDiscreteMessage?: boolean;
+    backgroundTask?: unknown;
+  };
 };
 
 interface TranscriptMessageLabels {
   promptCancelled?: string;
   branchSuccess?: (name: string) => string;
+  midTurnInserted?: (message: string) => string;
 }
 
 interface TranscriptMessageOptions {
@@ -70,6 +75,17 @@ function getSessionBranchDisplayName(data: unknown): string | null {
   return typeof branchData.newSessionId === 'string'
     ? branchData.newSessionId.slice(0, 8)
     : null;
+}
+
+function getMidTurnInjectedText(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
+  const messages = (data as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return null;
+  const text = messages
+    .filter((message): message is string => typeof message === 'string')
+    .join('\n')
+    .trim();
+  return text || null;
 }
 
 function isBackgroundNotificationAssistantBlock(
@@ -160,6 +176,7 @@ export function transcriptBlocksToDaemonMessages(
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
   let currentAssistantIdx: number | null = null;
+  let currentThinkingIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
   // the next top-level assistant/thought block must start a fresh assistant
   // message instead of being appended to text that appeared before the tool.
@@ -175,6 +192,7 @@ export function transcriptBlocksToDaemonMessages(
     switch (block.kind) {
       case 'user': {
         currentAssistantIdx = null;
+        currentThinkingIdx = null;
         needsNewContentMessage = false;
         const textBlock = block as DaemonTextTranscriptBlock;
         const msg: DaemonUserMessage = {
@@ -243,6 +261,7 @@ export function transcriptBlocksToDaemonMessages(
                 timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
+              currentThinkingIdx = null;
             }
           }
           if (lastProgress && !hasTerminal) {
@@ -277,6 +296,7 @@ export function transcriptBlocksToDaemonMessages(
             ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
+          currentThinkingIdx = null;
         } else if (!isTextBlockEmpty(textBlock)) {
           messages.push({
             id: block.id,
@@ -287,6 +307,7 @@ export function transcriptBlocksToDaemonMessages(
             ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
+          currentThinkingIdx = null;
           needsNewContentMessage = false;
         } else if (textBlock.usage && target && target.role === 'assistant') {
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
@@ -308,33 +329,28 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
         const target =
-          currentAssistantIdx !== null
-            ? messages[currentAssistantIdx]
+          currentThinkingIdx !== null
+            ? messages[currentThinkingIdx]
             : undefined;
-        if (
-          target &&
-          target.role === 'assistant' &&
-          !needsNewContentMessage &&
-          !target.content
-        ) {
-          messages[currentAssistantIdx!] = {
+        if (target && target.role === 'thinking' && !needsNewContentMessage) {
+          messages[currentThinkingIdx!] = {
             ...target,
-            thinking: (target.thinking || '') + textBlock.text,
+            content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
           };
           needsNewContentMessage = false;
         } else {
           messages.push({
             id: block.id,
-            role: 'assistant',
-            content: '',
-            thinking: textBlock.text,
+            role: 'thinking',
+            content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
           });
-          currentAssistantIdx = messages.length - 1;
+          currentThinkingIdx = messages.length - 1;
           needsNewContentMessage = false;
         }
+        currentAssistantIdx = null;
         break;
       }
 
@@ -366,6 +382,8 @@ export function transcriptBlocksToDaemonMessages(
 
         appendToolCallMessage(messages, block.id, toolCall, blockTime);
         toolsByCallId.set(toolCall.callId, toolCall);
+        currentAssistantIdx = null;
+        currentThinkingIdx = null;
         needsNewContentMessage = true;
         break;
       }
@@ -512,10 +530,16 @@ export function transcriptBlocksToDaemonMessages(
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
             : null;
+        const midTurnInsertedText =
+          statusBlock.source === 'mid_turn_message_injected'
+            ? getMidTurnInjectedText(statusBlock.data)
+            : null;
         const text =
           branchDisplayName && options.labels?.branchSuccess
             ? options.labels.branchSuccess(branchDisplayName)
-            : statusBlock.text;
+            : midTurnInsertedText && options.labels?.midTurnInserted
+              ? options.labels.midTurnInserted(midTurnInsertedText)
+              : statusBlock.text;
         if (isIgnoredWebShellStatus(text)) break;
         const todos = parsePlanTodos(text);
         if (todos) {
@@ -567,6 +591,7 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: promptCancelledText,
           variant: 'info',
+          source: 'prompt_cancelled',
           timestamp: blockTime,
         });
         needsNewContentMessage = true;

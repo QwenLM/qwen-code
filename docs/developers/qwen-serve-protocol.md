@@ -129,6 +129,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_stats',
+ 'session_lsp',
  'session_close', 'session_metadata', 'mcp_guardrails',
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
@@ -157,6 +158,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `client_heartbeat` advertises `POST /session/:id/heartbeat`. Older daemons return `404`; pre-flight this tag before issuing periodic heartbeats.
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
+
+`session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
 `session_approval_mode_control`, `workspace_tool_toggle`, `workspace_init`, and `workspace_mcp_restart` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) advertise the four mutation control routes documented under "Mutation: approval, tools, init, MCP restart" below. All four are strict-gated by the PR 15 mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
 
@@ -1003,6 +1006,43 @@ contains whitelisted metadata from the agent, shell, and monitor task
 registries; controllers, timers, offsets, pending messages, and raw registry
 objects are never exposed.
 
+### `GET /session/:id/lsp`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "workspaceCwd": "/canonical/path",
+  "enabled": true,
+  "configuredServers": 1,
+  "readyServers": 1,
+  "failedServers": 0,
+  "inProgressServers": 0,
+  "notStartedServers": 0,
+  "servers": [
+    {
+      "name": "typescript",
+      "status": "READY",
+      "languages": ["typescript", "javascript"],
+      "transport": "stdio",
+      "command": "typescript-language-server"
+    }
+  ]
+}
+```
+
+`status` is one of `NOT_STARTED`, `IN_PROGRESS`, `READY`, or `FAILED`.
+Optional `error` is present on failed servers when available. Disabled LSP
+(including bare mode) returns HTTP 200 with `enabled: false`, zero counts, and
+`servers: []`. LSP enabled with no configured servers returns `enabled: true`,
+`configuredServers: 0`, and `servers: []`. If initialization fails before the
+client exists, the response may include `initializationError`; if a live client
+cannot provide a snapshot, the response includes `statusUnavailable: true`.
+
+This route exposes only stable client-facing fields. It intentionally omits
+debug internals such as process IDs, spawn args, stderr tails, root URIs, and
+workspace-folder paths.
+
 ### `POST /session`
 
 Spawn a new agent or attach to an existing one (under `sessionScope: 'single'`, the default).
@@ -1559,7 +1599,14 @@ After a successful vote, every connected client sees `permission_resolved` with 
 
 The daemon brokers an OAuth 2.0 Device Authorization Grant (RFC 8628) so a remote SDK client can trigger a login whose tokens land on the **daemon** filesystem — not on the client. The daemon polls the IdP itself; the client's only job is to display the verification URL + user code and (optionally) subscribe to SSE for completion events.
 
-Capability tag: `auth_device_flow` (always advertised). Supported providers in v1: `qwen-oauth`.
+Capability tag: `auth_device_flow` (always advertised). Supported providers in
+v1: `qwen-oauth`.
+
+> [!note]
+>
+> Qwen OAuth free tier was discontinued on 2026-04-15. Treat `qwen-oauth` as the
+> legacy v1 provider identifier in this protocol; new clients should prefer a
+> currently supported auth provider when one is available.
 
 **Runtime locality.** The daemon never spawns a browser — even if it can. The client decides whether to call `open(verificationUri)` locally; on a headless pod (the canonical Mode B deployment) the user opens the URL on whatever device they have a browser on. See `docs/users/qwen-serve.md` for the recommended UX.
 
