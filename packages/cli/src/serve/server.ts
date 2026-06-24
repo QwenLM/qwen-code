@@ -67,6 +67,7 @@ import { loadSettings } from '../config/settings.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
+import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
   buildDaemonStatusResponse,
   type DaemonStartupSnapshot,
@@ -2008,6 +2009,11 @@ export function createServeApp(
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
+      // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
+      // on). A configured token no longer suppresses it — the browser carries
+      // the bearer token via the WS subprotocol, which the upgrade listener
+      // verifies (acp-http/index.ts).
+      voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 
@@ -3466,6 +3472,13 @@ export function createServeApp(
           pendingCount: err.pendingCount,
         });
       }
+      if (daemonLog && err instanceof InvalidClientIdError) {
+        daemonLog.warn('prompt admission rejected: invalid client id', {
+          sessionId,
+          promptId,
+          ...(clientId !== undefined ? { clientId } : {}),
+        });
+      }
       sendBridgeError(res, err, {
         route: 'POST /session/:id/prompt',
         sessionId,
@@ -4906,6 +4919,15 @@ export function createServeApp(
     token: opts.token,
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
+    // Browser captures audio and streams raw PCM here; the daemon transcribes
+    // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
+    // listener's loopback/CSRF/bearer checks.
+    extraWsRoutes: [
+      {
+        path: '/voice/stream',
+        onConnection: createVoiceWsConnectionHandler(boundWorkspace),
+      },
+    ],
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;

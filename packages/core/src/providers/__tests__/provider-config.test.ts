@@ -10,6 +10,7 @@ import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
+  findExistingProviderModels,
   findProviderByCredentials,
   getAllProviderBaseUrls,
   getDefaultModelIds,
@@ -362,6 +363,68 @@ describe('getDefaultModelIds', () => {
   it('returns empty array when no models', () => {
     const config = makeConfig({ models: undefined });
     expect(getDefaultModelIds(config)).toEqual([]);
+  });
+});
+
+describe('findExistingProviderModels', () => {
+  const config = makeConfig({ modelNamePrefix: '', envKey: 'TEST_API_KEY' });
+
+  it('returns the user-saved models owned by the provider', () => {
+    const result = findExistingProviderModels(config, {
+      [AuthType.USE_OPENAI]: [
+        { id: 'custom-model', envKey: 'TEST_API_KEY' },
+        { id: 'default-model', envKey: 'TEST_API_KEY' },
+        { id: 'other-provider-model', envKey: 'OTHER_API_KEY' },
+      ],
+    });
+    expect(result).toEqual({
+      protocol: AuthType.USE_OPENAI,
+      models: [
+        { id: 'custom-model', envKey: 'TEST_API_KEY' },
+        { id: 'default-model', envKey: 'TEST_API_KEY' },
+      ],
+    });
+  });
+
+  it('returns undefined when no saved models are owned by the provider', () => {
+    expect(
+      findExistingProviderModels(config, {
+        [AuthType.USE_OPENAI]: [{ id: 'x', envKey: 'OTHER_API_KEY' }],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined when modelProviders is empty or missing', () => {
+    expect(findExistingProviderModels(config, {})).toBeUndefined();
+    expect(findExistingProviderModels(config, undefined)).toBeUndefined();
+  });
+
+  it('returns undefined when ownership cannot be resolved (function envKey)', () => {
+    const customConfig = makeConfig({
+      envKey: () => 'DYNAMIC_KEY',
+      modelNamePrefix: '',
+    });
+    expect(
+      findExistingProviderModels(customConfig, {
+        [AuthType.USE_OPENAI]: [{ id: 'x', envKey: 'DYNAMIC_KEY' }],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('scans protocolOptions in order and picks the first with owned models', () => {
+    const multiProtocol = makeConfig({
+      modelNamePrefix: '',
+      envKey: 'TEST_API_KEY',
+      protocolOptions: [AuthType.USE_ANTHROPIC, AuthType.USE_OPENAI],
+    });
+    const result = findExistingProviderModels(multiProtocol, {
+      [AuthType.USE_OPENAI]: [{ id: 'openai-model', envKey: 'TEST_API_KEY' }],
+      [AuthType.USE_ANTHROPIC]: [
+        { id: 'anthropic-model', envKey: 'TEST_API_KEY' },
+      ],
+    });
+    expect(result?.protocol).toBe(AuthType.USE_ANTHROPIC);
+    expect(result?.models.map((m) => m.id)).toEqual(['anthropic-model']);
   });
 });
 

@@ -1029,6 +1029,105 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('maps invalid client id responses on non-blocking prompts', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(400, {
+            code: 'invalid_client_id',
+            error: 'unknown client',
+            sessionId: 's-1',
+            clientId: 'client-stale',
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      });
+
+      const result = await client
+        .promptNonBlocking(
+          's-1',
+          {
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          'client-stale',
+        )
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonHttpError);
+      expect(result).toMatchObject({
+        status: 400,
+        body: {
+          code: 'invalid_client_id',
+          sessionId: 's-1',
+          clientId: 'client-stale',
+        },
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-stale');
+    });
+
+    it('releases the local prompt slot after invalid client id responses on blocking prompts', async () => {
+      let promptRequests = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          promptRequests += 1;
+          if (promptRequests === 1) {
+            return jsonResponse(400, {
+              code: 'invalid_client_id',
+              error: 'unknown client',
+              sessionId: 's-1',
+              clientId: 'client-stale',
+            });
+          }
+          return jsonResponse(202, {
+            promptId: `p-${promptRequests}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return sseResponse(
+            `id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-${promptRequests}","stopReason":"end_turn"}}\n\n`,
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      const result = await client
+        .prompt(
+          's-1',
+          {
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          'client-stale',
+        )
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonHttpError);
+      expect(result).toMatchObject({
+        status: 400,
+        body: {
+          code: 'invalid_client_id',
+          sessionId: 's-1',
+          clientId: 'client-stale',
+        },
+      });
+      await expect(
+        client.prompt('s-1', {
+          prompt: [{ type: 'text', text: 'after stale client' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
     it('does not reserve a local prompt slot for a pre-aborted signal', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/s-1/prompt')) {
