@@ -6,7 +6,10 @@
 
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
-import { getInstallationInfo } from './installationInfo.js';
+import {
+  getInstallationInfo,
+  resolveUpdateCommand,
+} from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
 import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
@@ -75,11 +78,9 @@ export function handleAutoUpdate(
   if (!installationInfo.updateCommand || !isAutoUpdateEnabled) {
     return;
   }
-  const isNightly = info.update.latest.includes('nightly');
-
-  const updateCommand = installationInfo.updateCommand.replace(
-    '@latest',
-    isNightly ? '@nightly' : `@${info.update.latest}`,
+  const updateCommand = resolveUpdateCommand(
+    installationInfo.updateCommand,
+    info.update.latest,
   );
   const isWindows = os.platform() === 'win32';
   const shell = isWindows ? 'cmd.exe' : 'bash';

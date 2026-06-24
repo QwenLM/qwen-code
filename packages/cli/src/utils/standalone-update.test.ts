@@ -196,6 +196,36 @@ describe('standalone-update', () => {
     );
 
     it.skipIf(process.platform === 'win32')(
+      'allows shell metacharacters in single-quoted Unix wrapper paths',
+      () => {
+        const libDir = path.join(tempDir, 'with$dollar', '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(standaloneDir, { recursive: true });
+
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+
+        const wrapperPath = path.join(
+          tempDir,
+          'with$dollar',
+          '.local',
+          'bin',
+          'qwen',
+        );
+        const content = fs.readFileSync(wrapperPath, 'utf-8');
+        expect(content).toContain('with$dollar');
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
       'does not overwrite existing wrapper',
       () => {
         const libDir = path.join(tempDir, '.local', 'lib');
@@ -557,8 +587,27 @@ describe('standalone-update', () => {
       }
     });
 
-    it('rejects binDir with shell metacharacters', () => {
+    it('allows shell metacharacters in single-quoted PATH entries', () => {
       const binDir = path.join(tempDir, 'bin$(evil)');
+      const zshrc = path.join(tempDir, '.zshrc');
+      fs.writeFileSync(zshrc, '# existing config\n');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+      try {
+        ensurePathInShellRc(binDir);
+        expect(fs.readFileSync(zshrc, 'utf-8')).toContain(
+          `export PATH='${binDir}':$PATH`,
+        );
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('rejects binDir with newlines', () => {
+      const binDir = path.join(tempDir, 'bin\nevil');
       const origShell = process.env['SHELL'];
       const origHome = process.env['HOME'];
       process.env['SHELL'] = '/bin/zsh';

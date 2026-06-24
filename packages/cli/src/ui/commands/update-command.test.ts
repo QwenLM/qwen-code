@@ -26,12 +26,15 @@ vi.mock('../../utils/package.js', () => ({ getPackageJson }));
 
 const { updateCommand } = await import('./update-command.js');
 
-function context(executionMode: 'interactive' | 'non_interactive' | 'acp') {
+function context(
+  executionMode: 'interactive' | 'non_interactive' | 'acp',
+  enableAutoUpdate?: boolean,
+) {
   return createMockCommandContext({
     executionMode,
     services: {
       settings: {
-        merged: { general: {} },
+        merged: { general: { enableAutoUpdate } },
       },
       config: {
         getProjectRoot: () => '/repo',
@@ -68,6 +71,21 @@ describe('updateCommand', () => {
 
   it('returns the manual update command in non-interactive mode', async () => {
     const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
+    });
+    expect(handleAutoUpdate).not.toHaveBeenCalled();
+  });
+
+  it('returns the manual update command in interactive mode when auto-update is disabled', async () => {
+    const result = await updateCommand.action!(
+      context('interactive', false),
+      '',
+    );
 
     expect(result).toEqual({
       type: 'message',

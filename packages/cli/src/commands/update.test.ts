@@ -110,6 +110,19 @@ describe('update command', () => {
     );
   });
 
+  it('prints the update message when no update command is available', async () => {
+    getInstallationInfo.mockReturnValue({
+      updateMessage:
+        'Running from a local git clone. Please update with "git pull".',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Running from a local git clone. Please update with "git pull".',
+    );
+  });
+
   it('prints success message on standalone update', async () => {
     getInstallationInfo.mockReturnValue({
       isStandalone: true,

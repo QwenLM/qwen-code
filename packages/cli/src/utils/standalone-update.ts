@@ -313,7 +313,7 @@ async function extractArchive(
     const resolvedDest = fs.realpathSync(destDir);
     validateExtractedPaths(resolvedDest);
   } else {
-    const resolvedDest = path.resolve(destDir);
+    const resolvedDest = fs.realpathSync(destDir);
     await tar.extract({
       file: archivePath,
       cwd: destDir,
@@ -447,7 +447,7 @@ function cleanupEmptyStandaloneDir(standaloneDir: string): void {
   }
 }
 
-const UNSAFE_SHELL_CHARS = /["`$\\;\n\r]/;
+const UNSAFE_SHELL_CHARS = /[\0\n\r]/;
 const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
 
 function assertSafeForShellEmbed(p: string, context: string): void {
