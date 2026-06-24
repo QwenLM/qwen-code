@@ -457,19 +457,6 @@ describe('runVisionBridge', () => {
     expect(mockSideQuery).not.toHaveBeenCalled();
     expect(textOf(result.parts)).toContain('describe this');
   });
-
-  it('surfaces only the raw description as the display transcript', async () => {
-    mockSideQuery.mockResolvedValue({ text: 'A plain description' });
-    const result = await runVisionBridge({
-      config,
-      parts: ['q', image()],
-      signal: signal(),
-    });
-
-    expect(textOf(result.parts)).toMatch(/untrusted/i);
-    expect(result.transcript).toBe('A plain description');
-    expect(result.transcript).not.toMatch(/untrusted/i);
-  });
 });
 
 describe('selectVisionBridgeModel (same-provider only)', () => {

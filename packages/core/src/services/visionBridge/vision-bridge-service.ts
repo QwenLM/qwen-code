@@ -129,8 +129,6 @@ export interface VisionBridgeResult {
   status: VisionBridgeStatus;
   /** Transformed, image-free parts to send to the primary model. */
   parts?: PartListUnion;
-  /** Raw generated description for display (set on `ok`). */
-  transcript?: string;
   /** Images actually sent to the bridge model. */
   convertedCount: number;
   /** Images dropped because they were unreadable, too large, or over the cap. */
@@ -367,7 +365,6 @@ export async function runVisionBridge(params: {
           omittedCount,
         ),
       ),
-      transcript: description,
       convertedCount: toConvert.length,
       omittedCount,
       modelId: model,
