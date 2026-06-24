@@ -56,7 +56,7 @@ import {
   addSystemPromptAttributes,
   addToolSchemaAttributes,
   addModelOutputAttributes,
-  isTelemetrySdkInitialized,
+  areSensitiveSpanAttributesEnabled,
 } from '../../telemetry/index.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
@@ -96,21 +96,6 @@ const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
 const MAX_RESPONSE_TEXT_LENGTH = 4096;
 const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
-
-function truncateResponseText(
-  text: string | undefined,
-  maxLength: number,
-): string | undefined {
-  if (text === undefined || text.length <= maxLength) {
-    return text;
-  }
-
-  const maxPrefixLength = Math.max(
-    0,
-    maxLength - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
-  );
-  return `${text.slice(0, maxPrefixLength)}${RESPONSE_TEXT_TRUNCATION_SUFFIX}`;
-}
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -308,16 +293,22 @@ export class LoggingContentGenerator implements ContentGenerator {
         const durationMs = Date.now() - startTime;
         const shouldCollectSensitiveSpanAttributes =
           !isInternal && this.shouldCollectSensitiveSpanAttributes();
-        const modelOutputText = shouldCollectSensitiveSpanAttributes
-          ? this.extractResponseText(result)
+        const modelOutput = shouldCollectSensitiveSpanAttributes
+          ? this.extractResponseTextForSensitiveSpan(
+              result,
+              this.config.getTelemetrySensitiveSpanAttributeMaxLength(),
+            )
           : undefined;
         const responseText = isInternal
           ? undefined
-          : shouldCollectSensitiveSpanAttributes
-            ? truncateResponseText(modelOutputText, MAX_RESPONSE_TEXT_LENGTH)
-            : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
+          : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
         if (shouldCollectSensitiveSpanAttributes) {
-          addModelOutputAttributes(this.config, llmSpan, modelOutputText);
+          addModelOutputAttributes(
+            this.config,
+            llmSpan,
+            modelOutput?.text,
+            modelOutput?.originalLength,
+          );
         }
         this.safelyLogApiResponse(
           result.responseId ?? '',
@@ -646,20 +637,18 @@ export class LoggingContentGenerator implements ContentGenerator {
         !isInternal &&
         span !== undefined &&
         this.shouldCollectSensitiveSpanAttributes();
-      const streamModelOutputText = shouldCollectSensitiveSpanAttributes
-        ? this.extractResponseText(consolidatedResponse)
+      const streamModelOutput = shouldCollectSensitiveSpanAttributes
+        ? this.extractResponseTextForSensitiveSpan(
+            consolidatedResponse,
+            this.config.getTelemetrySensitiveSpanAttributeMaxLength(),
+          )
         : undefined;
       const streamResponseText = isInternal
         ? undefined
-        : shouldCollectSensitiveSpanAttributes
-          ? truncateResponseText(
-              streamModelOutputText,
-              MAX_RESPONSE_TEXT_LENGTH,
-            )
-          : this.extractResponseText(
-              consolidatedResponse,
-              MAX_RESPONSE_TEXT_LENGTH,
-            );
+        : this.extractResponseText(
+            consolidatedResponse,
+            MAX_RESPONSE_TEXT_LENGTH,
+          );
       // If the idle timeout already closed the span as failed, do not contradict
       // it with a "success" api_response log or model-output span attributes.
       // The OpenAI interaction log is also skipped — telemetry already carries
@@ -677,7 +666,12 @@ export class LoggingContentGenerator implements ContentGenerator {
           ),
         );
         if (shouldCollectSensitiveSpanAttributes && span) {
-          addModelOutputAttributes(this.config, span, streamModelOutputText);
+          addModelOutputAttributes(
+            this.config,
+            span,
+            streamModelOutput?.text,
+            streamModelOutput?.originalLength,
+          );
         }
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
@@ -1010,11 +1004,51 @@ export class LoggingContentGenerator implements ContentGenerator {
     return truncated ? `${text}${RESPONSE_TEXT_TRUNCATION_SUFFIX}` : text;
   }
 
+  private extractResponseTextForSensitiveSpan(
+    response: GenerateContentResponse | undefined,
+    maxLength: number,
+  ): { text: string; originalLength: number } | undefined {
+    const parts = response?.candidates?.[0]?.content?.parts;
+    if (!parts?.length) {
+      return undefined;
+    }
+
+    let text = '';
+    let originalLength = 0;
+    let hasText = false;
+    const appendText = (partText: string) => {
+      hasText = true;
+      originalLength += partText.length;
+      const remaining = maxLength - text.length;
+      if (remaining > 0) {
+        text += partText.slice(0, remaining);
+      }
+    };
+
+    for (const part of parts as Part[]) {
+      if (typeof part === 'string') {
+        appendText(part);
+        continue;
+      }
+
+      if (
+        'text' in part &&
+        typeof part.text === 'string' &&
+        !('thought' in part && part.thought)
+      ) {
+        appendText(part.text);
+      }
+    }
+
+    if (!hasText) {
+      return undefined;
+    }
+
+    return { text, originalLength };
+  }
+
   private shouldCollectSensitiveSpanAttributes(): boolean {
-    return (
-      isTelemetrySdkInitialized() &&
-      this.config.getTelemetryIncludeSensitiveSpanAttributes()
-    );
+    return areSensitiveSpanAttributesEnabled(this.config);
   }
 
   async countTokens(req: CountTokensParameters): Promise<CountTokensResponse> {

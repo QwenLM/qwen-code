@@ -51,7 +51,7 @@ export function parseTelemetryTargetValue(
  * @throws FatalConfigError when the env var is set but invalid; telemetry
  * config fails closed instead of silently falling back.
  */
-function parseTelemetryPositiveIntegerEnvValue(
+function parseSensitiveSpanAttributeMaxLengthEnvValue(
   envName: string,
   value: string | undefined,
 ): number | undefined {
@@ -73,7 +73,7 @@ function parseTelemetryPositiveIntegerEnvValue(
   return parsed;
 }
 
-function parseTelemetryPositiveIntegerSetting(
+function parseSensitiveSpanAttributeMaxLengthSetting(
   settingName: string,
   value: unknown,
 ): number | undefined {
@@ -166,11 +166,11 @@ export async function resolveTelemetrySettings(options: {
     false;
 
   const sensitiveSpanAttributeMaxLength =
-    parseTelemetryPositiveIntegerEnvValue(
+    parseSensitiveSpanAttributeMaxLengthEnvValue(
       'QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH',
       env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'],
     ) ??
-    parseTelemetryPositiveIntegerSetting(
+    parseSensitiveSpanAttributeMaxLengthSetting(
       'telemetry.sensitiveSpanAttributeMaxLength',
       settings.sensitiveSpanAttributeMaxLength,
     ) ??

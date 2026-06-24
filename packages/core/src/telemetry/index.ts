@@ -217,6 +217,7 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  areSensitiveSpanAttributesEnabled,
   truncateContent,
 } from './detailed-span-attributes.js';
 export { getTraceContext, formatTraceparent } from './trace-context.js';

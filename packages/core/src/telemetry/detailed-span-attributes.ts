@@ -9,6 +9,7 @@ import type { Span } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
 
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
 
@@ -16,7 +17,7 @@ const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
 // number of unique system prompts + tool schemas seen in one session.
 const seenHashes = new Set<string>();
 
-function isEnabled(config: Config): boolean {
+export function areSensitiveSpanAttributesEnabled(config: Config): boolean {
   return (
     isTelemetrySdkInitialized() &&
     config.getTelemetryIncludeSensitiveSpanAttributes()
@@ -25,9 +26,28 @@ function isEnabled(config: Config): boolean {
 
 export function truncateContent(
   content: string,
-  maxSize: number,
+  maxSize: number = DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  originalLength: number = content.length,
 ): { content: string; truncated: boolean } {
-  if (content.length <= maxSize) {
+  if (!Number.isSafeInteger(maxSize) || maxSize < 1) {
+    throw new TypeError(
+      `maxSize must be a positive safe integer, got ${String(maxSize)}`,
+    );
+  }
+  if (!Number.isSafeInteger(originalLength) || originalLength < 0) {
+    throw new TypeError(
+      `originalLength must be a non-negative safe integer, got ${String(
+        originalLength,
+      )}`,
+    );
+  }
+  if (originalLength < content.length) {
+    throw new TypeError(
+      `originalLength must be greater than or equal to content length, got ${originalLength} for content length ${content.length}`,
+    );
+  }
+
+  if (originalLength <= maxSize && content.length <= maxSize) {
     return { content, truncated: false };
   }
   return {
@@ -58,7 +78,7 @@ export function addUserPromptAttributes(
   span: Span,
   promptText: string,
 ): void {
-  if (!isEnabled(config) || !promptText) return;
+  if (!areSensitiveSpanAttributesEnabled(config) || !promptText) return;
 
   const { content, truncated } = truncateContent(
     promptText,
@@ -80,7 +100,7 @@ export function addSystemPromptAttributes(
   span: Span,
   systemInstruction: unknown,
 ): void {
-  if (!isEnabled(config) || !systemInstruction) return;
+  if (!areSensitiveSpanAttributesEnabled(config) || !systemInstruction) return;
 
   const text = stringifyContentUnion(systemInstruction);
   if (!text) return;
@@ -112,7 +132,7 @@ export function addToolSchemaAttributes(
   span: Span,
   tools: unknown[] | undefined,
 ): void {
-  if (!isEnabled(config) || !tools?.length) return;
+  if (!areSensitiveSpanAttributesEnabled(config) || !tools?.length) return;
 
   // The Gemini API shape is `[{ functionDeclarations: [...] }]` — a single
   // wrapper object whose inner array holds the actual per-tool schemas.
@@ -170,18 +190,21 @@ export function addModelOutputAttributes(
   config: Config,
   span: Span,
   responseText: string | undefined,
+  originalLength?: number,
 ): void {
-  if (!isEnabled(config) || !responseText) return;
+  if (!areSensitiveSpanAttributesEnabled(config) || !responseText) return;
 
+  const responseTextOriginalLength = originalLength ?? responseText.length;
   const { content, truncated } = truncateContent(
     responseText,
     getMaxContentSize(config),
+    responseTextOriginalLength,
   );
   span.setAttributes({
     'response.model_output': content,
     ...(truncated && {
       'response.model_output_truncated': true,
-      'response.model_output_original_length': responseText.length,
+      'response.model_output_original_length': responseTextOriginalLength,
     }),
   });
 }
@@ -194,7 +217,7 @@ export function addToolInputAttributes(
   toolName: string,
   toolInput: string,
 ): void {
-  if (!isEnabled(config)) return;
+  if (!areSensitiveSpanAttributesEnabled(config)) return;
 
   const { content, truncated } = truncateContent(
     toolInput,
@@ -217,7 +240,7 @@ export function addToolResultAttributes(
   toolName: string,
   toolResult: string,
 ): void {
-  if (!isEnabled(config)) return;
+  if (!areSensitiveSpanAttributesEnabled(config)) return;
 
   const { content, truncated } = truncateContent(
     toolResult,
