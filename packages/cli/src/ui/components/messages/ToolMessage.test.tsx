@@ -164,6 +164,26 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
   });
 
+  it('collapses ANSI result for completed collapsible tool', () => {
+    const ansiResult: AnsiOutputDisplay = {
+      ansiOutput: [[{ text: 'file content' }]],
+      totalLines: 1,
+      totalBytes: 12,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="config.yaml"
+        resultDisplay={ansiResult}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame();
+    expect(output).toContain('ReadFile');
+    expect(output).not.toContain('MockAnsiOutput'); // collapsed
+  });
+
   it('shows result for non-collapsible completed tool', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,

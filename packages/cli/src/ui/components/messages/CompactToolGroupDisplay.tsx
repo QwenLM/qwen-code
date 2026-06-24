@@ -175,10 +175,15 @@ function getToolCategory(toolName: string): ToolCategory {
 }
 
 /**
- * Whether a tool should be collapsed into a summary line (read/search/list)
- * rather than rendered individually. Matches Claude Code's
- * `collapseReadSearchGroups` philosophy: only information-gathering tools
- * are collapsed; mutation tools (edit/write/command) always show individually.
+ * Whether a tool is information-gathering (read/search/list) vs mutation/action.
+ *
+ * Used at two decision points:
+ * 1. ToolGroupMessage — partitions collapsible tools into a summary line
+ * 2. ToolMessage.shouldCollapseResult — hides completed text/ANSI output
+ *
+ * Adding a category here suppresses individual rendering AND result output
+ * for completed tools of that type. Only add categories whose results are
+ * disposable (file contents, search hits) — never agent/command results.
  */
 export function isCollapsibleTool(toolName: string): boolean {
   return COLLAPSIBLE_CATEGORIES.has(getToolCategory(toolName));
