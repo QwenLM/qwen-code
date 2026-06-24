@@ -28,9 +28,21 @@ import {
   ClientMcpWsConnection,
   type ClientMcpServerProvider,
 } from './client-mcp-ws.js';
+import type {
+  CdpTunnelRegistry,
+  CdpBridgeEndpoint,
+} from '../cdp-tunnel/cdp-tunnel-registry.js';
+import {
+  isCdpInboundFrameType,
+  type CdpOutboundFrame,
+} from '../cdp-tunnel/cdp-reverse-link.js';
+import { attachCdpClient } from '../cdp-tunnel/cdp-ws.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
+
+/** Pathname of the Plan C CDP-tunnel endpoint (issue #5626). */
+const CDP_PATH = '/cdp';
 
 /**
  * Grace window after the connection-scoped SSE stream closes before the
@@ -120,6 +132,20 @@ export interface MountAcpHttpOptions {
    * {@link clientMcpProvider}.
    */
   clientMcpProviderFactory?: (connectionId: string) => ClientMcpServerProvider;
+  /**
+   * Opt-in: tunnel raw CDP to a real browser tab over the reverse `/acp` WS
+   * (Plan C, issue #5626). When true, a new `/cdp` upgrade branch accepts a
+   * loopback puppeteer client (chrome-devtools-mcp) and inbound `cdp_*` frames
+   * on the extension's `/acp` socket are routed to the bound reverse link. Off
+   * by default — existing behaviour is unchanged when off.
+   */
+  cdpTunnelOverWs?: boolean;
+  /**
+   * Process-scoped registry that pairs the extension `/acp` reverse connection
+   * with the `/cdp` endpoint. Required when {@link cdpTunnelOverWs} is on;
+   * ignored otherwise.
+   */
+  cdpTunnelRegistry?: CdpTunnelRegistry;
 }
 
 export interface AcpHttpHandle {
@@ -485,7 +511,16 @@ export function mountAcpHttp(
         socket.destroy();
         return;
       }
-      if (url.pathname !== path) {
+      // `/cdp` is the Plan C CDP-tunnel endpoint (issue #5626): a loopback
+      // puppeteer client (chrome-devtools-mcp) connects here to drive a real
+      // tab over the extension's `/acp` reverse channel. It reuses the SAME
+      // loopback / host-allowlist / auth / CSRF checks below, then upgrades
+      // into the CDP glue instead of the ACP handshake. Off unless opted in.
+      const isCdpPath =
+        opts.cdpTunnelOverWs === true &&
+        opts.cdpTunnelRegistry !== undefined &&
+        url.pathname === CDP_PATH;
+      if (url.pathname !== path && !isCdpPath) {
         socket.destroy();
         return;
       }
@@ -575,6 +610,14 @@ export function mountAcpHttp(
         return;
       }
 
+      // ── /cdp branch: hand the upgraded socket to the CDP-tunnel glue ──
+      if (isCdpPath) {
+        wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          attachCdpClient(ws, opts.cdpTunnelRegistry!, writeStderrLine);
+        });
+        return;
+      }
+
       wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
         let initialized = false;
         const initTimer = setTimeout(() => {
@@ -591,6 +634,14 @@ export function mountAcpHttp(
         // Per-connection client-hosted MCP holder (issue #5626). Created
         // lazily on the first client-MCP frame; disposed on WS close.
         let clientMcp: ClientMcpWsConnection | undefined;
+        // Per-connection CDP-tunnel bridge unregister (Plan C, issue #5626).
+        // Set when this `/acp` connection registers itself as the active CDP
+        // bridge (on its first inbound `cdp_*` frame); called on WS close.
+        let cdpBridgeUnregister: (() => void) | undefined;
+        // The registered CDP bridge endpoint for this connection. Its
+        // `routeInbound` starts as a no-op and is reassigned by the `/cdp` glue
+        // (attachCdpClient) when a puppeteer client binds.
+        let cdpEndpoint: CdpBridgeEndpoint | undefined;
         const rawAddr =
           (socket as unknown as { remoteAddress?: string }).remoteAddress ??
           'ws-unknown';
@@ -612,6 +663,10 @@ export function mountAcpHttp(
           if (clientMcp) {
             void clientMcp.dispose('WS closed').catch(() => {});
             clientMcp = undefined;
+          }
+          if (cdpBridgeUnregister) {
+            cdpBridgeUnregister();
+            cdpBridgeUnregister = undefined;
           }
         });
 
@@ -750,6 +805,24 @@ export function mountAcpHttp(
             return;
           }
 
+          // ── CDP-tunnel frames (Plan C, issue #5626) ──────────────────
+          // The extension sends `cdp_result` / `cdp_event` / `cdp_attached` /
+          // `cdp_detach` on this same `/acp` socket. They are NOT JSON-RPC, so
+          // intercept before `parseInbound` and route to the bound `/cdp`
+          // reverse link. The bridge endpoint was registered eagerly at
+          // initialize (see above); `routeInbound` is a no-op until a puppeteer
+          // client binds.
+          if (
+            opts.cdpTunnelOverWs === true &&
+            cdpEndpoint !== undefined &&
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            isCdpInboundFrameType((parsed as { type?: unknown }).type)
+          ) {
+            cdpEndpoint.routeInbound(parsed as Record<string, unknown>);
+            return;
+          }
+
           const inbound = parseInbound(parsed);
           if (!inbound.ok) {
             ws.send(JSON.stringify(inbound.error));
@@ -824,6 +897,29 @@ export function mountAcpHttp(
             writeStderrLine(
               `qwen serve: /acp WS established ${conn.connectionId.slice(0, 8)} (loopback=${fromLoopback}, active=${registry.size})`,
             );
+            // Plan C (issue #5626): register this initialized connection as the
+            // active CDP bridge eagerly so a `/cdp` puppeteer client can bind
+            // immediately (the extension would otherwise only surface as the
+            // bridge on its first inbound `cdp_*` frame, which it never sends
+            // until the daemon `cdp_attach`es it — a chicken-and-egg deadlock).
+            // Single daemon = single extension = last-writer-wins; a non-CDP
+            // `/acp` client that never answers `cdp_*` just sits idle here.
+            if (
+              opts.cdpTunnelOverWs === true &&
+              opts.cdpTunnelRegistry !== undefined
+            ) {
+              cdpEndpoint = {
+                connectionId: conn.connectionId,
+                send: (frame: CdpOutboundFrame) =>
+                  ws.send(JSON.stringify(frame)),
+                routeInbound: () => false,
+              };
+              cdpBridgeUnregister =
+                opts.cdpTunnelRegistry.register(cdpEndpoint);
+              writeStderrLine(
+                `qwen serve: /acp connection ${conn.connectionId.slice(0, 8)} registered as CDP bridge`,
+              );
+            }
             return;
           }
 

@@ -84,6 +84,11 @@ const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 // `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
 // the daemon WS. Off by default while the contract settles.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
+// CDP tunnel opt-in (Plan C, issue #5626). `=1` advertises the
+// `cdp_tunnel_over_ws` capability and exposes the `/cdp` WebSocket so a
+// loopback puppeteer client can drive a real tab through the extension's
+// reverse `/acp` channel. Off by default while the contract settles.
+const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
@@ -509,6 +514,13 @@ export async function runQwenServe(
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
       process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV] === '1',
+    // CDP tunnel (Plan C, issue #5626). Opt-in via env until the public
+    // contract settles — the `/cdp` endpoint + `cdp_*` frame handling stay
+    // dormant otherwise. An explicit `cdpTunnelOverWs` in `optsIn` (embedded
+    // callers) still wins.
+    cdpTunnelOverWs:
+      optsIn.cdpTunnelOverWs ??
+      process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
   };
 
   // Catch the `--hostname localhost:4170` / `127.0.0.1:4170`

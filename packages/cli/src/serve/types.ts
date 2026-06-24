@@ -213,6 +213,16 @@ export interface ServeOptions {
    * handling stay gated behind explicit operator opt-in.
    */
   clientMcpOverWs?: boolean;
+  /**
+   * Opt-in: tunnel raw CDP to a real browser tab over the reverse `/acp` WS
+   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback puppeteer
+   * client (chrome-devtools-mcp) can connect to a new `/cdp` WebSocket and
+   * drive ONE real tab via the extension's `chrome.debugger`, reusing the
+   * ready-made chrome-devtools-mcp toolset. Off by default — the public
+   * contract is still settling, so the `cdp_tunnel_over_ws` capability tag and
+   * the `/cdp` endpoint stay gated behind explicit operator opt-in.
+   */
+  cdpTunnelOverWs?: boolean;
   /** Forward the experimental LSP opt-in to spawned ACP children. */
   experimentalLsp?: boolean;
 }

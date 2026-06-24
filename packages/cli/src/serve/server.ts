@@ -71,6 +71,7 @@ import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
 } from './acp-http/client-mcp-sender-registry.js';
+import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   buildDaemonStatusResponse,
   parseDaemonStatusDetail,
@@ -2027,8 +2028,15 @@ export function createServeApp(
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
       clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
+      cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
+
+  // Plan C CDP tunnel (issue #5626). Process-scoped registry pairing the
+  // extension `/acp` reverse connection with the `/cdp` puppeteer endpoint.
+  // Inert until both ends connect (gated by `cdpTunnelOverWs`).
+  const cdpTunnelRegistry =
+    opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
 
   app.get('/daemon/status', async (req, res) => {
     const detail = parseDaemonStatusDetail(req.query['detail']);
@@ -4928,6 +4936,11 @@ export function createServeApp(
             ),
         }
       : {}),
+    // Plan C CDP tunnel (issue #5626). The `/cdp` upgrade branch + `cdp_*`
+    // frame routing only activate when the flag is on and a registry is
+    // supplied; existing behaviour is unchanged otherwise.
+    cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
+    ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
