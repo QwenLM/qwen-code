@@ -6,7 +6,14 @@
 
 import type { Config } from '../config/config.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import type { ToolInvocation, ToolResult } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolConfirmationOutcome,
+  ToolConfirmationPayload,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -52,6 +59,41 @@ class ReadMcpResourceToolInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     return `${this.params.server_name}:${this.params.uri}`;
+  }
+
+  /**
+   * Model-initiated reads are gated like a tool call on the same MCP server:
+   * a server explicitly marked `trust: true` in a trusted folder bypasses
+   * confirmation (matching {@link DiscoveredMCPTool}); everything else asks.
+   * Without this the base default is `'allow'`, so the model could read from
+   * any configured server with no confirmation. The user-initiated `@server:uri`
+   * path is unaffected.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const server = this.config.getMcpServers()?.[this.params.server_name];
+    if (server?.trust === true && this.config.isTrustedFolder()) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    return {
+      type: 'info',
+      title: 'Confirm MCP Resource Read',
+      prompt: `Read resource ${this.params.uri} from MCP server "${this.params.server_name}"`,
+      // Tool-level rule (read_mcp_resource uses a 'literal' specifier, so a
+      // bare name rule is what reliably persists an "always allow").
+      permissionRules: ['ReadMcpResource'],
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules.
+      },
+    };
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -123,6 +165,9 @@ export class ReadMcpResourceTool extends BaseDeclarativeTool<
           server_name: {
             type: 'string',
             minLength: 1,
+            // Bound like `uri`: server_name is also reflected verbatim into the
+            // frame delimiters, which sit outside the content-size cap.
+            maxLength: 1024,
             description: 'The configured MCP server name.',
           },
           uri: {

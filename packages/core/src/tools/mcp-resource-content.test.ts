@@ -49,7 +49,7 @@ describe('formatMcpResourceContents', () => {
     expect(out.textChars).toBe(MAX_MCP_RESOURCE_TEXT_CHARS);
     // The closing delimiter carries a truncation notice so the model knows the
     // content is incomplete despite seeing an "End of MCP resource" marker.
-    expect(textOf(out.parts)).toContain('[Content truncated at');
+    expect(textOf(out.parts)).toContain('[Content truncated');
   });
 
   it('does not flag truncation when text is exactly at the cap', () => {

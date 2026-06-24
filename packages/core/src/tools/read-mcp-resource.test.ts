@@ -19,9 +19,17 @@ const inlineCount = (llmContent: unknown) =>
     ? (llmContent as Part[]).filter((p) => 'inlineData' in (p as object)).length
     : 0; // empty read → llmContent is the diagnostic string, not parts
 
-function configWith(readMcpResource: unknown): Config {
+function configWith(
+  readMcpResource: unknown,
+  opts: {
+    mcpServers?: Record<string, { trust?: boolean }>;
+    trustedFolder?: boolean;
+  } = {},
+): Config {
   return {
     getToolRegistry: () => ({ readMcpResource }),
+    getMcpServers: () => opts.mcpServers ?? {},
+    isTrustedFolder: () => opts.trustedFolder ?? false,
   } as unknown as Config;
 }
 
@@ -119,6 +127,50 @@ describe('ReadMcpResourceTool', () => {
     expect(result.llmContent).toBe(
       '\n--- MCP resource asys-mcp-http:asight://empty: (no readable content) ---\n',
     );
+  });
+
+  it('asks for confirmation by default (untrusted server)', async () => {
+    const tool = new ReadMcpResourceTool(
+      configWith(vi.fn(), { mcpServers: { srv: {} }, trustedFolder: true }),
+    );
+    const inv = tool.build({ server_name: 'srv', uri: 'x://a' });
+    expect(await inv.getDefaultPermission()).toBe('ask');
+  });
+
+  it('allows a trusted server in a trusted folder without confirmation', async () => {
+    const tool = new ReadMcpResourceTool(
+      configWith(vi.fn(), {
+        mcpServers: { srv: { trust: true } },
+        trustedFolder: true,
+      }),
+    );
+    const inv = tool.build({ server_name: 'srv', uri: 'x://a' });
+    expect(await inv.getDefaultPermission()).toBe('allow');
+  });
+
+  it('still asks for a trusted server in an untrusted folder', async () => {
+    const tool = new ReadMcpResourceTool(
+      configWith(vi.fn(), {
+        mcpServers: { srv: { trust: true } },
+        trustedFolder: false,
+      }),
+    );
+    const inv = tool.build({ server_name: 'srv', uri: 'x://a' });
+    expect(await inv.getDefaultPermission()).toBe('ask');
+  });
+
+  it('surfaces a persistable ReadMcpResource rule in the confirmation', async () => {
+    const tool = new ReadMcpResourceTool(
+      configWith(vi.fn(), { mcpServers: { srv: {} } }),
+    );
+    const inv = tool.build({ server_name: 'srv', uri: 'x://a' });
+    const details = await inv.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    expect(details).toMatchObject({
+      type: 'info',
+      permissionRules: ['ReadMcpResource'],
+    });
   });
 
   it('exposes the read target to the AUTO-mode classifier', () => {

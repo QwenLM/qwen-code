@@ -1456,6 +1456,25 @@ describe('handleAtCommand', () => {
       );
     });
 
+    it('injects an attributed diagnostic for an empty @ resource read', async () => {
+      // An empty read must not leave a dangling @server:uri with no content;
+      // the @ path injects the same diagnostic the read_mcp_resource tool does.
+      const readMcpResource = vi.fn().mockResolvedValue({ contents: [] });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://empty',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 612,
+        signal: abortController.signal,
+      });
+
+      expect(JSON.stringify(result.processedQuery)).toContain(
+        '--- MCP resource myserver:res://empty: (no readable content) ---',
+      );
+    });
+
     it('caps oversized resource text and flags it as truncated', async () => {
       const big = 'x'.repeat(100_001);
       const readMcpResource = vi.fn().mockResolvedValue({

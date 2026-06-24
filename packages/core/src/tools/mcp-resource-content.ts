@@ -112,8 +112,10 @@ export function formatMcpResourceContents(
 
   // Per-call nonce so the closing delimiter can't be forged by server content.
   const nonce = randomUUID().slice(0, 8);
+  // Generic on purpose: `truncated` is set by EITHER the text cap or a skipped
+  // blob, so don't claim a specific char count that may not apply.
   const truncationNotice = truncated
-    ? `\n[Content truncated at ${MAX_MCP_RESOURCE_TEXT_CHARS} chars — the full resource may contain additional content.]`
+    ? `\n[Content truncated — part of this resource exceeded size limits and was omitted.]`
     : '';
   const parts: Part[] =
     contentParts.length > 0
