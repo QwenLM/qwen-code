@@ -543,6 +543,16 @@ export class IdeClient {
     return { isValid: true };
   }
 
+  private static matchesCurrentWorkspace(
+    config: IdeConnectionConfig,
+    cwd: string,
+  ): boolean {
+    return (
+      config.workspacePath === undefined ||
+      IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid
+    );
+  }
+
   private getPortFromEnv(): string | undefined {
     const port = process.env['QWEN_CODE_IDE_SERVER_PORT'];
     if (!port) {
@@ -584,13 +594,20 @@ export class IdeClient {
     IdeConnectionConfig | undefined
   > {
     const portFromEnv = this.getPortFromEnv();
+    const cwd = process.cwd();
 
     if (portFromEnv) {
       try {
         const ideDir = Storage.getGlobalIdeDir();
         const lockFile = path.join(ideDir, `${portFromEnv}.lock`);
         const lockFileContents = await fs.promises.readFile(lockFile, 'utf8');
-        return JSON.parse(lockFileContents);
+        const config = JSON.parse(lockFileContents) as IdeConnectionConfig;
+        if (IdeClient.matchesCurrentWorkspace(config, cwd)) {
+          return config;
+        }
+        debugLogger.debug(
+          'Ignoring IDE env lock file because its workspace does not match the current working directory.',
+        );
       } catch (_) {
         // Fall through to legacy discovery.
       }
@@ -599,12 +616,16 @@ export class IdeClient {
     // Legacy discovery for VSCode extension < v0.5.1.
     const legacyConfig = await this.getLegacyConnectionConfig(portFromEnv);
     if (legacyConfig) {
-      return legacyConfig;
+      if (IdeClient.matchesCurrentWorkspace(legacyConfig, cwd)) {
+        return legacyConfig;
+      }
+      debugLogger.debug(
+        'Ignoring legacy IDE connection config because its workspace does not match the current working directory.',
+      );
     }
 
     const ideDir = Storage.getGlobalIdeDir();
     const configs = await this.getAllConnectionConfigs(ideDir);
-    const cwd = process.cwd();
     return configs.find(
       (config) =>
         config.workspacePath !== undefined &&
