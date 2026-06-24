@@ -4903,6 +4903,13 @@ export function createServeApp(
     fsFactory,
     deviceFlowRegistry,
     token: opts.token,
+    // Mirror the REST CORS allowlist onto the WS CSRF wall so an
+    // explicitly permitted origin (e.g. the extension's
+    // `chrome-extension://<id>`) can open the reverse tool channel.
+    allowedOrigins:
+      opts.allowOrigins && opts.allowOrigins.length > 0
+        ? parseAllowOriginPatterns(opts.allowOrigins)
+        : undefined,
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,

@@ -90,14 +90,23 @@ export function parseAllowOriginPatterns(
     } catch {
       throw new InvalidAllowOriginPatternError(entry, 'not a parseable URL');
     }
-    if (parsed.origin !== entry) {
+    // Browser-extension schemes (`chrome-extension:`, `moz-extension:`) get an
+    // opaque `null` origin from the URL spec, so they can't round-trip through
+    // `.origin`. Rebuild their canonical origin from scheme+host; the equality
+    // check below still rejects a trailing slash / path / userinfo / query
+    // because each of those makes `entry` differ from `<scheme>//<host>`.
+    const canonical =
+      parsed.origin === 'null'
+        ? `${parsed.protocol}//${parsed.host}`
+        : parsed.origin;
+    if (canonical !== entry) {
       throw new InvalidAllowOriginPatternError(
         entry,
-        `expected the canonical origin ${JSON.stringify(parsed.origin)} ` +
+        `expected the canonical origin ${JSON.stringify(canonical)} ` +
           'without trailing slash, path, userinfo, or query',
       );
     }
-    origins.add(parsed.origin.toLowerCase());
+    origins.add(canonical.toLowerCase());
   }
   return { allowAny, origins };
 }

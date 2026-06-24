@@ -14,6 +14,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
+import type { ParsedAllowOriginPatterns } from '../auth.js';
 import { AcpDispatcher } from './dispatch.js';
 import {
   ConnectionRegistry,
@@ -80,6 +81,13 @@ export interface MountAcpHttpOptions {
   maxConnections?: number;
   /** Bearer token for WS auth (WS bypasses Express middleware). */
   token?: string;
+  /**
+   * Parsed `--allow-origin` allowlist. The WS CSRF check (CSWSH defence)
+   * rejects non-loopback origins; origins in this allowlist are also accepted,
+   * so a browser extension (`chrome-extension://<id>`) can open the reverse
+   * tool channel. Mirrors the REST CORS allowlist (`allowOriginCors`).
+   */
+  allowedOrigins?: ParsedAllowOriginPatterns;
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
@@ -111,9 +119,7 @@ export interface MountAcpHttpOptions {
    * attributed to that connection. Takes precedence over
    * {@link clientMcpProvider}.
    */
-  clientMcpProviderFactory?: (
-    connectionId: string,
-  ) => ClientMcpServerProvider;
+  clientMcpProviderFactory?: (connectionId: string) => ClientMcpServerProvider;
 }
 
 export interface AcpHttpHandle {
@@ -514,11 +520,19 @@ export function mountAcpHttp(
       if (origin) {
         try {
           const originHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
-          if (
-            originHost !== '127.0.0.1' &&
-            originHost !== 'localhost' &&
-            originHost !== '::1'
-          ) {
+          const isLoopbackOrigin =
+            originHost === '127.0.0.1' ||
+            originHost === 'localhost' ||
+            originHost === '::1';
+          // `--allow-origin` allowlist (same match semantics as the REST
+          // `allowOriginCors`): lets an explicitly permitted non-loopback
+          // origin — e.g. a browser extension's `chrome-extension://<id>`
+          // opening the reverse tool channel — past the CSWSH wall.
+          const isAllowlistedOrigin =
+            opts.allowedOrigins !== undefined &&
+            (opts.allowedOrigins.allowAny ||
+              opts.allowedOrigins.origins.has(origin.toLowerCase()));
+          if (!isLoopbackOrigin && !isAllowlistedOrigin) {
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;

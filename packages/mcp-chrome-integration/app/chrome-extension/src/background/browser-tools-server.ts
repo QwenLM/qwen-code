@@ -43,6 +43,14 @@ const SERVER_NAME = 'chrome-tools';
 /** MCP protocol revision we negotiate during `initialize`. */
 const PROTOCOL_VERSION = '2025-06-18';
 
+/**
+ * Correlation id for the ACP `initialize` we send right after the socket opens.
+ * The daemon's `/acp` transport closes the connection with a 30s "initialize
+ * timeout" unless it receives an ACP initialize before anything else, so we
+ * must complete that handshake before advertising our MCP server.
+ */
+const ACP_INIT_ID = 'browser-tools-acp-init';
+
 /** Reconnect backoff bounds (ms). */
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -87,7 +95,7 @@ const TOOL_CATALOG: McpToolDefinition[] = [
   {
     name: 'chrome_read_page',
     description:
-      'Extract the active tab\'s text content, links, and images as structured data.',
+      "Extract the active tab's text content, links, and images as structured data.",
     inputSchema: {
       type: 'object',
       properties: {},
@@ -308,14 +316,19 @@ function toWebSocketUrl(baseUrl: string, token?: string): string {
   return token ? `${url}?token=${encodeURIComponent(token)}` : url;
 }
 
-/** Send a frame if the socket is open; swallow send failures (close handles it). */
-function sendFrame(frame: McpFrame): void {
+/** Send any JSON message if the socket is open; swallow failures (close handles it). */
+function sendRaw(message: unknown): void {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   try {
-    socket.send(JSON.stringify(frame));
+    socket.send(JSON.stringify(message));
   } catch (error) {
-    console.warn(LOG_PREFIX, 'Failed to send frame:', error);
+    console.warn(LOG_PREFIX, 'Failed to send:', error);
   }
+}
+
+/** Send a reverse-channel frame (`mcp_register` / `mcp_message` / `mcp_unregister`). */
+function sendFrame(frame: McpFrame): void {
+  sendRaw(frame);
 }
 
 /** Handle one inbound `mcp_message` frame: dispatch and reply by `id`. */
@@ -333,15 +346,32 @@ async function handleMcpMessage(frame: McpFrame): Promise<void> {
 
 /** Parse and route an inbound WS frame. */
 function onWsMessage(data: unknown): void {
-  let frame: McpFrame;
+  let msg: Record<string, unknown>;
   try {
-    frame = JSON.parse(String(data)) as McpFrame;
+    msg = JSON.parse(String(data)) as Record<string, unknown>;
   } catch {
     return; // ignore non-JSON / unrelated frames
   }
-  if (!frame || typeof frame !== 'object') return;
-  if (frame.type === 'mcp_message' && frame.server === SERVER_NAME) {
-    void handleMcpMessage(frame);
+  if (!msg || typeof msg !== 'object') return;
+
+  // ACP `initialize` ack: only after this is it safe to advertise our MCP
+  // server. Registering before the ack races the daemon's initialize gate.
+  if (msg['id'] === ACP_INIT_ID && ('result' in msg || 'error' in msg)) {
+    if (msg['error']) {
+      console.warn(LOG_PREFIX, 'ACP initialize failed:', msg['error']);
+      return;
+    }
+    console.log(LOG_PREFIX, 'ACP initialized; registering', SERVER_NAME);
+    sendFrame({
+      type: 'mcp_register',
+      server: SERVER_NAME,
+      tools: TOOL_CATALOG,
+    });
+    return;
+  }
+
+  if (msg['type'] === 'mcp_message' && msg['server'] === SERVER_NAME) {
+    void handleMcpMessage(msg as unknown as McpFrame);
   }
   // Other frame types (chat/session traffic on the shared /acp socket) are not
   // ours; ignore them.
@@ -387,13 +417,16 @@ async function connect(): Promise<void> {
 
   ws.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
-    console.log(LOG_PREFIX, 'Connected; registering', SERVER_NAME);
-    // Advertise the server name + catalog so the daemon can register a runtime
-    // SDK-type MCP server backed by this socket.
-    sendFrame({
-      type: 'mcp_register',
-      server: SERVER_NAME,
-      tools: TOOL_CATALOG,
+    console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
+    // The daemon's /acp transport requires an ACP `initialize` first and closes
+    // the socket on a 30s timeout otherwise. We advertise our MCP server
+    // (`mcp_register`) only after the initialize ack — see onWsMessage and
+    // qwen-serve-client-mcp.test.ts for the handshake sequence.
+    sendRaw({
+      jsonrpc: '2.0',
+      id: ACP_INIT_ID,
+      method: 'initialize',
+      params: {},
     });
   };
 

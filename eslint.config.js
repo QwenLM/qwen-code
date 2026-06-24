@@ -268,6 +268,13 @@ export default tseslint.config(
     files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
     rules: { 'no-console': 'off' },
   },
+  // Chrome extension (mcp-chrome-integration) - the MV3 background service
+  // worker and content scripts run in the browser with no stdio; console is
+  // the only logging / debugging channel available there.
+  {
+    files: ['packages/mcp-chrome-integration/**/*.ts', 'packages/mcp-chrome-integration/**/*.tsx'],
+    rules: { 'no-console': 'off' },
+  },
   // Specific CLI files that intentionally wrap console usage
   {
     files: [
