@@ -39,7 +39,7 @@ import {
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
-  resolveOwnsModel,
+  findExistingProviderModels,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -1357,11 +1357,6 @@ function resolveProviderDocumentationUrl(
   return undefined;
 }
 
-function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
-  const record = toRecord(value);
-  return typeof record['id'] === 'string';
-}
-
 function readSettingsEnv(
   settings: LoadedSettings,
   envKey: string | undefined,
@@ -1370,35 +1365,6 @@ function readSettingsEnv(
   const env = toRecord((settings.merged as Record<string, unknown>)['env']);
   const value = env[envKey];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function readProviderModels(
-  settings: LoadedSettings,
-  protocol: string,
-): ProviderModelConfig[] {
-  const modelProviders = toRecord(
-    (settings.merged as Record<string, unknown>)['modelProviders'],
-  );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
-}
-
-function findExistingProviderModels(
-  config: ProviderConfig,
-  settings: LoadedSettings,
-):
-  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
-  | undefined {
-  const ownsModel = resolveOwnsModel(config);
-  if (!ownsModel) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
-  for (const protocol of protocols) {
-    const models = readProviderModels(settings, protocol).filter(ownsModel);
-    if (models.length > 0) return { protocol, models };
-  }
-  return undefined;
 }
 
 function resolveProviderEnvKey(
@@ -1434,7 +1400,12 @@ function readExistingProviderConfig(
   config: ProviderConfig,
   settings: LoadedSettings,
 ): Record<string, unknown> | undefined {
-  const existing = findExistingProviderModels(config, settings);
+  const existing = findExistingProviderModels(
+    config,
+    (settings.merged as Record<string, unknown>)['modelProviders'] as
+      | Record<string, unknown>
+      | undefined,
+  );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
   const baseUrl =
