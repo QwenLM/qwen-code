@@ -6,8 +6,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
+import { promises as fs } from 'node:fs';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
@@ -18,7 +21,11 @@ import {
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionService } from '@qwen-code/qwen-code-core';
-import { SettingScope } from '../../config/settings.js';
+import {
+  resetHomeEnvBootstrapForTesting,
+  SettingScope,
+  SETTINGS_DIRECTORY_NAME,
+} from '../../config/settings.js';
 import { WorkspaceVoiceError } from '../../services/voice-service.js';
 import {
   SetupGithubError,
@@ -36,7 +43,10 @@ import {
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
-import { MAX_VOICE_MODEL_LENGTH } from '../validation-limits.js';
+import {
+  MAX_TRUST_REASON_LENGTH,
+  MAX_VOICE_MODEL_LENGTH,
+} from '../validation-limits.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
@@ -342,6 +352,11 @@ function emptyRules() {
   return { allow: [], ask: [], deny: [] };
 }
 
+async function writeJson(file: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(value, null, 2), 'utf8');
+}
+
 // A minimal fake workspace service for dispatch tests.
 const fakeWorkspace = {
   async getWorkspaceMcpStatus() {
@@ -614,14 +629,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     sessionShellCommandEnabled?: boolean;
     nextBridge?: FakeBridge;
     fsFactory?: WorkspaceFileSystemFactory;
+    boundWorkspace?: string;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
     bridge = opts.nextBridge ?? new FakeBridge();
+    const boundWorkspace = opts.boundWorkspace ?? '/ws';
     const app = express();
     app.use(express.json());
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
-      boundWorkspace: '/ws',
+      boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       fsFactory: opts.fsFactory,
@@ -1711,6 +1728,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it.each([
+    {
+      params: { desiredState: 'unknown' },
+      message: '`desiredState` must be "trusted" or "untrusted"',
+    },
+    {
+      params: {
+        desiredState: 'trusted',
+        reason: 'x'.repeat(MAX_TRUST_REASON_LENGTH + 1),
+      },
+      message: `\`reason\` must be a string up to ${MAX_TRUST_REASON_LENGTH} chars`,
+    },
+  ])(
+    'rejects invalid _qwen/workspace/trust/request params: $message',
+    async ({ params, message }) => {
+      const requestSpy = vi.spyOn(fakeWorkspace, 'requestWorkspaceTrustChange');
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 215,
+        method: '_qwen/workspace/trust/request',
+        params,
+      });
+      const frames = (await got) as Array<{
+        id: number;
+        error?: { code: number; message: string };
+      }>;
+      expect(frames[0]).toMatchObject({
+        id: 215,
+        error: { code: -32602, message },
+      });
+      expect(requestSpy).not.toHaveBeenCalled();
+      requestSpy.mockRestore();
+    },
+  );
+
   it('rejects _qwen/workspace/trust/request when folder trust is disabled', async () => {
     const trustSpy = vi
       .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
@@ -1803,6 +1859,98 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       rules: ['Read(.env)'],
     });
     setSpy.mockRestore();
+  });
+
+  it.each([
+    {
+      params: {
+        scope: 'project',
+        ruleType: 'deny',
+        rules: ['Read(.env)'],
+      },
+      message: '`scope` must be "user" or "workspace"',
+    },
+    {
+      params: {
+        scope: 'workspace',
+        ruleType: 'block',
+        rules: ['Read(.env)'],
+      },
+      message: '`ruleType` must be "allow", "ask", or "deny"',
+    },
+  ])(
+    'rejects invalid _qwen/workspace/permissions/set params: $message',
+    async ({ params, message }) => {
+      const setSpy = vi.spyOn(fakeWorkspace, 'setWorkspacePermissionRules');
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 218,
+        method: '_qwen/workspace/permissions/set',
+        params,
+      });
+      const frames = (await got) as Array<{
+        id: number;
+        error?: { code: number; message: string };
+      }>;
+      expect(frames[0]).toMatchObject({
+        id: 218,
+        error: { code: -32602, message },
+      });
+      expect(setSpy).not.toHaveBeenCalled();
+      setSpy.mockRestore();
+    },
+  );
+
+  it('preserves already-stored malformed permission rules through ACP permissions/set', async () => {
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-'));
+    const workspace = path.join(scratch, 'workspace');
+    const home = path.join(scratch, 'home');
+    const originalQwenHome = process.env['QWEN_HOME'];
+    const setSpy = vi.spyOn(fakeWorkspace, 'setWorkspacePermissionRules');
+    try {
+      process.env['QWEN_HOME'] = home;
+      resetHomeEnvBootstrapForTesting();
+      await fs.mkdir(workspace, { recursive: true });
+      await writeJson(
+        path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+        { permissions: { allow: ['Bash(git *'] } },
+      );
+      await restartServer({ boundWorkspace: workspace });
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 218,
+        method: '_qwen/workspace/permissions/set',
+        params: {
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: ['Bash(git *', 'Bash(git status)'],
+        },
+      });
+      const frames = (await got) as Array<{ id: number; result?: unknown }>;
+      expect(frames[0]).toMatchObject({ id: 218, result: { v: 1 } });
+      expect(setSpy).toHaveBeenCalledWith(expect.any(Object), {
+        scope: 'workspace',
+        ruleType: 'allow',
+        rules: ['Bash(git *', 'Bash(git status)'],
+      });
+    } finally {
+      if (originalQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = originalQwenHome;
+      }
+      resetHomeEnvBootstrapForTesting();
+      setSpy.mockRestore();
+      await fs.rm(scratch, { recursive: true, force: true });
+    }
   });
 
   it('maps _qwen/workspace/permissions/set missing live session to INVALID_PARAMS', async () => {
@@ -2070,6 +2218,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         data: expect.objectContaining({ releaseTag: 'v1.2.3' }),
       }),
     );
+  });
+
+  it('rejects _qwen/workspace/setup-github without consent', async () => {
+    await restartServer({ fsFactory: makeFileFsFactory({}) });
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 222,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: false },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; data?: { errorKind?: string } };
+    }>;
+
+    expect(frames[0]).toMatchObject({
+      id: 222,
+      error: {
+        code: -32602,
+        data: { errorKind: 'github_setup_consent_required' },
+      },
+    });
+    expect(setupGithubMocks.setupGithub).not.toHaveBeenCalled();
+  });
+
+  it('maps _qwen/workspace/setup-github without fsFactory to an internal error', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 222,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; data?: { errorKind?: string } };
+    }>;
+
+    expect(frames[0]).toMatchObject({
+      id: 222,
+      error: { code: -32603, data: { errorKind: 'internal_error' } },
+    });
+    expect(setupGithubMocks.setupGithub).not.toHaveBeenCalled();
   });
 
   it('includes partial setup-github results in ACP errors', async () => {

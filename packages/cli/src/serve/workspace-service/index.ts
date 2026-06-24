@@ -384,7 +384,12 @@ export function createDaemonWorkspaceService(
 
       const settings = loadSettings(boundWorkspace);
       validateWorkspaceVoiceState(settings, request);
-      const writes = buildWorkspaceVoiceSettingsWrites(settings, request);
+      const workspaceTrusted =
+        getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective
+          .state === 'trusted';
+      const writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
+        workspaceTrusted,
+      });
 
       const publishWrite = (write: WorkspaceVoiceSettingsWrite) => {
         publishWorkspaceEvent({
@@ -428,7 +433,11 @@ export function createDaemonWorkspaceService(
                 err instanceof Error ? err.message : String(err)
               }`,
             );
-            throw err;
+            throw new WorkspaceSettingsPartialPersistError(
+              `Voice settings partial persist failed: committed=${committed.length}/${writes.length}`,
+              committed,
+              err,
+            );
           }
           committed.push(write);
         }

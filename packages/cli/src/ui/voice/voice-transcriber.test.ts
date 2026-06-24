@@ -456,6 +456,15 @@ describe('voice-transcriber', () => {
     ).rejects.toThrow(/private-network address/);
   });
 
+  it('rejects private IPv4-compatible IPv6 voice URLs during network checks', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://[::192.168.1.1]/v1',
+      }),
+    ).rejects.toThrow(/private-network address/);
+  });
+
   it('rejects voice model hosts when DNS safety lookup fails', async () => {
     await expect(
       transcribeVoiceAudio(

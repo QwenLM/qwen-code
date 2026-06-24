@@ -310,7 +310,17 @@ describe('createDaemonWorkspaceService', () => {
             makeCtx({ originatorClientId: 'voice-client' }),
             { mode: 'tap', language: 'english' },
           ),
-        ).rejects.toThrow('disk full');
+        ).rejects.toMatchObject({
+          name: 'WorkspaceSettingsPartialPersistError',
+          committedWrites: [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+          ],
+          cause: expect.objectContaining({ message: 'disk full' }),
+        });
 
         expect(publishWorkspaceEvent).not.toHaveBeenCalled();
         expect(mockWriteStderrLine).toHaveBeenCalledWith(

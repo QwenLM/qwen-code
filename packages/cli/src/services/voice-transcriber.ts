@@ -128,6 +128,33 @@ function isLoopbackHost(hostname: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
+function readIpv4CompatibleIpv6(host: string): string | undefined {
+  if (!host.startsWith('::') || host.startsWith('::ffff:')) {
+    return undefined;
+  }
+  const parts = host.slice(2).split(':');
+  if (parts.length === 0 || parts.length > 2 || parts.some((p) => !p)) {
+    return undefined;
+  }
+  if (parts.some((part) => !/^[0-9a-f]{1,4}$/i.test(part))) {
+    return undefined;
+  }
+  const hextets = parts.map((part) => Number.parseInt(part, 16));
+  if (
+    hextets.some((part) => !Number.isInteger(part) || part < 0 || part > 0xffff)
+  ) {
+    return undefined;
+  }
+  const value =
+    hextets.length === 1 ? hextets[0]! : (hextets[0]! << 16) | hextets[1]!;
+  return [
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ].join('.');
+}
+
 // Blocks IP-literal private networks only. Hostname DNS resolution and
 // rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
@@ -138,6 +165,14 @@ function isPrivateNetworkIp(hostname: string): boolean {
   const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (ipv4Mapped) {
     return isPrivateNetworkIp(ipv4Mapped[1]!);
+  }
+  const ipv4Compatible = host.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4Compatible) {
+    return isPrivateNetworkIp(ipv4Compatible[1]!);
+  }
+  const normalizedIpv4Compatible = readIpv4CompatibleIpv6(host);
+  if (normalizedIpv4Compatible) {
+    return isPrivateNetworkIp(normalizedIpv4Compatible);
   }
   if (host.startsWith('::ffff:')) {
     return true;

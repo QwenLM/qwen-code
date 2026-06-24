@@ -156,7 +156,10 @@ async function writeVoiceModelSettings(h: Harness): Promise<void> {
   });
 }
 
-async function writeVoiceProviderSettings(h: Harness): Promise<void> {
+async function writeVoiceProviderSettings(
+  h: Harness,
+  opts: { folderTrustEnabled?: boolean } = {},
+): Promise<void> {
   await writeJson(path.join(h.home, 'settings.json'), {
     modelProviders: {
       openai: [
@@ -170,6 +173,9 @@ async function writeVoiceProviderSettings(h: Harness): Promise<void> {
     },
     env: { DASHSCOPE_API_KEY: 'sk-secret' },
     voiceModel: 'qwen3-asr-flash',
+    ...(opts.folderTrustEnabled
+      ? { security: { folderTrust: { enabled: true } } }
+      : {}),
   });
 }
 
@@ -315,6 +321,34 @@ describe('workspace voice routes', () => {
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
       SettingScope.Workspace,
+      'general.voice.enabled',
+      true,
+    );
+  });
+
+  it('POST writes unknown-trust workspace voice opt-in settings to user scope', async () => {
+    await writeVoiceProviderSettings(h, { folderTrustEnabled: true });
+    await writeWorkspaceVoiceEnabled(h, false);
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({
+        enabled: true,
+        mode: 'tap',
+      });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'general.voice.mode',
+      'tap',
+    );
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
       'general.voice.enabled',
       true,
     );
@@ -505,9 +539,11 @@ describe('workspace voice routes', () => {
 
     expect(res.status).toBe(500);
     expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+    const error = mockWriteStderrLine.mock.calls[0]?.[0];
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('partial persist error'),
     );
+    expect(error).toContain('committed=1/2');
   });
 
   it('POST rejects enabling voice when no valid voice model is selected', async () => {

@@ -101,8 +101,12 @@ export function voiceSettingsScopeToWire(
 export function buildWorkspaceVoiceSettingsWrites(
   settings: LoadedSettings,
   update: WorkspaceVoiceStateUpdate,
+  opts: { workspaceTrusted?: boolean } = {},
 ): WorkspaceVoiceSettingsWrite[] {
-  const voiceSettingsScope = getVoiceSettingsScope(settings);
+  const voiceSettingsScope = getVoiceSettingsScope(
+    settings,
+    opts.workspaceTrusted,
+  );
   const writes: WorkspaceVoiceSettingsWrite[] = [];
   if (update.voiceModel !== undefined) {
     writes.push({

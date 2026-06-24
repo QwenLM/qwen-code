@@ -41,11 +41,14 @@ export function readVoiceLanguage(settings: LoadedSettings): string {
   return language.trim();
 }
 
-export function getVoiceSettingsScope(settings: {
-  isTrusted?: boolean;
-  workspace?: { settings?: { general?: { voice?: { enabled?: unknown } } } };
-}): SettingScope {
-  return settings.isTrusted === true &&
+export function getVoiceSettingsScope(
+  settings: {
+    isTrusted?: boolean;
+    workspace?: { settings?: { general?: { voice?: { enabled?: unknown } } } };
+  },
+  workspaceTrusted = settings.isTrusted === true,
+): SettingScope {
+  return workspaceTrusted &&
     typeof settings.workspace?.settings?.general?.voice?.enabled === 'boolean'
     ? SettingScope.Workspace
     : SettingScope.User;

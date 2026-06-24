@@ -14,6 +14,7 @@ import {
   type SettingScope,
   type LoadedSettings,
 } from '../../config/settings.js';
+import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
@@ -178,11 +179,14 @@ async function persistVoiceUpdate(
   settings: LoadedSettings,
   update: WorkspaceVoiceStateUpdate,
   clientId: string | undefined,
+  workspaceTrusted: boolean,
 ): Promise<void> {
   if (!deps.persistSettings && !deps.persistSetting) {
     throw new Error('workspace voice settings persistence is not available');
   }
-  const writes = buildWorkspaceVoiceSettingsWrites(settings, update);
+  const writes = buildWorkspaceVoiceSettingsWrites(settings, update, {
+    workspaceTrusted,
+  });
 
   if (deps.persistSettings) {
     try {
@@ -214,7 +218,11 @@ async function persistVoiceUpdate(
             err instanceof Error ? err.message : String(err)
           }`,
         );
-        throw err;
+        throw new WorkspaceSettingsPartialPersistError(
+          `Voice settings partial persist failed: committed=${committed.length}/${writes.length}`,
+          committed,
+          err,
+        );
       }
       committed.push(write);
     }
@@ -318,7 +326,16 @@ export function registerWorkspaceVoiceRoutes(
       if (clientId === null) return;
 
       try {
-        await persistVoiceUpdate(deps, settings, parsed, clientId);
+        const workspaceTrusted =
+          getWorkspaceTrustStatus(settings.merged, deps.boundWorkspace)
+            .effective.state === 'trusted';
+        await persistVoiceUpdate(
+          deps,
+          settings,
+          parsed,
+          clientId,
+          workspaceTrusted,
+        );
       } catch (err) {
         writeStderrLine(
           `qwen serve: POST /workspace/voice persist error (workspace=${deps.boundWorkspace}): ${
