@@ -28,10 +28,19 @@ import {
   executeFillOrSelect,
   executeGetConsoleLogs,
 } from './browser-tool-executors';
+import {
+  executeNetworkDebuggerStart,
+  executeNetworkDebuggerStop,
+} from './browser-network-tools';
 import { createToolRouter } from './tool-router';
 import { normalizeToolName } from './tool-catalog';
 import { toCallToolResult, toErrorCallToolResult } from './mcp-tool-result';
 import { getDaemonConfig } from '../daemon/config.js';
+import {
+  isCdpBridgeFrame,
+  handleCdpFrame,
+  shutdownCdpBridge,
+} from './cdp-bridge';
 
 /* global WebSocket, console, setTimeout, clearTimeout */
 
@@ -70,6 +79,8 @@ const toolRouter = createToolRouter(
     chrome_click_element: executeClickElement,
     chrome_fill_or_select: executeFillOrSelect,
     chrome_console: executeGetConsoleLogs,
+    chrome_network_debugger_start: executeNetworkDebuggerStart,
+    chrome_network_debugger_stop: executeNetworkDebuggerStop,
   },
   (name: string) => async () => ({
     content: [{ type: 'text', text: `Unsupported tool in extension: ${name}` }],
@@ -163,6 +174,35 @@ const TOOL_CATALOG: McpToolDefinition[] = [
         },
       },
       required: ['selector'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_network_debugger_start',
+    description:
+      "Start capturing the active tab's network traffic via the CDP debugger (attaches the debugger; pair with chrome_network_debugger_stop). Reload or navigate the page after starting to capture its requests.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        captureWebSocket: {
+          type: 'boolean',
+          description: 'Also capture WebSocket frames.',
+        },
+        needDocumentBody: {
+          type: 'boolean',
+          description: 'Include the main document response body.',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_network_debugger_stop',
+    description:
+      'Stop the capture started by chrome_network_debugger_start and return the captured requests (URL, method, status, headers, response bodies).',
+    inputSchema: {
+      type: 'object',
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -372,6 +412,17 @@ function onWsMessage(data: unknown): void {
 
   if (msg['type'] === 'mcp_message' && msg['server'] === SERVER_NAME) {
     void handleMcpMessage(msg as unknown as McpFrame);
+    return;
+  }
+
+  // CDP-tunnel frames (Plan C, issue #5626): the daemon's `/cdp` endpoint
+  // forwards page-domain CDP commands here as `cdp_command` / `cdp_attach`.
+  // Route them to the CDP bridge, which drives the tab via chrome.debugger and
+  // pushes `cdp_result` / `cdp_event` / `cdp_attached` / `cdp_detach` back over
+  // this same socket.
+  if (isCdpBridgeFrame(msg['type'])) {
+    handleCdpFrame(msg as { type?: unknown }, (frame) => sendRaw(frame));
+    return;
   }
   // Other frame types (chat/session traffic on the shared /acp socket) are not
   // ours; ignore them.
@@ -439,6 +490,9 @@ async function connect(): Promise<void> {
   ws.onclose = () => {
     console.log(LOG_PREFIX, 'Disconnected');
     if (socket === ws) socket = null;
+    // Drop any CDP-tunnel debugger attachment so a closed daemon socket doesn't
+    // leave the debugger banner stuck on the user's tab.
+    shutdownCdpBridge();
     scheduleReconnect();
   };
 }

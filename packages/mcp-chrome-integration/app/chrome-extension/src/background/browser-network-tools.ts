@@ -24,6 +24,7 @@ import type {
   WebSocketSession,
   NetworkCaptureState,
 } from './browser-tool-types';
+import { isCdpTunnelAttached } from './cdp-bridge';
 
 /* global chrome, console, setTimeout */
 
@@ -544,7 +545,7 @@ export async function executeNetworkCapture(
     ) {
       try {
         chrome.debugger.onEvent.removeListener(handleDebuggerEvent);
-        await chrome.debugger.detach({ tabId: tabId });
+        await chrome.debugger.detach({ tabId });
       } catch (e) {
         // Might already be detached
       }
@@ -608,7 +609,7 @@ export async function executeNetworkCapture(
     return {
       success: true,
       message: 'Network capture stopped',
-      duration: duration,
+      duration,
       requestCount: totalRequestCount,
       websocketCount: capture.websockets.length,
       requests: limitedRequests,
@@ -636,6 +637,14 @@ export async function executeNetworkDebuggerStart(
   const tabId = tab.id;
   if (tabId === undefined) {
     throw new Error('Active tab has no id');
+  }
+
+  // Single debugger per tab: refuse to start a network capture while the Plan C
+  // CDP tunnel (issue #5626) holds the debugger session.
+  if (isCdpTunnelAttached()) {
+    throw new Error(
+      'The CDP tunnel is active; disconnect it before starting a network capture',
+    );
   }
 
   const captureWebSocketEnabled = Boolean(
@@ -745,7 +754,7 @@ export async function executeNetworkDebuggerStop(
   return {
     success: true,
     message: 'Network debugger stopped',
-    duration: duration,
+    duration,
     requestCount: requests.length,
     websocketCount: capture.websockets.length,
     requests: limitedRequests,
