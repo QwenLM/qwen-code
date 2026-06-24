@@ -2104,19 +2104,20 @@ export async function runQwenServe(
                 });
             };
 
-            (coreRuntimePromise
+            void (coreRuntimePromise
               ? coreRuntimePromise.then((core) => core.forceFlushMetrics())
               : Promise.resolve()
-            )
-              .catch((flushErr) => {
-                daemonLog.warn(
-                  `pre-shutdown metrics flush failed: ${
-                    flushErr instanceof Error
-                      ? flushErr.message
-                      : String(flushErr)
-                  }`,
-                );
-              })
+            ).catch((flushErr) => {
+              daemonLog.warn(
+                `pre-shutdown metrics flush failed: ${
+                  flushErr instanceof Error
+                    ? flushErr.message
+                    : String(flushErr)
+                }`,
+              );
+            });
+
+            Promise.resolve()
               .then(async () => {
                 await waitForRuntimeStartingForShutdown(
                   runtimeStarting,

@@ -766,6 +766,57 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('does not block shutdown on pending metrics flush', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-flush-pending-')),
+    );
+    const forceFlushMetrics = vi.spyOn(qwenCore, 'forceFlushMetrics');
+    forceFlushMetrics.mockReturnValue(new Promise<void>(() => {}));
+    const bridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
+    } as unknown as HttpAcpBridge;
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
+    let timeout: NodeJS.Timeout | undefined;
+    const closeResult = await Promise.race([
+      handle.close().then(() => 'closed'),
+      new Promise<'timed-out'>((resolve) => {
+        timeout = setTimeout(() => resolve('timed-out'), 1_000);
+        timeout.unref();
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+
+    expect(closeResult).toBe('closed');
+    expect(forceFlushMetrics).toHaveBeenCalledTimes(1);
+    expect(bridge.shutdown).toHaveBeenCalledTimes(1);
+  });
+
   it('fails runtimeReady and health when runtime startup times out', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
