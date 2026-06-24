@@ -3088,7 +3088,7 @@ describe('ContentGenerationPipeline', () => {
           /* drain */
         }
       })();
-      const expectation = await expect(consume).rejects.toMatchObject({
+      const expectation = expect(consume).rejects.toMatchObject({
         code: 'ETIMEDOUT',
       });
       expect(sdkSignal).toBeInstanceOf(AbortSignal);
@@ -3113,7 +3113,7 @@ describe('ContentGenerationPipeline', () => {
       const consume = (async () => {
         for await (const r of gen) results.push(r);
       })();
-      const expectation = await expect(consume).rejects.toMatchObject({
+      const expectation = expect(consume).rejects.toMatchObject({
         code: 'ETIMEDOUT',
       });
       await vi.advanceTimersByTimeAsync(1000);
