@@ -367,15 +367,19 @@ export interface QueryOptions {
   maxSessionTurns?: number;
 
   /**
-   * Equivalent to `tool.core` in settings.json.
-   * List of core tools to enable for the session.
-   * If specified, only these tools will be available to the AI.
-   * @example ['read_file', 'write_file', 'run_terminal_cmd']
+   * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
+   * If specified, only matching core tools are registered for the session.
+   * This is separate from `permissions.allow`, which auto-approves matching
+   * tool calls but does not restrict tool registration.
+   * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
+   * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
+   * tool registration, not invocation.
+   * @example ['read_file', 'edit', 'run_shell_command']
    */
   coreTools?: string[];
 
   /**
-   * Equivalent to `tool.exclude` in settings.json.
+   * Equivalent to `permissions.deny` in settings.json.
    * List of tools to exclude from the session.
    *
    * **Behavior:**
@@ -384,17 +388,17 @@ export interface QueryOptions {
    * - Tools will not be available to the AI, even if in `coreTools` or `allowedTools`
    *
    * **Pattern matching:**
-   * - Tool name: `'write_file'`, `'run_shell_command'`
-   * - Tool class: `'WriteTool'`, `'ShellTool'`
-   * - Shell command prefix: `'ShellTool(git commit)'` (matches commands starting with "git commit")
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(rm *)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
    *
-   * @example ['run_terminal_cmd', 'delete_file', 'ShellTool(rm )']
+   * @example ['Bash(rm *)', 'Read(.env)', 'Edit(/secrets/**)']
    * @see allowedTools For allowing specific tools
    */
   excludeTools?: string[];
 
   /**
-   * Equivalent to `tool.allowed` in settings.json.
+   * Equivalent to `permissions.allow` in settings.json.
    * List of tools that are allowed to run without confirmation.
    *
    * **Behavior:**
@@ -405,16 +409,16 @@ export interface QueryOptions {
    * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
    *
    * **Pattern matching:**
-   * - Tool name: `'write_file'`, `'run_shell_command'`
-   * - Tool class: `'WriteTool'`, `'ShellTool'`
-   * - Shell command prefix: `'ShellTool(git status)'` (matches commands starting with "git status")
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(git status)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
    *
    * **Use cases:**
-   * - Auto-approve safe shell commands: `['ShellTool(git status)', 'ShellTool(ls)']`
+   * - Auto-approve safe shell commands: `['Bash(git status)', 'Bash(ls)']`
    * - Auto-approve specific tools: `['write_file', 'edit']`
    * - Combine with `permissionMode: 'default'` to selectively auto-approve tools
    *
-   * @example ['read_file', 'ShellTool(git status)', 'ShellTool(npm test)']
+   * @example ['Read', 'Bash(git status)', 'Bash(npm test)']
    * @see canUseTool For custom approval logic
    * @see excludeTools For blocking specific tools
    */
@@ -423,10 +427,10 @@ export interface QueryOptions {
   /**
    * Authentication type for the AI service.
    * - 'openai': Use OpenAI-compatible authentication
-   * - 'qwen-oauth': Use Qwen OAuth authentication
+   * - 'qwen-oauth': Legacy Qwen OAuth authentication
    *
-   * Though we support 'qwen-oauth', it's not recommended to use it in the SDK.
-   * Because the credentials are stored in `~/.qwen` and may need to refresh periodically.
+   * Qwen OAuth free tier was discontinued on 2026-04-15. New SDK setups should
+   * use OpenAI-compatible authentication or another supported provider.
    */
   authType?: AuthType;
 

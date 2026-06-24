@@ -684,9 +684,9 @@
               "default": 60
             },
             "toolResultsNumToKeep": {
-              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
-              "type": "number",
-              "default": 5
+              "type": "integer",
+              "default": 5,
+              "description": "Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1."
             },
             "toolResultsTotalCharsThreshold": {
               "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
@@ -1217,9 +1217,10 @@
       "default": false
     },
     "stopHookBlockingCap": {
-      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
-      "type": "number",
-      "default": 8
+      "type": "integer",
+      "minimum": 1,
+      "default": 8,
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP."
     },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",

@@ -1248,7 +1248,8 @@ describe('MCPOAuthProvider', () => {
 
     // Regression test for https://github.com/QwenLM/qwen-code/issues/1749
     // Scenario: user runs `qwen mcp add --transport http yuque https://mcp.alibaba-inc.com/yuque/mcp`
-    // then `/mcp auth yuque`. Per MCP spec / RFC 8707, the resource param should be the
+    // then authenticates the server from the `/mcp` dialog. Per MCP spec /
+    // RFC 8707, the resource param should be the
     // full canonical URI "https://mcp.alibaba-inc.com/yuque/mcp", not just the host.
     it('should use full canonical URI as resource parameter (issue #1749)', async () => {
       let capturedAuthUrl: string | undefined;
