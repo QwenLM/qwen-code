@@ -14,14 +14,27 @@ import { buildVoiceKeyterms } from './voice-keyterms.js';
 /** Minimal LoadedSettings stand-in: buildVoiceKeyterms reads only these. */
 function makeSettings(
   workspaceDir: string,
-  opts: { keytermsFile?: string; isTrusted?: boolean } = {},
+  opts: {
+    keytermsFile?: string;
+    workspaceKeytermsFile?: string;
+    isTrusted?: boolean;
+  } = {},
 ): LoadedSettings {
-  const { keytermsFile, isTrusted = true } = opts;
+  const { keytermsFile, workspaceKeytermsFile, isTrusted = true } = opts;
+  const voiceSettings = keytermsFile ? { voice: { keytermsFile } } : undefined;
+  const workspaceVoiceSettings = workspaceKeytermsFile
+    ? { voice: { keytermsFile: workspaceKeytermsFile } }
+    : undefined;
   return {
     isTrusted,
-    workspace: { path: path.join(workspaceDir, '.qwen', 'settings.json') },
+    workspace: {
+      path: path.join(workspaceDir, '.qwen', 'settings.json'),
+      settings: { general: workspaceVoiceSettings },
+    },
+    system: { settings: {} },
+    user: { settings: { general: voiceSettings } },
     merged: {
-      general: keytermsFile ? { voice: { keytermsFile } } : {},
+      general: workspaceVoiceSettings ?? voiceSettings ?? {},
     },
   } as unknown as LoadedSettings;
 }
@@ -164,6 +177,67 @@ describe('buildVoiceKeyterms', () => {
       fs.writeFileSync(secret, 'SECRETKEYMATERIAL\n');
       fs.symlinkSync(secret, path.join(qwenDir, 'voice-keyterms.txt'));
       const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+      expect(terms).not.toContain('SECRETKEYMATERIAL');
+      expect(terms).toContain('TypeScript'); // globals only
+    });
+
+    it('does not follow a symlinked explicit keytermsFile', () => {
+      const secret = path.join(workspaceDir, 'secret.txt');
+      const link = path.join(workspaceDir, 'terms-link.txt');
+      fs.writeFileSync(secret, 'SECRETKEYMATERIAL\n');
+      fs.symlinkSync(secret, link);
+      const terms = buildVoiceKeyterms(
+        makeSettings(workspaceDir, { keytermsFile: link }),
+      );
+      expect(terms).not.toContain('SECRETKEYMATERIAL');
+      expect(terms).toContain('TypeScript'); // globals only
+    });
+
+    it('does not load the default file through a symlinked .qwen directory', () => {
+      const outsideDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'voice-keyterms-outside-'),
+      );
+      fs.rmSync(qwenDir, { recursive: true, force: true });
+      fs.writeFileSync(
+        path.join(outsideDir, 'voice-keyterms.txt'),
+        'SECRETKEYMATERIAL\n',
+      );
+      fs.symlinkSync(outsideDir, qwenDir);
+      try {
+        const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+        expect(terms).not.toContain('SECRETKEYMATERIAL');
+        expect(terms).toContain('TypeScript'); // globals only
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not let relative keytermsFile escape the workspace root', () => {
+      const outsideDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'voice-keyterms-outside-'),
+      );
+      fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'EscapedTerm\n');
+      try {
+        const relativeEscape = path.relative(
+          workspaceDir,
+          path.join(outsideDir, 'secret.txt'),
+        );
+        const terms = buildVoiceKeyterms(
+          makeSettings(workspaceDir, { keytermsFile: relativeEscape }),
+        );
+        expect(terms).not.toContain('EscapedTerm');
+        expect(terms).toContain('TypeScript'); // globals only
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('ignores workspace-scoped keytermsFile settings', () => {
+      const secret = path.join(workspaceDir, 'secret.txt');
+      fs.writeFileSync(secret, 'SECRETKEYMATERIAL\n');
+      const terms = buildVoiceKeyterms(
+        makeSettings(workspaceDir, { workspaceKeytermsFile: secret }),
+      );
       expect(terms).not.toContain('SECRETKEYMATERIAL');
       expect(terms).toContain('TypeScript'); // globals only
     });

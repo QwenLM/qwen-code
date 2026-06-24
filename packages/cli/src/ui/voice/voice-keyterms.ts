@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isSubpath } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 
 // Static vocabulary-biasing hints sent to the transcription provider to improve
@@ -124,23 +125,28 @@ function readUserKeyterms(settings: LoadedSettings): string[] {
     return [];
   }
   try {
-    const filePath = resolveKeytermsFile(settings);
+    const resolved = resolveKeytermsFile(settings);
+    if (!resolved) {
+      return [];
+    }
+    const filePath = canonicalizeKeytermsFile(resolved);
     if (!filePath) {
       return [];
     }
-    const stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
-    if (
-      !stat ||
-      stat.isSymbolicLink() ||
-      !stat.isFile() ||
-      stat.size > MAX_KEYTERMS_FILE_BYTES
-    ) {
+    const content = readRegularFileNoFollow(filePath);
+    if (content === undefined) {
       return [];
     }
-    return parseKeyterms(fs.readFileSync(filePath, 'utf-8'));
+    return parseKeyterms(content);
   } catch {
     return [];
   }
+}
+
+interface ResolvedKeytermsFile {
+  filePath: string;
+  workspaceRoot: string;
+  mustBeInWorkspace: boolean;
 }
 
 /**
@@ -149,19 +155,80 @@ function readUserKeyterms(settings: LoadedSettings): string[] {
  * `.qwen/voice-keyterms.txt`. Returns undefined when the workspace root is
  * unknown (e.g. minimal/stream-json settings with an empty workspace path).
  */
-function resolveKeytermsFile(settings: LoadedSettings): string | undefined {
+function resolveKeytermsFile(
+  settings: LoadedSettings,
+): ResolvedKeytermsFile | undefined {
   const workspacePath = settings.workspace?.path;
   if (!workspacePath) {
     return undefined;
   }
   const qwenDir = path.dirname(workspacePath);
+  const workspaceRoot = path.dirname(qwenDir);
   const configured = readKeytermsFileSetting(settings);
   if (configured) {
-    return path.isAbsolute(configured)
-      ? configured
-      : path.resolve(path.dirname(qwenDir), configured);
+    const isAbsolute = path.isAbsolute(configured);
+    return {
+      filePath: isAbsolute
+        ? configured
+        : path.resolve(workspaceRoot, configured),
+      workspaceRoot,
+      mustBeInWorkspace: !isAbsolute,
+    };
   }
-  return path.join(qwenDir, DEFAULT_KEYTERMS_FILENAME);
+  return {
+    filePath: path.join(qwenDir, DEFAULT_KEYTERMS_FILENAME),
+    workspaceRoot,
+    mustBeInWorkspace: true,
+  };
+}
+
+function canonicalizeKeytermsFile({
+  filePath,
+  workspaceRoot,
+  mustBeInWorkspace,
+}: ResolvedKeytermsFile): string | undefined {
+  const stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
+  if (
+    !stat ||
+    stat.isSymbolicLink() ||
+    !stat.isFile() ||
+    stat.nlink > 1 ||
+    stat.size > MAX_KEYTERMS_FILE_BYTES
+  ) {
+    return undefined;
+  }
+  const realFilePath = fs.realpathSync(filePath);
+  if (mustBeInWorkspace) {
+    const realWorkspaceRoot = fs.realpathSync(workspaceRoot);
+    if (!isSubpath(realWorkspaceRoot, realFilePath)) {
+      return undefined;
+    }
+  }
+  return realFilePath;
+}
+
+function readRegularFileNoFollow(filePath: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    const flags =
+      typeof fs.constants.O_NOFOLLOW === 'number'
+        ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+        : fs.constants.O_RDONLY;
+    fd = fs.openSync(filePath, flags);
+    const stat = fs.fstatSync(fd);
+    if (
+      !stat.isFile() ||
+      stat.nlink > 1 ||
+      stat.size > MAX_KEYTERMS_FILE_BYTES
+    ) {
+      return undefined;
+    }
+    return fs.readFileSync(fd, 'utf-8');
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+  }
 }
 
 /** Parse a keyterms file: one term per line, `#` comments and blanks ignored. */
@@ -173,10 +240,17 @@ function parseKeyterms(content: string): string[] {
 }
 
 function readKeytermsFileSetting(settings: LoadedSettings): string | undefined {
+  return (
+    readKeytermsFileSettingFromScope(settings.system?.settings) ??
+    readKeytermsFileSettingFromScope(settings.user?.settings)
+  );
+}
+
+function readKeytermsFileSettingFromScope(
+  settings: { general?: { voice?: { keytermsFile?: unknown } } } | undefined,
+): string | undefined {
   const value = (
-    settings.merged.general as
-      | { voice?: { keytermsFile?: unknown } }
-      | undefined
+    settings?.general as { voice?: { keytermsFile?: unknown } } | undefined
   )?.voice?.keytermsFile;
   if (typeof value !== 'string') {
     return undefined;
