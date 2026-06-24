@@ -606,7 +606,7 @@ export class IdeClient {
           return config;
         }
         debugLogger.debug(
-          'Ignoring IDE env lock file because its workspace does not match the current working directory.',
+          `Ignoring IDE env lock file: workspace "${config.workspacePath}" does not match cwd "${cwd}".`,
         );
       } catch (_) {
         // Fall through to legacy discovery.
@@ -620,7 +620,7 @@ export class IdeClient {
         return legacyConfig;
       }
       debugLogger.debug(
-        'Ignoring legacy IDE connection config because its workspace does not match the current working directory.',
+        `Ignoring legacy IDE connection config: workspace "${legacyConfig.workspacePath}" does not match cwd "${cwd}".`,
       );
     }
 

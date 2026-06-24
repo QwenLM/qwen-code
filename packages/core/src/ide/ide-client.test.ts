@@ -25,10 +25,19 @@ const { mockUndiciFetch, mockProxyAgent, mockEnvHttpProxyAgent } = vi.hoisted(
     };
   },
 );
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 vi.mock('undici', () => ({
   EnvHttpProxyAgent: mockEnvHttpProxyAgent,
   fetch: mockUndiciFetch,
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
 }));
 
 import {
@@ -110,6 +119,8 @@ describe('IdeClient', () => {
     });
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
     vi.mocked(os.homedir).mockReturnValue('/home/test');
+    mockDebugLogger.debug.mockClear();
+    mockDebugLogger.error.mockClear();
 
     // Mock MCP client and transports
     mockClient = {
@@ -563,6 +574,9 @@ describe('IdeClient', () => {
       expect(fs.promises.readdir).toHaveBeenCalledWith(
         path.join('/home/test', '.qwen', 'ide'),
       );
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Ignoring IDE env lock file: workspace "/other/workspace" does not match cwd "/test/workspace/sub-dir".',
+      );
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     });
 
@@ -648,6 +662,9 @@ describe('IdeClient', () => {
       expect(result).toEqual(matchingConfig);
       expect(fs.promises.readdir).toHaveBeenCalledWith(
         path.join('/home/test', '.qwen', 'ide'),
+      );
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Ignoring legacy IDE connection config: workspace "/other/workspace" does not match cwd "/test/workspace/sub-dir".',
       );
     });
 
