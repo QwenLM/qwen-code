@@ -95,7 +95,9 @@ export function CodePreviewOverlay({
         </div>
       )}
 
-      <ContentFrame title={t('overlay.code')} fitContent minWidth={850}>
+      {/* Docked mode: let the card fill the (narrow) panel width instead of flooring at 850px,
+          which would force constant horizontal scrolling in a side panel. */}
+      <ContentFrame title={t('overlay.code')} fitContent={!embedded} minWidth={embedded ? undefined : 850}>
         <div>
           <ShikiCodeViewer
             code={content}

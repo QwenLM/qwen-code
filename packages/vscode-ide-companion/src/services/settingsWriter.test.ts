@@ -90,6 +90,48 @@ describe('settingsWriter', () => {
     expect(preserved.length).toBeGreaterThan(0);
   });
 
+  it('preserves existing OpenAI models when the file is still in the reverted #5089 V5 shape', () => {
+    // Simulate a settings.json migrated to $version: 5 (the { protocol, models }
+    // wrapper) that the CLI v5->v4 migration has not yet rewritten. The
+    // extension reads/writes directly, so findOpenaiModels must tolerate the V5
+    // shape on read or the pre-existing user model is silently dropped.
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        $version: 5,
+        modelProviders: {
+          [AuthType.USE_OPENAI]: {
+            protocol: 'openai',
+            models: [
+              {
+                id: 'user-model',
+                name: 'user-model',
+                baseUrl: 'https://api.example.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    writeCodingPlanConfig('china', 'coding-plan-key');
+
+    const settings = JSON.parse(
+      fs.readFileSync(settingsPath, 'utf-8'),
+    ) as Record<string, unknown>;
+    const modelProviders = settings.modelProviders as Record<string, unknown>;
+    const openaiModels = modelProviders[AuthType.USE_OPENAI] as Array<
+      Record<string, string>
+    >;
+
+    // The pre-existing user model must survive the coding-plan write, and the
+    // result is written back in the V4 array shape.
+    expect(Array.isArray(openaiModels)).toBe(true);
+    expect(openaiModels.some((m) => m.id === 'user-model')).toBe(true);
+  });
+
   it('reads an api-key configuration after switching away from coding plan', () => {
     writeCodingPlanConfig('china', 'coding-plan-key');
 

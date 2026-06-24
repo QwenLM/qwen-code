@@ -22,7 +22,6 @@ import {
   formatBlockedResponse,
   formatNeedsUserResponse,
   formatCapEscalationResponse,
-  formatUnavailableResponse,
   formatApprovedNotes,
 } from '../plan-gate/planApprovalGate.js';
 import type { EvidenceBundle } from '../plan-gate/types.js';
@@ -107,10 +106,16 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * For AUTO/YOLO pre-plan modes (without user takeover), the gate runs
-   * inside execute() and no user confirmation prompt is needed. For
-   * DEFAULT/AUTO_EDIT (or after user takeover), the existing confirmation
-   * UI handles approval.
+   * The Plan Approval Gate auto-approves (runs inside execute(), no user prompt)
+   * only when the model entered plan mode itself via enter_plan_mode while the
+   * session was AUTO/YOLO — an autonomous flow that should not be interrupted.
+   *
+   * When the user entered plan mode explicitly (Shift+Tab, /plan, the dialog),
+   * the confirmation UI always handles approval, even if prePlanMode happens to
+   * be AUTO/YOLO. Note the Shift+Tab cycle order (…→auto→yolo→plan) means a
+   * manual entry ALWAYS lands with prePlanMode === 'yolo', so prePlanMode alone
+   * cannot distinguish the two cases — `enteredByModel` is the discriminator
+   * (issue #5574).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const prePlanMode = this.config.getPrePlanMode();
@@ -118,6 +123,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     if (
       isAutonomousPrePlanMode(prePlanMode) &&
       gateState &&
+      gateState.enteredByModel &&
       gateState.gateMode !== 'user_takeover'
     ) {
       return 'allow';
@@ -200,10 +206,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         return this.approveAndRestore(plan, prePlanMode, 'Gate user override');
       }
 
-      // ── Path B: AUTO/YOLO gate path (no takeover) ──────────────
+      // ── Path B: AUTO/YOLO gate path (model-initiated, no takeover) ──
       if (
         isAutonomousPrePlanMode(prePlanMode) &&
         gateState &&
+        gateState.enteredByModel &&
         gateState.gateMode !== 'user_takeover'
       ) {
         // Update the gate state with the latest resolution summary
@@ -295,16 +302,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            const llmContent = formatUnavailableResponse(decision);
-            const message = `Plan gate: unavailable - ${decision.reason}`;
-            return {
-              llmContent,
-              returnDisplay: this.buildRejectedGateDisplay(
-                message,
-                plan,
-                llmContent,
-              ),
-            };
+            // Gate is broken — fall back to DEFAULT mode so the user
+            // gets a real confirmation dialog on the next action,
+            // instead of trapping in plan mode with no escape hatch.
+            debugLogger.warn(
+              `Gate unavailable, falling back to DEFAULT mode: ${decision.reason}`,
+            );
+            return this.fallbackToUserDecision(plan);
           }
           default: {
             const _exhaustive: never = decision;
@@ -401,6 +405,36 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       returnDisplay: {
         type: 'plan_summary',
         message: displayMessage,
+        plan,
+      },
+    };
+  }
+
+  /**
+   * Gate unavailable fallback — switch to DEFAULT mode so the next
+   * action triggers a real user confirmation dialog. This breaks the
+   * gate trap while forcing the model to present the plan for approval
+   * rather than auto-executing in AUTO/YOLO.
+   */
+  private fallbackToUserDecision(plan: string): ToolResult {
+    this.setApprovalModeSafely(ApprovalMode.DEFAULT);
+
+    // Save plan so it's on disk even if the model proceeds.
+    try {
+      this.config.savePlan(plan);
+    } catch (error) {
+      debugLogger.warn(
+        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    return {
+      llmContent:
+        'Gate is unavailable and cannot review the plan. Ask the user whether to execute this plan or stay in plan mode to revise it.',
+      returnDisplay: {
+        type: 'plan_summary',
+        message:
+          'Plan gate is unavailable. The plan has been saved — please confirm whether to execute it.',
         plan,
       },
     };

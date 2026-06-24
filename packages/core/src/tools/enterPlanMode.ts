@@ -18,16 +18,16 @@ const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
 export type EnterPlanModeParams = Record<string, never>;
 
-const enterPlanModeToolDescription = `Use this tool to lower into plan mode before doing uncertain or complex work. Entering plan mode is a privilege reduction, so it does not require user confirmation.
+const enterPlanModeToolDescription = `Use this tool only after the user explicitly asks to switch into plan mode or confirms they want plan mode. Entering plan mode is a privilege reduction, so it does not require user confirmation at execution time.
 
 ## When to Use This Tool
-Use this tool when the task is not yet clear enough to safely execute, for example when it requires multi-file changes, design choices, investigation before a plan can be summarized, or when requirements are ambiguous. While investigating, if complexity rises or you find yourself repeatedly needing to ask the user, enter plan mode and consolidate a plan.
+Use this tool when the user has opted into plan mode for a task that should be read-only while the plan is formed, such as multi-file changes, design choices, or ambiguous requirements.
 
 ## When NOT to Use This Tool
-If the request is already clear, small, and low-risk, you may execute directly without entering plan mode. Do not make speculative small edits before you have thought the change through.
+Do not use this tool just because a task involves planning, is complex, or requires investigation. In the current mode, you can still think, inspect files, ask clarifying questions, and present a plan without switching modes.
 
 ## Important
-Do NOT use this tool if the user has explicitly asked you not to use plan mode.`;
+If plan mode seems helpful but the user has not asked for it, ask first. Do NOT use this tool if the user has explicitly asked you not to use plan mode.`;
 
 const enterPlanModeToolSchemaData: FunctionDeclaration = {
   name: 'enter_plan_mode',
@@ -81,8 +81,13 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     try {
       // Idempotent: only switch when not already in plan mode so we never
       // overwrite the saved prePlanMode.
+      // Mark this entry as model-initiated so exit_plan_mode runs the Plan
+      // Approval Gate for AUTO/YOLO sessions. User-initiated entries (Shift+Tab,
+      // /plan) leave this false and always get the confirmation dialog (#5574).
       if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
-        this.config.setApprovalMode(ApprovalMode.PLAN);
+        this.config.setApprovalMode(ApprovalMode.PLAN, {
+          enteredByModel: true,
+        });
       }
     } catch (error) {
       const errorMessage =
@@ -154,7 +159,7 @@ export class EnterPlanModeTool extends BaseDeclarativeTool<
       >,
       true, // isOutputMarkdown
       false, // canUpdateOutput
-      false, // shouldDefer — always visible so the model can enter plan mode
+      false, // shouldDefer — always visible so explicit plan-mode requests work
       false, // alwaysLoad
       'plan mode enter start',
     );

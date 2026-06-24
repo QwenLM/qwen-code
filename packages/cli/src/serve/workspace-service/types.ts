@@ -24,6 +24,7 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
+import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -75,6 +76,11 @@ export type InvokeWorkspaceCommandFn = <T>(
   params?: Record<string, unknown>,
   opts?: { timeoutMs?: number },
 ) => Promise<T>;
+
+export type RefreshExtensionsForAllSessionsFn = () => Promise<{
+  refreshed: number;
+  failed: number;
+}>;
 
 /**
  * The unified facade for workspace-scoped daemon operations. Routes
@@ -143,6 +149,12 @@ export interface DaemonWorkspaceService {
 
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
+
+  /** Broadcast extension refresh to all active sessions (fire-and-forget). */
+  refreshExtensionsForAllSessions(): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
 }
 
 // -- Result types for workspace mutations --
@@ -204,6 +216,13 @@ export interface DaemonWorkspaceServiceDeps {
   statusProvider?: DaemonStatusProvider;
 
   /**
+   * Daemon-local provider catalog/default-model snapshot. When present,
+   * `/workspace/providers` is answered from fresh workspace settings/env
+   * instead of querying the ACP child.
+   */
+  workspaceProvidersStatusProvider?: WorkspaceProvidersStatusProvider;
+
+  /**
    * Returns whether the ACP channel is currently live. Used by
    * `getWorkspaceEnvStatus` to populate the `acpChannelLive` field
    * without requiring an ACP round-trip.
@@ -231,6 +250,12 @@ export interface DaemonWorkspaceServiceDeps {
    * For commands like tool-toggle, MCP restart, init-workspace.
    */
   invokeWorkspaceCommand: InvokeWorkspaceCommandFn;
+
+  /**
+   * Broadcast an extension refresh to every live session. This must not
+   * delegate to `invokeWorkspaceCommand`, which targets only one live channel.
+   */
+  refreshExtensionsForAllSessions?: RefreshExtensionsForAllSessionsFn;
 
   /**
    * Publish a workspace-wide event to all sessions' SSE buses.

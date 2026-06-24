@@ -147,6 +147,15 @@ Now read the diff. Compare the PR's approach against your independent proposal:
 - Are there correctness bugs, security holes, or regressions your approach would have avoided?
 - Does the implementation follow the project's conventions, or does it over-abstract / duplicate code / put logic in the wrong package?
 
+**Reuse-before-new-code check:** for new non-trivial logic, run a small
+reuse ladder: is there an existing shared function/module/API in this repo? Does
+the standard library or platform API cover it? Does an already-installed
+dependency cover it? Prefer reusing or extending a compatible implementation
+instead of adding a parallel utility or per-file helper. Comment only when you
+can name the reusable implementation/API/dependency, or when the same
+non-trivial logic is repeated across changed files. Do not flag trivial
+one-liners, different semantics, or speculative extraction.
+
 Keep it tight — only flag two kinds of issues:
 
 - **Critical blockers** — correctness bugs, security holes, regressions.
@@ -229,7 +238,16 @@ If your independent proposal was materially simpler — say so. Not as a blocker
 
 **Step 2: Act on the verdict.**
 
-All stages genuinely clean — approve:
+**⛔ Approval guardrail — check this BEFORE approving.** A cross-repository (fork) `refactor` PR must never be auto-approved: refactors touch structure broadly and a fork author is not a trusted committer, so these always need a human maintainer's eye (this rule exists because such a PR was wrongly auto-approved and merged). Decide it deterministically — do not eyeball it:
+
+```bash
+GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
+  --jq 'if (.isCrossRepository and (.title | test("^\\s*refactor"; "i"))) then "block" else "ok" end')
+```
+
+If `GUARD` is `block`: do **not** run `gh pr review --approve` no matter how clean every stage looked. Escalate to the maintainer instead (the "Genuinely unsure" path below, using `$QWEN_MAINTAINER_HANDLE` if set), and only `--request-changes` if you actually found blocking issues. This overrides the "approve" path.
+
+All stages genuinely clean **and** `GUARD` is `ok` — approve:
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body "LGTM, looks ready to ship. ✅"
@@ -241,4 +259,4 @@ Reflection shows it shouldn't merge — request changes immediately, citing the 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "Needs some rethinking — see my notes above. 🙏"
 ```
 
-Genuinely unsure — **don't approve or reject**. Ask the maintainer to weigh in. Use `$QWEN_MAINTAINER_HANDLE` if set.
+Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**. Ask the maintainer to weigh in. Use `$QWEN_MAINTAINER_HANDLE` if set.

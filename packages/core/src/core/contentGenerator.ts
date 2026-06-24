@@ -29,7 +29,7 @@ import {
   StrictMissingCredentialsError,
   StrictMissingModelIdError,
 } from '../models/modelConfigErrors.js';
-import { PROVIDER_SOURCED_FIELDS } from '../models/modelsConfig.js';
+import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -135,6 +135,12 @@ export type ContentGeneratorConfig = {
   // and safe for permissive providers); set false to restore the legacy
   // embed-in-tool-message behavior. See QwenLM/qwen-code#4876, #3616.
   splitToolMedia?: boolean;
+  // OpenAI Chat Completions accepts tool result content as either a plain
+  // string or an array of text content parts. Some older OpenAI-compatible
+  // tool templates only read the string form, so this opt-in serializes
+  // text-only tool results as strings while leaving the default spec-compliant
+  // content-part shape unchanged.
+  toolResultContentFormat?: 'parts' | 'string';
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic

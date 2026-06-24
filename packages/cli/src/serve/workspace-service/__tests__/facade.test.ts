@@ -146,7 +146,41 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.skills).toEqual([]);
     });
 
-    it('getWorkspaceProvidersStatus delegates with correct method', async () => {
+    it('getWorkspaceProvidersStatus uses daemon-local provider when present', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, providers: [] });
+      const workspaceProvidersStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        acpChannelLive: false,
+        current: {
+          authType: 'USE_OPENAI',
+          modelId: 'fresh-model(USE_OPENAI)',
+        },
+        providers: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceProvidersStatusProvider,
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.getWorkspaceProvidersStatus(makeCtx());
+
+      expect(result.current?.modelId).toBe('fresh-model(USE_OPENAI)');
+      expect(result.acpChannelLive).toBe(false);
+      expect(workspaceProvidersStatusProvider).toHaveBeenCalledWith(
+        '/workspace',
+        false,
+      );
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+
+    it('getWorkspaceProvidersStatus keeps ACP fallback without daemon-local provider', async () => {
       const queryWorkspaceStatus = vi
         .fn()
         .mockResolvedValue({ v: 1, providers: [] });
@@ -386,6 +420,47 @@ describe('createDaemonWorkspaceService', () => {
         svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
       ).rejects.toThrow('disk full');
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('refreshExtensionsForAllSessions', () => {
+    it('delegates to the all-session refresh callback', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const refreshExtensionsForAllSessions = vi
+        .fn()
+        .mockResolvedValue({ refreshed: 2, failed: 1 });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, refreshExtensionsForAllSessions }),
+      );
+
+      const result = await svc.refreshExtensionsForAllSessions();
+
+      expect(result).toEqual({ refreshed: 2, failed: 1 });
+      expect(refreshExtensionsForAllSessions).toHaveBeenCalledOnce();
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    });
+
+    it('returns a failed result when the refresh callback is not wired', async () => {
+      const svc = createDaemonWorkspaceService(makeDeps());
+
+      await expect(svc.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 0,
+        failed: 1,
+      });
+    });
+
+    it('returns a failed result when the refresh callback rejects', async () => {
+      const refreshExtensionsForAllSessions = vi
+        .fn()
+        .mockRejectedValue(new Error('bridge down'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ refreshExtensionsForAllSessions }),
+      );
+
+      await expect(svc.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 0,
+        failed: 1,
+      });
     });
   });
 

@@ -269,7 +269,8 @@ export function mcpTransportOf(config: MCPServerConfig): McpTransportKind {
  * behavior, no enforcement.
  *
  * `QWEN_SERVE_MCP_CLIENT_BUDGET` — positive integer; non-numeric /
- *   zero / negative / NaN are silently ignored (treated as unset).
+ *   zero / negative / NaN are rejected (treated as unset) and a
+ *   stderr breadcrumb is written so the misconfiguration is visible.
  * `QWEN_SERVE_MCP_BUDGET_MODE` — `enforce|warn|off`. Defaults to
  *   `warn` when a budget is set, `off` otherwise.
  */
@@ -278,14 +279,18 @@ function readBudgetFromEnv(): McpBudgetConfig {
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
   let clientBudget: number | undefined;
   if (rawBudget !== undefined && rawBudget !== '') {
-    const parsed = Number(rawBudget);
-    if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
+    // Parse strictly as a decimal integer: Number('0x10')=16, Number('1e2')=100
+    // and Number('1.0')=1 all pass isInteger, so a loose parse would silently
+    // accept them. Only plain decimal digits should set a budget.
+    const trimmed = rawBudget.trim();
+    const parsed = Number(trimmed);
+    if (/^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) && parsed > 0) {
       clientBudget = parsed;
     } else {
       // operator typos
       // like `QWEN_SERVE_MCP_CLIENT_BUDGET=abc` previously fell
       // through silently to "no budget" with zero indication. The
-      // CLI parent (`commands/serve.ts` + `runQwenServe.ts`)
+      // CLI parent (`commands/serve.ts` + `run-qwen-serve.ts`)
       // validates and throws, but the ACP child process — where
       // this function runs — has no such validation. Surface a
       // boot breadcrumb so operators see the misconfiguration in
@@ -1494,6 +1499,7 @@ export class McpClientManager {
     try {
       const sessionId = this.cliConfig.getSessionId();
       const promptRegistry = this.cliConfig.getPromptRegistry();
+      const resourceRegistry = this.cliConfig.getResourceRegistry();
       const servers = populateMcpServerCommand(
         this.cliConfig.getMcpServers() || {},
         this.cliConfig.getMcpServerCommand(),
@@ -1573,6 +1579,7 @@ export class McpClientManager {
               sessionId,
               this.toolRegistry,
               promptRegistry,
+              resourceRegistry,
             );
             //
             // subscribe to entry-level events so a `'failed'` event
@@ -2840,12 +2847,14 @@ export class McpClientManager {
         // Pool mode: acquire through the shared pool
         const sessionId = this.cliConfig.getSessionId();
         const promptRegistry = this.cliConfig.getPromptRegistry();
+        const resourceRegistry = this.cliConfig.getResourceRegistry();
         const conn = await this.pool.acquire(
           name,
           config,
           sessionId,
           this.toolRegistry,
           promptRegistry,
+          resourceRegistry,
         );
         this.pooledConnections.set(name, conn);
         toolCount = conn.toolsSnapshot.length;

@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  memo,
   useContext,
   useEffect,
   useImperativeHandle,
@@ -20,12 +21,18 @@ import {
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
 import { useWebShellCustomization } from '../customization';
+import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
-import { toolContainsCallId } from './messages/toolFormatting';
+import { useSharedNow } from '../hooks/useSharedNow';
+import {
+  isAskUserQuestionToolName,
+  toolContainsCallId,
+} from './messages/toolFormatting';
+import turnCollapseStyles from './TurnCollapseRow.module.css';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
@@ -50,6 +57,7 @@ interface MessageListProps {
   tailKey?: string;
   virtualScrollThreshold?: number;
   shellOutputMaxLines: number;
+  activeTurnStartedAt?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
@@ -58,12 +66,19 @@ interface MessageListProps {
   autoScrollTailIntoView?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  onBranchSession?: () => void;
+  onFollowStateChange?: (isFollowing: boolean) => void;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
-  return (
-    !!request.rawInput?.questions && Array.isArray(request.rawInput.questions)
-  );
+  if (
+    !request.rawInput?.questions ||
+    !Array.isArray(request.rawInput.questions)
+  ) {
+    return false;
+  }
+  if (!request.toolName) return true;
+  return isAskUserQuestionToolName(request.toolName);
 }
 
 function approvalMatchesToolGroup(
@@ -93,11 +108,20 @@ export type DisplayItem =
       type: 'message';
       key: string;
       message: Message;
-      /**
-       * Present only on a turn's leading user-message row when the turn is
-       * collapsible; drives the prompt-row expand/collapse toggle.
-       */
-      collapse?: TurnCollapseHead;
+      /** Metrics info for the final answer assistant message. */
+      turnCollapse?: TurnCollapseHead;
+    }
+  | {
+      type: 'turn_collapse';
+      key: string;
+      turnCollapse: TurnCollapseHead;
+    }
+  | {
+      type: 'turn_content';
+      key: string;
+      turnId: string;
+      collapsed: boolean;
+      items: DisplayItem[];
     }
   | {
       type: 'parallel_agents';
@@ -132,7 +156,7 @@ function isBackgroundLaunchNarration(msg: Message): boolean {
   // those as internal launch narration and shows a single Parallel agents box.
   // Only skip thought-only messages here; any user-facing assistant content
   // still breaks the group and remains visible.
-  return msg.role === 'assistant' && Boolean(msg.thinking) && !msg.content;
+  return msg.role === 'thinking';
 }
 
 function isForceExpandGroup(
@@ -149,7 +173,7 @@ function isForceExpandGroup(
 }
 
 function isHiddenInCompactMode(msg: Message): boolean {
-  if (msg.role === 'assistant' && msg.thinking && !msg.content) return true;
+  if (msg.role === 'thinking') return true;
   return false;
 }
 
@@ -292,9 +316,10 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
 }
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
-  return item.type === 'parallel_agents'
-    ? `group:${item.key}`
-    : `msg:${item.key}`;
+  if (item.type === 'parallel_agents') return `group:${item.key}`;
+  if (item.type === 'turn_collapse') return `tc:${item.key}`;
+  if (item.type === 'turn_content') return `turn-content:${item.key}`;
+  return `msg:${item.key}`;
 }
 
 export interface ApplyTurnCollapseOptions {
@@ -309,6 +334,7 @@ export interface ApplyTurnCollapseOptions {
    * and un-collapsible so live output is never hidden.
    */
   isResponding: boolean;
+  activeTurnStartedAt?: number;
   /**
    * Tool-call id of a pending approval, if any. The turn containing it is
    * force-expanded so the inline approve/reject UI is never folded away (mirrors
@@ -332,6 +358,24 @@ function isAssistantAnswer(item: DisplayItem): boolean {
   );
 }
 
+function findFinalAnswerIndex(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+): number {
+  let lastWorkStepIndex = start;
+  for (let i = end; i > start; i--) {
+    if (isExecutionWorkStep(items[i]!)) {
+      lastWorkStepIndex = i;
+      break;
+    }
+  }
+  for (let i = end; i > lastWorkStepIndex; i--) {
+    if (isAssistantAnswer(items[i]!)) return i;
+  }
+  return -1;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, and mid-turn assistant text.
  * The final answer and any system/shell/insight rows (errors, cancellations,
@@ -339,14 +383,21 @@ function isAssistantAnswer(item: DisplayItem): boolean {
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_collapse') return false;
+  if (item.type === 'turn_content') {
+    return item.items.some((child) => isHideableStep(child, isFinalAnswer));
+  }
   switch (item.message.role) {
     case 'tool_group':
     case 'plan':
       return true;
     case 'assistant':
       return !isFinalAnswer;
-    case 'user':
+    case 'thinking':
+      return true;
     case 'system':
+      return isMidTurnInjectedDebugMessage(item.message);
+    case 'user':
     case 'user_shell':
     case 'btw':
     case 'insight_progress':
@@ -365,14 +416,40 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   }
 }
 
+function isMidTurnInjectedDebugMessage(message: {
+  content?: string;
+  source?: string;
+}): boolean {
+  return (
+    message.source === 'mid_turn_message_injected' ||
+    message.content?.startsWith(
+      'mid_turn_message_injected (unrecognized daemon event):',
+    ) === true
+  );
+}
+
 function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'parallel_agents') return true;
+  if (item.type === 'turn_collapse') return false;
+  if (item.type === 'turn_content') return item.items.some(isExecutionWorkStep);
   return item.message.role === 'tool_group' || item.message.role === 'plan';
 }
 
-/** Wall-clock stamp of a display row, whichever variant carries it. */
-function itemTimestamp(item: DisplayItem): number | undefined {
-  return item.type === 'message' ? item.message.timestamp : item.timestamp;
+function terminalTurnTimestamp(item: DisplayItem): number | undefined {
+  if (item.type !== 'message' || item.message.role !== 'system') {
+    return undefined;
+  }
+  return item.message.source === 'prompt_cancelled' ||
+    item.message.source === 'turn_error'
+    ? item.message.timestamp
+    : undefined;
+}
+
+function assistantContentTimestamp(item: DisplayItem): number | undefined {
+  if (item.type !== 'message' || item.message.role !== 'assistant') {
+    return undefined;
+  }
+  return item.message.content?.trim() ? item.message.timestamp : undefined;
 }
 
 /**
@@ -395,6 +472,10 @@ function itemAssistantUsage(item: DisplayItem):
 
 function itemToolCallCount(item: DisplayItem): number {
   if (item.type === 'parallel_agents') return item.agents.length;
+  if (item.type === 'turn_collapse') return 0;
+  if (item.type === 'turn_content') {
+    return item.items.reduce((sum, child) => sum + itemToolCallCount(child), 0);
+  }
   return item.message.role === 'tool_group' ? item.message.tools.length : 0;
 }
 
@@ -440,7 +521,7 @@ function turnOwnsCallId(
       if (item.agents.some((agent) => toolContainsCallId(agent, callId))) {
         return true;
       }
-    } else if (item.message.role === 'tool_group') {
+    } else if (item.type === 'message' && item.message.role === 'tool_group') {
       if (item.message.tools.some((tool) => toolContainsCallId(tool, callId))) {
         return true;
       }
@@ -454,6 +535,7 @@ export function applyTurnCollapse(
   {
     overrides,
     isResponding,
+    activeTurnStartedAt,
     pendingApprovalCallId,
     enabled,
   }: ApplyTurnCollapseOptions,
@@ -479,6 +561,7 @@ export function applyTurnCollapse(
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
     const head = items[start] as Extract<DisplayItem, { type: 'message' }>;
     const turnId = head.message.id;
+    const promptTs = head.message.timestamp;
     const isActiveTurn = k === userIdxs.length - 1 && isResponding;
     const hasPendingApproval = turnOwnsCallId(
       items,
@@ -487,39 +570,41 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    // Final answer = last assistant-with-content row after the turn's last
-    // non-assistant step. Assistant text that is followed by a tool/plan is
-    // narration for the execution trace, not the final answer; marking it as a
-    // step immediately keeps the trace indentation stable while a turn streams.
-    let answerIdx = -1;
-    let lastNonAssistantStepIdx = start;
-    for (let i = start + 1; i <= end; i++) {
-      if (isExecutionWorkStep(items[i])) lastNonAssistantStepIdx = i;
-    }
-    for (let i = end; i > lastNonAssistantStepIdx; i--) {
-      if (isAssistantAnswer(items[i])) {
-        answerIdx = i;
-        break;
-      }
-    }
-
+    const answerIdx = findFinalAnswerIndex(items, start, end);
     let hiddenCount = 0;
-    let lastStepTs: number | undefined;
+    let terminalTs: number | undefined;
+    let assistantTs: number | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedTokens = 0;
     let toolCallCount = 0;
+    let thinkingCount = 0;
     let hasUsage = false;
     for (let i = start + 1; i <= end; i++) {
-      const isStep = isHideableStep(items[i], i === answerIdx);
-      if (isStep) hiddenCount++;
-      toolCallCount += itemToolCallCount(items[i]);
-      const ts =
-        isStep || i === answerIdx ? itemTimestamp(items[i]) : undefined;
-      if (ts !== undefined) {
-        lastStepTs = lastStepTs === undefined ? ts : Math.max(lastStepTs, ts);
+      const item = items[i]!;
+      const isStep = isHideableStep(item, i === answerIdx);
+      if (isStep) {
+        hiddenCount++;
       }
-      const usage = itemAssistantUsage(items[i]);
+      toolCallCount += itemToolCallCount(item);
+      if (item.type === 'message' && item.message.role === 'thinking') {
+        thinkingCount++;
+      }
+      const terminalTimestamp = terminalTurnTimestamp(item);
+      if (terminalTimestamp !== undefined) {
+        terminalTs =
+          terminalTs === undefined
+            ? terminalTimestamp
+            : Math.max(terminalTs, terminalTimestamp);
+      }
+      const assistantTimestamp = assistantContentTimestamp(item);
+      if (assistantTimestamp !== undefined) {
+        assistantTs =
+          assistantTs === undefined
+            ? assistantTimestamp
+            : Math.max(assistantTs, assistantTimestamp);
+      }
+      const usage = itemAssistantUsage(item);
       if (usage) {
         inputTokens += usage.inputTokens;
         outputTokens += usage.outputTokens;
@@ -528,8 +613,10 @@ export function applyTurnCollapse(
       }
     }
 
-    const promptTs = head.message.timestamp;
-    const liveStartedAt = isActiveTurn ? (promptTs ?? Date.now()) : undefined;
+    const liveStartedAt = isActiveTurn
+      ? (activeTurnStartedAt ?? promptTs ?? Date.now())
+      : undefined;
+    const lastStepTs = terminalTs ?? assistantTs;
     const elapsedMs =
       promptTs !== undefined &&
       lastStepTs !== undefined &&
@@ -557,53 +644,97 @@ export function applyTurnCollapse(
           ? (overrides.get(turnId) as boolean)
           : isActiveTurn;
     const collapsed = !expanded;
+    let turnContentGroupIndex = 0;
+    const pushTurnContentGroup = (groupItems: DisplayItem[]) => {
+      if (groupItems.length === 0) return;
+      result.push({
+        type: 'turn_content',
+        key: `${turnId}-content-${turnContentGroupIndex++}`,
+        turnId,
+        collapsed,
+        items: groupItems,
+      });
+    };
 
+    // Push the user message
     result.push({
       type: 'message',
       key: head.key,
       message: head.message,
-      collapse: {
-        turnId,
-        collapsed,
-        hiddenCount,
-        ...(elapsedMs !== undefined ? { elapsedMs } : {}),
-        ...(hasUsage ? { inputTokens, outputTokens } : {}),
-        ...(cachedTokens > 0 ? { cachedTokens } : {}),
-        ...(toolCallCount > 0 ? { toolCallCount } : {}),
-        ...(liveStartedAt !== undefined ? { liveStartedAt } : {}),
-      },
+    });
+
+    // Insert standalone turn_collapse item right after user message
+    // This keeps the toggle at the top of the turn regardless of expand state
+    const turnCollapseInfo: TurnCollapseHead = {
+      turnId,
+      collapsed,
+      hiddenCount,
+      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      ...(hasUsage ? { inputTokens, outputTokens } : {}),
+      ...(cachedTokens > 0 ? { cachedTokens } : {}),
+      ...(toolCallCount > 0 ? { toolCallCount } : {}),
+      ...(thinkingCount > 0 ? { thinkingCount } : {}),
+      ...(liveStartedAt !== undefined ? { liveStartedAt } : {}),
+    };
+    result.push({
+      type: 'turn_collapse',
+      key: `tc-${turnId}`,
+      turnCollapse: turnCollapseInfo,
     });
 
     if (!collapsed) {
+      let turnContentItems: DisplayItem[] = [];
       for (let i = start + 1; i <= end; i++) {
-        result.push(items[i]!);
+        const item = items[i]!;
+        // Attach turnCollapse to final answer for metrics display
+        if (
+          i === answerIdx &&
+          item.type === 'message' &&
+          item.message.role === 'assistant'
+        ) {
+          pushTurnContentGroup(turnContentItems);
+          turnContentItems = [];
+          result.push({
+            ...item,
+            turnCollapse: turnCollapseInfo,
+          });
+        } else {
+          turnContentItems.push(item);
+        }
       }
+      pushTurnContentGroup(turnContentItems);
       continue;
     }
 
-    // Collapsed: drop the hideable steps; keep the final answer (its own
-    // thinking stripped) and any non-step rows (errors, cancellations, command
-    // output) in their original places. On an active turn the "answer" is still
-    // streaming, so fold it away too rather than strand a provisional line.
+    // Collapsed: keep hideable steps mounted in a zero-height content group so
+    // the fold animation can run. Keep the final answer and non-step rows
+    // (errors, cancellations, command output) in their original places. On an
+    // active turn the "answer" is still streaming, so fold it away too rather
+    // than strand a provisional line.
+    const collapsedContentItems: DisplayItem[] = [];
+    const visibleCollapsedItems: DisplayItem[] = [];
     for (let i = start + 1; i <= end; i++) {
       const item = items[i];
       if (i === answerIdx && isActiveTurn) continue;
-      if (isHideableStep(item, i === answerIdx)) continue;
       if (
         i === answerIdx &&
         item.type === 'message' &&
-        item.message.role === 'assistant' &&
-        item.message.thinking
+        item.message.role === 'assistant'
       ) {
-        result.push({
-          type: 'message',
-          key: item.key,
-          message: { ...item.message, thinking: undefined },
+        visibleCollapsedItems.push({
+          ...item,
+          turnCollapse: turnCollapseInfo,
         });
-      } else {
-        result.push(item);
+        continue;
       }
+      if (isHideableStep(item, i === answerIdx)) {
+        collapsedContentItems.push(item);
+        continue;
+      }
+      visibleCollapsedItems.push(item);
     }
+    pushTurnContentGroup(collapsedContentItems);
+    result.push(...visibleCollapsedItems);
   }
 
   return result;
@@ -631,8 +762,14 @@ export function findDisplayItemIndex(
         return i;
       }
     } else if (
+      item.type === 'parallel_agents' &&
       callId &&
       item.agents.some((agent) => toolContainsCallId(agent, callId))
+    ) {
+      return i;
+    } else if (
+      item.type === 'turn_content' &&
+      findDisplayItemIndex(item.items, messageId, callId) >= 0
     ) {
       return i;
     }
@@ -646,11 +783,14 @@ export interface MessageListHandle {
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** Resume bottom-follow mode and scroll to the latest output. */
+  scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
 
 const HEADER_INDEX = 0;
 const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
+const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_APPROVAL = 200;
 const ESTIMATE_TAIL = 240;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
@@ -662,6 +802,226 @@ export function shouldUseVirtualScroll(
   return totalCount > threshold;
 }
 
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds - minutes * 60;
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatTokenCount(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
+}
+
+type Translate = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
+
+function durationMetricText(elapsedMs: number | undefined): string {
+  return elapsedMs !== undefined ? formatDuration(elapsedMs) : '';
+}
+
+function tokenMetricText(collapse: TurnCollapseHead, t: Translate): string {
+  if (
+    collapse.inputTokens === undefined ||
+    collapse.outputTokens === undefined
+  ) {
+    return '';
+  }
+  const cachedTokens = collapse.cachedTokens ?? 0;
+  const cached =
+    cachedTokens > 0 && collapse.inputTokens > 0
+      ? ` (${formatTokenCount(cachedTokens)} ${t('turn.cached')}, ${Math.round(
+          (cachedTokens / collapse.inputTokens) * 100,
+        )}%)`
+      : '';
+  return `↑${formatTokenCount(collapse.inputTokens)}${cached} ↓${formatTokenCount(
+    collapse.outputTokens,
+  )}`;
+}
+
+function turnMetricsText(collapse: TurnCollapseHead, t: Translate): string {
+  const parts: string[] = [];
+  const tokenMetric = tokenMetricText(collapse, t);
+  if (tokenMetric) parts.push(tokenMetric);
+  if (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0) {
+    parts.push(t('turn.toolCalls', { count: collapse.toolCallCount }));
+  }
+  if (collapse.thinkingCount !== undefined && collapse.thinkingCount > 0) {
+    parts.push(t('turn.thinkingCount', { count: collapse.thinkingCount }));
+  }
+  return parts.join(' · ');
+}
+
+function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
+  return (
+    (collapse.inputTokens !== undefined &&
+      collapse.outputTokens !== undefined) ||
+    (collapse.toolCallCount !== undefined && collapse.toolCallCount > 0)
+  );
+}
+
+interface TurnCollapseRowProps {
+  turnCollapse: TurnCollapseHead;
+  onToggleCollapse: (turnId: string) => void;
+}
+
+const TurnCollapseRow = memo(function TurnCollapseRow({
+  turnCollapse,
+  onToggleCollapse,
+}: TurnCollapseRowProps) {
+  const { t } = useI18n();
+  const hasToggle = turnCollapse.hiddenCount > 0;
+  const liveStartedAt = turnCollapse.liveStartedAt;
+  const showMetadataRow =
+    hasToggle ||
+    liveStartedAt !== undefined ||
+    hasNonDurationMetrics(turnCollapse);
+
+  const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
+  const elapsedSeenRef = useRef(0);
+  let displayElapsedMs: number | undefined;
+  if (liveStartedAt !== undefined && showMetadataRow) {
+    elapsedSeenRef.current = Math.max(
+      elapsedSeenRef.current,
+      Math.max(0, now - liveStartedAt),
+    );
+    displayElapsedMs = elapsedSeenRef.current;
+  } else if (showMetadataRow && turnCollapse.elapsedMs !== undefined) {
+    elapsedSeenRef.current = 0;
+    displayElapsedMs = turnCollapse.elapsedMs;
+  } else {
+    elapsedSeenRef.current = 0;
+    displayElapsedMs = undefined;
+  }
+
+  const visibleMetrics = durationMetricText(displayElapsedMs);
+  const hiddenMetrics = turnMetricsText(turnCollapse, t);
+  const summaryMetrics = turnMetricsText(turnCollapse, t);
+  const statusLabel =
+    liveStartedAt !== undefined ? t('turn.processing') : t('turn.processed');
+  const showVisibleMetrics = !!visibleMetrics && showMetadataRow;
+  const showHiddenMetrics = !!hiddenMetrics && showMetadataRow;
+  const showSummaryMetrics = !!summaryMetrics && showMetadataRow;
+
+  if (!showMetadataRow) return null;
+  const toggleExpanded = () => {
+    if (!hasToggle) return;
+    onToggleCollapse(turnCollapse.turnId);
+  };
+
+  return (
+    <div
+      className={
+        hasToggle
+          ? `${turnCollapseStyles.collapseRow} ${turnCollapseStyles.collapseRowClickable}`
+          : turnCollapseStyles.collapseRow
+      }
+      role={hasToggle ? 'button' : undefined}
+      tabIndex={hasToggle ? 0 : undefined}
+      aria-expanded={hasToggle ? !turnCollapse.collapsed : undefined}
+      aria-label={
+        hasToggle
+          ? turnCollapse.collapsed
+            ? t('turn.expand')
+            : t('turn.collapse')
+          : undefined
+      }
+      title={
+        hasToggle
+          ? turnCollapse.collapsed
+            ? t('turn.expand')
+            : t('turn.collapse')
+          : undefined
+      }
+      onClick={hasToggle ? toggleExpanded : undefined}
+      onKeyDown={
+        hasToggle
+          ? (event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              toggleExpanded();
+            }
+          : undefined
+      }
+    >
+      <span className={turnCollapseStyles.collapseLabel}>
+        <span className={turnCollapseStyles.processedLabel}>
+          {statusLabel}
+          {showVisibleMetrics && ` ${visibleMetrics}`}
+        </span>
+        {showSummaryMetrics && (
+          <span className={turnCollapseStyles.summaryMetrics}>
+            {summaryMetrics}
+          </span>
+        )}
+        {showHiddenMetrics && (
+          <span className={turnCollapseStyles.hiddenMetrics}>
+            {hiddenMetrics}
+          </span>
+        )}
+      </span>
+      {hasToggle && (
+        <span
+          data-testid={`toggle-${turnCollapse.turnId}`}
+          className={turnCollapseStyles.collapseIcon}
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleExpanded();
+          }}
+        >
+          <span
+            className={
+              turnCollapse.collapsed
+                ? turnCollapseStyles.chevronRight
+                : turnCollapseStyles.chevronDown
+            }
+            aria-hidden="true"
+          />
+        </span>
+      )}
+    </div>
+  );
+});
+
+function getChatRowClassName(item: DisplayItem): string | undefined {
+  if (item.type === 'turn_collapse') return styles.turnStatusRow;
+  if (item.type === 'turn_content') {
+    return styles.turnContentRow;
+  }
+  if (item.type !== 'message') return undefined;
+  if (item.turnCollapse) return styles.turnAnswerRow;
+  return undefined;
+}
+
+const TurnContent = memo(function TurnContent({
+  collapsed,
+  children,
+}: {
+  collapsed: boolean;
+  children: ReactNode;
+}) {
+  const className = joinClassNames(
+    styles.turnContentClip,
+    collapsed ? styles.turnContentCollapsed : undefined,
+  );
+
+  return (
+    <div className={className} data-collapsed={collapsed ? 'true' : 'false'}>
+      <div className={styles.turnContentInner}>{children}</div>
+    </div>
+  );
+});
+
+function joinClassNames(
+  ...classNames: Array<string | undefined>
+): string | undefined {
+  const result = classNames.filter(Boolean).join(' ');
+  return result || undefined;
+}
+
 export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
   function MessageList(
     {
@@ -671,6 +1031,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       onShowContextDetail,
       catchingUp,
       isResponding = false,
+      activeTurnStartedAt,
       welcomeHeader,
       workspaceCwd,
       tailContent,
@@ -680,6 +1041,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       autoScrollTailIntoView = false,
       showRetryHint = false,
       onRetryClick,
+      onBranchSession,
+      onFollowStateChange,
     },
     ref,
   ) {
@@ -695,6 +1058,26 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       () => groupParallelAgents(mergedMessages),
       [mergedMessages],
     );
+    const lastCompletedAssistantId = useMemo(() => {
+      if (isResponding) return null;
+      for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
+        const message = mergedMessages[i];
+        if (
+          message &&
+          (message.role === 'tool_group' || message.role === 'plan')
+        ) {
+          return null;
+        }
+        if (
+          message?.role === 'assistant' &&
+          !message.isStreaming &&
+          message.content?.trim()
+        ) {
+          return message.id;
+        }
+      }
+      return null;
+    }, [isResponding, mergedMessages]);
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -708,23 +1091,47 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
     >(() => new Map());
-    const handleToggleCollapse = useCallback((turnId: string) => {
-      // (Un)folding a turn is the user reading history, not following the tail.
-      // Pause follow so the height change does not yank the viewport to the
-      // bottom — the toggled prompt row stays where it is on screen.
-      shouldFollow.current = false;
-      setCollapseOverrides((prev) => {
-        const currentlyExpanded = prev.get(turnId) ?? false;
-        const next = new Map(prev);
-        next.set(turnId, !currentlyExpanded);
-        return next;
-      });
-    }, []);
+    const shouldFollow = useRef(true);
+    const lastScrollTop = useRef(0);
+    const scrollCooldown = useRef(false);
+    const scrollCooldownCount = useRef(0);
+    const lastReportedFollow = useRef(true);
+    const prevLastUserMsgId = useRef<string | null>(null);
+    const prevCatchingUp: MutableRefObject<boolean | undefined> =
+      useRef(catchingUp);
+    const catchingUpRef = useRef(catchingUp);
+    const prevHasTailContent = useRef(false);
+    catchingUpRef.current = catchingUp;
+
+    const setShouldFollow = useCallback(
+      (value: boolean) => {
+        shouldFollow.current = value;
+        if (lastReportedFollow.current === value) return;
+        lastReportedFollow.current = value;
+        onFollowStateChange?.(value);
+      },
+      [onFollowStateChange],
+    );
+    const handleToggleCollapse = useCallback(
+      (turnId: string) => {
+        // (Un)folding a turn is the user reading history, not following the tail.
+        // Pause follow so the height change does not yank the viewport to the
+        // bottom — the toggled prompt row stays where it is on screen.
+        setShouldFollow(false);
+        setCollapseOverrides((prev) => {
+          const next = new Map(prev);
+          next.set(turnId, prev.has(turnId) ? !prev.get(turnId) : true);
+          return next;
+        });
+      },
+      [setShouldFollow],
+    );
     const visibleItems = useMemo(
       () =>
         applyTurnCollapse(displayItems, {
           overrides: collapseOverrides,
           isResponding,
+          activeTurnStartedAt,
           pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
           enabled: collapseEnabled,
         }),
@@ -732,6 +1139,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         displayItems,
         collapseOverrides,
         isResponding,
+        activeTurnStartedAt,
         pendingApproval?.toolCallId,
         collapseEnabled,
       ],
@@ -784,17 +1192,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // appearance — flows through this one effect.
     // ─────────────────────────────────────────────────────────────────────
 
-    const shouldFollow = useRef(true);
-    const lastScrollTop = useRef(0);
-    const scrollCooldown = useRef(false);
-    const scrollCooldownCount = useRef(0);
-    const prevLastUserMsgId = useRef<string | null>(null);
-    const prevCatchingUp: MutableRefObject<boolean | undefined> =
-      useRef(catchingUp);
-    const catchingUpRef = useRef(catchingUp);
-    const prevHasTailContent = useRef(false);
-    catchingUpRef.current = catchingUp;
-
     const hasTailApproval = useMemo(() => {
       if (!pendingApproval) return false;
       if (isAskUserQuestion(pendingApproval)) return true;
@@ -811,6 +1208,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       totalCount,
       virtualScrollThreshold,
     );
+    const getScrollElement = useCallback((): HTMLElement | null => {
+      return containerRef.current;
+    }, []);
 
     const getItemKey = useCallback(
       (index: number) => {
@@ -840,26 +1240,46 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     );
 
     // Rule 6: skip if content doesn't overflow (no scrollbar).
-    const scrollToBottom = useCallback(() => {
-      const el = containerRef.current;
-      if (!el) return;
-      if (el.scrollHeight <= el.clientHeight) return;
-      scrollCooldownCount.current += 1;
-      const gen = scrollCooldownCount.current;
-      scrollCooldown.current = true;
-      el.scrollTop = el.scrollHeight;
-      lastScrollTop.current = el.scrollTop;
-      requestAnimationFrame(() => {
-        if (scrollCooldownCount.current === gen) {
-          scrollCooldown.current = false;
+    const scrollToBottom = useCallback(
+      (behavior: ScrollBehavior = 'auto') => {
+        const el = getScrollElement();
+        if (!el) return;
+        if (el.scrollHeight <= el.clientHeight) return;
+        scrollCooldownCount.current += 1;
+        const gen = scrollCooldownCount.current;
+        scrollCooldown.current = true;
+        if (behavior === 'smooth') {
+          el.scrollTo({ top: el.scrollHeight, behavior });
+        } else {
+          el.scrollTop = el.scrollHeight;
         }
-      });
-    }, []);
+        lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
+        const releaseCooldown = () => {
+          if (scrollCooldownCount.current === gen) {
+            scrollCooldown.current = false;
+          }
+        };
+        if (behavior === 'smooth') {
+          setTimeout(releaseCooldown, 350);
+        } else {
+          requestAnimationFrame(releaseCooldown);
+        }
+      },
+      [getScrollElement],
+    );
+
+    const resumeBottomFollow = useCallback(
+      (behavior: ScrollBehavior = 'smooth') => {
+        setShouldFollow(true);
+        scrollToBottom(behavior);
+      },
+      [scrollToBottom, setShouldFollow],
+    );
 
     const virtualizer = useVirtualizer({
       count: totalCount,
       enabled: useVirtualScroll,
-      getScrollElement: () => containerRef.current,
+      getScrollElement,
       getItemKey,
       estimateSize: (index) => {
         if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
@@ -867,12 +1287,22 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           return ESTIMATE_APPROVAL;
         }
         if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
+        const item = visibleItems[index - headerOffset];
+        if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
+        if (item?.type === 'turn_content') {
+          return Math.max(
+            ESTIMATE_MESSAGE,
+            item.items.length * ESTIMATE_MESSAGE,
+          );
+        }
         return ESTIMATE_MESSAGE;
       },
       overscan: 20,
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,
     });
+    const virtualItems = virtualizer.getVirtualItems();
+    const totalVirtualSize = virtualizer.getTotalSize();
 
     // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
     // transcript" button) with a brief highlight on the target row.
@@ -894,7 +1324,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         // target sits near the bottom, and the next streaming height change
         // would pull the viewport back to the tail. An instant (non-smooth)
         // scroll keeps that cooldown window short and deterministic.
-        shouldFollow.current = false;
+        setShouldFollow(false);
         scrollCooldownCount.current += 1;
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
@@ -916,7 +1346,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         setFlashKey(null);
         requestAnimationFrame(() => setFlashKey(key));
       },
-      [useVirtualScroll, virtualizer, getItemKey],
+      [useVirtualScroll, virtualizer, getItemKey, setShouldFollow],
     );
 
     // A scroll target that currently sits inside a collapsed turn: expand the
@@ -934,6 +1364,17 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           callId,
         );
         if (visibleIndex >= 0) {
+          const visibleItem = visibleItems[visibleIndex];
+          if (visibleItem?.type === 'turn_content' && visibleItem.collapsed) {
+            pendingScrollRef.current = { messageId, callId };
+            setCollapseOverrides((prev) => {
+              if (prev.get(visibleItem.turnId) === true) return prev;
+              const next = new Map(prev);
+              next.set(visibleItem.turnId, true);
+              return next;
+            });
+            return true;
+          }
           pendingScrollRef.current = null;
           performScrollToRow(visibleIndex + headerOffset);
           return true;
@@ -956,7 +1397,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       [visibleItems, displayItems, headerOffset, performScrollToRow],
     );
 
-    useImperativeHandle(ref, () => ({ scrollToMessage }), [scrollToMessage]);
+    useImperativeHandle(
+      ref,
+      () => ({ scrollToMessage, scrollToBottom: resumeBottomFollow }),
+      [scrollToMessage, resumeBottomFollow],
+    );
 
     // Flush a deferred scroll once the expanded turn's rows are visible.
     useEffect(() => {
@@ -976,7 +1421,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // Runs synchronously in the scroll handler — no rAF needed since
     // the browser already coalesces scroll events.
     const handleScroll = useCallback(() => {
-      const el = containerRef.current;
+      const el = getScrollElement();
       if (!el) return;
       if (scrollCooldown.current) {
         lastScrollTop.current = el.scrollTop;
@@ -989,27 +1434,34 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
       // Rule 2: scrolling up → pause follow
       if (curr < prev - 1) {
-        shouldFollow.current = false;
+        setShouldFollow(false);
       }
       // Rule 3: near bottom → resume follow
       // (runs unconditionally so that container-resize-induced scrollTop
       // clamping — which looks like scrolling up — doesn't permanently
       // disable follow when the viewport is still near the bottom)
       if (distanceFromBottom < 30) {
-        shouldFollow.current = true;
+        setShouldFollow(true);
       }
-    }, []);
+    }, [getScrollElement, setShouldFollow]);
+
+    useEffect(() => {
+      const el = getScrollElement();
+      if (!el) return;
+      el.addEventListener('scroll', handleScroll, { passive: true });
+      return () => el.removeEventListener('scroll', handleScroll);
+    }, [getScrollElement, handleScroll]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
     // collapse overrides, and disarm any deferred scroll so it can't fire
     // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
-        shouldFollow.current = true;
+        setShouldFollow(true);
         pendingScrollRef.current = null;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
       }
-    }, [messages.length]);
+    }, [messages.length, setShouldFollow]);
 
     // Container-resize guard: when floating panels (e.g. TodoPanel)
     // appear or disappear the scroll container's clientHeight changes.
@@ -1040,24 +1492,23 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         return;
       }
       if (lastId && lastId !== prevLastUserMsgId.current) {
-        shouldFollow.current = true;
+        setShouldFollow(true);
         // A new prompt supersedes any pending "Show in transcript" scroll.
         pendingScrollRef.current = null;
-        requestAnimationFrame(scrollToBottom);
       }
       prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, scrollToBottom]);
+    }, [messages, catchingUp, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
     // replay just finished. Scroll to bottom once so the user sees the
     // latest content without the viewport fighting the replay.
     useEffect(() => {
       if (prevCatchingUp.current && !catchingUp) {
-        shouldFollow.current = true;
-        requestAnimationFrame(scrollToBottom);
+        setShouldFollow(true);
+        requestAnimationFrame(() => scrollToBottom());
       }
       prevCatchingUp.current = catchingUp;
-    }, [catchingUp, scrollToBottom]);
+    }, [catchingUp, scrollToBottom, setShouldFollow]);
 
     // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
     // at the very bottom of the virtualized list, so if the user had scrolled
@@ -1070,7 +1521,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         hasTailContent &&
         !prevHasTailContent.current
       ) {
-        shouldFollow.current = true;
+        setShouldFollow(true);
         // Re-check follow inside the frame: if the user scrolls up in the gap
         // before it fires (Rule 2 clears the flag), don't fight them.
         requestAnimationFrame(() => {
@@ -1078,10 +1529,79 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         });
       }
       prevHasTailContent.current = hasTailContent;
-    }, [autoScrollTailIntoView, hasTailContent, scrollToBottom]);
+    }, [
+      autoScrollTailIntoView,
+      hasTailContent,
+      scrollToBottom,
+      setShouldFollow,
+    ]);
 
     const renderVirtualItem = useCallback(
       (index: number) => {
+        const renderDisplayItem = (
+          displayItem: DisplayItem,
+          isLatest: boolean,
+        ): ReactNode => {
+          if (displayItem.type === 'parallel_agents') {
+            return (
+              <MessageTimestamp timestamp={displayItem.timestamp}>
+                <ParallelAgentsGroup
+                  agents={displayItem.agents}
+                  pendingApproval={pendingApproval}
+                  onConfirm={onConfirm}
+                />
+              </MessageTimestamp>
+            );
+          }
+
+          if (displayItem.type === 'turn_collapse') {
+            return (
+              <TurnCollapseRow
+                turnCollapse={displayItem.turnCollapse}
+                onToggleCollapse={handleToggleCollapse}
+              />
+            );
+          }
+
+          if (displayItem.type === 'turn_content') {
+            return (
+              <TurnContent collapsed={displayItem.collapsed}>
+                {displayItem.items.map((child) => (
+                  <div
+                    key={getDisplayItemVirtualKey(child)}
+                    className={getChatRowClassName(child)}
+                  >
+                    {renderDisplayItem(child, false)}
+                  </div>
+                ))}
+              </TurnContent>
+            );
+          }
+
+          return (
+            <MessageItem
+              message={displayItem.message}
+              pendingApproval={pendingApproval}
+              onConfirm={onConfirm}
+              onShowContextDetail={onShowContextDetail}
+              workspaceCwd={workspaceCwd}
+              isLatest={isLatest}
+              showRetryHint={showRetryHint}
+              onRetryClick={onRetryClick}
+              onBranchSession={onBranchSession}
+              showAssistantActions={
+                displayItem.message.role === 'assistant' &&
+                displayItem.message.id === lastCompletedAssistantId
+              }
+              showAssistantBranch={
+                displayItem.message.role === 'assistant' &&
+                displayItem.message.id === lastCompletedAssistantId
+              }
+              shellOutputMaxLines={shellOutputMaxLines}
+            />
+          );
+        };
+
         if (hasHeader && index === HEADER_INDEX) {
           return welcomeHeader;
         }
@@ -1111,33 +1631,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         const item = visibleItems[itemIndex];
         if (!item) return null;
 
-        if (item.type === 'parallel_agents') {
-          return (
-            <MessageTimestamp timestamp={item.timestamp}>
-              <ParallelAgentsGroup
-                agents={item.agents}
-                pendingApproval={pendingApproval}
-                onConfirm={onConfirm}
-              />
-            </MessageTimestamp>
-          );
-        }
-
-        return (
-          <MessageItem
-            message={item.message}
-            pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
-            onShowContextDetail={onShowContextDetail}
-            workspaceCwd={workspaceCwd}
-            isLatest={itemIndex === visibleItems.length - 1}
-            showRetryHint={showRetryHint}
-            onRetryClick={onRetryClick}
-            shellOutputMaxLines={shellOutputMaxLines}
-            collapse={item.collapse}
-            onToggleCollapse={handleToggleCollapse}
-          />
-        );
+        return renderDisplayItem(item, itemIndex === visibleItems.length - 1);
       },
       [
         hasHeader,
@@ -1152,20 +1646,22 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
+        onBranchSession,
         shellOutputMaxLines,
         handleToggleCollapse,
       ],
     );
 
-    const virtualItems = virtualizer.getVirtualItems();
-    const totalVirtualSize = virtualizer.getTotalSize();
-
     const getRowClassName = useCallback(
-      (key: string): string | undefined =>
-        flashKey === key ? styles.rowFlash : undefined,
+      (key: string, item?: DisplayItem): string | undefined =>
+        joinClassNames(
+          flashKey === key ? styles.rowFlash : undefined,
+          item ? getChatRowClassName(item) : undefined,
+        ),
       [flashKey],
     );
 
@@ -1182,13 +1678,17 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     //         and is a no-op when there's no overflow.
     useLayoutEffect(() => {
       if (catchingUp) return;
+      if (scrollCooldown.current) return;
       if (shouldFollow.current) {
-        scrollToBottom();
+        const lastId = getLastUserMessageId(messages);
+        const isNewUserMessage =
+          lastId !== null && lastId !== prevLastUserMsgId.current;
+        scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
       }
     }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
     return (
-      <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
+      <div ref={containerRef} className={styles.list}>
         {useVirtualScroll ? (
           <div
             style={{
@@ -1202,7 +1702,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(String(virtualRow.key))}
+                className={getRowClassName(
+                  String(virtualRow.key),
+                  visibleItems[virtualRow.index - headerOffset],
+                )}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -1218,11 +1721,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         ) : (
           Array.from({ length: totalCount }, (_, index) => {
             const key = getItemKey(index);
+            const item = visibleItems[index - headerOffset];
             return (
               <div
                 key={key}
                 data-index={index}
-                className={getRowClassName(key)}
+                className={getRowClassName(key, item)}
               >
                 {renderVirtualItem(index)}
               </div>

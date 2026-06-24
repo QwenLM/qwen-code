@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@craft-agent/core": "workspace:*",
+    "@craft-agent/session-tools-core": "workspace:*",
     "@craft-agent/shared": "workspace:*",
     "jose": "^6.0.0",
     "ws": "^8.19.0",

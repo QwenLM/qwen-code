@@ -110,11 +110,7 @@ describe('customProvider', () => {
     ]);
   });
 
-  it('owns any model whose envKey starts with the QWEN_CUSTOM_API_KEY_ prefix', () => {
-    // Without ownsModel, applyModelProvidersPatch falls back to id+baseUrl
-    // identity matching, so reinstalling a custom provider under a different
-    // baseUrl would leave the old entries behind. Prefix-match cleanly
-    // identifies "ours" without false positives against presets.
+  it('keeps custom ownership detection but merges installs by model identity', () => {
     expect(customProvider.ownsModel).toBeTypeOf('function');
     expect(
       customProvider.ownsModel?.({
@@ -128,11 +124,20 @@ describe('customProvider', () => {
         envKey: 'DEEPSEEK_API_KEY',
       }),
     ).toBe(false);
-    expect(
-      customProvider.ownsModel?.({
-        id: 'no-env-key',
-      }),
-    ).toBe(false);
+    expect(customProvider.mergeModelsByIdentity).toBe(true);
+
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://my-proxy.com/v1',
+      apiKey: 'sk-my-key',
+      modelIds: ['model-a'],
+    });
+
+    expect(plan.modelProviders?.[0]?.ownsModel).toBeUndefined();
+    expect(plan.modelSelection).toEqual({
+      modelId: 'model-a',
+      baseUrl: 'https://my-proxy.com/v1',
+    });
   });
 
   it('shows protocol, baseUrl, models, and advancedConfig steps', () => {

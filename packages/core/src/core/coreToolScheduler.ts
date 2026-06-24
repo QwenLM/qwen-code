@@ -19,6 +19,7 @@ import type {
   ChatRecordingService,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
   generateToolUseId,
   firePreToolUseHook,
@@ -65,6 +66,7 @@ import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   isAlreadyTruncated,
   persistAndTruncateToolResult,
@@ -1113,6 +1115,15 @@ export class CoreToolScheduler {
     return this.config.getMemoryPressureMonitor?.();
   }
 
+  private compactResultDisplayForInteractiveHistory<
+    T extends ToolResultDisplay | undefined,
+  >(resultDisplay: T): T {
+    return typeof this.config.isInteractive === 'function' &&
+      this.config.isInteractive()
+      ? compactToolResultDisplayForHistory(resultDisplay)
+      : resultDisplay;
+  }
+
   private setStatusInternal(
     targetCallId: string,
     status: 'success',
@@ -1262,7 +1273,8 @@ export class CoreToolScheduler {
                   },
                 },
               ],
-              resultDisplay,
+              resultDisplay:
+                this.compactResultDisplayForInteractiveHistory(resultDisplay),
               error: undefined,
               errorType: undefined,
               contentLength: errorMessage.length,
@@ -2868,11 +2880,10 @@ export class CoreToolScheduler {
     calls: ScheduledToolCall[],
     signal: AbortSignal,
   ): Promise<void> {
-    const parsed = parseInt(
-      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+    const maxConcurrency = parsePositiveIntegerEnv(
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
       10,
     );
-    const maxConcurrency = Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
     const executing = new Set<Promise<void>>();
 
     for (const call of calls) {
@@ -3061,12 +3072,14 @@ export class CoreToolScheduler {
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
       ? (outputChunk: ToolResultDisplay) => {
+          const compactOutput =
+            this.compactResultDisplayForInteractiveHistory(outputChunk);
           if (this.outputUpdateHandler) {
             this.outputUpdateHandler(callId, outputChunk);
           }
           this.toolCalls = this.toolCalls.map((tc) =>
             tc.request.callId === callId && tc.status === 'executing'
-              ? { ...tc, liveOutput: outputChunk }
+              ? { ...tc, liveOutput: compactOutput }
               : tc,
           );
           this.notifyToolCallsUpdate();
@@ -3513,7 +3526,9 @@ export class CoreToolScheduler {
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
-          resultDisplay: toolResult.returnDisplay,
+          resultDisplay: this.compactResultDisplayForInteractiveHistory(
+            toolResult.returnDisplay,
+          ),
           error: undefined,
           errorType: undefined,
           contentLength,

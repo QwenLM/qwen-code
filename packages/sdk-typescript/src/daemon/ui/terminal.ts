@@ -80,6 +80,18 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `caught up (${event.replayedCount} replayed)`,
         '2',
       );
+    case 'session.rewound':
+      return terminalLine(
+        'rewound',
+        `${event.promptId} → turn ${event.targetTurnIndex}`,
+        '2',
+      );
+    case 'session.branched':
+      return terminalLine(
+        'branched',
+        `${event.sourceSessionId} → ${event.newSessionId} (${event.displayName})`,
+        '2',
+      );
     case 'prompt.cancelled':
       return terminalLine('cancelled', 'prompt cancelled', '33');
     case 'followup.suggestion':
@@ -143,6 +155,34 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         'mcp',
         `${event.serverName} restart refused: ${event.reason}`,
         '33',
+      );
+    case 'workspace.extensions.changed':
+      if (event.status === 'failed') {
+        return terminalLine(
+          'ext',
+          `extension action failed${
+            event.name
+              ? ` ${event.name}`
+              : event.source
+                ? ` ${event.source}`
+                : ''
+          }: ${event.error ?? 'unknown error'}`,
+          '31',
+        );
+      }
+      if (event.status === 'installed') {
+        return terminalLine(
+          'ext',
+          `installed ${event.name ?? event.source ?? 'extension'}${
+            event.version ? ` v${event.version}` : ''
+          } (${event.refreshed} refreshed, ${event.failed} failed)`,
+          '36',
+        );
+      }
+      return terminalLine(
+        'ext',
+        `extensions refreshed (${event.refreshed} ok, ${event.failed} failed)`,
+        '36',
       );
     case 'auth.device_flow.started':
       return terminalLine(

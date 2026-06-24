@@ -943,6 +943,169 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
     });
 
+    describe('isArtifactEnabled', () => {
+      const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+      const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+
+      beforeEach(() => {
+        delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+        delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+      });
+
+      afterEach(() => {
+        if (originalForceEnable === undefined) {
+          delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+        } else {
+          process.env['QWEN_CODE_ENABLE_ARTIFACT'] = originalForceEnable;
+        }
+        if (originalDisable === undefined) {
+          delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+        } else {
+          process.env['QWEN_CODE_DISABLE_ARTIFACT'] = originalDisable;
+        }
+      });
+
+      it('is disabled by default', () => {
+        const config = new Config(baseParams);
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('honors settings when interactive and not in SDK mode', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: true,
+          sdkMode: false,
+        });
+        expect(config.isArtifactEnabled()).toBe(true);
+      });
+
+      it('lets QWEN_CODE_DISABLE_ARTIFACT override settings and env enablement', () => {
+        process.env['QWEN_CODE_DISABLE_ARTIFACT'] = '1';
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: true,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('stays disabled in SDK mode even when force-enabled', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          interactive: true,
+          sdkMode: true,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('stays disabled outside interactive mode even when force-enabled', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: false,
+          interactive: true,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(true);
+      });
+    });
+
+    describe('shouldAutoOpenArtifact', () => {
+      const browserEnvKeys = [
+        'QWEN_ARTIFACT_NO_AUTO_OPEN',
+        'BROWSER',
+        'CI',
+        'DEBIAN_FRONTEND',
+        'SSH_CONNECTION',
+        'DISPLAY',
+        'WAYLAND_DISPLAY',
+        'MIR_SOCKET',
+      ] as const;
+      const originalEnv: Partial<
+        Record<(typeof browserEnvKeys)[number], string>
+      > = {};
+
+      beforeEach(() => {
+        for (const key of browserEnvKeys) {
+          originalEnv[key] = process.env[key];
+          delete process.env[key];
+        }
+        process.env['DISPLAY'] = ':0';
+      });
+
+      afterEach(() => {
+        for (const key of browserEnvKeys) {
+          if (originalEnv[key] === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = originalEnv[key];
+          }
+        }
+      });
+
+      it('auto-opens artifacts by default', () => {
+        const config = new Config(baseParams);
+        expect(config.shouldAutoOpenArtifact()).toBe(true);
+      });
+
+      it('honors artifact.autoOpen=false from settings', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: false,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('lets QWEN_ARTIFACT_NO_AUTO_OPEN override settings', () => {
+        process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] = '1';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('honors global browser launch suppression', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+          noBrowser: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('honors CI browser launch suppression', () => {
+        process.env['CI'] = 'true';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
@@ -1003,6 +1166,38 @@ describe('Server Config (config.ts)', () => {
         excludedMcpServers: ['off'],
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('isMcpServerDisabled consults extension preferences only for the contributing extension', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        // baseParams pins overrideExtensions to []; lift it so the mocked
+        // loaded extension is visible to getActiveExtensions().
+        overrideExtensions: undefined,
+        // A user-configured server that shadows the extension's same-named one.
+        mcpServers: { foo: new MCPServerConfig() },
+      } as ConfigParameters);
+      const manager = config.getExtensionManager();
+      vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([
+        {
+          name: 'my-ext',
+          isActive: true,
+          config: { name: 'my-ext', mcpServers: { bar: {}, foo: {} } },
+        } as unknown as ReturnType<typeof manager.getLoadedExtensions>[number],
+      ]);
+      vi.spyOn(manager, 'getDisabledMcpServers').mockImplementation(
+        (extensionName: string) =>
+          extensionName === 'my-ext' ? ['bar', 'foo'] : [],
+      );
+      // `bar` is contributed by the extension and disabled in its preferences.
+      expect(config.isMcpServerDisabled('bar')).toBe(true);
+      // `foo` is shadowed by the user config (no extensionName on the merged
+      // entry), so the extension's disable record must not affect it.
+      expect(config.isMcpServerDisabled('foo')).toBe(false);
+      // The global exclusion list still applies to anything.
+      config.setExcludedMcpServers(['foo']);
+      expect(config.isMcpServerDisabled('foo')).toBe(true);
     });
 
     it('getFailedMcpServerNames skips pending approval servers', () => {
@@ -1258,34 +1453,57 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getEffectiveInputModalities', () => {
+    type MutableConfigInternals = {
+      contentGeneratorConfig: ContentGeneratorConfig;
+    };
+
+    // Mirrors exactly what fileUtils uses to decide media support, so the file
+    // reader's strip decision and the vision-bridge gate can never disagree.
+    it('returns the resolved modalities from the content generator config', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-model',
+        modalities: { image: true },
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({ image: true });
+    });
+
+    it('treats a model with no resolved modalities as text-only', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-unknown-model',
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({});
+    });
+  });
+
   describe('model switching with different credentials (OpenAI)', () => {
-    it('returns a bare fast model selector when the model is configured under another auth type', () => {
+    it('returns undefined for bare Qwen OAuth fast models under active OpenAI auth', async () => {
       const config = new Config({
         ...baseParams,
-        authType: AuthType.USE_ANTHROPIC,
-        model: 'claude-opus-4-7',
-        fastModel: 'deepseek-v4-flash',
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'coder-model',
         modelProvidersConfig: {
           [AuthType.USE_OPENAI]: [
             {
-              id: 'deepseek-v4-flash',
-              name: 'deepseek-v4-flash',
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
               baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
               envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'claude-opus-4-7',
-              name: 'claude-opus-4-7',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
             },
           ],
         },
       });
 
-      expect(config.getFastModel()).toBe('deepseek-v4-flash');
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getFastModel()).toBeUndefined();
     });
 
     it('returns an authType-qualified fast model selector', () => {
@@ -1315,6 +1533,56 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBe('openai:shared-model');
+    });
+
+    it('preserves authType-qualified fast model selectors across auth types', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'qwen-oauth:coder-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe('qwen-oauth:coder-model');
+    });
+
+    it('resolves a bare fast model under the current auth type', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'fast-model',
+              name: 'fast-model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getFastModel()).toBe('fast-model');
     });
 
     it('keeps authType-qualified selectors when the auth type matches the current auth type', () => {
@@ -1369,7 +1637,7 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:runtime-fast-model');
     });
 
-    it('returns undefined when the fast model is not configured for any auth type', () => {
+    it('returns undefined when no active auth type is available for a bare fast model', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -1386,6 +1654,29 @@ describe('Server Config (config.ts)', () => {
           ],
         },
       });
+
+      expect(config.getFastModel()).toBeUndefined();
+    });
+
+    it('returns undefined when the fast model is not configured for the current auth type', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'missing-fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(AuthType.USE_ANTHROPIC);
 
       expect(config.getFastModel()).toBeUndefined();
     });
@@ -2130,6 +2421,10 @@ describe('Server Config (config.ts)', () => {
   it('should set default file filtering settings when not provided', () => {
     const config = new Config(baseParams);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(true);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.agentignore',
+      '.aiignore',
+    ]);
   });
 
   it('should set custom file filtering settings when provided', () => {
@@ -2137,10 +2432,17 @@ describe('Server Config (config.ts)', () => {
       ...baseParams,
       fileFiltering: {
         respectGitIgnore: false,
+        customIgnoreFiles: ['.cursorignore'],
       },
     };
     const config = new Config(paramsWithFileFiltering);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore, .cursorignore',
+    );
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {
@@ -2589,6 +2891,21 @@ describe('Server Config (config.ts)', () => {
       };
       const config = new Config(paramsWithUndefinedBuiltinRipgrep);
       expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+  });
+
+  describe('Response tokens/sec display configuration', () => {
+    it('should default to false when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getShowResponseTokensPerSecond()).toBe(false);
+    });
+
+    it('should set showResponseTokensPerSecond when provided as true', () => {
+      const config = new Config({
+        ...baseParams,
+        showResponseTokensPerSecond: true,
+      });
+      expect(config.getShowResponseTokensPerSecond()).toBe(true);
     });
   });
 
@@ -3270,6 +3587,41 @@ describe('setApprovalMode with folder trust', () => {
       // Setting PLAN again should not overwrite prePlanMode
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+
+    // Regression for #5574: the gate state records whether the model or the
+    // user entered plan mode, so exit_plan_mode can decide whether to gate.
+    it('marks the plan gate entry as user-initiated by default', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+    });
+
+    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Simulate the Shift+Tab cycle order:
+      // default → auto-edit → auto → yolo → plan
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      // prePlanMode is yolo purely because it precedes plan in the cycle —
+      // it does NOT mean the user wants autonomous execution.
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
     });
   });
 
@@ -4091,6 +4443,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['toolResultContentFormat']: 'string',
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -4100,6 +4453,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        toolResultContentFormat: { kind: 'settings' },
       },
     });
 
@@ -4119,6 +4473,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['toolResultContentFormat']).toBe('string');
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -4128,6 +4483,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['toolResultContentFormat']?.kind).toBe('settings');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {

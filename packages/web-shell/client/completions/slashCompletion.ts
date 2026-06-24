@@ -20,6 +20,26 @@ export interface SkillInfo {
   description: string;
 }
 
+export type SlashCommandCompletionKind = 'command' | 'subcommand';
+
+export interface SlashCommandCompletionItem {
+  id: string;
+  label: string;
+  apply: string;
+  detail?: string;
+  category?: CommandDisplayCategory;
+  section?: string;
+  type?: 'command-info' | 'skill';
+}
+
+export interface SlashCommandCompletionResult {
+  kind: SlashCommandCompletionKind;
+  from: number;
+  to: number;
+  query: string;
+  items: SlashCommandCompletionItem[];
+}
+
 type Translate = (key: string) => string;
 const COMMAND_NAME_PATTERN = String.raw`([^\s/]+)`;
 
@@ -55,6 +75,10 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     },
     { name: 'output', description: '设置 LLM 输出语言' },
   ],
+  extensions: [
+    { name: 'manage', description: '管理扩展' },
+    { name: 'install', description: '安装扩展' },
+  ],
 };
 
 const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
@@ -82,6 +106,10 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
       ],
     },
     { name: 'output', description: 'Set LLM output language' },
+  ],
+  extensions: [
+    { name: 'manage', description: 'Manage installed extensions' },
+    { name: 'install', description: 'Install an extension from a source' },
   ],
 };
 
@@ -138,6 +166,7 @@ function resolveSubcommands(
   parts: string[],
   dynamicSkills: SkillInfo[] | undefined,
   language: WebShellLanguage,
+  commandSubcommands?: string[],
 ): SubcommandNode[] | null {
   if (cmdName === 'skills' && parts.length === 0) {
     if (!dynamicSkills || dynamicSkills.length === 0) return null;
@@ -156,6 +185,13 @@ function resolveSubcommands(
         ? IMPLICIT_SUBCOMMAND_TREE_ZH
         : IMPLICIT_SUBCOMMAND_TREE_EN;
     nodes = implicitTree[cmdName];
+  }
+
+  if (!nodes && parts.length === 0 && commandSubcommands?.length) {
+    nodes = commandSubcommands.map((name) => ({
+      name,
+      description: '',
+    }));
   }
 
   if (!nodes) return null;
@@ -282,6 +318,146 @@ export function getSlashCommandArgumentHint(
   return `[${nodes.map((node) => node.name).join('|')}]`;
 }
 
+function getLineBounds(text: string, cursor: number) {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const lineStart = text.lastIndexOf('\n', Math.max(0, safeCursor - 1)) + 1;
+  const nextNewline = text.indexOf('\n', safeCursor);
+  const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+  return {
+    lineStart,
+    lineEnd,
+    lineText: text.slice(lineStart, lineEnd),
+    textBefore: text.slice(lineStart, safeCursor),
+    cursor: safeCursor,
+  };
+}
+
+export function getSlashCommandCompletionResult(
+  text: string,
+  cursor: number,
+  commands: CommandInfo[],
+  skills: SkillInfo[] = [],
+  language: WebShellLanguage = 'en',
+  translate: Translate = (key) => key,
+  categoryOrder: CommandDisplayCategoryOrder = DEFAULT_COMMAND_CATEGORY_ORDER,
+): SlashCommandCompletionResult | null {
+  const {
+    lineStart,
+    lineEnd,
+    lineText,
+    textBefore,
+    cursor: safeCursor,
+  } = getLineBounds(text, cursor);
+
+  const subMatch = textBefore.match(
+    new RegExp(`^/${COMMAND_NAME_PATTERN}\\s+(.*)$`),
+  );
+  if (subMatch) {
+    const [, cmdName, rest] = subMatch;
+    const cmd = commands.find((c) => c.name === cmdName);
+    const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+    const implicitTree =
+      language === 'zh-CN'
+        ? IMPLICIT_SUBCOMMAND_TREE_ZH
+        : IMPLICIT_SUBCOMMAND_TREE_EN;
+    const hasTree = !!tree[cmdName] || cmdName === 'skills';
+    const hasImplicitTree = !!implicitTree[cmdName];
+    if (!cmd?.subcommands?.length && !hasTree && !hasImplicitTree) {
+      return null;
+    }
+
+    const tokens = rest.split(/\s+/);
+    const currentTyping = tokens.pop() || '';
+    const completedParts = tokens;
+
+    if (
+      !cmd?.subcommands?.length &&
+      !hasTree &&
+      hasImplicitTree &&
+      !currentTyping
+    ) {
+      return null;
+    }
+
+    const nodes = resolveSubcommands(
+      cmdName,
+      completedParts,
+      skills,
+      language,
+      cmd?.subcommands,
+    );
+    if (!nodes) return null;
+
+    const lp = currentTyping.toLowerCase();
+    const prefix = `/${cmdName} ${
+      completedParts.length > 0 ? completedParts.join(' ') + ' ' : ''
+    }`;
+    const filteredNodes = nodes
+      .filter((n) => !currentTyping || n.name.toLowerCase().includes(lp))
+      .sort((a, b) =>
+        currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
+      );
+    const isSkillList = cmdName === 'skills' && completedParts.length === 0;
+    const items = filteredNodes.map((node): SlashCommandCompletionItem => {
+      const command = `${prefix}${node.name}`;
+      return {
+        id: command,
+        label: node.name,
+        detail: node.description || undefined,
+        apply: `${command} `,
+        ...(isSkillList ? { type: 'skill' as const } : {}),
+      };
+    });
+
+    if (items.length === 0) return null;
+    return {
+      kind: 'subcommand',
+      from: lineStart,
+      to: safeCursor,
+      query: currentTyping,
+      items,
+    };
+  }
+
+  const match = lineText.match(/^\/([^\s/]*)$/);
+  if (!match) return null;
+
+  const prefix = match[1];
+  const lp = prefix.toLowerCase();
+  const filteredCommands = commands
+    .filter((command) => {
+      if (!prefix) return true;
+      return command.name.toLowerCase().includes(lp);
+    })
+    .sort((a, b) => compareSlashCommands(a, b, lp, categoryOrder));
+
+  const items = filteredCommands.map((command): SlashCommandCompletionItem => {
+    const apply = `/${command.name} `;
+    const category = getCommandDisplayCategory(command);
+    const showCommandInfo = category === 'custom' || category === 'skill';
+    return {
+      id: command.name,
+      label: `/${command.name}`,
+      detail: command.description || undefined,
+      apply,
+      category,
+      section: translate(COMMAND_SECTION_KEYS[category]),
+      ...(showCommandInfo && command.description
+        ? { type: 'command-info' as const }
+        : {}),
+    };
+  });
+
+  if (items.length === 0) return null;
+  return {
+    kind: 'command',
+    from: lineStart,
+    to: lineEnd,
+    query: prefix,
+    items,
+  };
+}
+
 export function slashCompletionSource(
   getCommands: () => CommandInfo[],
   getSkills: () => SkillInfo[] = () => [],
@@ -334,6 +510,7 @@ export function slashCompletionSource(
         completedParts,
         getSkills(),
         language,
+        cmd?.subcommands,
       );
       if (!nodes) return null;
 
@@ -360,9 +537,6 @@ export function slashCompletionSource(
               }
             : {}),
           detail: n.description || undefined,
-          ...(isSkillList && n.description
-            ? { info: `/${n.name}\n\n${n.description}` }
-            : {}),
           apply: `${command} `,
         };
       });
@@ -399,9 +573,7 @@ export function slashCompletionSource(
       return {
         label: command,
         detail: c.description || undefined,
-        ...(showCommandInfo && c.description
-          ? { info: `${command}\n\n${c.description}` }
-          : {}),
+        ...(showCommandInfo && c.description ? { type: 'command-info' } : {}),
         apply: `${command} `,
         section: getCommandSection(c, translate, categoryOrder),
       };

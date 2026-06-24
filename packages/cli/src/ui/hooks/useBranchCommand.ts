@@ -13,9 +13,13 @@ import {
   SessionStartSource,
   computeUniqueBranchTitle,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
+import {
+  buildResumedHistoryItems,
+  applyCollapsePolicyAndSummary,
+} from '../utils/resumeHistoryUtils.js';
 import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -51,6 +55,7 @@ function deriveFirstPrompt(messages: ChatRecord[]): string {
 
 export interface UseBranchCommandOptions {
   config: Config | null;
+  settings: LoadedSettings;
   historyManager: Pick<
     UseHistoryManagerReturn,
     'clearItems' | 'loadHistory' | 'addItem'
@@ -149,7 +154,13 @@ export function useBranchCommand(
         //    set immediately after the UI commits so any subsequent
         //    failure (title, hook, remount, announce) skips the catch
         //    block's core rollback.
-        const uiHistoryItems = buildResumedHistoryItems(resumed, config);
+        const rawItems = buildResumedHistoryItems(resumed, config);
+        const collapseOnResume =
+          options.settings.merged.ui?.history?.collapseOnResume ?? false;
+        const uiHistoryItems = applyCollapsePolicyAndSummary(
+          rawItems,
+          collapseOnResume,
+        );
         startNewSession(newSessionId);
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
@@ -258,7 +269,14 @@ export function useBranchCommand(
         );
       }
     },
-    [config, historyManager, startNewSession, setSessionName, remount],
+    [
+      config,
+      historyManager,
+      startNewSession,
+      setSessionName,
+      remount,
+      options.settings.merged.ui?.history?.collapseOnResume,
+    ],
   );
 
   return { handleBranch };

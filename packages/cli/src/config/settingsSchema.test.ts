@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
@@ -29,6 +30,7 @@ describe('SettingsSchema', () => {
         'security',
         'advanced',
         'plansDirectory',
+        'voiceModel',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -95,6 +97,22 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles,
+      ).toBeDefined();
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.type,
+      ).toBe('array');
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.default,
+      ).toEqual([...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES]);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.showInDialog,
+      ).toBe(false);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
           ?.enableRecursiveFileSearch,
       ).toBeDefined();
     });
@@ -144,6 +162,44 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().plansDirectory.default).toBe(undefined);
       expect(getSettingsSchema().plansDirectory.requiresRestart).toBe(true);
       expect(getSettingsSchema().plansDirectory.showInDialog).toBe(false);
+    });
+
+    it('should have voice model setting in schema', () => {
+      const voiceModel = getSettingsSchema().voiceModel;
+
+      expect(voiceModel).toBeDefined();
+      expect(voiceModel.type).toBe('string');
+      expect(voiceModel.category).toBe('Model');
+      expect(voiceModel.default).toBe('');
+      expect(voiceModel.requiresRestart).toBe(false);
+      expect(voiceModel.showInDialog).toBe(false);
+    });
+
+    it('should define stopHookBlockingCap schema override as a positive integer', () => {
+      expect(
+        getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,
+      ).toEqual({
+        type: 'integer',
+        minimum: 1,
+        default: 8,
+      });
+    });
+
+    it('should have voice dictation settings under general', () => {
+      const voice =
+        getSettingsSchema().general.properties.voice.properties ?? {};
+
+      expect(voice.enabled.type).toBe('boolean');
+      expect(voice.enabled.default).toBe(false);
+
+      expect(voice.mode.type).toBe('enum');
+      expect(voice.mode.default).toBe('hold');
+      expect(
+        voice.mode.options?.map((o: { value: string }) => o.value),
+      ).toEqual(['hold', 'tap']);
+
+      expect(voice.language.type).toBe('string');
+      expect(voice.language.default).toBe('');
     });
 
     it('should have unique categories', () => {
@@ -209,6 +265,10 @@ describe('SettingsSchema', () => {
         true,
       );
       expect(
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond
+          .showInDialog,
+      ).toBe(true);
+      expect(
         getSettingsSchema().privacy.properties.usageStatisticsEnabled
           .showInDialog,
       ).toBe(true);
@@ -264,6 +324,16 @@ describe('SettingsSchema', () => {
       expect(useTerminalBuffer.requiresRestart).toBe(false);
     });
 
+    it('should expose response tokens/sec as an opt-in UI setting', () => {
+      const responseTokensPerSecond =
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond;
+      expect(responseTokensPerSecond).toBeDefined();
+      expect(responseTokensPerSecond.type).toBe('boolean');
+      expect(responseTokensPerSecond.default).toBe(false);
+      expect(responseTokensPerSecond.showInDialog).toBe(true);
+      expect(responseTokensPerSecond.requiresRestart).toBe(true);
+    });
+
     it('should infer Settings type correctly', () => {
       // This test ensures that the Settings type is properly inferred from the schema
       const settings: Settings = {
@@ -308,6 +378,16 @@ describe('SettingsSchema', () => {
           { type: 'array', items: { type: 'string' } },
         ],
       });
+    });
+
+    it('should define context.importFormat as tree or flat', () => {
+      const importFormat = getSettingsSchema().context?.properties.importFormat;
+
+      expect(importFormat.type).toBe('enum');
+      expect(importFormat.options).toEqual([
+        { value: 'tree', label: 'Tree' },
+        { value: 'flat', label: 'Flat' },
+      ]);
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {
@@ -374,6 +454,17 @@ describe('SettingsSchema', () => {
         getSettingsSchema().general.properties.debugKeystrokeLogging
           .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
+    });
+
+    it('should define advanced.dnsResolutionOrder as ipv4first or verbatim', () => {
+      const dnsResolutionOrder =
+        getSettingsSchema().advanced.properties.dnsResolutionOrder;
+
+      expect(dnsResolutionOrder.type).toBe('enum');
+      expect(dnsResolutionOrder.options).toEqual([
+        { value: 'ipv4first', label: 'IPv4 First' },
+        { value: 'verbatim', label: 'Verbatim' },
+      ]);
     });
   });
 });

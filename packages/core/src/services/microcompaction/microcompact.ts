@@ -297,6 +297,40 @@ function buildClearMap(
   return clearMap;
 }
 
+function getFilePathsForResponse(
+  part: Part | undefined,
+  callIdToFilePath: Map<string, string[]>,
+): string[] | undefined {
+  const response = part?.functionResponse;
+  if (!response?.id || !response.name || !FILE_PATH_TOOLS.has(response.name)) {
+    return undefined;
+  }
+  const paths = callIdToFilePath.get(response.id);
+  return paths && paths.length > 0 ? [...new Set(paths)] : undefined;
+}
+
+function buildKeptFilePaths(
+  history: Content[],
+  refs: PartRef[],
+  keepRefs: Set<string>,
+  callIdToFilePath: Map<string, string[]>,
+): Set<string> {
+  const kept = new Set<string>();
+  for (const ref of refs) {
+    if (!keepRefs.has(refKey(ref))) continue;
+    const part = getPart(history, ref);
+    if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
+    const paths = getFilePathsForResponse(part, callIdToFilePath);
+    // If an id maps to multiple possible paths, a kept result cannot prove
+    // which file is still resident. Keep the #4239-safe behavior and do not
+    // let it protect any candidate path from disarming.
+    if (paths?.length === 1) {
+      kept.add(paths[0]!);
+    }
+  }
+  return kept;
+}
+
 interface SizeClearPlan {
   clearRefs: PartRef[];
   toolRefs: PartRef[];
@@ -426,14 +460,10 @@ export function microcompactHistory(
   settings: ClearContextOnIdleSettings,
   opts?: MicrocompactOptions,
 ): { history: Content[]; meta?: MicrocompactMeta } {
-  const envKeep = process.env['QWEN_MC_KEEP_RECENT'];
-  const rawKeepRecent =
-    envKeep !== undefined && Number.isFinite(Number(envKeep))
-      ? Number(envKeep)
-      : (settings.toolResultsNumToKeep ?? 5);
-  const keepRecent = Number.isFinite(rawKeepRecent)
-    ? Math.max(1, rawKeepRecent)
-    : 5;
+  const keepRecent = resolveKeepRecent(
+    process.env['QWEN_MC_KEEP_RECENT'],
+    settings.toolResultsNumToKeep,
+  );
 
   let triggerReason: MicrocompactTriggerReason | undefined;
   let gapMs = 0;
@@ -446,6 +476,8 @@ export function microcompactHistory(
   let toolResultCharsAfter: number | undefined;
   let pendingToolResultChars: number | undefined;
   let toolResultsTotalCharsThreshold: number | undefined;
+  let keptPathHistory = history;
+  let keptPathRefs: PartRef[] = [];
 
   if (opts?.force) {
     triggerReason = 'force';
@@ -473,18 +505,23 @@ export function microcompactHistory(
     ]);
     const allRefs: PartRef[] = [...tool, ...media, ...nestedMedia];
     clearRefs = allRefs.filter((r) => !keepRefs.has(refKey(r)));
+    keptPathRefs = tool;
   } else {
+    const pending = normalizePendingContent(opts?.pendingContent);
     const sizePlan = planSizeBasedClearing(
       history,
       settings,
       keepRecent,
-      opts?.pendingContent,
+      pending,
     );
     if (!sizePlan) {
       return { history };
     }
     triggerReason = 'size';
     tool = sizePlan.toolRefs.filter((r) => r.contentIndex < history.length);
+    keptPathHistory =
+      pending.length > 0 ? [...history, ...pending] : keptPathHistory;
+    keptPathRefs = sizePlan.toolRefs;
     keepRefs = sizePlan.keepToolRefs;
     clearRefs = sizePlan.clearRefs;
     toolResultCharsBefore = sizePlan.toolResultCharsBefore;
@@ -507,7 +544,13 @@ export function microcompactHistory(
 
   if (clearRefs.length > 0) {
     const clearMap = buildClearMap(clearRefs);
-    const callIdToFilePath = buildCallIdToFilePath(history);
+    const callIdToFilePath = buildCallIdToFilePath(keptPathHistory);
+    const keptFilePaths = buildKeptFilePaths(
+      keptPathHistory,
+      keptPathRefs,
+      keepRefs,
+      callIdToFilePath,
+    );
 
     result = history.map((content, ci) => {
       const partsToClean = clearMap.get(ci);
@@ -529,14 +572,17 @@ export function microcompactHistory(
           toolsCleared++;
           touched = true;
           // Record the blanked file's path so the caller disarms its
-          // fast-path; if unrecoverable, count it so the caller falls
-          // back to the blanket wipe (issue #4239).
+          // fast-path unless a kept result for the same path is still
+          // quotable from history. If unrecoverable, count it so the
+          // caller falls back to the blanket wipe (issue #4239).
           if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
-            const filePaths = part.functionResponse.id
-              ? callIdToFilePath.get(part.functionResponse.id)
-              : undefined;
+            const filePaths = getFilePathsForResponse(part, callIdToFilePath);
             if (filePaths && filePaths.length > 0) {
-              for (const p of filePaths) evictedReadPaths.add(p);
+              for (const p of filePaths) {
+                if (!keptFilePaths.has(p)) {
+                  evictedReadPaths.add(p);
+                }
+              }
             } else {
               unresolvedEvictedReads++;
             }
@@ -618,4 +664,24 @@ export function microcompactHistory(
       unresolvedEvictedReads,
     },
   };
+}
+
+function resolveKeepRecent(
+  envValue: string | undefined,
+  settingsValue: number | undefined,
+): number {
+  const normalize = (value: number | undefined): number | undefined => {
+    if (value === undefined || !Number.isSafeInteger(value)) return undefined;
+    return Math.max(1, value);
+  };
+
+  if (envValue !== undefined) {
+    const trimmed = envValue.trim();
+    if (/^-?\d+$/.test(trimmed)) {
+      const envKeep = normalize(Number(trimmed));
+      if (envKeep !== undefined) return envKeep;
+    }
+  }
+
+  return normalize(settingsValue) ?? 5;
 }

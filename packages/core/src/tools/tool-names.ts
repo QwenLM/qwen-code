@@ -58,6 +58,7 @@ export const ToolNames = {
   // round 1 removed the old ocu-era 9-name list, which still carried
   // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
+  ARTIFACT: 'artifact',
 } as const;
 
 /**
@@ -101,6 +102,7 @@ export const ToolDisplayNames = {
   EXIT_WORKTREE: 'ExitWorktree',
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
+  ARTIFACT: 'Artifact',
 } as const;
 
 // Migration from old tool names to new tool names

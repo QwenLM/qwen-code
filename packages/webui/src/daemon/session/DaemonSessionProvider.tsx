@@ -21,6 +21,7 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
+  extractServerTimestamp,
   matchTurnEvent,
   normalizeDaemonEvent,
   type DaemonEvent,
@@ -43,6 +44,7 @@ import {
   getReplayTokenUsage,
   getTokenCountFromUsage,
   mapProviderStatus,
+  mapSessionContextModels,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -102,6 +104,19 @@ export type {
   SendPromptOptions,
 } from './types.js';
 
+function assistantDoneFromTurnEvent(
+  event: DaemonEvent,
+  reason: string,
+): DaemonUiEvent {
+  const serverTimestamp = extractServerTimestamp(event);
+  return {
+    type: 'assistant.done',
+    reason,
+    eventId: event.id,
+    ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+  };
+}
+
 const DaemonStoreContext = createContext<DaemonTranscriptStore | undefined>(
   undefined,
 );
@@ -142,6 +157,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   toolsVersion: 0,
   settingsVersion: 0,
   mcpVersion: 0,
+  extensionsVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -221,6 +237,8 @@ export function DaemonSessionProvider({
   loadWarningsRef.current = loadWarnings;
   const modelServiceId = createSessionRequest?.modelServiceId;
   const sessionScope = createSessionRequest?.sessionScope;
+  const createSessionRequestRef = useRef(createSessionRequest);
+  createSessionRequestRef.current = createSessionRequest;
   const [promptStatus, setPromptStatus] = useState<DaemonPromptStatus>('idle');
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
     initialSessionId,
@@ -283,6 +301,12 @@ export function DaemonSessionProvider({
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      // Set when the user explicitly deletes the session (server
+      // publishes session_closed with reason 'client_close').
+      // Reconnecting would auto-create a new session, undoing the
+      // user's delete. Other session_closed reasons (idle_timeout,
+      // last_client_detached) fall through to normal reconnect.
+      let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
         try {
@@ -476,8 +500,26 @@ export function DaemonSessionProvider({
               ? loadWarningsRef.current?.context
               : undefined,
           ].filter((warning): warning is string => Boolean(warning));
-          const { models, currentModel, contextWindow } =
-            mapProviderStatus(providers);
+          const providerModelStatus = mapProviderStatus(providers);
+          const contextModelStatus = mapSessionContextModels(context);
+          const sessionModels =
+            contextModelStatus && contextModelStatus.models.length > 0
+              ? contextModelStatus.models
+              : providerModelStatus.models;
+          const sessionCurrentModel =
+            contextModelStatus?.currentModel ??
+            providerModelStatus.currentModel;
+          const providerContextWindow =
+            sessionCurrentModel === providerModelStatus.currentModel
+              ? providerModelStatus.contextWindow
+              : providerModelStatus.models.find(
+                  (model) => model.id === sessionCurrentModel,
+                )?.contextWindow;
+          const sessionContextWindow =
+            contextModelStatus?.contextWindow ??
+            sessionModels.find((model) => model.id === sessionCurrentModel)
+              ?.contextWindow ??
+            providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
           const currentMode = getCurrentMode(context);
 
@@ -492,8 +534,8 @@ export function DaemonSessionProvider({
             workspaceCwd: activeSession.workspaceCwd,
             commands,
             skills,
-            models,
-            currentModel,
+            models: sessionModels,
+            currentModel: sessionCurrentModel,
             currentMode,
             displayName:
               getSessionDisplayName(activeSession.state) ??
@@ -519,7 +561,7 @@ export function DaemonSessionProvider({
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
-            contextWindow,
+            contextWindow: sessionContextWindow,
             providers,
             supportedCommands,
             context,
@@ -592,12 +634,13 @@ export function DaemonSessionProvider({
                   const stopReason =
                     (replayEvent.data as DaemonTurnCompleteData | undefined)
                       ?.stopReason ?? 'end_turn';
-                  allUiEvents.push({
-                    type: 'assistant.done',
-                    reason: stopReason,
-                  });
+                  allUiEvents.push(
+                    assistantDoneFromTurnEvent(replayEvent, stopReason),
+                  );
                 } else if (replayEvent.type === 'turn_error') {
-                  allUiEvents.push({ type: 'assistant.done', reason: 'error' });
+                  allUiEvents.push(
+                    assistantDoneFromTurnEvent(replayEvent, 'error'),
+                  );
                 }
               } catch (error) {
                 const message =
@@ -679,10 +722,9 @@ export function DaemonSessionProvider({
               }
               const midTurnInjected = parseSidechannelMidTurnInjected(event);
               if (midTurnInjected) {
-                // Transient UX signal — consumers drop these from their pending
-                // queue. Not a transcript item, so skip normalization.
+                // Keep the sidechannel for queue dedupe, but still normalize the
+                // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
-                continue;
               }
               const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
@@ -716,15 +758,13 @@ export function DaemonSessionProvider({
                   const stopReason =
                     (event.data as DaemonTurnCompleteData | undefined)
                       ?.stopReason ?? 'end_turn';
-                  epochReplayUiEvents.push({
-                    type: 'assistant.done',
-                    reason: stopReason,
-                  });
+                  epochReplayUiEvents.push(
+                    assistantDoneFromTurnEvent(event, stopReason),
+                  );
                 } else if (event.type === 'turn_error') {
-                  epochReplayUiEvents.push({
-                    type: 'assistant.done',
-                    reason: 'error',
-                  });
+                  epochReplayUiEvents.push(
+                    assistantDoneFromTurnEvent(event, 'error'),
+                  );
                 }
 
                 const replayComplete = uiEvents.some(
@@ -767,12 +807,33 @@ export function DaemonSessionProvider({
                   }
                   setConnection((c) => ({ ...c, catchingUp: undefined }));
                 }
+
+                // session_closed with client_close during epoch replay
+                if (
+                  event.type === 'session_closed' &&
+                  (event.data as Record<string, unknown> | undefined)
+                    ?.reason === 'client_close'
+                ) {
+                  userDeletedSession = true;
+                  const closedSessionId = activeSession.sessionId;
+                  const active = activePromptsRef.current.get(closedSessionId);
+                  active?.controller.abort();
+                  activePromptsRef.current.delete(closedSessionId);
+                  session = undefined;
+                  sessionRef.current = undefined;
+                  break;
+                }
+
                 continue;
               }
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
+                const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
-                  current === 'waiting' ? 'streaming' : current,
+                  current === 'waiting' ||
+                  (current === 'idle' && hasGenerationSignal)
+                    ? 'streaming'
+                    : current,
                 );
               }
               const activePromptSettled = settleActivePromptFromTurnEvent(
@@ -836,11 +897,11 @@ export function DaemonSessionProvider({
                 const stopReason =
                   (event.data as DaemonTurnCompleteData | undefined)
                     ?.stopReason ?? 'end_turn';
-                store.dispatch({ type: 'assistant.done', reason: stopReason });
+                store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
                 setPromptStatus('idle');
               } else if (isObserver && event.type === 'turn_error') {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                store.dispatch({ type: 'assistant.done', reason: 'error' });
+                store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
                 setPromptStatus('idle');
               } else if (isObserver && hasActiveGenerationSignal(uiEvents)) {
                 schedulePassiveAssistantDone(
@@ -889,6 +950,27 @@ export function DaemonSessionProvider({
                   break;
                 }
               }
+              // session_closed with reason 'client_close' means the
+              // user explicitly deleted the session. Stop the
+              // reconnect loop — without this, the next iteration
+              // would call createOrAttach and auto-create a new
+              // session, undoing the user's delete action.
+              // Other reasons (idle_timeout, last_client_detached)
+              // fall through to the normal reconnect path.
+              if (
+                event.type === 'session_closed' &&
+                (event.data as Record<string, unknown> | undefined)?.reason ===
+                  'client_close'
+              ) {
+                userDeletedSession = true;
+                const closedSessionId = activeSession.sessionId;
+                const active = activePromptsRef.current.get(closedSessionId);
+                active?.controller.abort();
+                activePromptsRef.current.delete(closedSessionId);
+                session = undefined;
+                sessionRef.current = undefined;
+                break;
+              }
             } catch (error) {
               const message =
                 error instanceof Error ? error.message : String(error);
@@ -906,6 +988,24 @@ export function DaemonSessionProvider({
                 error,
               );
             }
+          }
+          if (userDeletedSession) {
+            // Session was explicitly closed (user deleted it). Do NOT
+            // reconnect — doing so would auto-create a new session.
+            // Note: we intentionally do NOT call setRestoreSessionId(undefined)
+            // here because restoreSessionId is in the useEffect dependency
+            // array — changing it would trigger an effect re-run that could
+            // create a new session via createOrAttach.
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+            setPromptStatus('idle');
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              sessionId: undefined,
+              error: undefined,
+            }));
+            return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
             // Keep the session handle after a normal SSE close so the next
@@ -1133,6 +1233,12 @@ export function DaemonSessionProvider({
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
         passiveAssistantDoneTimerRef,
+        getCreateSessionRequest: () => ({
+          ...createSessionRequestRef.current,
+          sessionScope: 'thread',
+          workspaceCwd:
+            resolvedWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+        }),
         addNotice,
         setConnection,
         setPromptStatus,
@@ -1191,7 +1297,7 @@ function settleActivePromptFromTurnEvent(
   try {
     const result = matchTurnEvent(event, promptId);
     if (!result) return false;
-    store.dispatch({ type: 'assistant.done', reason: result.stopReason });
+    store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
     setPromptStatus('idle');
     if (active.resolve) {
       activePrompts.delete(sessionId);
@@ -1204,7 +1310,7 @@ function settleActivePromptFromTurnEvent(
       });
     }
   } catch (error) {
-    store.dispatch({ type: 'assistant.done', reason: 'error' });
+    store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
     setPromptStatus('idle');
     if (active.reject) {
       activePrompts.delete(sessionId);
@@ -1578,7 +1684,7 @@ function getNumber(
 }
 
 function bumpWorkspaceEventSignals(
-  events: ReadonlyArray<{ type: string }>,
+  events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
 ): void {
   let memory = 0;
@@ -1586,6 +1692,10 @@ function bumpWorkspaceEventSignals(
   let tools = 0;
   let settings = 0;
   let mcp = 0;
+  let extensions = 0;
+  let lastExtensionChange:
+    | DaemonWorkspaceEventSignals['lastExtensionChange']
+    | undefined;
   let init = 0;
   let auth = 0;
 
@@ -1609,6 +1719,18 @@ function bumpWorkspaceEventSignals(
       case 'workspace.mcp.server_restart_refused':
         mcp += 1;
         break;
+      case 'workspace.extensions.changed':
+        extensions += 1;
+        lastExtensionChange = {
+          ...(event.status ? { status: event.status } : {}),
+          ...(event.source ? { source: event.source } : {}),
+          ...(event.name ? { name: event.name } : {}),
+          ...(event.version ? { version: event.version } : {}),
+          ...(event.error ? { error: event.error } : {}),
+          refreshed: event.refreshed,
+          failed: event.failed,
+        };
+        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -1624,7 +1746,8 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + settings + mcp + init + auth === 0) return;
+  if (memory + agents + tools + settings + mcp + extensions + init + auth === 0)
+    return;
 
   setSignals((current) => ({
     memoryVersion: current.memoryVersion + memory,
@@ -1632,6 +1755,8 @@ function bumpWorkspaceEventSignals(
     toolsVersion: current.toolsVersion + tools,
     settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
+    extensionsVersion: current.extensionsVersion + extensions,
+    ...(lastExtensionChange ? { lastExtensionChange } : {}),
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,
   }));

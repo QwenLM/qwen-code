@@ -22,6 +22,14 @@ const createConfig = ({
 });
 
 describe('lspCommand', () => {
+  it('declares ACP support for the status-only path', () => {
+    expect(lspCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+      'acp',
+    ]);
+  });
+
   it('returns an error when config is unavailable in non-interactive mode', async () => {
     if (!lspCommand.action) {
       throw new Error('lspCommand must have an action');
@@ -171,6 +179,40 @@ describe('lspCommand', () => {
       '| pyright | `pyright-langserver` | python | FAILED - startup failed |',
     );
     expect(result.content).not.toMatch(/[✅⏳❌⚪❓]/u);
+    expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  it('returns server status as a message in ACP mode', async () => {
+    if (!lspCommand.action) {
+      throw new Error('lspCommand must have an action');
+    }
+    const context = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: createConfig({
+          client: {
+            getServerStatus: vi.fn().mockReturnValue([
+              {
+                name: 'tsserver',
+                status: 'READY',
+                command: 'typescript-language-server',
+                languages: ['typescript'],
+              },
+            ]),
+          },
+        }) as unknown as never,
+      },
+    });
+
+    const result = await lspCommand.action(context, '');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining(
+        '| tsserver | `typescript-language-server` | typescript | READY |',
+      ),
+    });
     expect(context.ui.addItem).not.toHaveBeenCalled();
   });
 

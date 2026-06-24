@@ -26,7 +26,6 @@ import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
   PromptConfig,
-  RunConfig,
   ToolConfig,
 } from '../../agents/runtime/agent-types.js';
 import {
@@ -37,6 +36,7 @@ import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content, FunctionDeclaration } from '@google/genai';
 import {
   FORK_AGENT,
+  FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
@@ -975,6 +975,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     updateOutput?: (output: ToolResultDisplay) => void,
   ): void {
     let pendingConfirmationCallId: string | undefined;
+    const preserveProtocolPayloads = !this.config.isInteractive();
 
     this.eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
@@ -986,7 +987,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         callId: event.callId,
         name: event.name,
         status: 'executing' as const,
-        args: event.args,
+        ...(preserveProtocolPayloads ? { args: event.args } : {}),
         description: event.description,
       };
       this.currentToolCalls!.push(newToolCall);
@@ -1009,7 +1010,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...this.currentToolCalls![toolCallIndex],
           status: event.success ? 'success' : 'failed',
           error: event.error,
-          responseParts: event.responseParts,
+          ...(preserveProtocolPayloads && event.responseParts !== undefined
+            ? { responseParts: event.responseParts }
+            : {}),
+          ...(typeof event.resultDisplay === 'string'
+            ? { resultDisplay: event.resultDisplay }
+            : {}),
         };
 
         // When a tool result arrives for the tool that had a pending
@@ -1292,7 +1298,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       agentConfig,
       promptConfig,
       {},
-      {} as RunConfig,
+      { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
     );
@@ -2105,7 +2111,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ov.getCwd = () => wtPath;
         ov.getWorkingDir = () => wtPath;
         ov.getProjectRoot = () => wtPath;
-        const wtFileService = new FileDiscoveryService(wtPath);
+        const wtFileService = new FileDiscoveryService(
+          wtPath,
+          this.config.getFileFilteringOptions().customIgnoreFiles,
+        );
         ov.fileDiscoveryService = wtFileService;
         ov.getFileService = () => wtFileService;
         const wtWorkspace = new WorkspaceContext(wtPath);

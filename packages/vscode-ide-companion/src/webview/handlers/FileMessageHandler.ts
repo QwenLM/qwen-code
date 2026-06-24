@@ -20,6 +20,7 @@ import {
   type FileSearch,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { shouldResolveAgainstWorkspace } from '../../utils/file-path.js';
 
 /**
  * File message handler
@@ -120,6 +121,13 @@ export class FileMessageHandler extends BaseMessageHandler {
       '[FileMessageHandler] Cleared file search cache, trigger:',
       rootPath,
     );
+  }
+
+  private toZeroBasedEditorPosition(value: string | undefined): number {
+    if (!value) {
+      return 0;
+    }
+    return Math.max(0, parseInt(value, 10) - 1);
   }
 
   private createWatcherForFolder(folder: vscode.WorkspaceFolder): void {
@@ -553,12 +561,12 @@ export class FileMessageHandler extends BaseMessageHandler {
       }
 
       const [, path, lineStr, columnStr] = match;
-      const lineNumber = lineStr ? parseInt(lineStr, 10) - 1 : 0; // VS Code uses 0-based line numbers
-      const columnNumber = columnStr ? parseInt(columnStr, 10) - 1 : 0; // VS Code uses 0-based column numbers
+      const lineNumber = this.toZeroBasedEditorPosition(lineStr);
+      const columnNumber = this.toZeroBasedEditorPosition(columnStr);
 
       // Convert to absolute path if relative
       let absolutePath = path;
-      if (!path.startsWith('/') && !path.match(/^[a-zA-Z]:/)) {
+      if (shouldResolveAgainstWorkspace(path)) {
         // Relative path - resolve against workspace
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (workspaceFolder) {

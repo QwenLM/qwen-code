@@ -18,6 +18,8 @@ export const MCP_MANAGEMENT_STEPS = {
   DISABLE_SCOPE_SELECT: 'disable-scope-select',
   TOOL_LIST: 'tool-list',
   TOOL_DETAIL: 'tool-detail',
+  RESOURCE_LIST: 'resource-list',
+  RESOURCE_DETAIL: 'resource-detail',
   AUTHENTICATE: 'authenticate', // OAuth 认证步骤
 } as const;
 
@@ -44,12 +46,16 @@ export interface MCPServerDisplayInfo {
   invalidToolCount?: number;
   /** Prompt数量 */
   promptCount: number;
+  /** Resource数量 */
+  resourceCount: number;
   /** 错误信息 */
   errorMessage?: string;
   /** 是否被禁用（在排除列表中） */
   isDisabled: boolean;
   /** 是否存储有 OAuth 认证信息 */
   hasOAuthTokens?: boolean;
+  /** 未连接且需要（重新）认证：连接时收到 401，或声明了 OAuth 但无已存 token */
+  requiresAuth?: boolean;
 }
 
 /**
@@ -76,6 +82,26 @@ export interface MCPToolDisplayInfo {
   isValid: boolean;
   /** 无效原因（当isValid为false时） */
   invalidReason?: string;
+}
+
+/**
+ * MCP Resource显示信息
+ */
+export interface MCPResourceDisplayInfo {
+  /** 资源 URI（在对话中通过 @server:uri 引用） */
+  uri: string;
+  /** 资源名称 */
+  name?: string;
+  /** 资源标题（更友好的展示名，若有） */
+  title?: string;
+  /** 资源描述 */
+  description?: string;
+  /** MIME 类型 */
+  mimeType?: string;
+  /** 资源大小（字节） */
+  size?: number;
+  /** 所属服务器 */
+  serverName: string;
 }
 
 /**
@@ -128,6 +154,8 @@ export interface ServerDetailStepProps {
   server: MCPServerDisplayInfo | null;
   /** 查看工具列表回调 */
   onViewTools: () => void;
+  /** 查看资源列表回调 */
+  onViewResources?: () => void;
   /** 重新连接回调 */
   onReconnect?: () => void;
   /** 禁用服务器回调 */
@@ -138,6 +166,8 @@ export interface ServerDetailStepProps {
   onClearAuth?: () => void;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -164,6 +194,8 @@ export interface ToolListStepProps {
   onSelect: (tool: MCPToolDisplayInfo) => void;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -174,6 +206,36 @@ export interface ToolDetailStepProps {
   tool: MCPToolDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
+}
+
+/**
+ * ResourceListStep 组件属性
+ */
+export interface ResourceListStepProps {
+  /** 资源列表 */
+  resources: MCPResourceDisplayInfo[];
+  /** 服务器名称 */
+  serverName: string;
+  /** 选择回调 */
+  onSelect: (resource: MCPResourceDisplayInfo) => void;
+  /** 返回回调 */
+  onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
+}
+
+/**
+ * ResourceDetailStep 组件属性
+ */
+export interface ResourceDetailStepProps {
+  /** 资源信息 */
+  resource: MCPResourceDisplayInfo | null;
+  /** 返回回调 */
+  onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -184,6 +246,8 @@ export interface AuthenticateStepProps {
   server: MCPServerDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**

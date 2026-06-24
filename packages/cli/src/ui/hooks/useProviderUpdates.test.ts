@@ -138,8 +138,8 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.currentModelAffected).toBe(false);
   });
 
-  it('reports currentModelAffected when model is removed', async () => {
-    mockConfig.getModel.mockReturnValue('old-deprecated-model');
+  it('excludes user-added custom models from the diff', async () => {
+    mockConfig.getModel.mockReturnValue('my-custom-model');
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -150,10 +150,10 @@ describe('useProviderUpdates', () => {
       [AuthType.USE_OPENAI]: [
         ...chinaTemplate,
         {
-          id: 'old-deprecated-model',
+          id: 'my-custom-model',
           baseUrl: CODING_PLAN_CHINA_BASE_URL,
           envKey: CODING_PLAN_ENV_KEY,
-          name: '[Coding Plan] old-deprecated-model',
+          name: '[Coding Plan] my-custom-model',
         },
       ],
     };
@@ -171,8 +171,82 @@ describe('useProviderUpdates', () => {
     });
 
     const entry = result.current.providerUpdateRequest?.entries[0];
-    expect(entry?.diff.currentModelAffected).toBe(true);
-    expect(entry?.diff.removed).toContain('old-deprecated-model');
+    expect(entry?.diff.removed).not.toContain('my-custom-model');
+    expect(entry?.diff.currentModelAffected).toBe(false);
+  });
+
+  it('detects newly added built-in models when the template grows', async () => {
+    // Simulate an older install that lacks the last built-in model.
+    const olderTemplate = chinaTemplate.slice(0, -1);
+    const addedModelId = chinaTemplate[chinaTemplate.length - 1]!.id;
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: olderTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    const entry = result.current.providerUpdateRequest?.entries[0];
+    expect(entry?.diff.added).toContain(addedModelId);
+  });
+
+  it('preserves user-added custom models when executing an update', async () => {
+    const customModel = {
+      id: 'my-custom-model',
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      envKey: CODING_PLAN_ENV_KEY,
+      name: '[Coding Plan] my-custom-model',
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, customModel],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    expect(reloaded[AuthType.USE_OPENAI]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'my-custom-model' }),
+      ]),
+    );
   });
 
   it('executes update when user confirms with "update"', async () => {
@@ -300,6 +374,7 @@ describe('useProviderUpdates', () => {
     expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
       'qwen3.5-plus',
+      undefined,
     );
   });
 

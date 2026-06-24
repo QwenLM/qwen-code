@@ -135,10 +135,12 @@ export function createDaemonWorkspaceService(
     boundWorkspace,
     contextFilename,
     statusProvider,
+    workspaceProvidersStatusProvider,
     isChannelLive,
     persistDisabledTools,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
+    refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
     publishWorkspaceEvent,
   } = deps;
 
@@ -160,6 +162,12 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
+      if (workspaceProvidersStatusProvider) {
+        return workspaceProvidersStatusProvider(
+          boundWorkspace,
+          isChannelLive?.() ?? false,
+        );
+      }
       return queryWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceProviders,
         () => createIdleWorkspaceProvidersStatus(boundWorkspace),
@@ -619,6 +627,20 @@ export function createDaemonWorkspaceService(
         sessionsSkipped,
         childError,
       };
+    },
+
+    async refreshExtensionsForAllSessions() {
+      try {
+        if (!refreshExtensionsForAllSessionsOnBridge) {
+          throw new Error('refreshExtensionsForAllSessions is not wired');
+        }
+        return await refreshExtensionsForAllSessionsOnBridge();
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { refreshed: 0, failed: 1 };
+      }
     },
   };
 }

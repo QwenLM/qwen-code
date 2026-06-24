@@ -1438,7 +1438,10 @@ export async function loadCliConfig(
     }
   }
 
-  const fileService = new FileDiscoveryService(cwd);
+  const fileService = new FileDiscoveryService(
+    cwd,
+    settings.context?.fileFiltering?.customIgnoreFiles,
+  );
 
   const includeDirectories = (
     bareMode ? [] : (settings.context?.includeDirectories ?? [])
@@ -1893,6 +1896,8 @@ export async function loadCliConfig(
       ...settings.ui?.accessibility,
       screenReader,
     },
+    showResponseTokensPerSecond:
+      settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
@@ -1919,6 +1924,25 @@ export async function loadCliConfig(
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    artifactEnabled: settings.experimental?.artifact ?? false,
+    artifactAutoOpen: settings.artifact?.autoOpen ?? true,
+    artifactPublisher: settings.artifact?.publisher ?? 'local',
+    artifactHost: settings.artifact?.host
+      ? {
+          uploadCommand: settings.artifact?.host?.uploadCommand ?? '',
+          urlTemplate: settings.artifact?.host?.urlTemplate ?? '',
+          keyPrefix: settings.artifact?.host?.keyPrefix,
+        }
+      : undefined,
+    artifactOss: settings.artifact?.oss
+      ? {
+          bucket: settings.artifact?.oss?.bucket ?? '',
+          endpoint: settings.artifact?.oss?.endpoint ?? '',
+          keyPrefix: settings.artifact?.oss?.keyPrefix,
+          acl: settings.artifact?.oss?.acl,
+          publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
+        }
+      : undefined,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,
@@ -1950,8 +1974,7 @@ export async function loadCliConfig(
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
-    skipWorkflowUsageWarning:
-      settings.model?.skipWorkflowUsageWarning ?? false,
+    skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,

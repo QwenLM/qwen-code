@@ -422,6 +422,19 @@ describe('BackgroundTaskRegistry', () => {
       expect(MAX_CONCURRENT_BACKGROUND_AGENTS).toBeGreaterThanOrEqual(1);
     });
 
+    it('rejects hex / scientific / non-decimal-integer overrides and falls back', () => {
+      // Number('0x10')=16, Number('1e2')=100 and Number('1.0')=1 all pass
+      // Number.isInteger, so the loose parse silently accepted them. The cap
+      // should only honor plain decimal integers, like the rest of the codebase.
+      for (const raw of ['0x10', '1e2', '1.0']) {
+        expect(
+          resolveMaxConcurrentBackgroundAgents({
+            [BACKGROUND_AGENT_CONCURRENCY_ENV]: raw,
+          }),
+        ).toBe(DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS);
+      }
+    });
+
     it('rejects new running background agents once the cap is reached', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 2,
@@ -1539,6 +1552,18 @@ describe('BackgroundTaskRegistry', () => {
       });
       expect(onRegister).toHaveBeenCalledTimes(1);
       expect(onRegister.mock.calls[0]![0].agentId).toBe('bg-fires-register-cb');
+    });
+
+    it('can suppress the register callback for background entries', () => {
+      const onRegister = vi.fn();
+      registry.setRegisterCallback(onRegister);
+
+      const entry = registry.register(makeRegistration('bg-suppressed'), {
+        suppressRegisterCallback: true,
+      });
+
+      expect(entry.agentId).toBe('bg-suppressed');
+      expect(onRegister).not.toHaveBeenCalled();
     });
 
     it('unregisterForeground emits status change after removing the entry', () => {

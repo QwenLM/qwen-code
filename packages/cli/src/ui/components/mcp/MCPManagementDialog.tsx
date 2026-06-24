@@ -13,17 +13,25 @@ import type {
   MCPManagementDialogProps,
   MCPServerDisplayInfo,
   MCPToolDisplayInfo,
+  MCPResourceDisplayInfo,
 } from './types.js';
 import { MCP_MANAGEMENT_STEPS } from './types.js';
 import { ServerListStep } from './steps/ServerListStep.js';
 import { ServerDetailStep } from './steps/ServerDetailStep.js';
 import { ToolListStep } from './steps/ToolListStep.js';
 import { ToolDetailStep } from './steps/ToolDetailStep.js';
+import { ResourceListStep } from './steps/ResourceListStep.js';
+import { ResourceDetailStep } from './steps/ResourceDetailStep.js';
 import { DisableScopeSelectStep } from './steps/DisableScopeSelectStep.js';
 import { AuthenticateStep } from './steps/AuthenticateStep.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   getMCPServerStatus,
+  removeMCPServerStatus,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  mcpServerRequiresOAuth,
+  MCPServerStatus,
   DiscoveredMCPTool,
   MCPOAuthTokenStorage,
   type MCPServerConfig,
@@ -49,6 +57,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   const [selectedTool, setSelectedTool] = useState<MCPToolDisplayInfo | null>(
     null,
   );
+  const [selectedResource, setSelectedResource] =
+    useState<MCPResourceDisplayInfo | null>(null);
   const [navigationStack, setNavigationStack] = useState<string[]>([
     MCP_MANAGEMENT_STEPS.SERVER_LIST,
   ]);
@@ -63,6 +73,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     const mcpServers = config.getMcpServers() || {};
     const toolRegistry = config.getToolRegistry();
     const promptRegistry = config.getPromptRegistry();
+    const resourceRegistry = config.getResourceRegistry();
 
     const serverInfos: MCPServerDisplayInfo[] = [];
 
@@ -84,6 +95,10 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       const serverPrompts = allPrompts.filter(
         (p) => 'serverName' in p && p.serverName === name,
       );
+
+      // Get resources for this server
+      const serverResources =
+        resourceRegistry?.getResourcesByServer(name) || [];
 
       // Determine source type
       let source: MCPServerDisplayInfo['source'] = 'user';
@@ -115,6 +130,13 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         // Ignore errors when checking token existence
       }
 
+      // Needs (re-)authentication: a 401 during connect, or OAuth declared
+      // with no stored token. Only meaningful while not connected.
+      const requiresAuth =
+        status !== MCPServerStatus.CONNECTED &&
+        (mcpServerRequiresOAuth.get(name) === true ||
+          (Boolean(serverConfig.oauth?.enabled) && !hasOAuthTokens));
+
       serverInfos.push({
         name,
         status,
@@ -123,13 +145,28 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         toolCount: serverTools.length,
         invalidToolCount,
         promptCount: serverPrompts.length,
+        resourceCount: serverResources.length,
         isDisabled,
         hasOAuthTokens,
+        requiresAuth,
       });
     }
 
     return serverInfos;
   }, [config]);
+
+  // Synchronously refresh status + needs-auth on a fetched snapshot.
+  const restampStatus = useCallback((s: MCPServerDisplayInfo) => {
+    const status = getMCPServerStatus(s.name);
+    return {
+      ...s,
+      status,
+      requiresAuth:
+        status === MCPServerStatus.CONNECTED
+          ? false
+          : mcpServerRequiresOAuth.get(s.name) === true || s.requiresAuth,
+    };
+  }, []);
 
   // Load MCP server data on initial render
   useEffect(() => {
@@ -137,7 +174,11 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       setIsLoading(true);
       try {
         const serverInfos = await fetchServerData();
-        setServers(serverInfos);
+        // Re-stamp statuses (and the status-derived needs-auth flag)
+        // synchronously right before setState: a status change landing
+        // during fetch's awaits would fire the listener against the OLD
+        // state and then be overwritten by this snapshot.
+        setServers(serverInfos.map(restampStatus));
       } catch (error) {
         debugLogger.error('Error loading MCP servers:', error);
       } finally {
@@ -146,7 +187,35 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     };
 
     loadServers();
-  }, [fetchServerData]);
+  }, [fetchServerData, restampStatus]);
+
+  // Live-update server rows (and the derived detail view) when a connection
+  // status changes, e.g. a "connecting" server finishing.
+  useEffect(() => {
+    const listener = (serverName: string, status?: MCPServerStatus) => {
+      if (status === undefined) return; // removals are handled by reloads
+      setServers((prev) =>
+        prev.map((s) =>
+          s.name === serverName
+            ? {
+                ...s,
+                status,
+                // Keep needs-auth in step with the live status: a connect
+                // proves auth works; a failure may have just set the 401
+                // marker (it is written before the DISCONNECTED event).
+                requiresAuth:
+                  status === MCPServerStatus.CONNECTED
+                    ? false
+                    : mcpServerRequiresOAuth.get(serverName) === true ||
+                      s.requiresAuth,
+              }
+            : s,
+        ),
+      );
+    };
+    addMCPStatusChangeListener(listener);
+    return () => removeMCPStatusChangeListener(listener);
+  }, []);
 
   // Selected server
   const selectedServer = useMemo(() => {
@@ -224,9 +293,34 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     });
   }, [config, selectedServer]);
 
+  // Get server resource list
+  const getServerResources = useCallback((): MCPResourceDisplayInfo[] => {
+    if (!config || !selectedServer) return [];
+
+    const resourceRegistry = config.getResourceRegistry();
+    if (!resourceRegistry) return [];
+
+    return resourceRegistry
+      .getResourcesByServer(selectedServer.name)
+      .map((resource) => ({
+        uri: resource.uri,
+        name: resource.name,
+        title: resource.title,
+        description: resource.description,
+        mimeType: resource.mimeType,
+        size: resource.size,
+        serverName: resource.serverName,
+      }));
+  }, [config, selectedServer]);
+
   // View tool list
   const handleViewTools = useCallback(() => {
     handleNavigateToStep(MCP_MANAGEMENT_STEPS.TOOL_LIST);
+  }, [handleNavigateToStep]);
+
+  // View resource list
+  const handleViewResources = useCallback(() => {
+    handleNavigateToStep(MCP_MANAGEMENT_STEPS.RESOURCE_LIST);
   }, [handleNavigateToStep]);
 
   // Authenticate
@@ -243,18 +337,28 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     [handleNavigateToStep],
   );
 
+  // Select resource
+  const handleSelectResource = useCallback(
+    (resource: MCPResourceDisplayInfo) => {
+      setSelectedResource(resource);
+      handleNavigateToStep(MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL);
+    },
+    [handleNavigateToStep],
+  );
+
   // Reload server data - uses the extracted fetchServerData function
   const reloadServers = useCallback(async () => {
     setIsLoading(true);
     try {
       const serverInfos = await fetchServerData();
-      setServers(serverInfos);
+      // Same synchronous re-stamp as the initial load (see comment there).
+      setServers(serverInfos.map(restampStatus));
     } catch (error) {
       debugLogger.error('Error reloading MCP servers:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [fetchServerData]);
+  }, [fetchServerData, restampStatus]);
 
   // Clear OAuth authentication tokens and disconnect the server
   const handleClearAuth = useCallback(async () => {
@@ -318,6 +422,14 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       const server = selectedServer;
       const settings = loadSettings();
 
+      // Clear the extension-scoped disable flag, if any.
+      const extensionName = server.config.extensionName;
+      if (extensionName) {
+        config
+          .getExtensionManager()
+          ?.setMcpServerDisabled(extensionName, server.name, false);
+      }
+
       // Remove from user and workspace exclusion lists
       for (const scope of [SettingScope.User, SettingScope.Workspace]) {
         const scopeSettings = settings.forScope(scope).settings;
@@ -371,17 +483,31 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         const server = selectedServer;
         const settings = loadSettings();
 
-        // Determine the scope based on server configuration location
-        let targetScope: 'user' | 'workspace' = 'user';
+        // Extension servers are disabled via the extension-scoped preference
+        // instead of user/workspace mcp.excluded settings.
         if (server.source === 'extension') {
-          // Extension servers should not be disabled through user/workspace settings
-          // Show error message and return
-          debugLogger.warn(
-            `Cannot disable extension MCP server '${server.name}'`,
-          );
+          const extensionName = server.config.extensionName;
+          const manager = config.getExtensionManager();
+          if (!extensionName || !manager) {
+            debugLogger.warn(
+              `Cannot disable extension MCP server '${server.name}'`,
+            );
+            setIsLoading(false);
+            return;
+          }
+          manager.setMcpServerDisabled(extensionName, server.name, true);
+          await config.getToolRegistry()?.disconnectServer(server.name);
+          // Drop the status entry so the footer health pill doesn't keep
+          // counting an intentionally disabled server as offline.
+          removeMCPServerStatus(server.name);
+          await reloadServers();
           setIsLoading(false);
           return;
-        } else if (server.source === 'project') {
+        }
+
+        // Determine the scope based on server configuration location
+        let targetScope: 'user' | 'workspace' = 'user';
+        if (server.source === 'project') {
           targetScope = 'workspace';
         }
 
@@ -535,6 +661,36 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           </Box>
         );
         break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
+        headerText = (
+          <Box flexDirection="column">
+            <Text color={theme.text.accent} bold>
+              {t('Resources for {{serverName}}', {
+                serverName: selectedServer?.name || 'Server',
+              })}
+            </Text>
+            <Text color={theme.text.secondary}>
+              ({getServerResources().length}{' '}
+              {getServerResources().length === 1
+                ? t('resource')
+                : t('resources')}
+              )
+            </Text>
+          </Box>
+        );
+        break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
+        headerText = (
+          <Box flexDirection="column">
+            <Text color={theme.text.accent} bold wrap="truncate">
+              {selectedResource?.uri || t('Resource Detail')}
+            </Text>
+            <Text color={theme.text.secondary}>
+              {selectedResource?.serverName || t('Server')}
+            </Text>
+          </Box>
+        );
+        break;
       case MCP_MANAGEMENT_STEPS.AUTHENTICATE:
         headerText = (
           <Box>
@@ -550,7 +706,15 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     }
 
     return headerText;
-  }, [getCurrentStep, selectedServer, selectedTool, getServerTools, servers]);
+  }, [
+    getCurrentStep,
+    selectedServer,
+    selectedTool,
+    selectedResource,
+    getServerTools,
+    getServerResources,
+    servers,
+  ]);
 
   // Render step content
   const renderStepContent = useCallback(() => {
@@ -571,6 +735,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           <ServerDetailStep
             server={selectedServer}
             onViewTools={handleViewTools}
+            onViewResources={handleViewResources}
             onReconnect={handleReconnect}
             onDisable={handleDisable}
             onAuthenticate={handleAuthenticate}
@@ -603,6 +768,24 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           <ToolDetailStep tool={selectedTool} onBack={handleNavigateBack} />
         );
 
+      case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
+        return (
+          <ResourceListStep
+            resources={getServerResources()}
+            serverName={selectedServer?.name || ''}
+            onSelect={handleSelectResource}
+            onBack={handleNavigateBack}
+          />
+        );
+
+      case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
+        return (
+          <ResourceDetailStep
+            resource={selectedResource}
+            onBack={handleNavigateBack}
+          />
+        );
+
       case MCP_MANAGEMENT_STEPS.AUTHENTICATE:
         return (
           <AuthenticateStep
@@ -627,16 +810,20 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     servers,
     selectedServer,
     selectedTool,
+    selectedResource,
     handleSelectServer,
     handleViewTools,
+    handleViewResources,
     handleReconnect,
     handleDisable,
     handleAuthenticate,
     handleClearAuth,
     handleNavigateBack,
     handleSelectTool,
+    handleSelectResource,
     handleSelectDisableScope,
     getServerTools,
+    getServerResources,
     reloadServers,
   ]);
 
@@ -663,6 +850,12 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         footerText = t('↑↓ to navigate · Enter to select · Esc to back');
         break;
       case MCP_MANAGEMENT_STEPS.TOOL_DETAIL:
+        footerText = t('Esc to back');
+        break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
+        footerText = t('↑↓ to navigate · Enter to select · Esc to back');
+        break;
+      case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
         footerText = t('Esc to back');
         break;
       case MCP_MANAGEMENT_STEPS.AUTHENTICATE:

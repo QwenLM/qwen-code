@@ -576,6 +576,51 @@ describe('getInstallationInfo', () => {
     expect(info.isGlobal).toBe(false);
   });
 
+  it('should not detect a sibling directory as the local git clone', () => {
+    const siblingPath = `${projectRoot}-other/packages/cli/dist/index.js`;
+    process.argv[1] = siblingPath;
+    mockedRealPathSync.mockReturnValue(siblingPath);
+    mockedIsGitRepository.mockReturnValue(true);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+
+    const info = getInstallationInfo(projectRoot, false);
+
+    expect(info.updateMessage).not.toContain('local git clone');
+    expect(info.isGlobal).toBe(true);
+  });
+
+  it('should not detect a Windows sibling directory as the local git clone', () => {
+    const windowsRoot = 'C:/repo/app';
+    const siblingPath = 'C:\\repo\\app-other\\packages\\cli\\dist\\index.js';
+    process.argv[1] = siblingPath;
+    mockedRealPathSync.mockReturnValue(siblingPath);
+    mockedIsGitRepository.mockReturnValue(true);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+
+    const info = getInstallationInfo(windowsRoot, false);
+
+    expect(info.updateMessage).not.toContain('local git clone');
+    expect(info.isGlobal).toBe(true);
+  });
+
+  it('should not detect a node_modules-prefixed sibling directory as local install', () => {
+    const siblingPath = `${projectRoot}/node_modules-backup/.bin/gemini`;
+    process.argv[1] = siblingPath;
+    mockedRealPathSync.mockReturnValue(siblingPath);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+
+    const info = getInstallationInfo(projectRoot, false);
+
+    expect(info.updateMessage).not.toContain('Locally installed');
+    expect(info.isGlobal).toBe(true);
+  });
+
   it('should default to global npm installation for unrecognized paths', () => {
     const globalPath = `/usr/local/bin/gemini`;
     process.argv[1] = globalPath;

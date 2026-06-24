@@ -14,8 +14,17 @@ export function getDaemonToken(): string | undefined {
   if (typeof window === 'undefined') {
     return undefined;
   }
+  // Prefer the URL fragment (#token=) — unlike a ?token= query it is never
+  // sent to the server, so it stays out of access logs and Referer headers
+  // (this is what `qwen serve --open` now uses). Fall back to ?token= for
+  // backward compatibility (e.g. the dev launcher / hand-built URLs).
+  const fromHash = new URLSearchParams(
+    window.location.hash.replace(/^#/, ''),
+  ).get('token');
   cachedDaemonToken =
-    new URLSearchParams(window.location.search).get('token') || undefined;
+    fromHash ||
+    new URLSearchParams(window.location.search).get('token') ||
+    undefined;
   return cachedDaemonToken;
 }
 
@@ -23,9 +32,21 @@ export function removeDaemonTokenFromUrl(): void {
   if (typeof window === 'undefined') return;
   if (import.meta.env.DEV) return;
   const url = new URL(window.location.href);
-  if (!url.searchParams.has('token')) return;
-  url.searchParams.delete('token');
-  window.history.replaceState(null, '', url);
+  let changed = false;
+  if (url.searchParams.has('token')) {
+    url.searchParams.delete('token');
+    changed = true;
+  }
+  if (url.hash) {
+    const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+    if (hashParams.has('token')) {
+      hashParams.delete('token');
+      const rest = hashParams.toString();
+      url.hash = rest ? `#${rest}` : '';
+      changed = true;
+    }
+  }
+  if (changed) window.history.replaceState(null, '', url);
 }
 
 export function getDaemonAuthHeaders(): HeadersInit | undefined {

@@ -10,6 +10,7 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 
 ## What it gives you
 
+- **Built-in Web Shell UI** — `qwen serve` serves the browser-based Web Shell at its root (`http://127.0.0.1:4170/`) out of the box; run `qwen serve --open` to launch it in your browser automatically. It is served on the same origin as the API, so no second port or reverse proxy is needed. Pass `--no-web` for an API-only daemon.
 - **One agent process, many clients** — under the default `sessionScope: 'single'`, every client connecting to the daemon shares one ACP session. Live cross-client collaboration on the same conversation, the same file diffs, the same permission prompts.
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
@@ -63,6 +64,8 @@ qwen serve
 
 The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works". The daemon binds to the current working directory; use `--workspace /path/to/dir` to override.
 
+**Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
+
 ### 2. Sanity-check it
 
 ```bash
@@ -84,7 +87,11 @@ operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
 `GET /session/:id/context`, `GET /session/:id/supported-commands`, and
-`GET /session/:id/tasks`.
+`GET /session/:id/tasks`, and `GET /session/:id/lsp`.
+
+`GET /session/:id/lsp` returns structured per-session LSP status. Start the
+daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
+otherwise the route returns `enabled: false` with no servers.
 
 `GET /daemon/status` is the consolidated troubleshooting snapshot. The default
 `detail=summary` reads only in-memory daemon state (sessions, permissions,
@@ -230,6 +237,8 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 | `--mcp-budget-mode <m>`                 | `warn` / `off`  | How `--mcp-client-budget` is enforced. `warn` (default when budget set): no refusal, snapshot's `budgets[0].status` flips to `warning` at ≥75% of budget. `enforce`: connects past the cap are refused, per-server cell shows `disabledReason: 'budget'`, deterministic by `mcpServers` declaration order. `off` (default when budget unset): pure observability. Boot rejects `enforce` without a budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `--http-bridge`                         | `true`          | Stage 1 mode: one `qwen --acp` child per daemon (bound to one workspace at boot, per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02); N sessions multiplex onto that child via ACP `newSession()`. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--allow-origin <pat>`                  | —               | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). Cross-origin allowlist for browser webui clients. Repeatable. Each value is `*` (any origin — boot refuses if no bearer token is configured; `--require-auth` on loopback is recommended so `/health` and `/demo` are also bearer-gated, since both are pre-auth on loopback by default) or a canonical URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path / userinfo / query). **Subdomain wildcards (`https://*.example.com`) are intentionally unsupported** — list each subdomain explicitly, or use `*` with a configured token (and `--require-auth` for full hardening). Matched origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, methods, headers, max-age, and exposed `Retry-After`); unmatched origins still get a 403 with the same envelope as today's wall. `Origin: null` (sandboxed iframes, file:// docs) is always rejected, even under `*`. Pre-flight via `caps.features.allow_origin`. Loopback self-origin hits are unaffected. |
+| `--web` / `--no-web`                    | `true`          | Serve the built Web Shell SPA at the daemon root (`GET /`, `/assets/*`, and SPA deep-link fallback). The static shell is registered **before** the bearer-auth gate — a browser can't attach a token to a `<script>` subresource or an address-bar navigation, the shell carries no secrets, and every API route stays token-gated regardless. On non-loopback binds a one-line stderr warning notes the UI is reachable without auth. Use `--no-web` for an API-only daemon. No effect when the build omits the Web Shell assets (the daemon logs a breadcrumb and runs API-only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `--open`                                | `false`         | After the listener is up, open the Web Shell in your default browser at the daemon URL (with `#token=` appended as a URL fragment when a token is configured — a fragment is never sent to the server, keeping the token out of access logs and Referer headers). No-op with `--no-web`, or in headless / CI / SSH environments where no browser is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 > **Sizing the load knobs.** `--max-sessions` is the **new-child** cap.
 > Three other layers also limit load — when sizing for a high-concurrency
@@ -456,7 +465,15 @@ The bridge keeps **one channel per daemon** (one daemon per workspace, per §02)
 
 ## Logging in to a remote daemon (issue #4175 PR 21)
 
-When the daemon runs on a remote pod (no shared display with you), you can still log in to a Qwen account by triggering an OAuth device flow over HTTP. The daemon polls the IdP itself; your job is just to open a URL on whatever device has a browser.
+When the daemon runs on a remote pod (no shared display with you), a client can
+trigger an OAuth device flow over HTTP. The daemon polls the IdP itself; your job
+is just to open a URL on whatever device has a browser.
+
+> [!note]
+>
+> Qwen OAuth free tier was discontinued on 2026-04-15. The `qwen-oauth`
+> examples below document the device-flow protocol shape and legacy provider
+> identifier; new setups should use a currently supported auth provider.
 
 ```bash
 # 1. Start a flow. The daemon contacts the IdP, returns a code + URL.

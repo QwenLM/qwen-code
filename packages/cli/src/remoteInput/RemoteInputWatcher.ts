@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createReadStream, watchFile, unwatchFile, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  createReadStream,
+  openSync,
+  readSync,
+  statSync,
+  unwatchFile,
+  watchFile,
+} from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
@@ -51,6 +60,7 @@ export class RemoteInputWatcher {
   private processing = false;
   private active = true;
   private bytesRead = 0;
+  private consumedPrefixHash: string | null = null;
   private reading = false;
   private filePath: string;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -95,8 +105,10 @@ export class RemoteInputWatcher {
     try {
       const stat = statSync(this.filePath);
       this.bytesRead = stat.size;
+      this.consumedPrefixHash = this.hashFilePrefix(this.bytesRead);
     } catch {
       this.bytesRead = 0;
+      this.consumedPrefixHash = null;
     }
 
     watchFile(this.filePath, { interval: this.pollIntervalMs }, () => {
@@ -128,8 +140,25 @@ export class RemoteInputWatcher {
       return Promise.resolve();
     }
 
+    // Size alone misses truncate+rewrite that lands at the same or a larger
+    // size. Append-only writes preserve the consumed prefix hash; rewrites do not.
+    if (currentSize < this.bytesRead) {
+      debugLogger.debug(
+        'RemoteInput: input file shrank, resetting read offset',
+      );
+      this.bytesRead = 0;
+      this.consumedPrefixHash = null;
+    } else if (this.hasConsumedPrefixChanged()) {
+      debugLogger.debug(
+        'RemoteInput: input file prefix changed, resetting read offset',
+      );
+      this.bytesRead = 0;
+      this.consumedPrefixHash = null;
+    }
+
     if (currentSize <= this.bytesRead) return Promise.resolve();
 
+    const nextConsumedPrefixHash = this.hashFilePrefix(currentSize);
     this.reading = true;
     const stream = createReadStream(this.filePath, {
       start: this.bytesRead,
@@ -179,11 +208,66 @@ export class RemoteInputWatcher {
     return new Promise<void>((resolve) => {
       rl.on('close', () => {
         this.bytesRead = currentSize;
+        if (nextConsumedPrefixHash !== null) {
+          this.consumedPrefixHash = nextConsumedPrefixHash;
+        }
         this.reading = false;
         this.processQueue();
         resolve();
       });
     });
+  }
+
+  private hasConsumedPrefixChanged(): boolean {
+    if (this.bytesRead === 0) {
+      return false;
+    }
+    if (this.consumedPrefixHash === null) {
+      debugLogger.warn(
+        'RemoteInput: missing consumed prefix hash, resetting read offset',
+      );
+      return true;
+    }
+
+    const currentHash = this.hashFilePrefix(this.bytesRead);
+    if (currentHash === null) {
+      debugLogger.warn(
+        'RemoteInput: failed to hash consumed prefix, resetting read offset',
+      );
+      return true;
+    }
+    return currentHash !== this.consumedPrefixHash;
+  }
+
+  private hashFilePrefix(size: number): string | null {
+    if (size <= 0) return null;
+
+    let fd: number | null = null;
+    try {
+      fd = openSync(this.filePath, 'r');
+      const hash = createHash('sha256');
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, size));
+      let remaining = size;
+      let position = 0;
+
+      while (remaining > 0) {
+        const bytesToRead = Math.min(buffer.length, remaining);
+        const bytesRead = readSync(fd, buffer, 0, bytesToRead, position);
+        if (bytesRead <= 0) return null;
+        hash.update(buffer.subarray(0, bytesRead));
+        remaining -= bytesRead;
+        position += bytesRead;
+      }
+
+      return hash.digest('base64');
+    } catch (err) {
+      debugLogger.warn('RemoteInput: failed to hash file prefix:', err);
+      return null;
+    } finally {
+      if (fd !== null) {
+        closeSync(fd);
+      }
+    }
   }
 
   private async processQueue(): Promise<void> {

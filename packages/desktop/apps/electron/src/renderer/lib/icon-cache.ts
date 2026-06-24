@@ -20,7 +20,7 @@
  */
 
 import { useState, useEffect, useMemo } from 'react'
-import { isEmoji } from '@craft-agent/shared/utils/icon-constants'
+import { isEmoji, isIconUrl } from '@craft-agent/shared/utils/icon-constants'
 import type { ResolvedEntityIcon } from '@craft-agent/shared/icons'
 
 // ============================================================================
@@ -201,7 +201,7 @@ export async function loadSourceIcon(
 
   // Priority 3: URL in config.icon - return URL directly
   // Config URL takes precedence over auto-discovered local files
-  if (icon && (icon.startsWith('http://') || icon.startsWith('https://'))) {
+  if (icon && isIconUrl(icon)) {
     sourceIconCache.set(cacheKey, icon)
     return icon
   }
@@ -320,7 +320,7 @@ export async function loadSkillIcon(
   }
 
   // Priority 2: URL in metadata - return URL directly
-  if (iconValue && (iconValue.startsWith('http://') || iconValue.startsWith('https://'))) {
+  if (iconValue && isIconUrl(iconValue)) {
     skillIconCache.set(cacheKey, iconValue)
     return iconValue
   }
@@ -538,7 +538,7 @@ export function useEntityIcon(opts: UseEntityIconOptions): ResolvedEntityIcon {
     // Guard against non-string values (can happen with malformed config data)
     if (!iconValue || typeof iconValue !== 'string') return null
     if (isEmoji(iconValue)) return { type: 'emoji' as const, value: iconValue }
-    if (iconValue.startsWith('http://') || iconValue.startsWith('https://')) {
+    if (isIconUrl(iconValue)) {
       return { type: 'url' as const, value: iconValue }
     }
     return null

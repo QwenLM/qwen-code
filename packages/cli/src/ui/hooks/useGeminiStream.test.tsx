@@ -44,6 +44,7 @@ const mockSendMessageStream = vi
   .fn()
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
+const mockRunVisionBridge = vi.hoisted(() => vi.fn());
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -106,6 +107,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     activeGoalEquals: mockActiveGoalEquals,
     setActiveGoal: mockSetActiveGoal,
     clearActiveGoal: mockClearActiveGoal,
+    runVisionBridge: mockRunVisionBridge,
   };
 });
 
@@ -276,6 +278,7 @@ describe('useGeminiStream', () => {
       .mockClear()
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
+    mockRunVisionBridge.mockReset();
   });
 
   afterEach(() => {
@@ -332,6 +335,7 @@ describe('useGeminiStream', () => {
           props.history,
           props.addItem,
           props.config,
+          true,
           props.loadedSettings,
           props.onDebugMessage,
           props.handleSlashCommand,
@@ -407,6 +411,351 @@ describe('useGeminiStream', () => {
           type: SendMessageType.Notification,
           notificationDisplayText: displayText,
         }),
+      );
+    });
+  });
+
+  describe('vision bridge gate', () => {
+    const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
+    const enableBridge = (primaryAcceptsImages = false) => {
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: () =>
+          primaryAcceptsImages ? { image: true } : {},
+        getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      });
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'describe' }, imagePart],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+    };
+
+    it('runs the bridge and replaces image parts with text for text-only models', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+      expect(sent).toContain('[transcribed image]');
+      expect(sent).not.toContain('inlineData');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Converted 1 image(s) to text via vm'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('caps very long bridge transcripts in the user-facing notice', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: `${'a'.repeat(5000)}TAIL_SHOULD_BE_TRUNCATED`,
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.not.stringContaining('TAIL_SHOULD_BE_TRUNCATED'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Transcript truncated'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('strips terminal control/escape characters from the transcript notice', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        // Untrusted image transcript with an ANSI (C0 ESC) and a C1 CSI control.
+        transcript: 'clean\u001b[31mRED\u009b2Ktext',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      const notice = mockAddItem.mock.calls.find(
+        (c) =>
+          c[0]?.type === MessageType.INFO &&
+          String(c[0]?.text).includes('Converted'),
+      );
+      const text = String(notice?.[0]?.text ?? '');
+      expect(text).toContain('clean'); // clean text preserved
+      expect(text).toContain('RED');
+      expect(text).not.toContain('\u001b'); // ESC stripped
+      expect(text).not.toContain('\u009b'); // C1 CSI stripped
+    });
+
+    it('does not query bridge config for text-only messages', async () => {
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: vi.fn(() => ({})),
+        getDefaultVisionBridgeModel: vi.fn(() => ({ id: 'vision-model' })),
+      });
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'describe without images' }],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('describe without images');
+      });
+
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockConfig.getEffectiveInputModalities).not.toHaveBeenCalled();
+      expect(mockConfig.getDefaultVisionBridgeModel).not.toHaveBeenCalled();
+    });
+
+    it('keeps the turn alive with text plus a note when the bridge fails', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [
+          { text: 'describe' },
+          {
+            text: '[Vision bridge could not interpret the attached image(s): timed out.]',
+          },
+        ],
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'vm',
+        modelEndpoint: 'vision.example.com',
+        egressOccurred: true,
+        error: 'timed out',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+      expect(sent).toContain('could not interpret');
+      expect(sent).not.toContain('inlineData');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent to vm (vision.example.com).',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('does not expose raw provider errors in the bridge failure notice', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [
+          { text: 'describe' },
+          {
+            text: '[Vision bridge could not interpret the attached image(s): the vision model request failed.]',
+          },
+        ],
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'vm',
+        modelEndpoint: 'vision.example.com',
+        egressOccurred: true,
+        error: '401 from https://signed.example.com?token=secret',
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.not.stringContaining('token=secret'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('vision model request failed'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('shows egress disclosure after cancellation if image data was already sent', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockImplementation(({ signal }) => {
+        Object.defineProperty(signal, 'aborted', {
+          value: true,
+          configurable: true,
+        });
+        return Promise.resolve({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelId: 'vm',
+          modelEndpoint: 'vision.example.com',
+          egressOccurred: true,
+        });
+      });
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent to vm (vision.example.com).',
+          ),
+        }),
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('does not show a bridge notice after cancellation before dispatch', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockImplementation(({ signal }) => {
+        Object.defineProperty(signal, 'aborted', {
+          value: true,
+          configurable: true,
+        });
+        return Promise.resolve({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelId: 'vm',
+        });
+      });
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('were sent to'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('skips the bridge when the primary model already accepts images', async () => {
+      enableBridge(/* primaryAcceptsImages */ true);
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      // The image is sent straight to the (multimodal) primary model.
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        'inlineData',
+      );
+    });
+
+    it('runs the bridge when primary model modalities are unknown', async () => {
+      enableBridge();
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: () => ({}),
+      });
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        '[transcribed image]',
+      );
+      expect(
+        JSON.stringify(mockSendMessageStream.mock.calls[0][0]),
+      ).not.toContain('inlineData');
+    });
+
+    it('skips the bridge when no image-capable model is available', async () => {
+      enableBridge();
+      Object.assign(mockConfig, {
+        getDefaultVisionBridgeModel: () => undefined,
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        'inlineData',
       );
     });
   });
@@ -620,6 +969,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -719,6 +1069,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -786,8 +1137,25 @@ describe('useGeminiStream', () => {
       },
     };
     const resolvedTextPart: Part = { text: 'inspect @/tmp/screenshot.png' };
+    const transcriptPart: Part = { text: '[mid-turn image transcript]' };
     const recordMidTurnUserMessage = vi.fn();
     const recordAtCommand = vi.fn();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      getChatRecordingService: vi.fn(() => ({
+        recordMidTurnUserMessage: vi.fn(),
+      })),
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [transcriptPart],
+      transcript: '[mid-turn image transcript]',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vm',
+    });
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
       recordAtCommand,
       recordMidTurnUserMessage,
@@ -854,6 +1222,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -884,10 +1253,24 @@ describe('useGeminiStream', () => {
 
     const expectedMidTurnParts: Part[] = [
       {
-        text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
+        text: `\n[User message received during tool execution]: ${transcriptPart.text}`,
       },
-      resolvedImagePart,
     ];
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [resolvedTextPart, resolvedImagePart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('[mid-turn image transcript]'),
+      }),
+      expect.any(Number),
+    );
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('[mid-turn image transcript]');
+    expect(sent).not.toContain('inlineData');
     expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
       expect.objectContaining({
         query: queuedPrompt,
@@ -911,6 +1294,134 @@ describe('useGeminiStream', () => {
       expect.any(AbortSignal),
       'prompt-id-midturn-image',
       { type: SendMessageType.ToolResult },
+    );
+  });
+
+  it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
+    const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
+    const resolvedImagePart: Part = {
+      inlineData: {
+        mimeType: 'image/png',
+        data: 'iVBORw0KGgo=',
+      },
+    };
+    const resolvedTextPart: Part = {
+      text: 'inspect @/tmp/screenshot.png and summarize',
+    };
+    const recordMidTurnUserMessage = vi.fn();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      getChatRecordingService: vi.fn(() => ({
+        recordMidTurnUserMessage: vi.fn(),
+      })),
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: false,
+      status: 'failed',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelId: 'vm',
+      egressOccurred: true,
+      error: 'provider failed',
+    });
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedImagePart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
+    >);
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-bridge-fail',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.(completedToolCalls);
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
+    expect(sent).not.toContain('inlineData');
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [
+        {
+          text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
+        },
+      ],
+      queuedPrompt,
     );
   });
 
@@ -996,6 +1507,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1115,6 +1627,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1239,6 +1752,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1352,6 +1866,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1458,6 +1973,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1557,6 +2073,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1645,6 +2162,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1757,6 +2275,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1803,6 +2322,79 @@ describe('useGeminiStream', () => {
       // No message should be sent back to the API for a turn with only cancellations
       expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
+  });
+
+  it('does not schedule tool calls collected before a LoopDetected halt', async () => {
+    mockUseReactToolScheduler.mockImplementation(() => [
+      [],
+      mockScheduleToolCalls,
+      mockMarkToolsAsSubmitted,
+    ]);
+
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        // Two identical calls stream before the always-on consecutive guard
+        // halts the turn. The TUI must NOT execute them — it should halt
+        // cleanly like the non-interactive runner.
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'rep-1',
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-loop-halt',
+          },
+        };
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'rep-2',
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-loop-halt',
+          },
+        };
+        yield { type: ServerGeminiEventType.LoopDetected };
+      })(),
+    );
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('repeat a tool');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    // The calls streamed before the halt must not be scheduled for execution.
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
   });
 
   it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
@@ -1861,6 +2453,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2140,6 +2733,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2278,6 +2872,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2425,6 +3020,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2540,6 +3136,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2662,6 +3259,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2863,6 +3461,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2988,6 +3587,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -3126,6 +3726,7 @@ describe('useGeminiStream', () => {
           historyWithToolGroup,
           mockAddItem,
           config,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3307,6 +3908,7 @@ describe('useGeminiStream', () => {
           history,
           mockAddItem,
           config,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3737,10 +4339,10 @@ describe('useGeminiStream', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        {
+        expect.objectContaining({
           type: 'gemini',
           text: 'Initial',
-        },
+        }),
         expect.any(Number),
       );
 
@@ -3804,6 +4406,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3853,6 +4456,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3909,6 +4513,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3968,6 +4573,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4049,6 +4655,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4104,6 +4711,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4161,6 +4769,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4234,6 +4843,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4582,6 +5192,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4639,6 +5250,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           testConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5132,6 +5744,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5187,6 +5800,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5243,6 +5857,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5355,6 +5970,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -5409,6 +6025,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -5483,6 +6100,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5580,6 +6198,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5986,6 +6605,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -6102,6 +6722,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -6175,6 +6796,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6245,6 +6867,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6374,6 +6997,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6429,6 +7053,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -6650,10 +7275,10 @@ describe('useGeminiStream', () => {
         });
 
         expect(mockAddItem).toHaveBeenCalledWith(
-          {
+          expect.objectContaining({
             type: 'gemini',
             text: 'First call content',
-          },
+          }),
           expect.any(Number),
         );
         expect(mainAbortSignal?.aborted).toBe(true);
@@ -7495,6 +8120,150 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         );
+      });
+    });
+  });
+
+  describe('cron scheduler initialization', () => {
+    // Renders useGeminiStream wired to a provided cron scheduler mock, with a
+    // controllable isConfigInitialized gate. `config` identity is stable across
+    // rerenders so the cron effect only re-runs when `initialized` flips.
+    const renderCronHook = (scheduler: unknown, initialized: boolean) => {
+      const cronConfig = {
+        ...mockConfig,
+        isCronEnabled: vi.fn(() => true),
+        getCronScheduler: vi.fn(() => scheduler),
+      } as unknown as Config;
+      return renderHook(
+        (props: { initialized: boolean }) =>
+          useGeminiStream(
+            new MockedGeminiClientClass(cronConfig),
+            [],
+            mockAddItem,
+            cronConfig,
+            props.initialized,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand as unknown as (
+              cmd: PartListUnion,
+            ) => Promise<SlashCommandProcessorResult | false>,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        { initialProps: { initialized } },
+      );
+    };
+
+    it('defers enableDurable and start until isConfigInitialized is true', async () => {
+      const callOrder: string[] = [];
+      const scheduler = {
+        // A real async gap before recording: a synchronous push would make the
+        // order assertion pass even if production dropped the `await`.
+        enableDurable: vi.fn().mockImplementation(async () => {
+          await new Promise((r) => setTimeout(r, 10));
+          callOrder.push('enableDurable');
+        }),
+        start: vi.fn().mockImplementation(() => {
+          callOrder.push('start');
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      const { rerender } = renderCronHook(scheduler, false);
+
+      // Before initialization: the scheduler must not be touched.
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      expect(scheduler.start).not.toHaveBeenCalled();
+
+      rerender({ initialized: true });
+
+      await waitFor(() => {
+        expect(scheduler.start).toHaveBeenCalled();
+      });
+      // enableDurable is awaited before start despite the 10ms gap.
+      expect(callOrder).toEqual(['enableDurable', 'start']);
+    });
+
+    it('does not start scheduler when isConfigInitialized remains false', async () => {
+      const scheduler = {
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      renderCronHook(scheduler, false);
+
+      // Give effects time to run.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      expect(scheduler.start).not.toHaveBeenCalled();
+    });
+
+    it('does not start scheduler if unmounted during the enableDurable gap', async () => {
+      // enableDurable stays pending until we resolve it by hand, so we can
+      // unmount inside the async gap — the exact race the `stopped` flag guards.
+      let resolveEnable: () => void = () => {};
+      const scheduler = {
+        enableDurable: vi.fn().mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              resolveEnable = resolve;
+            }),
+        ),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      const { unmount } = renderCronHook(scheduler, true);
+
+      await waitFor(() => {
+        expect(scheduler.enableDurable).toHaveBeenCalled();
+      });
+      expect(scheduler.start).not.toHaveBeenCalled();
+
+      // Unmount while enableDurable is still in flight, then let it resolve.
+      unmount();
+      resolveEnable();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // The stopped guard must suppress the late start(); cleanup ran stop().
+      expect(scheduler.start).not.toHaveBeenCalled();
+      expect(scheduler.stop).toHaveBeenCalled();
+    });
+
+    it('still starts the scheduler when enableDurable rejects', async () => {
+      const scheduler = {
+        enableDurable: vi.fn().mockRejectedValue(new Error('lock contention')),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      renderCronHook(scheduler, true);
+
+      // A failed enableDurable must NOT skip start(): session-only cron tasks
+      // (created via cron_create during this session) still need the scheduler
+      // running — only durable/persistent tasks are lost. Regression guard for
+      // the catch falling through instead of returning (#5022 review).
+      await waitFor(() => {
+        expect(scheduler.start).toHaveBeenCalled();
       });
     });
   });

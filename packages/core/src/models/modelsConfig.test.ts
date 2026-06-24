@@ -1398,6 +1398,47 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getGenerationConfig().model).toBe('model-a');
   });
 
+  it('should use explicit provider baseUrl when syncing after provider install', () => {
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'shared-model',
+          name: 'Shared Model (old)',
+          baseUrl: 'https://old.example.com/v1',
+          envKey: 'OLD_API_KEY',
+        },
+        {
+          id: 'shared-model',
+          name: 'Shared Model (new)',
+          baseUrl: 'https://new.example.com/v1',
+          envKey: 'NEW_API_KEY',
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'shared-model',
+        baseUrl: 'https://old.example.com/v1',
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(
+      AuthType.USE_OPENAI,
+      'shared-model',
+      'https://new.example.com/v1',
+    );
+
+    expect(modelsConfig.getModel()).toBe('shared-model');
+    expect(modelsConfig.getGenerationConfig()).toMatchObject({
+      model: 'shared-model',
+      baseUrl: 'https://new.example.com/v1',
+      apiKeyEnvKey: 'NEW_API_KEY',
+    });
+  });
+
   it('should maintain consistency between currentModelId and _generationConfig.model during setModel', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
@@ -1736,6 +1777,71 @@ describe('ModelsConfig', () => {
           .slice(0, firstNonQwenIndex)
           .every((m) => m.authType === AuthType.QWEN_OAUTH),
       ).toBe(true);
+    });
+
+    it('should include an active runtime model whose authType has no registry models', () => {
+      // Regression for #5089: an OPENAI_*-derived runtime model (no registry
+      // entry) used to drop out of the default listing because the iteration
+      // was limited to `modelRegistry.getAuthTypes()`, which only knows about
+      // authTypes that have registry models. The runtime model can be the
+      // *current* model, so it must still appear in availableModels.
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'my-openai-model',
+          apiKey: 'sk-test-key',
+          baseUrl: 'https://api.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'env', envKey: 'OPENAI_MODEL' },
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+          baseUrl: { kind: 'env', envKey: 'OPENAI_BASE_URL' },
+        },
+      });
+
+      const snapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+      expect(snapshotId).toBe('$runtime|openai|my-openai-model');
+
+      // Default call (no explicit authTypes) — the openai runtime model must
+      // be present even though openai has no registry models.
+      const allModels = modelsConfig.getAllConfiguredModels();
+      const openaiModel = allModels.find(
+        (m) => m.authType === AuthType.USE_OPENAI,
+      );
+      expect(openaiModel).toBeDefined();
+      expect(openaiModel?.id).toBe('my-openai-model');
+      expect(openaiModel?.isRuntimeModel).toBe(true);
+
+      // qwen-oauth registry models still come first and are still listed.
+      expect(allModels.some((m) => m.authType === AuthType.QWEN_OAUTH)).toBe(
+        true,
+      );
+    });
+
+    it('should not inject the runtime model when an explicit authType filter excludes it', () => {
+      // The runtime-model injection is scoped to the default listing; an
+      // explicit filter must return exactly the requested authType set.
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'my-openai-model',
+          apiKey: 'sk-test-key',
+          baseUrl: 'https://api.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'env', envKey: 'OPENAI_MODEL' },
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+          baseUrl: { kind: 'env', envKey: 'OPENAI_BASE_URL' },
+        },
+      });
+      modelsConfig.detectAndCaptureRuntimeModel();
+
+      const qwenOnly = modelsConfig.getAllConfiguredModels([
+        AuthType.QWEN_OAUTH,
+      ]);
+      expect(qwenOnly.every((m) => m.authType === AuthType.QWEN_OAUTH)).toBe(
+        true,
+      );
     });
   });
 
@@ -2494,6 +2600,39 @@ describe('ModelsConfig', () => {
       });
 
       expect(modelsConfig.getModelDisplayName('gpt-4o')).toBe('GPT-4o');
+    });
+
+    it('should disambiguate duplicate model ids by current baseUrl', async () => {
+      const idealabBaseUrl = 'https://idealab.example.com/api/openai/v1';
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'qwen3.7-max',
+            name: '[Token Plan] qwen3.7-max',
+            baseUrl: 'https://token-plan.example.com/v1',
+            envKey: 'TOKEN_PLAN_API_KEY',
+          },
+          {
+            id: 'qwen3.7-max',
+            name: '[Idealab] qwen3.7-max',
+            baseUrl: idealabBaseUrl,
+            envKey: 'IDEALAB_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'qwen3.7-max', {
+        baseUrl: idealabBaseUrl,
+      });
+
+      expect(modelsConfig.getModelDisplayName('qwen3.7-max')).toBe(
+        '[Idealab] qwen3.7-max',
+      );
     });
 
     it('should return raw modelId when currentAuthType is falsy', () => {

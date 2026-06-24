@@ -20,6 +20,7 @@ import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
+  ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceExtensionsStatus,
@@ -39,6 +40,7 @@ export interface RewindSnapshotInfo {
 
 export interface RewindRequest {
   promptId: string;
+  rewindFiles?: boolean;
 }
 
 export interface RewindResponse {
@@ -109,8 +111,14 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface BridgeForkAgentResult {
+  sessionId: string;
+  description: string;
+  launched: boolean;
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -119,7 +127,6 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
@@ -240,6 +247,22 @@ export interface BridgeDaemonStatusSnapshot {
   sessions: BridgeDaemonSessionDiagnostic[];
 }
 
+export interface BridgeExtensionsChangedData {
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
+}
+
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
@@ -281,10 +304,10 @@ export interface AcpSessionBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `PromptQueueFullError` and pre-aborted signals throw
-   * synchronously so HTTP routes can reject before returning 202. Deferred
-   * failures such as `SessionNotFoundError` may be returned as rejected
-   * promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject before
+   * returning 202. Deferred failures such as `SessionNotFoundError` may be
+   * returned as rejected promises.
    */
   sendPrompt(
     sessionId: string,
@@ -448,6 +471,9 @@ export interface AcpSessionBridge {
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
 
+  /** Read sanitized LSP server status for a live session. */
+  getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
   /** Cancel a background task in a live session. */
   cancelSessionTask(
     sessionId: string,
@@ -471,6 +497,20 @@ export interface AcpSessionBridge {
 
   /** Read workspace-level installed extension status. */
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
+
+  /**
+   * Broadcast extension refresh to all active sessions and emit an
+   * `extensions_changed` workspace event when complete.
+   */
+  refreshExtensionsForAllSessions(
+    data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+  ): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
+
+  /** Emit an extension lifecycle event without refreshing sessions. */
+  broadcastExtensionsChanged(data: BridgeExtensionsChangedData): void;
 
   /**
    * Switch the active model service for a session. Throws
@@ -542,6 +582,17 @@ export interface AcpSessionBridge {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<{ sessionId: string; answer: string | null }>;
+
+  /**
+   * Launch a background fork agent that inherits the live session's current
+   * conversation context. This is CLI `/fork`, not ACP `session/fork`
+   * (which maps to `/branch`).
+   */
+  launchSessionForkAgent(
+    sessionId: string,
+    directive: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeForkAgentResult>;
 
   /**
    * Queue a mid-turn user message for the running turn. The ACP child drains
