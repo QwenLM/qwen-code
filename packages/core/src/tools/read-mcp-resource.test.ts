@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import type { ToolResult } from './tools.js';
 import { ToolNames } from './tool-names.js';
 import { ReadMcpResourceTool } from './read-mcp-resource.js';
 import {
@@ -127,6 +128,11 @@ describe('ReadMcpResourceTool', () => {
     expect(result.llmContent).toBe(
       '\n--- MCP resource asys-mcp-http:asight://empty: (no readable content) ---\n',
     );
+    // returnDisplay must carry the `Read resource` prefix too (the happy path
+    // asserts both); a regression to `undefined`/a bare summary would slip by.
+    expect(result.returnDisplay).toBe(
+      'Read resource asys-mcp-http:asight://empty — (no readable content)',
+    );
   });
 
   it('asks for confirmation by default (untrusted server)', async () => {
@@ -156,6 +162,20 @@ describe('ReadMcpResourceTool', () => {
       }),
     );
     const inv = tool.build({ server_name: 'srv', uri: 'x://a' });
+    expect(await inv.getDefaultPermission()).toBe('ask');
+  });
+
+  it('asks for confirmation when server_name is not configured', async () => {
+    // Likeliest real case: the model hallucinates a server name, or config
+    // changed. `server` is undefined, so the trust check falls through to 'ask'
+    // even in a trusted folder with another trusted server present.
+    const tool = new ReadMcpResourceTool(
+      configWith(vi.fn(), {
+        mcpServers: { other: { trust: true } },
+        trustedFolder: true,
+      }),
+    );
+    const inv = tool.build({ server_name: 'nonexistent', uri: 'x://a' });
     expect(await inv.getDefaultPermission()).toBe('ask');
   });
 
@@ -197,15 +217,21 @@ describe('ReadMcpResourceTool', () => {
     const signal = new AbortController().signal;
 
     const blobCounts: number[] = [];
+    let starved: ToolResult | undefined;
     for (let i = 0; i < 4; i++) {
       const result = await tool
         .build({ server_name: 'srv', uri: `x://${i}` })
         .execute(signal);
       blobCounts.push(inlineCount(result.llmContent));
+      starved = result;
     }
 
     // First three calls fit (budget = 3× per-call cap); the fourth is skipped.
     expect(blobCounts).toEqual([1, 1, 1, 0]);
+    // The starved call surfaces the budget-exhaustion diagnostic, not silent
+    // empty content — inlineCount alone can't tell those two apart.
+    expect(starved!.llmContent).toContain('(content too large — skipped)');
+    expect(starved!.returnDisplay).toContain('(content too large — skipped)');
   });
 
   it('does not share the blob budget across different signals (turns)', async () => {
