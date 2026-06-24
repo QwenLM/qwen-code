@@ -443,6 +443,31 @@ describe('handleSlashCommand', () => {
     });
   });
 
+  it('records failed SKILL commands when action throws', async () => {
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockRejectedValue(new Error('boom')),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    await expect(
+      handleSlashCommand('/review', abortController, mockConfig, mockSettings),
+    ).rejects.toThrow('boom');
+
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+  });
+
   it('records blocked SKILL submit_prompt commands as failures', async () => {
     mockFireUserPromptExpansionEvent.mockResolvedValue({
       getBlockingError: () => ({
@@ -470,6 +495,37 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result.type).toBe('message');
+    expect(
+      uiTelemetryService.getMetricsForSession('test-session').skills,
+    ).toEqual({
+      totalCalls: 1,
+      totalSuccess: 0,
+      totalFail: 1,
+      byName: {
+        review: { count: 1, success: 0, fail: 1 },
+      },
+    });
+  });
+
+  it('records SKILL submit_prompt commands as failures when hooks throw', async () => {
+    mockFireUserPromptExpansionEvent.mockRejectedValue(
+      new Error('hook crash'),
+    );
+    const mockSkillCommand = {
+      name: 'review',
+      description: 'Review code',
+      kind: CommandKind.SKILL,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'Review prompt',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillCommand]);
+
+    await expect(
+      handleSlashCommand('/review', abortController, mockConfig, mockSettings),
+    ).rejects.toThrow('hook crash');
+
     expect(
       uiTelemetryService.getMetricsForSession('test-session').skills,
     ).toEqual({
