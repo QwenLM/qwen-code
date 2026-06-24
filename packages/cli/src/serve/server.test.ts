@@ -261,6 +261,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_branch',
   ),
   'workspace_settings',
+  'workspace_permissions',
   'workspace_init',
   'workspace_mcp_restart',
   'session_recap',
@@ -1084,6 +1085,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       resumeCalls.push(req);
       return result;
     },
+    // Keep non-async so prompt admission failures can throw synchronously.
     sendPrompt(sessionId, req, signal, context) {
       promptCalls.push({
         sessionId,
@@ -1589,6 +1591,20 @@ describe('createServeApp', () => {
           continue;
         }
         if (feature === 'workspace_settings') {
+          expect(predicate({ persistSettingAvailable: true })).toBe(true);
+          expect(predicate({ persistSettingAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistSettingAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_permissions') {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -5319,6 +5335,36 @@ describe('createServeApp', () => {
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
       expect(res.status).toBe(202);
       expect(res.body.promptId).toBeDefined();
+    });
+
+    it('400 without promptId when bridge rejects invalid client admission synchronously', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new InvalidClientIdError('session-A', 'client-stale');
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-stale')
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-stale',
+      });
+      expect(res.body.promptId).toBeUndefined();
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'prompt admission rejected: invalid client id',
+        expect.objectContaining({
+          sessionId: 'session-A',
+          clientId: 'client-stale',
+        }),
+      );
     });
 
     it('503 without promptId when bridge rejects prompt admission synchronously', async () => {
