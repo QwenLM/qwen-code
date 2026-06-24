@@ -94,6 +94,22 @@ describe('update command', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('does not print generic fallback when installation info has updateMessage', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+      updateMessage: 'Running via npx, update not applicable.',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Running via npx, update not applicable.',
+    );
+    expect(writeStdoutLine).not.toHaveBeenCalledWith(
+      'Manual update required. Please reinstall Qwen Code.',
+    );
+  });
+
   it('prints success message on standalone update', async () => {
     getInstallationInfo.mockReturnValue({
       isStandalone: true,

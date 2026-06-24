@@ -89,6 +89,22 @@ describe('updateCommand', () => {
     });
   });
 
+  it('does not append generic fallback when installation info has updateMessage', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+      updateMessage: 'Running via npx, update not applicable.',
+    });
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nRunning via npx, update not applicable.',
+    });
+  });
+
   it('returns standalone reinstall guidance when no update command is available', async () => {
     getInstallationInfo.mockReturnValue({
       isStandalone: true,

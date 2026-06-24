@@ -216,6 +216,27 @@ export function isSafeTarLinkTarget(
   return isPathInside(resolvedDest, linkTarget);
 }
 
+export function isSafeTarEntry(
+  entryPath: string,
+  entry: { type?: string; linkpath?: unknown },
+  resolvedDest: string,
+): boolean {
+  if (!isSafeTarEntryPath(entryPath)) return false;
+
+  // Reject hardlinks outright. tar resolves hardlink linkpath relative to the
+  // extraction root, not the entry directory, so sharing symlink target logic
+  // would allow traversal outside resolvedDest.
+  if (entry.type === 'Link') {
+    return false;
+  }
+
+  if (entry.type === 'SymbolicLink' && entry.linkpath !== undefined) {
+    return isSafeTarLinkTarget(entryPath, String(entry.linkpath), resolvedDest);
+  }
+
+  return true;
+}
+
 function isAlreadyExistsError(err: unknown): boolean {
   return (
     typeof err === 'object' &&
@@ -292,19 +313,7 @@ async function extractArchive(
       file: archivePath,
       cwd: destDir,
       preservePaths: false,
-      filter: (p, entry) => {
-        if (!isSafeTarEntryPath(p)) return false;
-        if (
-          'type' in entry &&
-          (entry.type === 'SymbolicLink' || entry.type === 'Link') &&
-          'linkpath' in entry
-        ) {
-          if (!isSafeTarLinkTarget(p, String(entry.linkpath), resolvedDest)) {
-            return false;
-          }
-        }
-        return true;
-      },
+      filter: (p, entry) => isSafeTarEntry(p, entry, resolvedDest),
     });
     // Post-extraction defense-in-depth: detect chained symlink attacks that
     // bypass the string-level filter (e.g. symlink A → ".", then A/payload → "../../etc")

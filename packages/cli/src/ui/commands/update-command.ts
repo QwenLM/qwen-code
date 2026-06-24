@@ -67,15 +67,17 @@ export const updateCommand: SlashCommand = {
         info.update.latest,
       );
       lines.push(t('Run the following to update:'), `  ${updateCmd}`);
-    } else if (installationInfo.isStandalone) {
-      lines.push(
-        t(
-          'Unable to auto-update this standalone installation. Please reinstall from:',
-        ),
-        '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/',
-      );
-    } else {
-      lines.push(t('Manual update required. Please reinstall Qwen Code.'));
+    } else if (!installationInfo.updateMessage) {
+      if (installationInfo.isStandalone) {
+        lines.push(
+          t(
+            'Unable to auto-update this standalone installation. Please reinstall from:',
+          ),
+          '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/',
+        );
+      } else {
+        lines.push(t('Manual update required. Please reinstall Qwen Code.'));
+      }
     }
 
     // Non-interactive / ACP mode: report the available update and manual command.

@@ -83,7 +83,7 @@ export const updateCommand: CommandModule = {
       );
       writeStdoutLine(t('Run the following to update:'));
       writeStdoutLine(`  ${updateCmd}`);
-    } else {
+    } else if (!installationInfo.updateMessage) {
       if (installationInfo.isStandalone) {
         writeStdoutLine(
           t(

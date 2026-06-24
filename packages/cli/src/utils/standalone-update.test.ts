@@ -14,6 +14,7 @@ import {
   ensurePathInShellRc,
   performStandaloneUpdate,
   isSafeTarEntryPath,
+  isSafeTarEntry,
   isSafeTarLinkTarget,
 } from './standalone-update.js';
 
@@ -322,7 +323,7 @@ describe('standalone-update', () => {
       );
     });
 
-    it('rejects symlink and hardlink targets outside the extraction directory', () => {
+    it('rejects symlink targets outside the extraction directory', () => {
       const dest = path.join(tempDir, 'extract');
       expect(
         isSafeTarLinkTarget('qwen-code/bin/qwen', '../../../etc/passwd', dest),
@@ -337,6 +338,31 @@ describe('standalone-update', () => {
           dest,
         ),
       ).toBe(false);
+    });
+  });
+
+  describe('isSafeTarEntry', () => {
+    it('rejects hardlinks outright', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarEntry(
+          'qwen-code/bin/qwen',
+          { type: 'Link', linkpath: '../poc.txt' },
+          dest,
+        ),
+      ).toBe(false);
+    });
+
+    it('allows safe regular entries and safe symlinks', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(isSafeTarEntry('qwen-code/bin/qwen', {}, dest)).toBe(true);
+      expect(
+        isSafeTarEntry(
+          'qwen-code/bin/qwen',
+          { type: 'SymbolicLink', linkpath: '../lib/cli.js' },
+          dest,
+        ),
+      ).toBe(true);
     });
   });
 
