@@ -3106,6 +3106,7 @@ describe('ContentGenerationPipeline', () => {
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
       expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
       expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
+      expect(gated.wasReturned()).toBe(true);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
@@ -3131,6 +3132,7 @@ describe('ContentGenerationPipeline', () => {
         chunksReceived: 0,
         streamLifetimeMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
       });
+      expect(gated.wasReturned()).toBe(true);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
@@ -3210,6 +3212,7 @@ describe('ContentGenerationPipeline', () => {
       await vi.advanceTimersByTimeAsync(1000);
       expect(await captured).toMatchObject({ code: 'ETIMEDOUT' });
       expect(sdkSignal?.aborted).toBe(true);
+      expect(gated.wasReturned()).toBe(true);
     });
 
     it('delivers chunks then throws ETIMEDOUT when the stream stalls after some output', async () => {
@@ -3234,6 +3237,7 @@ describe('ContentGenerationPipeline', () => {
         chunksReceived: 1,
       });
       expect(results).toHaveLength(1);
+      expect(gated.wasReturned()).toBe(true);
     });
 
     it('resets the timer on each chunk and completes a slow-but-active stream', async () => {
@@ -3329,6 +3333,7 @@ describe('ContentGenerationPipeline', () => {
       const err = (await captured) as { name?: string; code?: string };
       expect(err.name).toBe('AbortError');
       expect(err.code).not.toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
     });
 
     it('is disabled when streamIdleTimeoutMs <= 0 (no timeout fires)', async () => {
@@ -3379,6 +3384,7 @@ describe('ContentGenerationPipeline', () => {
       await vi.advanceTimersByTimeAsync(1000);
       await consume;
       expect(settled).toBe(true);
+      expect(gated.wasReturned()).toBe(true);
     });
 
     it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
@@ -3412,6 +3418,7 @@ describe('ContentGenerationPipeline', () => {
       const err = await captured;
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect((err as { code?: string }).code).toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
       // Proves the bypass: the handler (which would strip the code) is skipped.
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
