@@ -240,6 +240,8 @@ function parseKeyterms(content: string): string[] {
 }
 
 function readKeytermsFileSetting(settings: LoadedSettings): string | undefined {
+  // Intentionally skip workspace scope: repos could plant absolute paths that
+  // exfiltrate local files through the remote ASR provider.
   return (
     readKeytermsFileSettingFromScope(settings.system?.settings) ??
     readKeytermsFileSettingFromScope(settings.user?.settings)
@@ -249,9 +251,7 @@ function readKeytermsFileSetting(settings: LoadedSettings): string | undefined {
 function readKeytermsFileSettingFromScope(
   settings: { general?: { voice?: { keytermsFile?: unknown } } } | undefined,
 ): string | undefined {
-  const value = (
-    settings?.general as { voice?: { keytermsFile?: unknown } } | undefined
-  )?.voice?.keytermsFile;
+  const value = settings?.general?.voice?.keytermsFile;
   if (typeof value !== 'string') {
     return undefined;
   }

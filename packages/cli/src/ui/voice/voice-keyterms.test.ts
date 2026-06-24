@@ -181,6 +181,15 @@ describe('buildVoiceKeyterms', () => {
       expect(terms).toContain('TypeScript'); // globals only
     });
 
+    it('does not read a hard-linked keyterms file', () => {
+      const secret = path.join(workspaceDir, 'secret.txt');
+      fs.writeFileSync(secret, 'HardLinkSecret\n');
+      fs.linkSync(secret, path.join(qwenDir, 'voice-keyterms.txt'));
+      const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+      expect(terms).not.toContain('HardLinkSecret');
+      expect(terms).toContain('TypeScript'); // globals only
+    });
+
     it('does not follow a symlinked explicit keytermsFile', () => {
       const secret = path.join(workspaceDir, 'secret.txt');
       const link = path.join(workspaceDir, 'terms-link.txt');
