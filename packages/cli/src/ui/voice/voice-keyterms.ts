@@ -104,7 +104,7 @@ function capKeyterms(terms: string[]): string[] {
     }
     const next = chars + term.length + (out.length > 0 ? 1 : 0);
     if (next > MAX_KEYTERMS_CHARS) {
-      break;
+      continue;
     }
     out.push(term);
     chars = next;
@@ -254,7 +254,7 @@ function readRegularFileNoFollow({
 function parseKeyterms(content: string): string[] {
   return content
     .split(/\r?\n/)
-    .map((line) => line.replace(/#.*$/, '').trim())
+    .map((line) => line.replace(/(?:^|\s+)#.*$/, '').trim())
     .filter((line) => line.length > 0);
 }
 

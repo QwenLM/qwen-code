@@ -90,10 +90,14 @@ describe('buildVoiceKeyterms', () => {
     it('ignores blank lines and "#" comments (including indented comments)', () => {
       fs.writeFileSync(
         path.join(qwenDir, 'voice-keyterms.txt'),
-        '# project terms\n\n  Kubernetes # container orchestration  \n   # indented comment\n',
+        '# project terms\n\n  Kubernetes # container orchestration  \nC#\nF#\n   # indented comment\n',
       );
       const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
       expect(terms).toContain('Kubernetes');
+      expect(terms).toContain('C#');
+      expect(terms).toContain('F#');
+      expect(terms).not.toContain('C');
+      expect(terms).not.toContain('F');
       expect(terms).not.toContain('Kubernetes # container orchestration');
       expect(terms).not.toContain('# project terms');
       expect(terms).not.toContain('# indented comment');
@@ -224,6 +228,16 @@ describe('buildVoiceKeyterms', () => {
       expect(terms.join(' ').length).toBeLessThanOrEqual(2000);
       expect(userTerms.length).toBeLessThan(40); // not all long terms fit
       expect(userTerms.length).toBeGreaterThan(0); // some user terms past globals
+    });
+
+    it('skips over a term that exceeds the remaining char budget', () => {
+      fs.writeFileSync(
+        path.join(qwenDir, 'voice-keyterms.txt'),
+        `${'x'.repeat(2200)}\nShortTerm\n`,
+      );
+      const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+      expect(terms).toContain('ShortTerm');
+      expect(terms.join(' ').length).toBeLessThanOrEqual(2000);
     });
 
     it('does not read a keyterms file in an untrusted workspace', () => {
