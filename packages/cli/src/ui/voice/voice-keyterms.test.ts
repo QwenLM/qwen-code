@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -72,6 +72,7 @@ describe('buildVoiceKeyterms', () => {
     });
 
     afterEach(() => {
+      vi.unstubAllEnvs();
       fs.rmSync(workspaceDir, { recursive: true, force: true });
     });
 
@@ -125,6 +126,16 @@ describe('buildVoiceKeyterms', () => {
         makeSettings(workspaceDir, { keytermsFile: 'terms.txt' }),
       );
       expect(terms).toContain('RelativeTerm');
+    });
+
+    it('expands a tilde-prefixed keytermsFile', () => {
+      vi.stubEnv('HOME', workspaceDir);
+      vi.stubEnv('USERPROFILE', workspaceDir);
+      fs.writeFileSync(path.join(workspaceDir, 'terms.txt'), 'HomeTerm\n');
+      const terms = buildVoiceKeyterms(
+        makeSettings(workspaceDir, { keytermsFile: '~/terms.txt' }),
+      );
+      expect(terms).toContain('HomeTerm');
     });
 
     it('honors a system-scoped keytermsFile setting', () => {

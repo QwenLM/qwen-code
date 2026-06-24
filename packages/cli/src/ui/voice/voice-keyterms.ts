@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isSubpath } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { resolvePath } from '../../utils/resolvePath.js';
 
 // Static vocabulary-biasing hints sent to the transcription provider to improve
 // accuracy on domain-specific terms a generic STT model tends to mangle. Sent as
@@ -166,11 +167,10 @@ function resolveKeytermsFile(
   const workspaceRoot = path.dirname(qwenDir);
   const configured = readKeytermsFileSetting(settings);
   if (configured) {
-    const isAbsolute = path.isAbsolute(configured);
+    const expanded = resolvePath(configured);
+    const isAbsolute = path.isAbsolute(expanded);
     return {
-      filePath: isAbsolute
-        ? configured
-        : path.resolve(workspaceRoot, configured),
+      filePath: isAbsolute ? expanded : path.resolve(workspaceRoot, expanded),
       workspaceRoot,
       mustBeInWorkspace: !isAbsolute,
     };

@@ -203,6 +203,9 @@ describe('SettingsSchema', () => {
 
       expect(voice.keytermsFile.type).toBe('string');
       expect(voice.keytermsFile.default).toBe('');
+
+      expect(voice.refineTranscript.type).toBe('boolean');
+      expect(voice.refineTranscript.default).toBe(true);
     });
 
     it('should have unique categories', () => {
