@@ -209,6 +209,9 @@ async function runStartupIteration(
   const { VITEST_WORKER_ID: _vitestWorkerId, ...childEnv } = process.env;
 
   try {
+    // Keep this separate from spawnDaemon(): the benchmark needs the wall
+    // clock to include Node process creation, raw stderr for the timing-line
+    // assertion, and tighter sample-to-sample teardown.
     child = spawn(
       process.execPath,
       [
