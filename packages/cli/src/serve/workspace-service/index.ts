@@ -350,6 +350,7 @@ export function createDaemonWorkspaceService(
         const result = await invokeWorkspaceCommand(
           'qwen/permissions/setRules',
           {
+            cwd: boundWorkspace,
             scope: request.scope,
             ruleType: request.ruleType,
             rules: request.rules,

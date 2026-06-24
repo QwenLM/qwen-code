@@ -28,6 +28,46 @@ export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
 
 /**
+ * Browsers cannot set an `Authorization` header on a WebSocket, so the Web
+ * Shell authenticates the `/voice/stream` (and `/acp`) upgrade by offering the
+ * bearer token as a `Sec-WebSocket-Protocol` subprotocol of the form
+ * `qwen-bearer.<base64url(token)>`. Kept in sync with the encoder in
+ * `packages/web-shell/client/voice/useVoiceCapture.ts`.
+ */
+export const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
+
+/**
+ * Pull the bearer credential off a WS upgrade request. Prefer the standard
+ * `Authorization: Bearer <token>` header (non-browser clients); fall back to
+ * the `qwen-bearer.*` subprotocol (browser clients). Returns `undefined` when
+ * neither is present or parseable.
+ */
+function extractUpgradeBearer(req: IncomingMessage): string | undefined {
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.includes(' ')) {
+    const scheme = authHeader.slice(0, authHeader.indexOf(' ')).toLowerCase();
+    if (scheme === 'bearer') {
+      const credentials = authHeader.slice(authHeader.indexOf(' ') + 1).trim();
+      if (credentials) return credentials;
+    }
+  }
+  const offered = req.headers['sec-websocket-protocol'];
+  if (offered) {
+    for (const raw of offered.split(',')) {
+      const entry = raw.trim();
+      if (!entry.startsWith(WS_BEARER_SUBPROTOCOL_PREFIX)) continue;
+      const encoded = entry.slice(WS_BEARER_SUBPROTOCOL_PREFIX.length);
+      // `Buffer.from(_, 'base64url')` never throws — malformed input just
+      // decodes to garbage bytes, which fail the constant-time hash compare
+      // at the call site. An empty decode means "no credential offered".
+      const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
+      if (decoded) return decoded;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Grace window after the connection-scoped SSE stream closes before the
  * connection is reaped (if not reconnected and no session stream is live).
  * Long enough to ride out a transient blip / reconnect, short enough to free
@@ -83,6 +123,22 @@ export interface MountAcpHttpOptions {
   sessionShellCommandEnabled?: boolean;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
+  /**
+   * Additional non-ACP WebSocket routes (e.g. `/voice/stream`) that reuse this
+   * upgrade listener's security checks. Matched paths skip the ACP init flow.
+   */
+  extraWsRoutes?: readonly ExtraWsRoute[];
+}
+
+/**
+ * A non-ACP WebSocket route that shares the daemon's single upgrade listener
+ * (and therefore its loopback / host-allowlist / CSRF / bearer-token checks)
+ * instead of attaching a second `'upgrade'` listener — the ACP listener
+ * `socket.destroy()`s unknown paths, so a competing listener can't coexist.
+ */
+export interface ExtraWsRoute {
+  path: string;
+  onConnection: (ws: WebSocket, req: IncomingMessage) => void;
 }
 
 export interface AcpHttpHandle {
@@ -431,13 +487,39 @@ export function mountAcpHttp(
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
     if (wss) return;
-    wss = new WebSocketServer({ noServer: true, maxPayload: 10 * 1024 * 1024 });
+    wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: 10 * 1024 * 1024,
+      // Browsers authenticate the upgrade by offering the bearer token as a
+      // `qwen-bearer.*` subprotocol (see extractUpgradeBearer). Never echo that
+      // secret-bearing value back in the handshake response — select the first
+      // non-secret subprotocol instead. The web-shell offers a non-secret
+      // marker (`qwen-ws`) alongside the bearer one precisely so there is always
+      // a safe value to select: selecting none would make strict WS clients
+      // (e.g. the `ws` library) reject the handshake with "Server sent no
+      // subprotocol". ACP clients offer no subprotocol, so this is a no-op for
+      // them.
+      handleProtocols: (protocols) => {
+        for (const proto of protocols) {
+          if (!proto.startsWith(WS_BEARER_SUBPROTOCOL_PREFIX)) return proto;
+        }
+        return false;
+      },
+    });
     upgradeServer = httpServer;
     const expectedTokenHash = opts.token
       ? createHash('sha256').update(opts.token).digest()
       : undefined;
 
     upgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+      const rawAddr =
+        (socket as unknown as { remoteAddress?: string }).remoteAddress ??
+        'ws-unknown';
+      const logReject = (reason: string) => {
+        writeStderrLine(
+          `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
+        );
+      };
       let url: URL;
       try {
         url = new URL(
@@ -445,10 +527,15 @@ export function mountAcpHttp(
           `http://${req.headers.host ?? 'localhost'}`,
         );
       } catch {
+        logReject('invalid-url');
         socket.destroy();
         return;
       }
-      if (url.pathname !== path) {
+      const extraRoute = opts.extraWsRoutes?.find(
+        (route) => route.path === url.pathname,
+      );
+      if (url.pathname !== path && !extraRoute) {
+        logReject(`unknown-path ${url.pathname}`);
         socket.destroy();
         return;
       }
@@ -470,6 +557,7 @@ export function mountAcpHttp(
           `host.docker.internal:${localPort}`,
         ]);
         if (!allowed.has(host)) {
+          logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
           return;
@@ -488,11 +576,13 @@ export function mountAcpHttp(
             originHost !== 'localhost' &&
             originHost !== '::1'
           ) {
+            logReject(`origin-not-allowed ${originHost}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;
           }
         } catch {
+          logReject('invalid-origin');
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
           return;
@@ -502,35 +592,38 @@ export function mountAcpHttp(
       // Auth: WS bypasses Express middleware. Same posture as REST:
       // loopback without token = allow; non-loopback/token-mismatch = reject.
       if (opts.token) {
-        const authHeader = req.headers['authorization'];
-        if (!authHeader || !authHeader.includes(' ')) {
-          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-          socket.destroy();
-          return;
-        }
-        const scheme = authHeader
-          .slice(0, authHeader.indexOf(' '))
-          .toLowerCase();
-        const credentials = authHeader
-          .slice(authHeader.indexOf(' ') + 1)
-          .trim();
-        const actual = createHash('sha256').update(credentials).digest();
+        // Accept the token from `Authorization` (non-browser clients) or the
+        // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
+        // on a WebSocket). Hash-compare in constant time, same posture as REST.
+        const credentials = extractUpgradeBearer(req);
+        const actual = credentials
+          ? createHash('sha256').update(credentials).digest()
+          : undefined;
         if (
-          scheme !== 'bearer' ||
+          !actual ||
           !expectedTokenHash ||
+          actual.length !== expectedTokenHash.length ||
           !timingSafeEqual(expectedTokenHash, actual)
         ) {
+          logReject('auth-mismatch');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;
         }
       } else if (!fromLoopback) {
+        logReject('non-loopback-without-token');
         socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
         socket.destroy();
         return;
       }
 
       wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+        // Non-ACP routes (e.g. voice) own their own protocol — hand the
+        // upgraded socket off and skip the ACP initialize handshake.
+        if (extraRoute) {
+          extraRoute.onConnection(ws, req);
+          return;
+        }
         let initialized = false;
         const initTimer = setTimeout(() => {
           if (!initialized) {
@@ -543,9 +636,6 @@ export function mountAcpHttp(
         initTimer.unref?.();
         let connRef: AcpConnection | undefined;
         let messageQueue = Promise.resolve();
-        const rawAddr =
-          (socket as unknown as { remoteAddress?: string }).remoteAddress ??
-          'ws-unknown';
         const wsKey = rawAddr.startsWith('::ffff:')
           ? rawAddr.slice(7)
           : rawAddr;

@@ -380,7 +380,12 @@ describe('createDaemonWorkspaceService', () => {
 
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/permissions/setRules',
-        { scope: 'workspace', ruleType: 'allow', rules: ['Shell(*)'] },
+        {
+          cwd: '/workspace',
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: ['Shell(*)'],
+        },
       );
       expect(publishWorkspaceEvent).toHaveBeenCalledWith({
         type: 'settings_changed',

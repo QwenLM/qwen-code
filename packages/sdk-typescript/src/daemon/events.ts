@@ -588,7 +588,6 @@ export interface DaemonTrustChangeRequestedData {
   workspaceCwd: string;
   desiredState: 'trusted' | 'untrusted';
   reason?: string;
-  originatorClientId?: string;
   [key: string]: unknown;
 }
 
@@ -633,7 +632,6 @@ export interface DaemonGithubSetupCompletedData {
     error?: string;
   };
   warnings: string[];
-  originatorClientId?: string;
   [key: string]: unknown;
 }
 

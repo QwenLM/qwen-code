@@ -1735,7 +1735,9 @@ describe('PR 21 — auth device-flow events', () => {
       });
 
       expect(known?.type).toBe('github_setup_completed');
-      expect(known?.data.gitignore.status).toBe('failed');
+      expect(
+        (known?.data as DaemonGithubSetupCompletedData).gitignore.status,
+      ).toBe('failed');
       expect(
         asKnownDaemonEvent({
           id: 12,

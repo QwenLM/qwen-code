@@ -255,6 +255,9 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
+  // Baseline (always advertised) — presence means the `/voice/stream`
+  // endpoint exists; the WS errors if no voice model is configured.
+  'voice_transcribe',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -291,7 +294,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
-      f !== 'session_branch',
+      f !== 'session_branch' &&
+      f !== 'voice_transcribe',
   ),
   'workspace_settings',
   'workspace_permissions',
@@ -321,6 +325,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'voice_transcribe',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -1122,6 +1127,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       resumeCalls.push(req);
       return result;
     },
+    // Keep non-async so prompt admission failures can throw synchronously.
     sendPrompt(sessionId, req, signal, context) {
       promptCalls.push({
         sessionId,
@@ -1545,6 +1551,24 @@ describe('createServeApp', () => {
       );
     });
 
+    it('advertises `voice_transcribe` only when the voice WebSocket route is active', () => {
+      expect(
+        getAdvertisedServeFeatures(undefined, { voiceWsAvailable: true }),
+      ).toContain('voice_transcribe');
+      expect(
+        getAdvertisedServeFeatures(undefined, { voiceWsAvailable: false }),
+      ).not.toContain('voice_transcribe');
+      // A configured token / `--require-auth` no longer suppresses voice: the
+      // browser carries the bearer token via the WS subprotocol, which the
+      // upgrade listener verifies.
+      expect(
+        getAdvertisedServeFeatures(undefined, {
+          requireAuth: true,
+          voiceWsAvailable: true,
+        }),
+      ).toContain('voice_transcribe');
+    });
+
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
       // Iterate the Map so any future conditional tag added here whose
       // predicate isn't honored by `getAdvertisedServeFeatures` fails
@@ -1692,6 +1716,27 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'voice_transcribe') {
+          expect(predicate({ voiceWsAvailable: true })).toBe(true);
+          expect(predicate({ voiceWsAvailable: false })).toBe(false);
+          // requireAuth no longer suppresses voice (token rides the WS
+          // subprotocol), so the predicate ignores it.
+          expect(predicate({ requireAuth: true, voiceWsAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(true);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              voiceWsAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              voiceWsAvailable: false,
+            }),
+          ).not.toContain(feature);
           continue;
         }
         // Future conditional tag. Authors must add a branch above with
@@ -5526,6 +5571,36 @@ describe('createServeApp', () => {
       expect(res.body.promptId).toBeDefined();
     });
 
+    it('400 without promptId when bridge rejects invalid client admission synchronously', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new InvalidClientIdError('session-A', 'client-stale');
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-stale')
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-stale',
+      });
+      expect(res.body.promptId).toBeUndefined();
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'prompt admission rejected: invalid client id',
+        expect.objectContaining({
+          sessionId: 'session-A',
+          clientId: 'client-stale',
+        }),
+      );
+    });
+
     it('503 without promptId when bridge rejects prompt admission synchronously', async () => {
       const bridge = fakeBridge({
         promptImpl: () => {
@@ -9025,6 +9100,10 @@ describe('createServeApp', () => {
         v: 1,
         detail: 'summary',
       });
+      // Voice is advertised even with a token configured: browsers authenticate
+      // the WS via the `qwen-bearer.*` subprotocol, so the token no longer
+      // suppresses the capability.
+      expect(withAuth.body.capabilities.features).toContain('voice_transcribe');
     });
 
     it('returns summary diagnostics without querying workspace status', async () => {

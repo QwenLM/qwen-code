@@ -58,6 +58,8 @@ export interface VoiceModelSource {
   getAllConfiguredModels(): AvailableModel[];
 }
 
+export type VoiceModelLookup = VoiceModelSource;
+
 interface ResolveVoiceTranscriptionConfigArgs {
   config: VoiceModelSource;
   settings: LoadedSettings;
