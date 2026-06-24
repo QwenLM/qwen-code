@@ -45,9 +45,13 @@ const V2_SETTINGS_VERSION = 2;
 const TRUST_FOLDER = 'TRUST_FOLDER';
 const TRUST_PARENT = 'TRUST_PARENT';
 const DO_NOT_TRUST = 'DO_NOT_TRUST';
+type CachedTrustRule = {
+  level: 'trusted' | 'untrusted';
+  variants: Set<string>;
+};
 let homeEnvBootstrapped = false;
 let cachedTrustedFoldersPath: string | undefined;
-let cachedTrustedFolders: Record<string, string> | undefined;
+let cachedTrustedFolderRules: CachedTrustRule[] | undefined;
 
 function getTrustedFoldersPathFastPath(): string {
   return (
@@ -108,7 +112,7 @@ function readHomeEnvIntoFastPath(file: string): void {
 export function resetServeFastPathHomeEnvBootstrapForTesting(): void {
   homeEnvBootstrapped = false;
   cachedTrustedFoldersPath = undefined;
-  cachedTrustedFolders = undefined;
+  cachedTrustedFolderRules = undefined;
 }
 
 function getHomeEnvFallbackVarsFastPath(): Record<string, string> {
@@ -287,15 +291,18 @@ export function loadServeFastPathEnvironment(
   }
 }
 
-function readTrustedFoldersFastPath(): Record<string, string> {
+function readTrustedFolderRulesFastPath(): readonly CachedTrustRule[] {
   const trustedFoldersPath = getTrustedFoldersPathFastPath();
-  if (cachedTrustedFolders && cachedTrustedFoldersPath === trustedFoldersPath) {
-    return cachedTrustedFolders;
+  if (
+    cachedTrustedFolderRules &&
+    cachedTrustedFoldersPath === trustedFoldersPath
+  ) {
+    return cachedTrustedFolderRules;
   }
   if (!fs.existsSync(trustedFoldersPath)) {
     cachedTrustedFoldersPath = trustedFoldersPath;
-    cachedTrustedFolders = {};
-    return cachedTrustedFolders;
+    cachedTrustedFolderRules = [];
+    return cachedTrustedFolderRules;
   }
 
   let parsed: unknown;
@@ -322,29 +329,44 @@ function readTrustedFoldersFastPath(): Record<string, string> {
     }
   }
   cachedTrustedFoldersPath = trustedFoldersPath;
-  cachedTrustedFolders = out;
-  return cachedTrustedFolders;
+  cachedTrustedFolderRules = buildTrustedFolderRules(out);
+  return cachedTrustedFolderRules;
+}
+
+function buildTrustedFolderRules(
+  trustedFolders: Record<string, string>,
+): CachedTrustRule[] {
+  const rules: CachedTrustRule[] = [];
+  for (const [rulePath, trustLevel] of Object.entries(
+    trustedFolders,
+  )) {
+    if (trustLevel === TRUST_FOLDER) {
+      rules.push({
+        level: 'trusted',
+        variants: getPathComparisonVariants(rulePath),
+      });
+    } else if (trustLevel === TRUST_PARENT) {
+      rules.push({
+        level: 'trusted',
+        variants: getPathComparisonVariants(path.dirname(rulePath)),
+      });
+    } else if (trustLevel === DO_NOT_TRUST) {
+      rules.push({
+        level: 'untrusted',
+        variants: getPathComparisonVariants(rulePath),
+      });
+    }
+  }
+  return rules;
 }
 
 function isPathTrustedFastPath(location: string): boolean | undefined {
-  const trustedPaths: string[] = [];
-  const untrustedPaths: string[] = [];
-  for (const [rulePath, trustLevel] of Object.entries(
-    readTrustedFoldersFastPath(),
-  )) {
-    if (trustLevel === TRUST_FOLDER) {
-      trustedPaths.push(rulePath);
-    } else if (trustLevel === TRUST_PARENT) {
-      trustedPaths.push(path.dirname(rulePath));
-    } else if (trustLevel === DO_NOT_TRUST) {
-      untrustedPaths.push(rulePath);
-    }
-  }
-
+  const rules = readTrustedFolderRulesFastPath();
   const locationVariants = getPathComparisonVariants(location);
-  for (const trustedPath of trustedPaths) {
+  for (const rule of rules) {
+    if (rule.level !== 'trusted') continue;
     for (const locationVariant of locationVariants) {
-      for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
+      for (const trustedVariant of rule.variants) {
         if (isWithinRoot(locationVariant, trustedVariant)) {
           return true;
         }
@@ -352,9 +374,10 @@ function isPathTrustedFastPath(location: string): boolean | undefined {
     }
   }
 
-  for (const untrustedPath of untrustedPaths) {
+  for (const rule of rules) {
+    if (rule.level !== 'untrusted') continue;
     for (const locationVariant of locationVariants) {
-      for (const untrustedVariant of getPathComparisonVariants(untrustedPath)) {
+      for (const untrustedVariant of rule.variants) {
         if (locationVariant === untrustedVariant) {
           return false;
         }

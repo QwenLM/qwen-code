@@ -541,6 +541,29 @@ describe('serve fast path argument parsing', () => {
     expect(parsed.options.rateLimitWindowMs).toBe(1);
   });
 
+  it('enables rate limiting from env and applies env tuning values', () => {
+    const parsed = parseServeFastPathArgs(['serve'], {
+      QWEN_SERVE_RATE_LIMIT: '1',
+      QWEN_SERVE_RATE_LIMIT_PROMPT: '10',
+    });
+
+    expect(parsed.kind).toBe('serve');
+    if (parsed.kind !== 'serve') return;
+    expect(parsed.options.rateLimit).toBe(true);
+    expect(parsed.options.rateLimitPrompt).toBe(10);
+  });
+
+  it('discards rate limit env tuning when rate limiting is disabled', () => {
+    const parsed = parseServeFastPathArgs(['serve'], {
+      QWEN_SERVE_RATE_LIMIT_PROMPT: '10',
+    });
+
+    expect(parsed.kind).toBe('serve');
+    if (parsed.kind !== 'serve') return;
+    expect(parsed.options).not.toHaveProperty('rateLimit');
+    expect(parsed.options.rateLimitPrompt).toBeUndefined();
+  });
+
   it('rejects unsafe rate limit env integers instead of rounding them', () => {
     const parsed = parseServeFastPathArgs(['serve', '--rate-limit'], {
       QWEN_SERVE_RATE_LIMIT_PROMPT: String(Number.MAX_SAFE_INTEGER + 1),

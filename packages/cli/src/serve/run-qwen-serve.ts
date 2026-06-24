@@ -736,7 +736,9 @@ export function createLazyBridgeProxy(
   ) as AcpSessionBridge;
 }
 
-function resolveRuntimeStartupTimeoutMs(override: number | undefined): number {
+export function resolveRuntimeStartupTimeoutMs(
+  override: number | undefined,
+): number {
   if (override !== undefined) {
     return Number.isFinite(override) && override > 0 ? override : 0;
   }
@@ -1913,6 +1915,7 @@ export async function runQwenServe(
           startup.preheat.error = message;
         }
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
+        daemonLog.error('runtime startup failed', error);
         markRuntimeFailed(error);
         await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
       };

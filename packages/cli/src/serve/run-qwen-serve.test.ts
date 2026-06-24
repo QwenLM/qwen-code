@@ -14,6 +14,7 @@ import {
   createLazyBridgeProxy,
   extractContextFilename,
   InvalidPolicyConfigError,
+  resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
   validatePolicyConfig,
@@ -630,6 +631,93 @@ describe('runQwenServe runtime startup failures', () => {
     expect(getDaemonStatusSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [undefined, 120_000],
+    ['', 120_000],
+    ['5000', 5000],
+    ['0', 0],
+    ['abc', 120_000],
+    [String(Number.MAX_SAFE_INTEGER + 1), 120_000],
+  ])(
+    'resolves QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS=%s to %s',
+    (envValue, expected) => {
+      const originalEnv =
+        process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
+      try {
+        if (envValue === undefined) {
+          delete process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
+        } else {
+          process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'] = envValue;
+        }
+
+        expect(resolveRuntimeStartupTimeoutMs(undefined)).toBe(expected);
+      } finally {
+        if (originalEnv === undefined) {
+          delete process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
+        } else {
+          process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'] = originalEnv;
+        }
+      }
+    },
+  );
+
+  it('returns bootstrap 503 for unknown routes while runtime is still starting', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-starting-route-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.TelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.TelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const bridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
+    } as unknown as HttpAcpBridge;
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true, runtimeStartupTimeoutMs: 0 },
+    );
+
+    try {
+      const res = await fetch(`${handle.url}/unknown-route`);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({
+        error: 'Daemon runtime is still starting',
+        code: 'daemon_runtime_starting',
+      });
+    } finally {
+      resolveTelemetry?.({ enabled: false });
+      await handle.close();
+    }
+  });
+
   it('fails runtimeReady and health when runtime startup times out', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
@@ -725,6 +813,12 @@ describe('runQwenServe runtime startup failures', () => {
       expect(await healthRes.json()).toMatchObject({
         status: 'degraded',
         error: 'runtime boom',
+      });
+      const unknownRes = await fetch(`${handle.url}/unknown-route`);
+      expect(unknownRes.status).toBe(503);
+      expect(await unknownRes.json()).toMatchObject({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
       });
 
       const capabilitiesRes = await fetch(`${handle.url}/capabilities`, {
