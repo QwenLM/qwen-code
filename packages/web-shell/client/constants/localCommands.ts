@@ -46,7 +46,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     {
       name: 'model',
       description: t('local.model'),
-      argumentHint: '[--fast] [<model>]',
+      argumentHint: '[--fast|--voice] [<model>]',
     },
     {
       name: 'mcp',

@@ -116,8 +116,12 @@ function createSendIndex(webShellDir: string): (res: Response) => void {
       .set('X-Content-Type-Options', 'nosniff')
       .set('Referrer-Policy', 'no-referrer')
       .set(
+        // `microphone=(self)` lets the same-origin Web Shell document request
+        // the mic for voice dictation (the prompt won't even appear under an
+        // empty `microphone=()` allowlist). Still blocks cross-origin iframes;
+        // camera/geolocation/payment stay disabled (unused).
         'Permissions-Policy',
-        'camera=(), microphone=(), geolocation=(), payment=()',
+        'camera=(), microphone=(self), geolocation=(), payment=()',
       )
       .set('Cache-Control', 'no-cache');
     // `dotfiles: 'allow'` is required because the resolved path may pass

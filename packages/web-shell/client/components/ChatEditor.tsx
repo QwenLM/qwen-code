@@ -31,6 +31,7 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { ModeIcon } from './ModeIcon';
+import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
@@ -642,11 +643,7 @@ function SlashCommandPanel({
   } as CSSProperties;
 
   return createPortal(
-    <div
-      ref={panelRef}
-      className={styles.slashPortalLayer}
-      style={themeVars}
-    >
+    <div ref={panelRef} className={styles.slashPortalLayer} style={themeVars}>
       <div
         className={styles.slashPanel}
         style={positionedPanelStyle}
@@ -723,8 +720,7 @@ function SlashCommandPanel({
                         ...(showBelow
                           ? { top: rowRect.bottom + gap }
                           : {
-                              bottom:
-                                window.innerHeight - rowRect.top + gap,
+                              bottom: window.innerHeight - rowRect.top + gap,
                             }),
                         maxHeight,
                       });
@@ -967,7 +963,8 @@ export const ChatEditor = memo(
       return visibleActionSet.has(action);
     };
     const commandNames = useMemo(
-      () => new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
+      () =>
+        new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
       [commands],
     );
     const hasCommand = useCallback(
@@ -1517,6 +1514,15 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
+                <VoiceButton
+                  disabled={disabled}
+                  onInsert={(text) => {
+                    const existing = core.getText();
+                    const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+                    core.insertText(`${sep}${text} `);
+                    core.focus();
+                  }}
+                />
                 <button
                   className={
                     isRunning
