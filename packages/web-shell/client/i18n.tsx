@@ -247,6 +247,10 @@ const EN: Messages = {
   'markdownTable.detailsHeader': 'Row details',
   'markdownTable.actions': 'Actions',
   'markdownTable.sortByColumn': (v) => `Sort by ${v?.column ?? ''}`,
+  'markdownTable.sortByColumnAsc': (v) =>
+    `Sort by ${v?.column ?? ''}, ascending`,
+  'markdownTable.sortByColumnDesc': (v) =>
+    `Sort by ${v?.column ?? ''}, descending`,
   'markdownTable.filterColumn': (v) => `Filter ${v?.column ?? ''}`,
   'markdownTable.emptyFiltered': 'No rows match the filters.',
   'markdownTable.sort.asc': 'Sort ascending',
@@ -1288,6 +1292,8 @@ const ZH: Messages = {
   'markdownTable.detailsHeader': '单行详情',
   'markdownTable.actions': '操作',
   'markdownTable.sortByColumn': (v) => `按 ${v?.column ?? ''} 排序`,
+  'markdownTable.sortByColumnAsc': (v) => `${v?.column ?? ''} 已升序排序`,
+  'markdownTable.sortByColumnDesc': (v) => `${v?.column ?? ''} 已降序排序`,
   'markdownTable.filterColumn': (v) => `筛选 ${v?.column ?? ''}`,
   'markdownTable.emptyFiltered': '没有符合筛选条件的行。',
   'markdownTable.sort.asc': '升序排序',

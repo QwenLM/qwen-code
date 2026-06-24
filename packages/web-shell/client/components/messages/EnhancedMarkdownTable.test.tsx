@@ -22,6 +22,7 @@ afterEach(() => {
 function renderTableContent(
   children: ReactNode,
   language: WebShellLanguage = 'en',
+  fallback?: ReactNode,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -29,7 +30,9 @@ function renderTableContent(
   act(() => {
     root.render(
       <I18nProvider language={language}>
-        <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
+        <EnhancedMarkdownTable fallback={fallback}>
+          {children}
+        </EnhancedMarkdownTable>
       </I18nProvider>,
     );
   });
@@ -103,6 +106,17 @@ function inputValue(input: HTMLInputElement, value: string): void {
   act(() => {
     setter?.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+function selectValue(select: HTMLSelectElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLSelectElement.prototype,
+    'value',
+  )?.set;
+  act(() => {
+    setter?.call(select, value);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
   });
 }
 
@@ -183,9 +197,15 @@ describe('EnhancedMarkdownTable', () => {
 
     click(button(container, 'Sort by Score'));
     expect(rowTexts(container)).toEqual(['Beta|2', 'Alpha|10', 'Gamma|30']);
+    expect(button(container, 'Sort by Score, ascending')).toBeDefined();
 
-    click(button(container, 'Sort by Score'));
+    click(button(container, 'Sort by Score, ascending'));
     expect(rowTexts(container)).toEqual(['Gamma|30', 'Alpha|10', 'Beta|2']);
+    expect(button(container, 'Sort by Score, descending')).toBeDefined();
+
+    click(button(container, 'Sort by Score, descending'));
+    expect(rowTexts(container)).toEqual(['Alpha|10', 'Beta|2', 'Gamma|30']);
+    expect(button(container, 'Sort by Score')).toBeDefined();
   });
 
   it('filters rows from a column value menu', () => {
@@ -226,6 +246,138 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(rowTexts(container)).toEqual(['Gamma|30']);
     expect(container.textContent).toContain('1/3 rows');
+  });
+
+  it('applies text filter operators and reset', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-option-search-0"]',
+      ),
+    ).toBe(document.activeElement);
+    selectValue(
+      container.querySelector<HTMLSelectElement>(
+        'select[name="markdown-table-text-operator-0"]',
+      )!,
+      'equals',
+    );
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-text-filter-0"]',
+      )!,
+      'Alpha',
+    );
+    click(textButton(container, 'Confirm'));
+    expect(rowTexts(container)).toEqual(['Alpha|10']);
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Reset'));
+    expect(rowTexts(container)).toEqual(['Alpha|10', 'Beta|2', 'Gamma|30']);
+
+    click(button(container, 'Filter Team'));
+    selectValue(
+      container.querySelector<HTMLSelectElement>(
+        'select[name="markdown-table-text-operator-0"]',
+      )!,
+      'startsWith',
+    );
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-text-filter-0"]',
+      )!,
+      'Ga',
+    );
+    click(textButton(container, 'Confirm'));
+    expect(rowTexts(container)).toEqual(['Gamma|30']);
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Reset'));
+    click(button(container, 'Filter Team'));
+    selectValue(
+      container.querySelector<HTMLSelectElement>(
+        'select[name="markdown-table-text-operator-0"]',
+      )!,
+      'endsWith',
+    );
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-text-filter-0"]',
+      )!,
+      'ta',
+    );
+    click(textButton(container, 'Confirm'));
+    expect(rowTexts(container)).toEqual(['Beta|2']);
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Reset'));
+    click(button(container, 'Filter Team'));
+    selectValue(
+      container.querySelector<HTMLSelectElement>(
+        'select[name="markdown-table-text-operator-0"]',
+      )!,
+      'notEquals',
+    );
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-text-filter-0"]',
+      )!,
+      'Beta',
+    );
+    click(textButton(container, 'Confirm'));
+    expect(rowTexts(container)).toEqual(['Alpha|10', 'Gamma|30']);
+  });
+
+  it('applies a between number filter', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Score'));
+    selectValue(
+      container.querySelector<HTMLSelectElement>(
+        'select[name="markdown-table-number-operator-1"]',
+      )!,
+      'between',
+    );
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-number-filter-1"]',
+      )!,
+      '10',
+    );
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-number-filter-to-1"]',
+      )!,
+      '2',
+    );
+    click(textButton(container, 'Confirm'));
+
+    expect(rowTexts(container)).toEqual(['Alpha|10', 'Beta|2']);
+  });
+
+  it('sorts decimal values without leading zero numerically', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>.5</td>
+        </tr>
+        <tr>
+          <td>-.75</td>
+        </tr>
+        <tr>
+          <td>.123</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    click(button(container, 'Sort by Value'));
+    expect(rowTexts(container)).toEqual(['-.75', '.123', '.5']);
   });
 
   it('quick copies the visible sorted table', () => {
@@ -271,7 +423,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     click(button(container, 'Sort by Team'));
-    click(button(container, 'Sort by Team'));
+    click(button(container, 'Sort by Team, ascending'));
     click(button(container, 'Filter Team'));
     const beta = container.querySelector<HTMLInputElement>(
       'input[name="markdown-table-filter-option-0-1"]',
@@ -334,7 +486,11 @@ describe('EnhancedMarkdownTable', () => {
   it('shows row details for visible columns', () => {
     const container = renderTable();
 
-    click(button(container, 'View details for row 2'));
+    const detailsButton = button(container, 'View details for row 2');
+    click(detailsButton);
+    const detailsId = detailsButton.getAttribute('aria-controls');
+    expect(detailsId).toBeTruthy();
+    expect(container.ownerDocument.getElementById(detailsId!)).not.toBeNull();
     expect(container.textContent).toContain('Row details');
     expect(container.textContent).toContain('Team');
     expect(container.textContent).toContain('Beta');
@@ -363,6 +519,51 @@ describe('EnhancedMarkdownTable', () => {
     expect(rowTexts(container)).toEqual(['Alpha|10', 'Gamma|30']);
     expect(container.textContent).not.toContain('Row details');
     expect(container.textContent).not.toContain('Beta');
+  });
+
+  it('falls back for oversized tables', () => {
+    const rows = Array.from({ length: 501 }, (_, index) => (
+      <tr key={index}>
+        <td>{index}</td>
+      </tr>
+    ));
+    const container = renderTableContent(
+      [
+        <thead key="head">
+          <tr>
+            <th>Value</th>
+          </tr>
+        </thead>,
+        <tbody key="body">{rows}</tbody>,
+      ],
+      'en',
+      <table>
+        <tbody>
+          <tr>
+            <td>plain fallback</td>
+          </tr>
+        </tbody>
+      </table>,
+    );
+
+    expect(container.textContent).toContain('plain fallback');
+    expect(container.textContent).not.toContain('Quick copy');
+  });
+
+  it('parses direct table row children', () => {
+    const container = renderTableContent([
+      <tr key="head">
+        <th>Team</th>
+        <th>Score</th>
+      </tr>,
+      <tr key="alpha">
+        <td>Alpha</td>
+        <td>10</td>
+      </tr>,
+    ]);
+
+    expect(container.textContent).toContain('Quick copy');
+    expect(rowTexts(container)).toEqual(['Alpha|10']);
   });
 
   it('localizes the new controls', () => {

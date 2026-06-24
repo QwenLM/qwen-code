@@ -3,6 +3,7 @@ import {
   Fragment,
   isValidElement,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -11,6 +12,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { useI18n } from '../../i18n';
 import styles from './EnhancedMarkdownTable.module.css';
@@ -240,7 +242,7 @@ function parseTable(
 
 function parseNumber(value: string): number | null {
   const normalized = value.replace(/[,%\s]/g, '');
-  if (!/^-?\d+(\.\d+)?$/.test(normalized)) return null;
+  if (!/^-?(\d+(\.\d+)?|\.\d+)$/.test(normalized)) return null;
   return Number(normalized);
 }
 
@@ -368,7 +370,7 @@ function matchesNumberFilter(
       return cellNumber <= filterNumber;
     case 'between': {
       const filterNumberTo = parseNumber(filter.valueTo ?? '');
-      if (filterNumberTo === null) return false;
+      if (filterNumberTo === null) return true;
       const min = Math.min(filterNumber, filterNumberTo);
       const max = Math.max(filterNumber, filterNumberTo);
       return cellNumber >= min && cellNumber <= max;
@@ -567,6 +569,7 @@ function ValueFilterSection({
   columnIndex,
   columnName,
   search,
+  searchInputRef,
   filteredOptions,
   visibleOptions,
   selectedValues,
@@ -578,6 +581,7 @@ function ValueFilterSection({
   columnIndex: number;
   columnName: string;
   search: string;
+  searchInputRef: RefObject<HTMLInputElement | null>;
   filteredOptions: FilterOption[];
   visibleOptions: FilterOption[];
   selectedValues: Set<string>;
@@ -591,6 +595,7 @@ function ValueFilterSection({
   return (
     <div className={styles.filterMenuSection}>
       <input
+        ref={searchInputRef}
         className={styles.filterSearch}
         value={search}
         onChange={(event) => onSearchChange(event.currentTarget.value)}
@@ -794,6 +799,7 @@ function FilterMenuFooter({
 }
 
 function ColumnFilterMenu({
+  id,
   columnName,
   columnIndex,
   filter,
@@ -807,6 +813,7 @@ function ColumnFilterMenu({
   onHideColumn,
   onSort,
 }: {
+  id: string;
   columnName: string;
   columnIndex: number;
   filter?: ColumnFilter;
@@ -844,6 +851,11 @@ function ColumnFilterMenu({
   const [numberValueTo, setNumberValueTo] = useState(
     filter?.numberFilter?.valueTo ?? '',
   );
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    searchInputRef.current?.focus();
+  }, []);
 
   const filteredOptions = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -912,12 +924,15 @@ function ColumnFilterMenu({
 
   return (
     <div
+      id={id}
       className={styles.filterMenu}
       style={style}
       role="dialog"
-      aria-label={columnName}
+      aria-labelledby={`${id}-title`}
     >
-      <div className={styles.filterMenuTitle}>{columnName}</div>
+      <div id={`${id}-title`} className={styles.filterMenuTitle}>
+        {columnName}
+      </div>
       <SortMenuSection
         columnIndex={columnIndex}
         sortedThisColumn={sortedThisColumn}
@@ -930,6 +945,7 @@ function ColumnFilterMenu({
         columnIndex={columnIndex}
         columnName={columnName}
         search={search}
+        searchInputRef={searchInputRef}
         filteredOptions={filteredOptions}
         visibleOptions={visibleOptions}
         selectedValues={selectedValues}
@@ -993,6 +1009,7 @@ export function EnhancedMarkdownTable({
 
 function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   const { t } = useI18n();
+  const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
   const [selection, setSelection] = useState<SelectionRange | null>(null);
@@ -1007,24 +1024,78 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   const draggingRef = useRef(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const focusReturnFrameRef = useRef(0);
+  const pendingSelectionRef = useRef<{
+    rowIndex: number;
+    columnIndex: number;
+  } | null>(null);
+  const selectionFrameRef = useRef(0);
+
+  const focusFilterTrigger = () => {
+    if (focusReturnFrameRef.current) {
+      cancelAnimationFrame(focusReturnFrameRef.current);
+    }
+    focusReturnFrameRef.current = requestAnimationFrame(() => {
+      focusReturnFrameRef.current = 0;
+      const trigger = filterTriggerRef.current;
+      if (trigger?.isConnected) trigger.focus();
+    });
+  };
+
+  const closeFilterMenu = () => {
+    setOpenFilterMenu(null);
+    focusFilterTrigger();
+  };
+
+  const flushPendingSelection = () => {
+    if (selectionFrameRef.current) {
+      cancelAnimationFrame(selectionFrameRef.current);
+      selectionFrameRef.current = 0;
+    }
+    const pendingSelection = pendingSelectionRef.current;
+    pendingSelectionRef.current = null;
+    if (!pendingSelection) return;
+    setSelection((current) =>
+      current
+        ? {
+            ...current,
+            focusRow: pendingSelection.rowIndex,
+            focusCol: pendingSelection.columnIndex,
+          }
+        : current,
+    );
+  };
 
   useEffect(() => {
     const stopDragging = () => {
+      flushPendingSelection();
       draggingRef.current = false;
       setIsDragging(false);
     };
     window.addEventListener('mouseup', stopDragging);
-    return () => window.removeEventListener('mouseup', stopDragging);
+    return () => {
+      window.removeEventListener('mouseup', stopDragging);
+      if (selectionFrameRef.current) {
+        cancelAnimationFrame(selectionFrameRef.current);
+      }
+      if (focusReturnFrameRef.current) {
+        cancelAnimationFrame(focusReturnFrameRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
+    if (!openFilterMenu) return;
     const closeMenu = (event: MouseEvent) => {
       if (!shellRef.current?.contains(event.target as Node)) {
-        setOpenFilterMenu(null);
+        closeFilterMenu();
       }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpenFilterMenu(null);
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      closeFilterMenu();
     };
     document.addEventListener('mousedown', closeMenu);
     document.addEventListener('keydown', closeOnEscape);
@@ -1032,7 +1103,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       document.removeEventListener('mousedown', closeMenu);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, []);
+  }, [openFilterMenu]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
@@ -1088,7 +1159,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       }
       return next;
     });
-    setOpenFilterMenu(null);
+    closeFilterMenu();
   };
 
   const setColumnSort = (
@@ -1117,6 +1188,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     columnIndex: number,
   ) => {
     setSelection(null);
+    filterTriggerRef.current = event.currentTarget;
     const buttonRect = event.currentTarget.getBoundingClientRect();
     const menuWidth = 300;
     const menuHeight = 430;
@@ -1143,7 +1215,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   const hideColumn = (columnIndex: number) => {
     if (visibleColumnIndexes.length <= 1) return;
     setSelection(null);
-    setOpenFilterMenu(null);
+    closeFilterMenu();
     setFilters((current) => {
       const next = { ...current };
       delete next[columnIndex];
@@ -1169,9 +1241,14 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
   };
 
+  const selectionBounds = useMemo(
+    () => (selection ? getSelectionBounds(selection) : null),
+    [selection],
+  );
+
   const isCellSelected = (rowIndex: number, columnIndex: number): boolean => {
-    if (!selection) return false;
-    const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(selection);
+    if (!selectionBounds) return false;
+    const { minRow, maxRow, minCol, maxCol } = selectionBounds;
     return (
       rowIndex >= minRow &&
       rowIndex <= maxRow &&
@@ -1199,17 +1276,33 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   const extendSelection = (rowIndex: number, columnIndex: number) => {
     if (!draggingRef.current) return;
     setIsDragging(true);
-    setSelection((current) =>
-      current
-        ? { ...current, focusRow: rowIndex, focusCol: columnIndex }
-        : current,
-    );
+    pendingSelectionRef.current = { rowIndex, columnIndex };
+    if (selectionFrameRef.current) return;
+    selectionFrameRef.current = requestAnimationFrame(() => {
+      selectionFrameRef.current = 0;
+      const pendingSelection = pendingSelectionRef.current;
+      pendingSelectionRef.current = null;
+      if (!pendingSelection) return;
+      setSelection((current) =>
+        current
+          ? {
+              ...current,
+              focusRow: pendingSelection.rowIndex,
+              focusCol: pendingSelection.columnIndex,
+            }
+          : current,
+      );
+    });
   };
 
   const copySelection = () => {
     const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
     if (!text || !navigator.clipboard) return;
-    void navigator.clipboard.writeText(text).catch(() => {});
+    void navigator.clipboard
+      .writeText(text)
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   };
 
   const copyVisibleTable = () => {
@@ -1219,7 +1312,11 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       visibleColumnIndexes,
     );
     if (!text || !navigator.clipboard) return;
-    void navigator.clipboard.writeText(text).catch(() => {});
+    void navigator.clipboard
+      .writeText(text)
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -1322,6 +1419,15 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                 const columnName =
                   header.text ||
                   t('markdownTable.column', { index: columnIndex + 1 });
+                const sortAriaLabel = isSorted
+                  ? t(
+                      sort.direction === 'asc'
+                        ? 'markdownTable.sortByColumnAsc'
+                        : 'markdownTable.sortByColumnDesc',
+                      { column: columnName },
+                    )
+                  : t('markdownTable.sortByColumn', { column: columnName });
+                const filterMenuId = `${tableId}-filter-${columnIndex}`;
                 return (
                   <th key={header.key} className={styles.headerCell}>
                     <div className={styles.headerControls}>
@@ -1329,9 +1435,8 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                         className={styles.headerButton}
                         type="button"
                         onClick={() => toggleSort(columnIndex)}
-                        aria-label={t('markdownTable.sortByColumn', {
-                          column: columnName,
-                        })}
+                        aria-label={sortAriaLabel}
+                        aria-pressed={isSorted}
                       >
                         <span className={styles.headerText}>
                           {header.content}
@@ -1339,6 +1444,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                         <span className={styles.sortIcon}>{sortLabel}</span>
                       </button>
                       <button
+                        ref={isMenuOpen ? filterTriggerRef : undefined}
                         className={`${styles.filterTrigger} ${
                           isFiltered ? styles.filterTriggerActive : ''
                         }`}
@@ -1350,6 +1456,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                           column: columnName,
                         })}
                         aria-expanded={isMenuOpen}
+                        aria-controls={isMenuOpen ? filterMenuId : undefined}
                       >
                         ▾
                       </button>
@@ -1362,6 +1469,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           <tbody>
             {visibleRows.map((row, rowIndex) => {
               const detailOpen = detailRowKey === row.key;
+              const detailId = `${tableId}-detail-${row.key}`;
               return (
                 <Fragment key={row.key}>
                   <tr>
@@ -1371,6 +1479,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                         type="button"
                         onClick={() => toggleRowDetail(row.key)}
                         aria-expanded={detailOpen}
+                        aria-controls={detailId}
                         aria-label={t(
                           detailOpen
                             ? 'markdownTable.closeRowDetailsAria'
@@ -1405,7 +1514,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                     })}
                   </tr>
                   {detailOpen && (
-                    <tr className={styles.detailRow}>
+                    <tr id={detailId} className={styles.detailRow}>
                       <td
                         className={styles.detailCell}
                         colSpan={visibleColumnIndexes.length + 1}
@@ -1450,6 +1559,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       {openFilterMenu && openFilterHeader && (
         <ColumnFilterMenu
           key={openFilterMenu.columnIndex}
+          id={`${tableId}-filter-${openFilterMenu.columnIndex}`}
           columnName={openFilterColumnName}
           columnIndex={openFilterMenu.columnIndex}
           filter={filters[openFilterMenu.columnIndex]}
@@ -1459,7 +1569,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
           canHideColumn={visibleColumnIndexes.length > 1}
           onApply={setColumnFilter}
-          onClose={() => setOpenFilterMenu(null)}
+          onClose={closeFilterMenu}
           onHideColumn={hideColumn}
           onSort={setColumnSort}
         />

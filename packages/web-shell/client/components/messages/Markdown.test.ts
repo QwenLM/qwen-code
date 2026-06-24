@@ -4,6 +4,7 @@
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { I18nProvider } from '../../i18n';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
 import { isSafeHref, isSafeImageSrc, Markdown } from './Markdown';
 
@@ -104,7 +105,57 @@ describe('isSafeImageSrc', () => {
   });
 });
 
-describe('Markdown enhanced table fallback', () => {
+describe('Markdown enhanced tables', () => {
+  it('uses enhanced table controls when enabled', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, {
+            content: '| A |\n| --- |\n| 1 |',
+            enhanceTables: true,
+          }),
+        ),
+      );
+    });
+
+    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Details');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('uses plain table rendering when enhancement is disabled', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, {
+            content: '| A |\n| --- |\n| 1 |',
+            enhanceTables: false,
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('table')).not.toBeNull();
+    expect(container.textContent).not.toContain('Quick copy');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('renders the plain table fallback when enhancement throws', () => {
     vi.spyOn(EnhancedTableModule, 'EnhancedMarkdownTable').mockImplementation(
       () => {
@@ -120,10 +171,14 @@ describe('Markdown enhanced table fallback', () => {
 
     act(() => {
       root.render(
-        createElement(Markdown, {
-          content: '| A |\n| --- |\n| 1 |',
-          enhanceTables: true,
-        }),
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, {
+            content: '| A |\n| --- |\n| 1 |',
+            enhanceTables: true,
+          }),
+        ),
       );
     });
 

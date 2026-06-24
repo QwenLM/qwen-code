@@ -1,4 +1,11 @@
-import { Component, memo, useEffect, useState, type ReactNode } from 'react';
+import {
+  Component,
+  isValidElement,
+  memo,
+  useEffect,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useTheme } from '../../themeContext';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
@@ -332,14 +339,40 @@ function PlainMarkdownTable({ children }: { children?: ReactNode }) {
   );
 }
 
+function getMarkdownNodeText(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') {
+    return '';
+  }
+  if (typeof node === 'string' || typeof node === 'number') {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    return node.map(getMarkdownNodeText).join('');
+  }
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return getMarkdownNodeText(node.props.children);
+  }
+  return '';
+}
+
 class EnhancedMarkdownTableBoundary extends Component<
-  { children: ReactNode; fallback: ReactNode },
-  { hasError: boolean }
+  { children: ReactNode; fallback: ReactNode; resetKey: string },
+  { hasError: boolean; resetKey: string }
 > {
-  state = { hasError: false };
+  state = { hasError: false, resetKey: this.props.resetKey };
 
   static getDerivedStateFromError() {
     return { hasError: true };
+  }
+
+  static getDerivedStateFromProps(
+    props: { resetKey: string },
+    state: { resetKey: string },
+  ) {
+    if (props.resetKey !== state.resetKey) {
+      return { hasError: false, resetKey: props.resetKey };
+    }
+    return null;
   }
 
   componentDidCatch(error: Error) {
@@ -396,7 +429,10 @@ function createComponents(
       const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
       if (enhanceTables) {
         return (
-          <EnhancedMarkdownTableBoundary fallback={fallback}>
+          <EnhancedMarkdownTableBoundary
+            fallback={fallback}
+            resetKey={getMarkdownNodeText(children)}
+          >
             <EnhancedMarkdownTable fallback={fallback}>
               {children}
             </EnhancedMarkdownTable>
