@@ -30,7 +30,11 @@ import type {
   PermissionSettingsScope,
   QwenPermissionSettings,
 } from '../../config/permission-settings.js';
-import type { SettingScope, EnvReloadResult } from '../../config/settings.js';
+import type {
+  SettingScope,
+  EnvReloadResult,
+  LoadedSettings,
+} from '../../config/settings.js';
 import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
@@ -225,6 +229,28 @@ export interface WorkspaceTrustChangeResult {
   requiresOperatorAction: true;
 }
 
+export interface WorkspaceSettingsWrite {
+  scope: SettingScope;
+  key: string;
+  value: unknown;
+}
+
+export class WorkspaceSettingsPartialPersistError extends Error {
+  readonly committedWrites: WorkspaceSettingsWrite[];
+  override readonly cause: unknown;
+
+  constructor(
+    message: string,
+    committedWrites: WorkspaceSettingsWrite[],
+    cause: unknown,
+  ) {
+    super(message);
+    this.name = 'WorkspaceSettingsPartialPersistError';
+    this.committedWrites = committedWrites;
+    this.cause = cause;
+  }
+}
+
 export interface WorkspacePermissionRulesUpdate {
   scope: PermissionSettingsScope;
   ruleType: PermissionRuleType;
@@ -317,11 +343,11 @@ export interface DaemonWorkspaceServiceDeps {
     scope: SettingScope,
     key: string,
     value: unknown,
-  ) => Promise<void>;
+  ) => Promise<void | LoadedSettings>;
 
   persistSettings?: (
     workspace: string,
-    writes: Array<{ scope: SettingScope; key: string; value: unknown }>,
+    writes: WorkspaceSettingsWrite[],
   ) => Promise<void>;
 
   /** Reload daemon-side process.env from .env / settings.env. */

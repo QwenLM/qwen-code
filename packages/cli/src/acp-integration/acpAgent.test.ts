@@ -549,7 +549,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
-import { loadSettings } from '../config/settings.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
+import {
+  MAX_PERMISSION_RULE_LENGTH,
+  MAX_PERMISSION_RULES_COUNT,
+} from '../config/permission-settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
@@ -1332,49 +1336,64 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   }
 
   function makeCoreSettings(outputLanguage = 'English') {
+    type PermissionRules = { allow: string[]; ask: string[]; deny: string[] };
+
     const userGeneral = { outputLanguage };
     const mergedGeneral = { outputLanguage };
-    const userSettings: Record<string, unknown> = {
-      general: userGeneral,
-    };
+    const userSettings: Record<string, unknown> = { general: userGeneral };
     const workspaceSettings: Record<string, unknown> = {};
-    const mergedSettings: Record<string, unknown> = {
-      general: mergedGeneral,
-    };
+    const mergedSettings: Record<string, unknown> = { general: mergedGeneral };
+    const emptyRules = (): PermissionRules => ({
+      allow: [],
+      ask: [],
+      deny: [],
+    });
     const readPermissionRules = (
       settings: Record<string, unknown>,
-      ruleType: 'allow' | 'ask' | 'deny',
-    ): string[] => {
+    ): PermissionRules => {
       const permissions = settings['permissions'];
-      if (!permissions || typeof permissions !== 'object') return [];
-      const value = (permissions as Record<string, unknown>)[ruleType];
-      return Array.isArray(value)
-        ? value.filter((item): item is string => typeof item === 'string')
-        : [];
-    };
-    const updateMergedPermissions = () => {
-      mergedSettings['permissions'] = {
-        allow: [
-          ...readPermissionRules(userSettings, 'allow'),
-          ...readPermissionRules(workspaceSettings, 'allow'),
-        ],
-        ask: [
-          ...readPermissionRules(userSettings, 'ask'),
-          ...readPermissionRules(workspaceSettings, 'ask'),
-        ],
-        deny: [
-          ...readPermissionRules(userSettings, 'deny'),
-          ...readPermissionRules(workspaceSettings, 'deny'),
-        ],
+      if (
+        typeof permissions !== 'object' ||
+        permissions === null ||
+        Array.isArray(permissions)
+      ) {
+        return emptyRules();
+      }
+      const permissionRecord = permissions as Record<string, unknown>;
+      const readList = (key: keyof PermissionRules) =>
+        Array.isArray(permissionRecord[key])
+          ? permissionRecord[key].filter(
+              (value): value is string => typeof value === 'string',
+            )
+          : [];
+      return {
+        allow: readList('allow'),
+        ask: readList('ask'),
+        deny: readList('deny'),
       };
     };
-    const setValue = vi.fn((scope: string, key: string, value: unknown) => {
+    const updateMergedPermissions = () => {
+      const userRules = readPermissionRules(userSettings);
+      const workspaceRules = readPermissionRules(workspaceSettings);
+      mergedSettings['permissions'] = {
+        allow: [...userRules.allow, ...workspaceRules.allow],
+        ask: [...userRules.ask, ...workspaceRules.ask],
+        deny: [...userRules.deny, ...workspaceRules.deny],
+      };
+    };
+    const setValue = vi.fn((_scope: string, key: string, value: unknown) => {
+      const target = _scope === 'Workspace' ? workspaceSettings : userSettings;
       if (key.startsWith('permissions.')) {
-        const ruleType = key.split('.')[1] as 'allow' | 'ask' | 'deny';
-        const target = scope === 'Workspace' ? workspaceSettings : userSettings;
+        const ruleType = key.slice('permissions.'.length);
+        if (ruleType !== 'allow' && ruleType !== 'ask' && ruleType !== 'deny') {
+          return;
+        }
+        const existing = target['permissions'];
         const permissions =
-          target['permissions'] && typeof target['permissions'] === 'object'
-            ? (target['permissions'] as Record<string, unknown>)
+          typeof existing === 'object' &&
+          existing !== null &&
+          !Array.isArray(existing)
+            ? { ...(existing as Record<string, unknown>) }
             : {};
         permissions[ruleType] = value;
         target['permissions'] = permissions;
@@ -2933,45 +2952,41 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('qwen/permissions/getSettings returns user workspace merged and trust state', async () => {
     const settings = makeCoreSettings();
-    (settings.user.settings as Record<string, unknown>)['permissions'] = {
-      allow: ['Bash(git *)'],
-      deny: ['Read(.env)'],
-    };
-    (settings.workspace.settings as Record<string, unknown>)['permissions'] = {
-      allow: ['Edit(src/**)'],
-      ask: ['Bash(npm *)'],
-    };
-    (settings.merged as Record<string, unknown>)['permissions'] = {
-      allow: ['Bash(git *)', 'Edit(src/**)'],
-      ask: ['Bash(npm *)'],
-      deny: ['Read(.env)'],
-    };
+    settings.setValue(SettingScope.User, 'permissions.allow', [
+      'ShellTool(git status)',
+    ]);
+    settings.setValue(SettingScope.Workspace, 'permissions.allow', [
+      'ShellTool(npm test)',
+    ]);
+    settings.setValue(SettingScope.Workspace, 'permissions.deny', [
+      'ReadFileTool(**/.env)',
+    ]);
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
-    await expect(
-      agent.extMethod('qwen/permissions/getSettings', {}),
-    ).resolves.toEqual({
+    const result = await agent.extMethod('qwen/permissions/getSettings', {});
+
+    expect(result).toEqual({
       v: 1,
       user: {
         path: '/home/test/.qwen/settings.json',
         rules: {
-          allow: ['Bash(git *)'],
+          allow: ['ShellTool(git status)'],
           ask: [],
-          deny: ['Read(.env)'],
+          deny: [],
         },
       },
       workspace: {
         path: '/work/.qwen/settings.json',
         rules: {
-          allow: ['Edit(src/**)'],
-          ask: ['Bash(npm *)'],
-          deny: [],
+          allow: ['ShellTool(npm test)'],
+          ask: [],
+          deny: ['ReadFileTool(**/.env)'],
         },
       },
       merged: {
-        allow: ['Bash(git *)', 'Edit(src/**)'],
-        ask: ['Bash(npm *)'],
-        deny: ['Read(.env)'],
+        allow: ['ShellTool(git status)', 'ShellTool(npm test)'],
+        ask: [],
+        deny: ['ReadFileTool(**/.env)'],
       },
       isTrusted: true,
     });
@@ -3631,7 +3646,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/permissions/setRules rejects malformed permission rules', async () => {
+  it('qwen/permissions/setRules rejects new malformed permission rules', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
@@ -3639,10 +3654,75 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod('qwen/permissions/setRules', {
         scope: 'user',
         ruleType: 'allow',
-        rules: ['Bash(git *'],
+        rules: ['ShellTool(git status'],
       }),
     ).rejects.toThrowError(/Malformed permission rule/);
     expect(settings.setValue).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules rejects oversized permission rule lists', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: Array.from(
+          { length: MAX_PERMISSION_RULES_COUNT + 1 },
+          (_, index) => `ShellTool(echo ${index})`,
+        ),
+      }),
+    ).rejects.toThrowError(
+      `rules array exceeds ${MAX_PERMISSION_RULES_COUNT} entries`,
+    );
+    expect(settings.setValue).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules rejects oversized permission rule strings', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: [`ShellTool(${'x'.repeat(MAX_PERMISSION_RULE_LENGTH + 1)})`],
+      }),
+    ).rejects.toThrowError(
+      `rule exceeds ${MAX_PERMISSION_RULE_LENGTH}-character limit`,
+    );
+    expect(settings.setValue).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules preserves already-stored malformed permission rules', async () => {
+    const settings = makeCoreSettings();
+    settings.setValue(SettingScope.User, 'permissions.allow', [
+      'ShellTool(git status',
+    ]);
+    vi.mocked(settings.setValue).mockClear();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/permissions/setRules', {
+      scope: 'user',
+      ruleType: 'allow',
+      rules: ['ShellTool(git status', 'ShellTool(npm test)'],
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'permissions.allow',
+      ['ShellTool(git status', 'ShellTool(npm test)'],
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3675,55 +3755,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('qwen/permissions/setRules syncs live permission managers after replacement', async () => {
     const settings = makeCoreSettings();
-    (settings.user.settings as Record<string, unknown>)['permissions'] = {
-      allow: ['Bash(old *)'],
-    };
-    (settings.workspace.settings as Record<string, unknown>)['permissions'] = {
-      deny: ['Read(secret)'],
-    };
-    (settings.merged as Record<string, unknown>)['permissions'] = {
-      allow: ['Bash(old *)'],
-      ask: [],
-      deny: ['Read(secret)'],
-    };
+    settings.setValue(SettingScope.User, 'permissions.allow', [
+      'ShellTool(git status)',
+      'ShellTool(git diff)',
+    ]);
+    vi.mocked(settings.setValue).mockClear();
+    const addPersistentRule = vi.fn();
+    const removePersistentRule = vi.fn();
     const permissionManager = {
-      addPersistentRule: vi.fn(),
-      removePersistentRule: vi.fn(),
+      addPersistentRule,
+      removePersistentRule,
     };
-    const innerConfig = makeInnerConfig();
-    Object.assign(innerConfig, {
-      getPermissionManager: vi.fn().mockReturnValue(permissionManager),
-    });
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      innerConfig as unknown as Config,
-    );
-    vi.mocked(Session).mockImplementation(
-      () =>
-        ({
-          getId: vi.fn().mockReturnValue('test-session-id'),
-          getConfig: vi.fn().mockReturnValue(innerConfig),
-          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
-          startCronScheduler: vi.fn(),
-          dispose: vi.fn(),
-        }) as unknown as InstanceType<typeof Session>,
-    );
-    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
-    await agent.newSession({ cwd: '/work', mcpServers: [] });
+    const innerConfig = await setupSessionMocks('test-session-id');
+    (
+      innerConfig as ReturnType<typeof makeInnerConfig> & {
+        getPermissionManager: () => typeof permissionManager;
+      }
+    ).getPermissionManager = vi.fn(() => permissionManager);
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
     await agent.extMethod('qwen/permissions/setRules', {
       scope: 'user',
       ruleType: 'allow',
-      rules: ['Bash(new *)'],
+      rules: ['ShellTool(git diff)', 'ShellTool(npm test)'],
     });
 
-    expect(permissionManager.removePersistentRule).toHaveBeenCalledWith(
-      'Bash(old *)',
+    expect(removePersistentRule).toHaveBeenCalledWith(
+      'ShellTool(git status)',
       'allow',
     );
-    expect(permissionManager.addPersistentRule).toHaveBeenCalledWith(
-      'Bash(new *)',
+    expect(removePersistentRule).not.toHaveBeenCalledWith(
+      'ShellTool(git diff)',
+      'allow',
+    );
+    expect(addPersistentRule).toHaveBeenCalledWith(
+      'ShellTool(npm test)',
+      'allow',
+    );
+    expect(addPersistentRule).not.toHaveBeenCalledWith(
+      'ShellTool(git diff)',
       'allow',
     );
 

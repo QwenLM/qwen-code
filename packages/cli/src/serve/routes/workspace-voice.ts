@@ -34,6 +34,10 @@ import {
 } from '../../services/voice-settings.js';
 import { MAX_VOICE_LANGUAGE_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  WorkspaceSettingsPartialPersistError,
+  type WorkspaceSettingsWrite,
+} from '../workspace-service/types.js';
 
 type WorkspaceVoiceTranscriber = (
   input: WorkspaceVoiceTranscriptionInput,
@@ -44,11 +48,11 @@ type PersistSetting = (
   scope: SettingScope,
   key: string,
   value: unknown,
-) => Promise<void>;
+) => Promise<void | LoadedSettings>;
 
 type PersistSettings = (
   workspace: string,
-  writes: Array<{ scope: SettingScope; key: string; value: unknown }>,
+  writes: WorkspaceSettingsWrite[],
 ) => Promise<void>;
 
 export interface WorkspaceVoiceRouteDeps {
@@ -172,7 +176,16 @@ async function persistVoiceUpdate(
   const writes = buildWorkspaceVoiceSettingsWrites(settings, update);
 
   if (deps.persistSettings) {
-    await deps.persistSettings(deps.boundWorkspace, writes);
+    try {
+      await deps.persistSettings(deps.boundWorkspace, writes);
+    } catch (err) {
+      if (err instanceof WorkspaceSettingsPartialPersistError) {
+        for (const write of err.committedWrites) {
+          broadcastVoiceWrite(deps, write, clientId);
+        }
+      }
+      throw err;
+    }
     for (const write of writes) {
       broadcastVoiceWrite(deps, write, clientId);
     }

@@ -84,4 +84,4 @@ Custom channels automatically support everything built-in channels do:
 
 ## Building Your Own Channel Plugin
 
-Want to build a channel plugin for a new platform? See the [Channel Plugin Developer Guide](/developers/channel-plugins) for the `ChannelPlugin` interface, the `Envelope` format, and extension points.
+Want to build a channel plugin for a new platform? See the [Channel Plugin Developer Guide](../../../developers/channel-plugins.md) for the `ChannelPlugin` interface, the `Envelope` format, and extension points.

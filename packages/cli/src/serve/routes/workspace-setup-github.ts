@@ -307,8 +307,8 @@ export function resolveSetupGithubProxy(
   const settingsProxy =
     trustState === 'trusted'
       ? settings.merged.proxy
-      : settings.system.settings.proxy ||
-        settings.user.settings.proxy ||
+      : settings.user.settings.proxy ||
+        settings.system.settings.proxy ||
         settings.systemDefaults.settings.proxy;
   return (
     settingsProxy ||
@@ -328,8 +328,8 @@ function settingsForSetupGithubTrust(
   return {
     security: {
       folderTrust: {
-        ...userFolderTrust,
         ...systemFolderTrust,
+        ...userFolderTrust,
       },
     },
   };

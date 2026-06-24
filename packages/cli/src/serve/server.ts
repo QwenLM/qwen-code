@@ -805,7 +805,7 @@ export interface ServeAppDeps {
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
-  ) => Promise<void>;
+  ) => Promise<void | import('../config/settings.js').LoadedSettings>;
   persistSettings?: (
     workspace: string,
     writes: Array<{
@@ -2774,7 +2774,9 @@ export function createServeApp(
       boundWorkspace,
       mutate,
       safeBody,
-      persistSetting,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, bridge),

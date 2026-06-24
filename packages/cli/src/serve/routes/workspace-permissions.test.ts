@@ -17,6 +17,10 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../../config/settings.js';
 import {
+  MAX_PERMISSION_RULES_COUNT,
+  MAX_PERMISSION_RULE_LENGTH,
+} from '../../config/permission-settings.js';
+import {
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
   TrustLevel,
@@ -266,8 +270,34 @@ describe('workspace permissions routes', () => {
       .post('/workspace/permissions')
       .send({ scope: 'user', ruleType: 'allow', rules: ['Bash(git *'] });
     expect(malformedRule.status).toBe(400);
-    expect(malformedRule.body.code).toBe('invalid_rule');
+    expect(malformedRule.body.code).toBe('invalid_rules');
     expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('POST rejects oversized rule lists before invoking ACP', async () => {
+    const tooManyRules = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'user',
+        ruleType: 'allow',
+        rules: Array.from(
+          { length: MAX_PERMISSION_RULES_COUNT + 1 },
+          (_, index) => `Bash(echo ${index})`,
+        ),
+      });
+    expect(tooManyRules.status).toBe(400);
+    expect(tooManyRules.body.code).toBe('invalid_rules');
+
+    const tooLongRule = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'user',
+        ruleType: 'allow',
+        rules: [`Bash(${'x'.repeat(MAX_PERMISSION_RULE_LENGTH + 1)})`],
+      });
+    expect(tooLongRule.status).toBe(400);
+    expect(tooLongRule.body.code).toBe('invalid_rules');
+    expect(h.setWorkspacePermissionRules).not.toHaveBeenCalled();
   });
 
   it('POST replaces one scoped rule list through a live ACP child and publishes settings_changed', async () => {

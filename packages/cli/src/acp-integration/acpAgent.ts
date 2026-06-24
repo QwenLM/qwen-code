@@ -6742,17 +6742,24 @@ class QwenAgent implements Agent {
 
         const settings = this.loadPermissionSettings(cwd);
         const before = readPermissionRuleSet(settings.merged);
+        const settingScope =
+          scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
+        const scopeSettings =
+          scope === 'workspace'
+            ? settings.workspace.settings
+            : settings.user.settings;
+        const existingRules = readPermissionRuleSet(scopeSettings)[ruleType];
         let rules: string[];
         try {
-          rules = normalizePermissionRules(params['rules']);
+          rules = normalizePermissionRules(params['rules'], {
+            existingRules,
+          });
         } catch (error) {
           if (error instanceof PermissionRulesValidationError) {
             throw RequestError.invalidParams(undefined, error.message);
           }
           throw error;
         }
-        const settingScope =
-          scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
 
         settings.setValue(settingScope, `permissions.${ruleType}`, rules);
         // `setValue` already recomputed the in-memory merged view, so read the

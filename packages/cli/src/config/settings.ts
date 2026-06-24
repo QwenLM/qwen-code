@@ -537,6 +537,32 @@ export class LoadedSettings {
     saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
   }
 
+  setValues(
+    writes: ReadonlyArray<{
+      scope: SettingScope;
+      key: string;
+      value: unknown;
+    }>,
+    onScopeCommitted?: (scope: SettingScope) => void,
+  ): void {
+    const scopes = new Set<SettingScope>();
+    for (const write of writes) {
+      const value =
+        write.key === 'model.name' && typeof write.value === 'string'
+          ? stripRuntimeSnapshotPrefix(write.value)
+          : write.value;
+      const settingsFile = this.forScope(write.scope);
+      setNestedPropertySafe(settingsFile.settings, write.key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, write.key, value);
+      scopes.add(write.scope);
+    }
+    this._merged = this.computeMergedSettings();
+    for (const scope of scopes) {
+      saveSettings(this.forScope(scope));
+      onScopeCommitted?.(scope);
+    }
+  }
+
   recomputeMerged(): void {
     this._merged = this.computeMergedSettings();
   }

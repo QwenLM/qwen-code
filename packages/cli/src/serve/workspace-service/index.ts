@@ -56,7 +56,10 @@ import {
 } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
-import { WorkspacePermissionRulesSessionRequiredError } from './types.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
+} from './types.js';
 import type {
   DaemonWorkspaceService,
   DaemonWorkspaceServiceDeps,
@@ -395,7 +398,16 @@ export function createDaemonWorkspaceService(
       };
 
       if (persistSettings) {
-        await persistSettings(boundWorkspace, writes);
+        try {
+          await persistSettings(boundWorkspace, writes);
+        } catch (err) {
+          if (err instanceof WorkspaceSettingsPartialPersistError) {
+            for (const write of err.committedWrites) {
+              publishWrite(write);
+            }
+          }
+          throw err;
+        }
         for (const write of writes) {
           publishWrite(write);
         }

@@ -6,11 +6,39 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
-import { BaseTextInput, defaultRenderLine } from './BaseTextInput.js';
+import type { DOMElement } from 'ink';
+import {
+  BaseTextInput,
+  defaultRenderLine,
+  getAbsolutePosition,
+  getPhysicalCursorPosition,
+} from './BaseTextInput.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
+
+const mockSetCursorPosition = vi.hoisted(() => vi.fn());
+const mockUseBoxMetrics = vi.hoisted(() =>
+  vi.fn(() => ({
+    width: 0,
+    height: 0,
+    top: 0,
+    left: 0,
+    hasMeasured: true,
+  })),
+);
+
+vi.mock('ink', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink')>();
+  return {
+    ...actual,
+    useBoxMetrics: mockUseBoxMetrics,
+    useCursor: () => ({
+      setCursorPosition: mockSetCursorPosition,
+    }),
+  };
+});
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -48,6 +76,19 @@ function createBuffer() {
   } as unknown as TextBuffer;
 }
 
+function createElement(
+  top: number,
+  left: number,
+  parentNode?: DOMElement,
+): DOMElement {
+  return {
+    yogaNode: {
+      getComputedLayout: () => ({ top, left }),
+    },
+    parentNode,
+  } as unknown as DOMElement;
+}
+
 function captureKeypressHandler(): (key: Key) => void {
   const calls = mockedUseKeypress.mock.calls;
   if (calls.length === 0) {
@@ -59,6 +100,13 @@ function captureKeypressHandler(): (key: Key) => void {
 describe('BaseTextInput', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUseBoxMetrics.mockReturnValue({
+      width: 0,
+      height: 0,
+      top: 0,
+      left: 0,
+      hasMeasured: true,
+    });
   });
 
   it('does not type the render-mode shortcut into the buffer', () => {
@@ -96,6 +144,83 @@ describe('BaseTextInput', () => {
     expect(buffer.handleInput).toHaveBeenCalledWith(typedKey);
   });
 
+  it('clears the physical cursor position on unmount', () => {
+    const buffer = createBuffer();
+    const { unmount } = render(
+      <BaseTextInput buffer={buffer} onSubmit={vi.fn()} />,
+    );
+
+    mockSetCursorPosition.mockClear();
+    unmount();
+
+    expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
+  });
+
+  it('hides the physical cursor when showCursor is false', () => {
+    const buffer = createBuffer();
+
+    render(
+      <BaseTextInput buffer={buffer} onSubmit={vi.fn()} showCursor={false} />,
+    );
+
+    expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
+  });
+
+  it('positions the physical cursor from absolute Ink DOM position', () => {
+    const root = createElement(2, 3);
+    const parent = createElement(5, 7, root);
+    const child = createElement(11, 13, parent);
+
+    expect(
+      getPhysicalCursorPosition(child, {
+        hasMeasured: true,
+        showCursor: true,
+        cursorVisualRow: 2,
+        cursorVisualCol: 3,
+        scrollVisualRow: 1,
+        linesToRender: ['', 'ab😀cd'],
+        prefixWidth: 2,
+      }),
+    ).toEqual({ x: 29, y: 20 });
+  });
+});
+
+describe('getAbsolutePosition', () => {
+  it('returns undefined for a missing node', () => {
+    expect(getAbsolutePosition(null)).toBeUndefined();
+  });
+
+  it('sums computed layout offsets across parent nodes', () => {
+    const root = createElement(2, 3);
+    const parent = createElement(5, 7, root);
+    const child = createElement(11, 13, parent);
+
+    expect(getAbsolutePosition(child)).toEqual({ top: 18, left: 23 });
+  });
+
+  it('skips nodes without yogaNode in the parent chain', () => {
+    const root = createElement(2, 3);
+    const middle = { parentNode: root } as unknown as DOMElement;
+    const child = createElement(11, 13, middle);
+
+    expect(getAbsolutePosition(child)).toEqual({ top: 13, left: 16 });
+  });
+
+  it('skips nodes whose getComputedLayout returns undefined', () => {
+    const root = createElement(2, 3);
+    const middle = {
+      yogaNode: {
+        getComputedLayout: () => undefined,
+      },
+      parentNode: root,
+    } as unknown as DOMElement;
+    const child = createElement(11, 13, middle);
+
+    expect(getAbsolutePosition(child)).toEqual({ top: 13, left: 16 });
+  });
+});
+
+describe('defaultRenderLine', () => {
   it('renders the software cursor on the current character', () => {
     const { lastFrame } = render(
       <>

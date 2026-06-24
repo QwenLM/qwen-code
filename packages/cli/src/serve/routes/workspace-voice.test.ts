@@ -27,6 +27,7 @@ import {
 import { createServeApp } from '../server.js';
 import type { ServeOptions } from '../types.js';
 import { registerWorkspaceVoiceRoutes } from './workspace-voice.js';
+import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
@@ -411,6 +412,45 @@ describe('workspace voice routes', () => {
       4,
       'general.voice.enabled',
       true,
+      'user',
+      'client-1',
+    );
+  });
+
+  it('POST broadcasts committed batch voice writes when batch persistence partially fails', async () => {
+    await writeVoiceModelSettings(h);
+    const broadcastSettingsChanged = vi.fn();
+    const persistSettings = vi.fn(async (_workspace, writes) => {
+      throw new WorkspaceSettingsPartialPersistError(
+        'batch failed',
+        [writes[0]!],
+        new Error('disk full'),
+      );
+    });
+    const app = express();
+    app.use(express.json({ limit: '10mb' }));
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSetting: h.persistSetting,
+      persistSettings,
+      broadcastSettingsChanged,
+      parseAndValidateClientId: vi.fn(() => 'client-1'),
+      transcribe: h.transcribe,
+    });
+
+    const res = await request(app).post('/workspace/voice').send({
+      voiceModel: 'qwen3-asr-flash',
+      mode: 'hold',
+    });
+
+    expect(res.status).toBe(500);
+    expect(broadcastSettingsChanged).toHaveBeenCalledTimes(1);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'voiceModel',
+      'qwen3-asr-flash',
       'user',
       'client-1',
     );

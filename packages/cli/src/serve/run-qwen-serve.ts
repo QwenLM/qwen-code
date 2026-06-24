@@ -67,6 +67,10 @@ import {
 import { initDaemonLogger, type DaemonLogger } from './daemon-logger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
+import {
+  WorkspaceSettingsPartialPersistError,
+  type WorkspaceSettingsWrite,
+} from './workspace-service/types.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type {
   ServeOptions,
@@ -929,19 +933,45 @@ export async function runQwenServe(
     scope: SettingScope,
     key: string,
     value: unknown,
-  ): Promise<void> =>
+  ) =>
     withSettingsLock(workspace, async () => {
       const fresh = loadSettings(workspace);
       fresh.setValue(scope, key, value);
+      return fresh;
     });
   const persistSettingsFn = (
     workspace: string,
-    writes: Array<{ scope: SettingScope; key: string; value: unknown }>,
+    writes: WorkspaceSettingsWrite[],
   ): Promise<void> =>
     withSettingsLock(workspace, async () => {
       const fresh = loadSettings(workspace);
+      const writesByScope = new Map<SettingScope, number>();
       for (const write of writes) {
-        fresh.setValue(write.scope, write.key, write.value);
+        writesByScope.set(
+          write.scope,
+          (writesByScope.get(write.scope) ?? 0) + 1,
+        );
+      }
+      const committedScopes = new Set<SettingScope>();
+      let committed = 0;
+      try {
+        fresh.setValues(writes, (scope) => {
+          committedScopes.add(scope);
+          committed += writesByScope.get(scope) ?? 0;
+        });
+      } catch (err) {
+        const failedWrite =
+          writes.find((write) => !committedScopes.has(write.scope)) ??
+          writes[committed];
+        const message = `persistSettings partial failure (workspace=${workspace}, committed=${committed}/${writes.length}, failedKey=${failedWrite?.key ?? '<unknown>'}, failedScope=${failedWrite?.scope ?? '<unknown>'}): ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        writeStderrLine(`qwen serve: ${message}`);
+        throw new WorkspaceSettingsPartialPersistError(
+          message,
+          writes.filter((write) => committedScopes.has(write.scope)),
+          err,
+        );
       }
     });
 

@@ -2253,6 +2253,7 @@ describe('createServeApp', () => {
             ruleType: 'allow',
             rules: ['Bash(git status)'],
           },
+          undefined,
         );
       } finally {
         await fsp.rm(wsRoot, { recursive: true, force: true });

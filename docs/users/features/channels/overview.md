@@ -7,7 +7,7 @@ Channels let you interact with a Qwen Code agent from messaging platforms like T
 When you run `qwen channel start`, Qwen Code:
 
 1. Reads channel configurations from your `settings.json`
-2. Spawns a single agent process using the [Agent Client Protocol (ACP)](../../developers/architecture)
+2. Spawns a single agent process using the [Agent Client Protocol (ACP)](../../../developers/architecture.md)
 3. Connects to each messaging platform and starts listening for messages
 4. Routes incoming messages to the agent and sends responses back to the correct chat
 

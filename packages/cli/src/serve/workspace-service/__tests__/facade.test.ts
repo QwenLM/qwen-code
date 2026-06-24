@@ -99,6 +99,10 @@ import {
   TrustLevel,
 } from '../../../config/trustedFolders.js';
 import { WorkspaceVoiceError } from '../../../services/voice-service.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
+} from '../types.js';
 import type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
@@ -314,6 +318,38 @@ describe('createDaemonWorkspaceService', () => {
         );
       });
     });
+
+    it('publishes committed batch voice writes when batch persistence partially fails', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const persistSettings = vi.fn(async (_workspace, writes) => {
+        throw new WorkspaceSettingsPartialPersistError(
+          'batch failed',
+          [writes[0]!],
+          new Error('disk full'),
+        );
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ persistSettings, publishWorkspaceEvent }),
+      );
+
+      await expect(
+        svc.setWorkspaceVoiceSettings(
+          makeCtx({ originatorClientId: 'voice-client' }),
+          { mode: 'tap', language: 'english' },
+        ),
+      ).rejects.toThrow(WorkspaceSettingsPartialPersistError);
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'general.voice.mode',
+          value: 'tap',
+          scope: 'user',
+        },
+        originatorClientId: 'voice-client',
+      });
+    });
   });
 
   describe('workspace permissions', () => {
@@ -378,7 +414,7 @@ describe('createDaemonWorkspaceService', () => {
             makeCtx({ originatorClientId: 'perm-client' }),
             { scope: 'user', ruleType: 'deny', rules: ['Shell(rm -rf *)'] },
           ),
-        ).rejects.toThrow('live ACP session');
+        ).rejects.toThrow(WorkspacePermissionRulesSessionRequiredError);
 
         expect(persistSetting).not.toHaveBeenCalled();
         expect(publishWorkspaceEvent).not.toHaveBeenCalled();
@@ -463,7 +499,7 @@ describe('createDaemonWorkspaceService', () => {
         expect(result).toMatchObject({
           v: 1,
           user: {
-            path: path.join(home, 'settings.json'),
+            path: `${home}/settings.json`,
             rules: {
               allow: ['Shell(git *)'],
               ask: [],
@@ -471,11 +507,7 @@ describe('createDaemonWorkspaceService', () => {
             },
           },
           workspace: {
-            path: path.join(
-              workspace,
-              SETTINGS_DIRECTORY_NAME,
-              'settings.json',
-            ),
+            path: `${workspace}/${SETTINGS_DIRECTORY_NAME}/settings.json`,
             rules: {
               allow: ['Read(src/**)'],
               ask: ['Shell(npm *)'],

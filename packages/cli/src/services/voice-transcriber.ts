@@ -431,7 +431,10 @@ export function sanitizeVoiceErrorMessage(
 }
 
 function inputAudioFormat(mimeType: string): string {
-  return mimeType.split(';', 1)[0]?.replace(/^audio\//, '') || 'wav';
+  const subtype = mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  return subtype.startsWith('audio/')
+    ? subtype.slice('audio/'.length) || 'wav'
+    : 'wav';
 }
 
 function transcriptionAbortSignal(abortSignal?: AbortSignal): AbortSignal {
