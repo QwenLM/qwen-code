@@ -31,12 +31,12 @@ describe('stop hook blocking cap', () => {
     );
   });
 
-  it('normalizes finite fractional values down to whole iterations', () => {
+  it('normalizes finite fractional config values down to whole iterations', () => {
     expect(normalizeStopHookBlockingCap(3.7)).toBe(3);
     expect(normalizeStopHookBlockingCap(100.9)).toBe(MAX_STOP_HOOK_BLOCK_CAP);
   });
 
-  it('caps large finite values to avoid unbounded recursive Stop loops', () => {
+  it('caps large integer values to avoid unbounded recursive Stop loops', () => {
     expect(normalizeStopHookBlockingCap(99999)).toBe(MAX_STOP_HOOK_BLOCK_CAP);
   });
 
@@ -44,6 +44,16 @@ describe('stop hook blocking cap', () => {
     process.env[STOP_HOOK_BLOCK_CAP_ENV] = '3';
 
     expect(resolveStopHookBlockingCap(12)).toBe(3);
+  });
+
+  it('rejects fractional environment overrides', () => {
+    process.env[STOP_HOOK_BLOCK_CAP_ENV] = '1.5';
+
+    expect(resolveStopHookBlockingCap(12)).toBe(DEFAULT_STOP_HOOK_BLOCK_CAP);
+  });
+
+  it('preserves legacy fractional config values when no environment override is set', () => {
+    expect(resolveStopHookBlockingCap(3.7)).toBe(3);
   });
 
   it('ignores an empty environment override', () => {

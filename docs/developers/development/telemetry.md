@@ -125,7 +125,7 @@ OpenTelemetry names: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 The `QWEN_TELEMETRY_OTLP_*` variants take precedence over the `OTEL_*` variants.
 
 For detailed information about all configuration options, see the
-[Configuration Guide](./cli/configuration.md).
+[Configuration Guide](../../users/configuration/settings.md).
 
 ### Resource attributes
 
