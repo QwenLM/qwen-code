@@ -451,6 +451,19 @@ describe('detailed-span-attributes', () => {
       );
     });
 
+    it('sets truncation attributes for input over the default limit', () => {
+      const config = createMockConfig();
+      const span = createMockSpan();
+      const largeInput =
+        'i'.repeat(DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH + 1);
+      addToolInputAttributes(config, span, 'Bash', largeInput);
+
+      expect(span.attrs['tool_input_truncated']).toBe(true);
+      expect(span.attrs['tool_input_original_length']).toBe(
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH + 1,
+      );
+    });
+
     it('no-ops when flag is disabled', () => {
       mockState.sensitiveEnabled = false;
       const config = createMockConfig();

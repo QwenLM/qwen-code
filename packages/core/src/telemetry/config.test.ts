@@ -201,6 +201,29 @@ describe('telemetry/config helpers', () => {
       expect(resolvedFromEnv.sensitiveSpanAttributeMaxLength).toBe(131_072);
     });
 
+    it('accepts sensitiveSpanAttributeMaxLength at the configured maximum', async () => {
+      const resolvedFromSettings = await resolveTelemetrySettings({
+        settings: {
+          sensitiveSpanAttributeMaxLength:
+            SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+        },
+      });
+      expect(resolvedFromSettings.sensitiveSpanAttributeMaxLength).toBe(
+        SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+      );
+
+      const resolvedFromEnv = await resolveTelemetrySettings({
+        env: {
+          QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: String(
+            SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+          ),
+        },
+      });
+      expect(resolvedFromEnv.sensitiveSpanAttributeMaxLength).toBe(
+        SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+      );
+    });
+
     it('rejects invalid sensitiveSpanAttributeMaxLength settings', async () => {
       await expect(
         resolveTelemetrySettings({
@@ -241,6 +264,24 @@ describe('telemetry/config helpers', () => {
         }),
       ).rejects.toThrow(/sensitiveSpanAttributeMaxLength.*got NaN/i);
     });
+
+    it.each([
+      ['string', '1024'],
+      ['boolean', true],
+    ])(
+      'rejects non-number sensitiveSpanAttributeMaxLength settings (%s)',
+      async (_type, value) => {
+        const settings = {
+          sensitiveSpanAttributeMaxLength: value,
+        } as unknown as Parameters<
+          typeof resolveTelemetrySettings
+        >[0]['settings'];
+
+        await expect(
+          resolveTelemetrySettings({ settings }),
+        ).rejects.toThrow(/sensitiveSpanAttributeMaxLength/i);
+      },
+    );
 
     it('rejects invalid sensitive span max length env values', async () => {
       await expect(
