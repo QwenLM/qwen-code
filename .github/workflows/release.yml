@@ -510,6 +510,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
+              --label 'skip-changelog' \
               --title "chore(release): ${RELEASE_TAG}" \
               --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
           fi

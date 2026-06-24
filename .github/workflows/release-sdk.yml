@@ -399,6 +399,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
+              --label 'skip-changelog' \
               --title "chore(release): sdk-typescript ${RELEASE_TAG}" \
               --body "Automated release PR for sdk-typescript ${RELEASE_TAG}.")"
           fi

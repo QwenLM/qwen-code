@@ -667,6 +667,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --base main \
               --head "$RELEASE_BRANCH" \
+              --label 'skip-changelog' \
               --title "chore(release): desktop ${RELEASE_TAG}" \
               --body "Automated desktop release PR for ${RELEASE_TAG}. Syncs desktop package versions on main.")"
           fi

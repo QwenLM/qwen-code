@@ -460,6 +460,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
+              --label 'skip-changelog' \
               --title "chore(release): sdk-python ${RELEASE_TAG}" \
               --body "Automated release PR for sdk-python ${RELEASE_TAG}.")"
           fi
