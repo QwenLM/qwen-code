@@ -82,6 +82,16 @@ describe('refineVoiceTranscript', () => {
     expect(out).toBe('/quit');
   });
 
+  it('falls back to raw when refinement rewrites a slash command', async () => {
+    mockRunSideQuery.mockResolvedValue({ text: '/clear all' });
+    const out = await refineVoiceTranscript(
+      config,
+      '/quit now please',
+      new AbortController().signal,
+    );
+    expect(out).toBe('/quit now please');
+  });
+
   it('falls back to raw when refinement balloons the text', async () => {
     mockRunSideQuery.mockResolvedValue({ text: 'a'.repeat(100) });
     const out = await refineVoiceTranscript(

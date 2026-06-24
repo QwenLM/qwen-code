@@ -11,6 +11,7 @@ import { InputPrompt } from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -445,6 +446,41 @@ describe('InputPrompt', () => {
       expect(handleVoiceKeypress).not.toHaveBeenCalled();
     });
     expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('passes a voice refinement callback when a fast model is configured', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: expect.any(Function) }),
+    );
+    unmount();
+  });
+
+  it('omits voice refinement when refineTranscript is disabled', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+    const settings = {
+      merged: {
+        general: { voice: { refineTranscript: false } },
+      },
+    } as LoadedSettings;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />, {
+      settings,
+    });
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: undefined }),
+    );
     unmount();
   });
 

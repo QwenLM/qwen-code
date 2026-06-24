@@ -75,8 +75,7 @@ export async function refineVoiceTranscript(
     // transcript) could introduce a leading command sigil — auto-submitted in
     // tap mode — or balloon the text. Fall back to the user's actual words.
     const introducedCommand =
-      (refined.startsWith('/') && !raw.startsWith('/')) ||
-      (refined.startsWith('@') && !raw.startsWith('@'));
+      refined.startsWith('/') || refined.startsWith('@');
     const ballooned = refined.length > raw.length * MAX_GROWTH_FACTOR;
     if (introducedCommand || ballooned) {
       debugLogger.warn('[voice] refinement looks unsafe; using raw', {
