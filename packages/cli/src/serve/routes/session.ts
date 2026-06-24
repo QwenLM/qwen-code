@@ -18,7 +18,6 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
-  MAX_WORKSPACE_PATH_LENGTH,
   PromptQueueFullError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
@@ -72,57 +71,8 @@ export function registerSessionRoutes(
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
-    // 1 daemon = 1 workspace. Three input shapes:
-    //   - `cwd` ABSENT from body → fall back to the daemon's bound
-    //     workspace (clients pre-flight
-    //     `caps.workspaceCwd` and may then omit `cwd`).
-    //   - `cwd` PRESENT but not a string → 400 malformed. A
-    //     client/orchestrator serialization bug (`cwd: null`,
-    //     `cwd: 123`, `cwd: {}`) must not silently bind a session
-    //     to the daemon's workspace; surface the bug instead.
-    //   - `cwd` PRESENT as a string → fall through to the
-    //     `path.isAbsolute` check (empty string and relative both
-    //     fail there with "must be an absolute path when provided").
-    //
-    // `safeBody` returns an `Object.create(null)` map, so
-    // `'cwd' in body` reflects exactly "did the client send the
-    // key?" without prototype-chain confusion. The presence-check
-    // is safe as long as `PROTOTYPE_POLLUTION_KEYS` doesn't grow to
-    // include `cwd` — see the cross-reference in the const's JSDoc
-    // for what to do if that invariant ever has to break.
-    const hasCwd = 'cwd' in body;
-    if (hasCwd && typeof body['cwd'] !== 'string') {
-      res
-        .status(400)
-        .json({ error: '`cwd` must be a string absolute path when provided' });
-      return;
-    }
-    // Length cap BEFORE assignment so a multi-MB `cwd` body can't
-    // amplify through downstream interpolations
-    // (`WorkspaceMismatchError`'s `.message` echoes `requested` twice;
-    // `sendBridgeError` writes it to stderr; `res.json` echoes it
-    // again). On the loopback-default-no-token deployment shape this
-    // is pre-auth, so a 10 MB cwd body — right under
-    // `express.json({limit: '10mb'})` — would otherwise cost
-    // ~60 MB per request × `maxConnections` (default 256). The
-    // `MAX_WORKSPACE_PATH_LENGTH` constant matches Linux's PATH_MAX
-    // (4096); legitimate filesystem paths fit well under it. The
-    // `WorkspaceMismatchError` constructor also truncates as a
-    // belt-and-suspenders defense for non-route callers (tests,
-    // embeds, future entry points that throw the error directly).
-    if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
-      res.status(400).json({
-        error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
-      });
-      return;
-    }
-    const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
-    if (!path.isAbsolute(cwd)) {
-      res
-        .status(400)
-        .json({ error: '`cwd` must be an absolute path when provided' });
-      return;
-    }
+    const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
+    if (cwd === undefined) return;
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
