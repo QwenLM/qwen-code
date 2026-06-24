@@ -225,6 +225,9 @@ export function DaemonSessionProvider({
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const heartbeatSupportedRef = useRef(false);
+  const settledRestoredActivePromptSessionsRef = useRef<
+    WeakSet<DaemonSessionClient>
+  >(new WeakSet());
   const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
   const loadWarningsRef = useRef(loadWarnings);
@@ -301,6 +304,7 @@ export function DaemonSessionProvider({
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let hasCurrentSessionActivePrompt = () => false;
       // Set when the user explicitly deletes the session (server
       // publishes session_closed with reason 'client_close').
       // Reconnecting would auto-create a new session, undoing the
@@ -471,6 +475,35 @@ export function DaemonSessionProvider({
           }
 
           const activeSession = session;
+          // Prompt activity is session state returned by /load. Surface it
+          // immediately so a refreshed page shows the running state without
+          // waiting for auxiliary data such as providers, commands, or context.
+          //
+          // `activePromptsRef` only tracks prompts submitted by this browser
+          // instance. After a page refresh, `/load` can attach to a daemon
+          // session whose prompt is still running, but there is no local
+          // controller/promise to put in `activePromptsRef`. Keep that restored
+          // live state separately so `session.replay_complete` (history caught
+          // up) does not get mistaken for `turn_complete` (prompt finished).
+          const restoredActivePromptSettled =
+            settledRestoredActivePromptSessionsRef.current.has(activeSession);
+          let restoredActivePrompt =
+            activeSession.hasActivePrompt === true &&
+            !restoredActivePromptSettled;
+          const settleRestoredActivePrompt = () => {
+            // `hasActivePrompt` is a load/resume snapshot on this session client.
+            // Once a terminal event consumes it, keep it consumed across SSE
+            // reconnects for the same client; later prompts from this page are
+            // still tracked independently in activePromptsRef.
+            settledRestoredActivePromptSessionsRef.current.add(activeSession);
+            restoredActivePrompt = false;
+          };
+          const hasSessionActivePrompt = () =>
+            restoredActivePrompt ||
+            activePromptsRef.current.has(activeSession.sessionId);
+          hasCurrentSessionActivePrompt = hasSessionActivePrompt;
+          setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
+
           const [providerResult, commandResult, contextResult] =
             await Promise.allSettled([
               client.workspaceProviders(),
@@ -571,11 +604,6 @@ export function DaemonSessionProvider({
               activeSession.lastEventId != null ||
               undefined,
           }));
-          setPromptStatus(
-            activePromptsRef.current.has(activeSession.sessionId)
-              ? 'streaming'
-              : 'idle',
-          );
           if (loadWarningTexts.length > 0) {
             store.dispatch(
               loadWarningTexts.map((text) => ({
@@ -679,20 +707,6 @@ export function DaemonSessionProvider({
                 { requireBoundPromptId: true },
               );
             }
-            // If replay has a user message but no terminal signal
-            // (turn_complete/turn_error/prompt_cancelled), the turn was
-            // likely still in progress — seed promptStatus so the loading
-            // indicator shows immediately instead of flickering.
-            const hasTurnTerminalEvent = replayEvents.some(
-              (e) =>
-                e.type === 'turn_complete' ||
-                e.type === 'turn_error' ||
-                e.type === 'prompt_cancelled',
-            );
-            const hasReplayUserMessage = replayEvents.some(isUserMessageEvent);
-            if (hasReplayUserMessage && !hasTurnTerminalEvent) {
-              setPromptStatus((s) => (s === 'idle' ? 'waiting' : s));
-            }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
           if (pendingLoadToResolve) {
@@ -743,8 +757,12 @@ export function DaemonSessionProvider({
                     ? (event.data as Record<string, unknown>).reason
                     : undefined;
                 if (reason === 'epoch_reset') {
-                  setPromptStatus('idle');
-                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                  if (!hasSessionActivePrompt()) {
+                    setPromptStatus('idle');
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                  }
                   activeSession.setLastEventId(0);
                   epochReplayUiEvents = [];
                   epochReplaySourceEvents = [];
@@ -761,17 +779,35 @@ export function DaemonSessionProvider({
                   epochReplayUiEvents.push(
                     assistantDoneFromTurnEvent(event, stopReason),
                   );
+                  if (restoredActivePrompt) {
+                    settleRestoredActivePrompt();
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                    if (!hasSessionActivePrompt()) {
+                      setPromptStatus('idle');
+                    }
+                  }
                 } else if (event.type === 'turn_error') {
                   epochReplayUiEvents.push(
                     assistantDoneFromTurnEvent(event, 'error'),
                   );
+                  if (restoredActivePrompt) {
+                    settleRestoredActivePrompt();
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                    if (!hasSessionActivePrompt()) {
+                      setPromptStatus('idle');
+                    }
+                  }
                 }
 
                 const replayComplete = uiEvents.some(
                   (uiEvent) => uiEvent.type === 'session.replay_complete',
                 );
                 if (replayComplete) {
-                  if (!activePromptsRef.current.has(activeSession.sessionId)) {
+                  if (!hasSessionActivePrompt()) {
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
                     );
@@ -845,8 +881,29 @@ export function DaemonSessionProvider({
                 setPromptStatus,
                 passiveAssistantDoneTimerRef,
               );
+              let restoredPromptSettled = false;
+              if (
+                !activePromptSettled &&
+                restoredActivePrompt &&
+                (event.type === 'turn_complete' || event.type === 'turn_error')
+              ) {
+                // A refreshed page restores an already-running prompt without a
+                // local ActivePrompt entry or prompt promise to settle. The daemon
+                // terminal event is still authoritative, so end the restored
+                // running state here instead of relying on the observer branch.
+                settleRestoredActivePrompt();
+                restoredPromptSettled = true;
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                const stopReason =
+                  event.type === 'turn_complete'
+                    ? ((event.data as DaemonTurnCompleteData | undefined)
+                        ?.stopReason ?? 'end_turn')
+                    : 'error';
+                store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
+                setPromptStatus('idle');
+              }
               const shouldGuardAssistant =
-                !activePromptsRef.current.has(activeSession.sessionId) &&
+                !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;
               const eventsToDispatch = shouldGuardAssistant
                 ? uiEvents.filter((e) => e.type !== 'debug')
@@ -855,8 +912,10 @@ export function DaemonSessionProvider({
               for (const uiEvent of uiEvents) {
                 if (
                   uiEvent.type === 'prompt.cancelled' &&
-                  uiEvent.originatorClientId !== activeSession.clientId
+                  (restoredActivePrompt ||
+                    uiEvent.originatorClientId !== activeSession.clientId)
                 ) {
+                  settleRestoredActivePrompt();
                   setPromptStatus('idle');
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                   activePromptsRef.current.delete(activeSession.sessionId);
@@ -865,7 +924,7 @@ export function DaemonSessionProvider({
                   if (store.getSnapshot().awaitingResync) {
                     store.clearAwaitingResync();
                   }
-                  if (!activePromptsRef.current.has(activeSession.sessionId)) {
+                  if (!hasSessionActivePrompt()) {
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
                     );
@@ -877,9 +936,14 @@ export function DaemonSessionProvider({
                   }
                 }
               }
+              // A restored active prompt is not in activePromptsRef because this
+              // browser did not submit it. Treat it as active here too; otherwise
+              // the passive observer timer can briefly mark a still-running turn
+              // idle between sparse tool/thinking updates.
               const isObserver =
                 !activePromptSettled &&
-                !activePromptsRef.current.has(activeSession.sessionId);
+                !restoredPromptSettled &&
+                !hasSessionActivePrompt();
               if (isObserver) {
                 const hasUserMsg = uiEvents.some(
                   (e) => e.type === 'user.text.delta',
@@ -925,8 +989,13 @@ export function DaemonSessionProvider({
                   typeof event.data === 'object' && event.data !== null
                     ? (event.data as Record<string, unknown>).reason
                     : undefined;
-                setPromptStatus('idle');
-                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                // Resync asks us to rebuild transcript state, but it is not a
+                // prompt terminal signal. Keep loading alive for local/restored
+                // prompts until turn_complete, turn_error, or prompt_cancelled.
+                if (!hasSessionActivePrompt()) {
+                  setPromptStatus('idle');
+                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                }
                 store.reset();
                 if (reason === 'epoch_reset') {
                   activeSession.setLastEventId(0);
@@ -1011,13 +1080,20 @@ export function DaemonSessionProvider({
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current?.sessionId === activeSession.sessionId) {
-              clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-              setPromptStatus('idle');
               console.debug('[DaemonSessionProvider] SSE stream ended');
-              store.dispatch({
-                type: 'assistant.done',
-                reason: 'stream_ended',
-              });
+              if (!hasSessionActivePrompt()) {
+                // A transport close is only a safe "done" signal for passive
+                // observers. When a local/restored prompt is still active, the
+                // daemon may continue running while we reconnect via
+                // Last-Event-ID, so keep the prompt in streaming state until a
+                // real turn_complete/turn_error/prompt_cancelled arrives.
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                setPromptStatus('idle');
+                store.dispatch({
+                  type: 'assistant.done',
+                  reason: 'stream_ended',
+                });
+              }
             }
             setConnection((current) => ({
               ...current,
@@ -1041,8 +1117,13 @@ export function DaemonSessionProvider({
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
           }
-          clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-          setPromptStatus('idle');
+          // Retriable transport failures are not prompt terminal events. Keep
+          // restored/local prompts in streaming state until the daemon sends
+          // turn_complete, turn_error, or prompt_cancelled.
+          if (isAuthFailure || isTerminal || !hasCurrentSessionActivePrompt()) {
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setPromptStatus('idle');
+          }
           const pendingLoad = pendingSessionLoadRef.current;
           if (
             pendingLoad &&
@@ -1328,15 +1409,6 @@ function settleActivePromptFromTurnEvent(
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
   return event.type === 'turn_complete';
-}
-
-function isUserMessageEvent(event: DaemonEvent): boolean {
-  if (event.type !== 'session_update') return false;
-  const data = event.data as
-    | { update?: { sessionUpdate?: unknown } }
-    | null
-    | undefined;
-  return data?.update?.sessionUpdate === 'user_message_chunk';
 }
 
 function normalizeAndFilterEvent(

@@ -44,6 +44,7 @@ interface MockSession {
   workspaceCwd: string;
   clientId: string;
   state?: Record<string, unknown>;
+  hasActivePrompt?: boolean;
   client?: MockClient;
   lastEventId?: number;
   setLastEventId: (lastEventId: number | undefined) => void;
@@ -51,6 +52,10 @@ interface MockSession {
     req: unknown,
     signal?: AbortSignal,
   ) => Promise<PromptResult | NonBlockingPromptAccepted>;
+  submitPrompt: (
+    req: unknown,
+    signal?: AbortSignal,
+  ) => Promise<NonBlockingPromptAccepted>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
@@ -876,10 +881,11 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('prevents double submit while a prompt is running', async () => {
-    const prompt = createDeferred<PromptResult>();
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const turnComplete = createDeferred<void>();
     const session = createMockSession({
-      prompt: vi.fn(() => prompt.promise),
-      events: createIdleEvents(),
+      submitPrompt: vi.fn(() => accepted.promise),
+      events: createTurnCompleteEvents(turnComplete),
     });
     sdkMocks.sessions.push(session);
     let actions: DaemonSessionActions | undefined;
@@ -908,19 +914,20 @@ describe('DaemonSessionProvider', () => {
       );
     });
 
-    prompt.resolve({ stopReason: 'end_turn' });
+    accepted.resolve({ promptId: 'prompt-1', lastEventId: 10 });
+    turnComplete.resolve();
     const runningPrompt = firstPrompt;
     if (!runningPrompt) throw new Error('prompt was not started');
     await act(async () => {
       await expect(runningPrompt).resolves.toEqual({ stopReason: 'end_turn' });
     });
-    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(session.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('keeps prompt loading active after non-blocking prompt acceptance', async () => {
     const turnComplete = createDeferred<void>();
     const session = createMockSession({
-      prompt: vi.fn(async () => ({
+      submitPrompt: vi.fn(async () => ({
         promptId: 'prompt-1',
         lastEventId: 10,
       })),
@@ -993,7 +1000,7 @@ describe('DaemonSessionProvider', () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const turnComplete = createDeferred<void>();
     const session = createMockSession({
-      prompt: vi.fn(() => accepted.promise),
+      submitPrompt: vi.fn(() => accepted.promise),
       events: async function* acceptedPromptEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
@@ -1057,12 +1064,12 @@ describe('DaemonSessionProvider', () => {
     const secondAccepted = createDeferred<NonBlockingPromptAccepted>();
     const firstTurnComplete = createDeferred<void>();
     const secondTurnComplete = createDeferred<void>();
-    const prompt = vi
+    const submitPrompt = vi
       .fn()
       .mockReturnValueOnce(firstAccepted.promise)
       .mockReturnValueOnce(secondAccepted.promise);
     const session = createMockSession({
-      prompt,
+      submitPrompt,
       events: async function* acceptedPromptEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
@@ -1133,7 +1140,7 @@ describe('DaemonSessionProvider', () => {
       secondPrompt = providerActions.sendPrompt('next prompt');
       await flushPromises();
     });
-    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(submitPrompt).toHaveBeenCalledTimes(2);
 
     const pendingFirstPrompt = firstPrompt;
     if (!pendingFirstPrompt) throw new Error('first prompt was not started');
@@ -1163,9 +1170,9 @@ describe('DaemonSessionProvider', () => {
   it('rejects the prompt when turn_error arrives before acceptance returns', async () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const turnError = createDeferred<void>();
-    const prompt = vi.fn().mockReturnValueOnce(accepted.promise);
+    const submitPrompt = vi.fn().mockReturnValueOnce(accepted.promise);
     const session = createMockSession({
-      prompt,
+      submitPrompt,
       events: async function* acceptedPromptEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
@@ -1227,10 +1234,14 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('sends image prompt content through the daemon action', async () => {
-    const prompt = vi.fn(async () => ({ stopReason: 'end_turn' }));
+    const turnComplete = createDeferred<void>();
+    const submitPrompt = vi.fn(async () => ({
+      promptId: 'prompt-1',
+      lastEventId: 10,
+    }));
     const session = createMockSession({
-      prompt,
-      events: createIdleEvents(),
+      submitPrompt,
+      events: createTurnCompleteEvents(turnComplete),
     });
     sdkMocks.sessions.push(session);
     let actions: DaemonSessionActions | undefined;
@@ -1245,13 +1256,16 @@ describe('DaemonSessionProvider', () => {
     if (!providerActions) throw new Error('actions were not initialized');
 
     await act(async () => {
-      await providerActions.sendPrompt('describe', {
+      const promptResult = providerActions.sendPrompt('describe', {
         optimisticUserMessage: false,
         images: [{ data: 'base64-image', mimeType: 'image/png' }],
       });
+      await flushPromises();
+      turnComplete.resolve();
+      await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
     });
 
-    expect(prompt).toHaveBeenCalledWith(
+    expect(submitPrompt).toHaveBeenCalledWith(
       {
         prompt: [
           { type: 'text', text: 'describe' },
@@ -1263,10 +1277,14 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('passes retry prompts through the daemon action', async () => {
-    const prompt = vi.fn(async () => ({ stopReason: 'end_turn' }));
+    const turnComplete = createDeferred<void>();
+    const submitPrompt = vi.fn(async () => ({
+      promptId: 'prompt-1',
+      lastEventId: 10,
+    }));
     const session = createMockSession({
-      prompt,
-      events: createIdleEvents(),
+      submitPrompt,
+      events: createTurnCompleteEvents(turnComplete),
     });
     sdkMocks.sessions.push(session);
     let actions: DaemonSessionActions | undefined;
@@ -1281,13 +1299,16 @@ describe('DaemonSessionProvider', () => {
     if (!providerActions) throw new Error('actions were not initialized');
 
     await act(async () => {
-      await providerActions.sendPrompt('retry this', {
+      const promptResult = providerActions.sendPrompt('retry this', {
         optimisticUserMessage: false,
         retry: true,
       });
+      await flushPromises();
+      turnComplete.resolve();
+      await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
     });
 
-    expect(prompt).toHaveBeenCalledWith(
+    expect(submitPrompt).toHaveBeenCalledWith(
       {
         prompt: [{ type: 'text', text: 'retry this' }],
         retry: true,
@@ -1468,12 +1489,15 @@ describe('DaemonSessionProvider', () => {
   it('treats prompt abort during cancel as cancellation and keeps busy until cancel completes', async () => {
     const cancel = createDeferred<void>();
     const assistantChunk = createDeferred<void>();
-    let promptCalls = 0;
+    const secondTurnComplete = createDeferred<void>();
+    let submitPromptCalls = 0;
     const session = createMockSession({
-      prompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
-        promptCalls += 1;
-        if (promptCalls > 1) return Promise.resolve({ stopReason: 'end_turn' });
-        return new Promise<PromptResult>((_resolve, reject) => {
+      submitPrompt: vi.fn((_req: unknown, signal?: AbortSignal) => {
+        submitPromptCalls += 1;
+        if (submitPromptCalls > 1) {
+          return Promise.resolve({ promptId: 'prompt-2', lastEventId: 11 });
+        }
+        return new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
           signal?.addEventListener('abort', () => reject(createAbortError()), {
             once: true,
           });
@@ -1495,15 +1519,23 @@ describe('DaemonSessionProvider', () => {
             },
           },
         };
-        await new Promise<void>((resolve) => {
-          if (opts.signal?.aborted) {
-            resolve();
-            return;
-          }
-          opts.signal?.addEventListener('abort', () => resolve(), {
-            once: true,
-          });
-        });
+        await Promise.race([
+          secondTurnComplete.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 12,
+          type: 'turn_complete',
+          timestamp: '2025-01-01T00:00:00.000Z',
+          sessionId: 'session-1',
+          data: { promptId: 'prompt-2', stopReason: 'end_turn' },
+        };
       },
     });
     sdkMocks.sessions.push(session);
@@ -1562,13 +1594,14 @@ describe('DaemonSessionProvider', () => {
       streaming: false,
     });
     await act(async () => {
-      await expect(providerActions.sendPrompt('after cancel')).resolves.toEqual(
-        {
-          stopReason: 'end_turn',
-        },
-      );
+      const afterCancelPrompt = providerActions.sendPrompt('after cancel');
+      await flushPromises();
+      secondTurnComplete.resolve();
+      await expect(afterCancelPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
     });
-    expect(session.prompt).toHaveBeenCalledTimes(2);
+    expect(session.submitPrompt).toHaveBeenCalledTimes(2);
     expect(
       blocks.some(
         (block) => block.kind === 'error' && block.text.includes('AbortError'),
@@ -1577,10 +1610,10 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('ends assistant streaming when prompt fails with a non-abort error', async () => {
-    const prompt = createDeferred<PromptResult>();
+    const prompt = createDeferred<NonBlockingPromptAccepted>();
     const assistantChunk = createDeferred<void>();
     const session = createMockSession({
-      prompt: vi.fn(() => prompt.promise),
+      submitPrompt: vi.fn(() => prompt.promise),
       events: async function* assistantThenIdleEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
@@ -1919,9 +1952,9 @@ describe('DaemonSessionProvider', () => {
     const firstEvents = createClosableEvents();
     const firstSession = createMockSession({
       sessionId: 'session-a',
-      prompt: vi.fn(
+      submitPrompt: vi.fn(
         (_req: unknown, signal?: AbortSignal) =>
-          new Promise<PromptResult>((_resolve, reject) => {
+          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
             signal?.addEventListener(
               'abort',
               () => reject(createAbortError()),
@@ -1935,10 +1968,14 @@ describe('DaemonSessionProvider', () => {
         throw Object.assign(new Error('missing session'), { status: 404 });
       },
     });
+    const secondTurnComplete = createDeferred<void>();
     const secondSession = createMockSession({
       sessionId: 'session-b',
-      prompt: vi.fn(async () => ({ stopReason: 'end_turn' })),
-      events: createIdleEvents(),
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events: createTurnCompleteEvents(secondTurnComplete),
     });
     sdkMocks.sessions.push(firstSession, secondSession);
     let actions: DaemonUiSessionActions | undefined;
@@ -1979,11 +2016,14 @@ describe('DaemonSessionProvider', () => {
     await expect(abortedPrompt).resolves.toEqual({ stopReason: 'cancelled' });
 
     await act(async () => {
-      await expect(providerActions.sendPrompt('new prompt')).resolves.toEqual({
+      const newPrompt = providerActions.sendPrompt('new prompt');
+      await flushPromises();
+      secondTurnComplete.resolve();
+      await expect(newPrompt).resolves.toEqual({
         stopReason: 'end_turn',
       });
     });
-    expect(secondSession.prompt).toHaveBeenCalledTimes(1);
+    expect(secondSession.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('reuses the same session client after a normal SSE stream end', async () => {
@@ -2215,7 +2255,444 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
-  it('marks replayed user turns without terminal events as waiting', async () => {
+  it('keeps restored active prompts streaming after replay completes', async () => {
+    const replayDrained = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      lastEventId: 5,
+      events: async function* restoredPromptThenReplayComplete(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 0, lastReplayedEventId: 5 },
+        };
+        replayDrained.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await replayDrained.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('streaming');
+  });
+
+  it('keeps restored active prompts streaming after an SSE stream end', async () => {
+    const streamEnded = createDeferred<void>();
+    const events = vi.fn(async function* restoredPromptThenStreamEnd(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 1) {
+        streamEnded.resolve();
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+    });
+    const session = createMockSession({
+      hasActivePrompt: true,
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1000,
+      maxReconnectDelayMs: 1000,
+    });
+    await act(async () => {
+      await streamEnded.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('streaming');
+  });
+
+  it('settles restored active prompts when turn_complete arrives', async () => {
+    const turnCompleted = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      lastEventId: 5,
+      events: async function* restoredPromptThenTurnComplete() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'restored-prompt', stopReason: 'end_turn' },
+        };
+        turnCompleted.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await turnCompleted.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('settles restored active prompts when turn_error arrives', async () => {
+    const turnErrored = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      lastEventId: 5,
+      events: async function* restoredPromptThenTurnError() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_error',
+          data: {
+            promptId: 'restored-prompt',
+            message: 'failed',
+            code: 'error',
+          },
+        } satisfies DaemonEvent;
+        turnErrored.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await turnErrored.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('settles restored active prompts when prompt_cancelled arrives', async () => {
+    const promptCancelled = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      lastEventId: 5,
+      events: async function* restoredPromptThenPromptCancelled() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'prompt_cancelled',
+          originatorClientId: 'client-1',
+          data: {
+            sessionId: 'session-1',
+            reason: 'user_cancel',
+          },
+        } satisfies DaemonEvent;
+        promptCancelled.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await promptCancelled.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('does not revive settled restored active prompts after SSE reconnect', async () => {
+    const turnCompleted = createDeferred<void>();
+    const reconnected = createDeferred<void>();
+    const events = vi.fn(async function* restoredPromptThenReconnect(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 1) {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'restored-prompt', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        turnCompleted.resolve();
+        return;
+      }
+      reconnected.resolve();
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+    });
+    const session = createMockSession({
+      hasActivePrompt: true,
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await turnCompleted.promise;
+      await reconnected.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('settles restored active prompts during epoch replay', async () => {
+    const replayCompleted = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      events: async function* restoredPromptEpochReplay() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        } satisfies DaemonEvent;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'restored-prompt', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        yield {
+          id: 8,
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 1, lastReplayedEventId: 8 },
+        } satisfies DaemonEvent;
+        replayCompleted.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await replayCompleted.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('keeps restored active prompts streaming after retriable SSE errors', async () => {
+    const streamFailed = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      events: async function* restoredPromptThenRetriableError() {
+        streamFailed.resolve();
+        throw new Error('network reset');
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1000,
+      maxReconnectDelayMs: 1000,
+    });
+    await act(async () => {
+      await streamFailed.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('streaming');
+  });
+
+  it('keeps locally submitted prompts active after retriable SSE errors', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const streamFailed = createDeferred<void>();
+    let callCount = 0;
+    const events = vi.fn(async function* localPromptThenRetriableError(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      callCount += 1;
+      if (callCount === 1) {
+        yield {
+          id: 5,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'working' },
+            },
+          },
+        } satisfies DaemonEvent;
+        streamFailed.resolve();
+        throw new Error('network reset');
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+    });
+    const session = createMockSession({
+      submitPrompt: vi.fn(() => accepted.promise),
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    const providerActions = requireActions(actions);
+
+    await act(async () => {
+      void providerActions.sendPrompt('keep running');
+      accepted.resolve({ promptId: 'prompt-1', lastEventId: 10 });
+      await streamFailed.promise;
+      await wait(20);
+      await flushPromises();
+    });
+
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(promptStatus).not.toBe('idle');
+  });
+
+  it('keeps restored active prompts streaming after resync requests', async () => {
+    const resyncSeen = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      events: async function* restoredPromptThenResync() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        } satisfies DaemonEvent;
+        resyncSeen.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1000,
+      maxReconnectDelayMs: 1000,
+    });
+    await act(async () => {
+      await resyncSeen.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('streaming');
+  });
+
+  it('does not infer active prompts from replayed user turns without terminal events', async () => {
     const session = createMockSession({
       replaySnapshot: {
         compactedReplay: [
@@ -2251,7 +2728,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
-    expect(promptStatus).toBe('waiting');
+    expect(promptStatus).toBe('idle');
   });
 
   it('finishes replayed assistant streaming when replay ends with turn_error', async () => {
@@ -3611,9 +4088,9 @@ describe('DaemonSessionProvider', () => {
     async (status) => {
       const streamFailure = createDeferred<void>();
       const session = createMockSession({
-        prompt: vi.fn(
+        submitPrompt: vi.fn(
           (_req: unknown, signal?: AbortSignal) =>
-            new Promise<PromptResult>((_resolve, reject) => {
+            new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
               signal?.addEventListener(
                 'abort',
                 () => reject(createAbortError()),
@@ -3803,9 +4280,15 @@ describe('DaemonSessionProvider', () => {
           },
         };
         yield {
+          id: 2,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        };
+        yield {
           v: 1,
           type: 'replay_complete',
-          data: { replayedCount: 1, lastReplayedEventId: 1 },
+          data: { replayedCount: 2, lastReplayedEventId: 2 },
         };
         replayDrained.resolve();
         await new Promise<void>((resolve) => {
@@ -3834,8 +4317,9 @@ describe('DaemonSessionProvider', () => {
 
     await renderWithProvider(<Harness />, { autoConnect: true });
     const providerActions = requireActions(actions);
+    let promptResult: Promise<unknown> | undefined;
     await act(async () => {
-      await providerActions.sendPrompt('stale local');
+      promptResult = providerActions.sendPrompt('stale local');
       await flushPromises();
     });
     expect(blocks).toMatchObject([{ kind: 'user', text: 'stale local' }]);
@@ -3859,6 +4343,11 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'fresh replayed' },
     ]);
+    const pendingPrompt = promptResult;
+    if (!pendingPrompt) throw new Error('prompt was not started');
+    await expect(pendingPrompt).resolves.toEqual({
+      stopReason: 'end_turn',
+    });
   });
 
   it('reloads the session snapshot after ring-evicted resync', async () => {
@@ -3963,7 +4452,7 @@ describe('DaemonSessionProvider', () => {
     const firstSession = createMockSession({
       sessionId: 'session-ring-active-prompt',
       lastEventId: 10,
-      prompt: vi.fn(async () => ({
+      submitPrompt: vi.fn(async () => ({
         promptId: 'prompt-1',
         lastEventId: 10,
       })),
@@ -4077,7 +4566,7 @@ describe('DaemonSessionProvider', () => {
     const firstSession = createMockSession({
       sessionId: 'session-ring-active-error',
       lastEventId: 10,
-      prompt: vi.fn(async () => ({
+      submitPrompt: vi.fn(async () => ({
         promptId: 'prompt-1',
         lastEventId: 10,
       })),
@@ -4208,7 +4697,7 @@ describe('DaemonSessionProvider', () => {
     const firstSession = createMockSession({
       sessionId: 'session-ring-unaccepted-prompt',
       lastEventId: 10,
-      prompt: vi.fn(() => accepted.promise),
+      submitPrompt: vi.fn(() => accepted.promise),
       events: async function* ringEvictedEvents() {
         await ringEvicted.promise;
         yield {
@@ -4856,9 +5345,9 @@ describe('DaemonSessionProvider', () => {
     // auto-recreate happens.
     const promptBlocked = createDeferred<void>();
     const session = createMockSession({
-      prompt: vi.fn(
+      submitPrompt: vi.fn(
         (_req: unknown, signal?: AbortSignal) =>
-          new Promise<PromptResult>((_resolve, reject) => {
+          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
             signal?.addEventListener(
               'abort',
               () => reject(createAbortError()),
@@ -5309,6 +5798,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
     state: opts.state ?? {},
+    hasActivePrompt: opts.hasActivePrompt ?? false,
     lastEventId: opts.lastEventId,
     setLastEventId:
       opts.setLastEventId ??
@@ -5319,6 +5809,12 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       opts.prompt ??
       vi.fn(async () => ({
         stopReason: 'end_turn',
+      })),
+    submitPrompt:
+      opts.submitPrompt ??
+      vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 0,
       })),
     cancel: opts.cancel ?? vi.fn(async () => {}),
     setModel:
@@ -5369,6 +5865,33 @@ function createIdleEvents(): MockSession['events'] {
       opts.signal?.addEventListener('abort', () => resolve(), { once: true });
     });
     yield* [];
+  };
+}
+
+function createTurnCompleteEvents(
+  turnComplete: ReturnType<typeof createDeferred<void>>,
+  promptId = 'prompt-1',
+): MockSession['events'] {
+  return async function* turnCompleteEvents(
+    opts: { signal?: AbortSignal } = {},
+  ) {
+    await Promise.race([
+      turnComplete.promise,
+      new Promise<void>((resolve) =>
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        }),
+      ),
+    ]);
+    if (opts.signal?.aborted) return;
+    yield {
+      v: 1,
+      id: 11,
+      type: 'turn_complete',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      sessionId: 'session-1',
+      data: { promptId, stopReason: 'end_turn' },
+    };
   };
 }
 

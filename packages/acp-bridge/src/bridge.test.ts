@@ -8187,6 +8187,36 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('enriched listWorkspaceSessions', () => {
+    it('reports active prompt state when attaching to an existing session', async () => {
+      let finishPrompt: ((value: PromptResponse) => void) | undefined;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            promptImpl: () =>
+              new Promise<PromptResponse>((resolve) => {
+                finishPrompt = resolve;
+              }),
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'keep running' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(finishPrompt).toBeDefined();
+      });
+      const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(attached.attached).toBe(true);
+      expect(attached.hasActivePrompt).toBe(true);
+
+      finishPrompt!({ stopReason: 'end_turn' });
+      await prompt;
+      await bridge.shutdown();
+    });
+
     it('includes createdAt and metadata fields', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

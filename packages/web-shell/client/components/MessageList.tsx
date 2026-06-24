@@ -865,7 +865,7 @@ function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
 
 interface TurnCollapseRowProps {
   turnCollapse: TurnCollapseHead;
-  onToggleCollapse: (turnId: string) => void;
+  onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
 const TurnCollapseRow = memo(function TurnCollapseRow({
@@ -909,7 +909,8 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   if (!showMetadataRow) return null;
   const toggleExpanded = () => {
     if (!hasToggle) return;
-    onToggleCollapse(turnCollapse.turnId);
+    const nextExpanded = turnCollapse.collapsed;
+    onToggleCollapse(turnCollapse.turnId, nextExpanded);
   };
 
   return (
@@ -1112,20 +1113,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       },
       [onFollowStateChange],
     );
-    const handleToggleCollapse = useCallback(
-      (turnId: string) => {
-        // (Un)folding a turn is the user reading history, not following the tail.
-        // Pause follow so the height change does not yank the viewport to the
-        // bottom — the toggled prompt row stays where it is on screen.
-        setShouldFollow(false);
-        setCollapseOverrides((prev) => {
-          const next = new Map(prev);
-          next.set(turnId, prev.has(turnId) ? !prev.get(turnId) : true);
-          return next;
-        });
-      },
-      [setShouldFollow],
-    );
     const visibleItems = useMemo(
       () =>
         applyTurnCollapse(displayItems, {
@@ -1211,6 +1198,28 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const getScrollElement = useCallback((): HTMLElement | null => {
       return containerRef.current;
     }, []);
+
+    const handleToggleCollapse = useCallback(
+      (turnId: string, nextExpanded: boolean) => {
+        const el = getScrollElement();
+        const distanceFromBottom = el
+          ? el.scrollHeight - el.scrollTop - el.clientHeight
+          : 0;
+        const isScrolledAwayFromBottom =
+          !!el && el.scrollHeight > el.clientHeight && distanceFromBottom >= 30;
+
+        // Only pause follow when the user is actually reading away from the
+        // tail. Short, non-overflowing chats should not surface the
+        // scroll-to-bottom affordance just because a turn was expanded.
+        setShouldFollow(!isScrolledAwayFromBottom);
+        setCollapseOverrides((prev) => {
+          const next = new Map(prev);
+          next.set(turnId, nextExpanded);
+          return next;
+        });
+      },
+      [getScrollElement, setShouldFollow],
+    );
 
     const getItemKey = useCallback(
       (index: number) => {

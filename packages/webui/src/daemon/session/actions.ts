@@ -19,11 +19,7 @@ import type {
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
-import {
-  isDaemonTurnError,
-  isNonBlockingAccepted,
-  type PromptResult,
-} from '@qwen-code/sdk/daemon';
+import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -171,26 +167,17 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
-        const result = await session.prompt(
-          promptRequest as Parameters<typeof session.prompt>[0],
+        const accepted = await session.submitPrompt(
+          promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
         );
-        if (isNonBlockingAccepted(result)) {
-          return await waitForAcceptedPromptCompletion(
-            activePromptsRef.current,
-            settledPromptsRef.current,
-            sessionId,
-            ctrl,
-            result.promptId,
-          );
-        }
-        if (sessionRef.current?.sessionId === sessionId) {
-          store.dispatch({
-            type: 'assistant.done',
-            reason: result.stopReason,
-          });
-        }
-        return result;
+        return await waitForAcceptedPromptCompletion(
+          activePromptsRef.current,
+          settledPromptsRef.current,
+          sessionId,
+          ctrl,
+          accepted.promptId,
+        );
       } catch (error) {
         if (isAbortError(error)) {
           if (sessionRef.current?.sessionId === sessionId) {
@@ -198,11 +185,11 @@ export function createDaemonSessionActions({
           }
           return { stopReason: 'cancelled' };
         }
-        if (sessionRef.current?.sessionId === sessionId) {
-          store.dispatch({ type: 'assistant.done', reason: 'error' });
-        }
         if (isDaemonTurnError(error)) {
           throw error;
+        }
+        if (sessionRef.current?.sessionId === sessionId) {
+          store.dispatch({ type: 'assistant.done', reason: 'error' });
         }
         throw dispatchActionError(
           addNotice,
