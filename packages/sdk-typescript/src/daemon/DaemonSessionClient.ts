@@ -337,9 +337,15 @@ export class DaemonSessionClient {
     return await this.client.getRewindSnapshots(this.sessionId);
   }
 
-  async rewind(promptId: string): Promise<DaemonRewindResult> {
+  async rewind(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): Promise<DaemonRewindResult> {
     return await this.client.rewindSession(this.sessionId, promptId, {
       clientId: this.clientId,
+      ...(opts?.rewindFiles !== undefined
+        ? { rewindFiles: opts.rewindFiles }
+        : {}),
     });
   }
 

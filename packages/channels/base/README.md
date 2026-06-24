@@ -291,5 +291,5 @@ Block streaming and `onResponseChunk` work independently — plugins can overrid
 
 ## Further reading
 
-- [Channel Plugin Developer Guide](../../docs/developers/channel-plugins.md)
+- [Channel Plugin Developer Guide](../../../docs/developers/channel-plugins.md)
 - [`@qwen-code/channel-plugin-example`](../plugin-example/) — working reference implementation
