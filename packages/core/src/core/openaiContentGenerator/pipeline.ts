@@ -51,7 +51,9 @@ export class StreamInactivityTimeoutError extends Error {
     readonly chunksReceived: number,
     readonly streamLifetimeMs: number,
   ) {
-    super(`No stream activity for ${idleMs}ms (inactivity timeout)`);
+    super(
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks (stream lifetime: ${streamLifetimeMs}ms)`,
+    );
     this.name = 'StreamInactivityTimeoutError';
   }
 }

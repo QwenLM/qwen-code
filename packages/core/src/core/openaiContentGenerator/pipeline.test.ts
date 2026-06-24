@@ -21,6 +21,7 @@ import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './constants.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -3099,9 +3100,37 @@ describe('ContentGenerationPipeline', () => {
       await vi.advanceTimersByTimeAsync(1000);
       const err = await captured;
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect((err as Error).message).toBe(
+        'No stream activity for 1000ms after 0 chunks (stream lifetime: 1000ms)',
+      );
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
       expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
       expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('uses the default stream idle timeout when no override is configured', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline();
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect(err).toMatchObject({
+        code: 'ETIMEDOUT',
+        idleMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        chunksReceived: 0,
+        streamLifetimeMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+      });
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
