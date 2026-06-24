@@ -151,7 +151,9 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
+    "chrome-devtools-mcp": "1.4.0",
     "ink": "^7.0.3",
+    "puppeteer-core": "25.2.0",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {
