@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ModelsConfig, tokenLimit } from '@qwen-code/qwen-code-core';
+import {
+  ModelsConfig,
+  resolveProviderProtocol,
+  tokenLimit,
+} from '@qwen-code/qwen-code-core';
 import type { AuthType } from '@qwen-code/qwen-code-core';
 import type {
   ServeWorkspaceProviderCurrent,
@@ -96,6 +100,7 @@ function buildWorkspaceProvidersStatus(
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
     const explicitModelBaseUrls = buildExplicitModelBaseUrls(
       settings.modelProviders,
+      settings.providerProtocol,
     );
 
     for (const model of modelsConfig.getAllConfiguredModels()) {
@@ -212,11 +217,14 @@ function matchesCurrentBaseUrl(
 
 function buildExplicitModelBaseUrls(
   modelProviders: Settings['modelProviders'],
+  providerProtocol: Settings['providerProtocol'],
 ): Set<string> {
   const baseUrls = new Set<string>();
   if (!modelProviders) return baseUrls;
 
-  for (const [authType, providerConfig] of Object.entries(modelProviders)) {
+  for (const [providerId, providerConfig] of Object.entries(modelProviders)) {
+    const authType = resolveProviderProtocol(providerId, providerProtocol);
+    if (!authType) continue;
     const models = readProviderModels(providerConfig);
     for (const model of models) {
       if (

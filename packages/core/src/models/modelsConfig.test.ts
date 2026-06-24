@@ -2685,5 +2685,22 @@ describe('ModelsConfig', () => {
         modelsConfig.getAvailableModelsForAuthType(AuthType.USE_OPENAI),
       ).toEqual([]);
     });
+
+    it('threads providerProtocolConfig through reloadModelProvidersConfig', () => {
+      const modelsConfig = new ModelsConfig();
+
+      modelsConfig.reloadModelProvidersConfig(
+        {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
+          .map((m) => m.id),
+      ).toContain('qwen3.7-max');
+    });
   });
 });

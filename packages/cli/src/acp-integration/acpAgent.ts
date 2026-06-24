@@ -6864,7 +6864,7 @@ class QwenAgent implements Agent {
               try {
                 config.reloadModelProvidersConfig(
                   newMerged.modelProviders,
-                  newMerged.providerProtocol,
+                  newMerged.providerProtocol ?? {},
                 );
               } catch (err) {
                 debugLogger.warn(
@@ -6888,7 +6888,9 @@ class QwenAgent implements Agent {
                 );
               }
             } else if (
-              (changed.has('modelProviders') || envChanged) &&
+              (changed.has('modelProviders') ||
+                changed.has('providerProtocol') ||
+                envChanged) &&
               authType
             ) {
               try {
