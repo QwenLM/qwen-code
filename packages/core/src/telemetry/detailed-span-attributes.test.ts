@@ -224,15 +224,17 @@ describe('detailed-span-attributes', () => {
     expect(systemSpan.attrs['system_prompt_truncated']).toBe(true);
 
     const toolSchemaSpan = createMockSpan();
-    addToolSchemaAttributes(config, toolSchemaSpan, [
-      { name: 'Read', description: 'abcdef' },
-    ]);
+    const toolDeclaration = { name: 'Read', description: 'abcdef' };
+    addToolSchemaAttributes(config, toolSchemaSpan, [toolDeclaration]);
     expect(toolSchemaSpan.events[0]!.attributes['tool_definition']).toEqual(
       expect.stringContaining('[TRUNCATED'),
     );
     expect(
       toolSchemaSpan.events[0]!.attributes['tool_definition_truncated'],
     ).toBe(true);
+    expect(
+      toolSchemaSpan.events[0]!.attributes['tool_definition_original_length'],
+    ).toBe(JSON.stringify(toolDeclaration).length);
 
     const modelSpan = createMockSpan();
     addModelOutputAttributes(config, modelSpan, 'abcdef');
@@ -247,6 +249,7 @@ describe('detailed-span-attributes', () => {
       expect.stringContaining('[TOOL INPUT: Bash]\nabc\n\n[TRUNCATED'),
     );
     expect(toolInputSpan.attrs['tool_input_truncated']).toBe(true);
+    expect(toolInputSpan.attrs['tool_input_original_length']).toBe(6);
 
     const toolResultSpan = createMockSpan();
     addToolResultAttributes(config, toolResultSpan, 'Read', 'abcdef');
@@ -254,6 +257,7 @@ describe('detailed-span-attributes', () => {
       expect.stringContaining('[TOOL RESULT: Read]\nabc\n\n[TRUNCATED'),
     );
     expect(toolResultSpan.attrs['tool_result_truncated']).toBe(true);
+    expect(toolResultSpan.attrs['tool_result_original_length']).toBe(6);
   });
 
   describe('addSystemPromptAttributes', () => {

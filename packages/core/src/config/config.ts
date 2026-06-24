@@ -430,6 +430,10 @@ export interface TelemetrySettings {
   resourceAttributeWarnings?: string[];
 }
 
+type ResolvedTelemetrySettings = TelemetrySettings & {
+  sensitiveSpanAttributeMaxLength: number;
+};
+
 export interface TelemetryMetricsSettings {
   /**
    * Include `session.id` on every metric data point. Default: false.
@@ -1265,7 +1269,7 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
-  private readonly telemetrySettings: TelemetrySettings;
+  private readonly telemetrySettings: ResolvedTelemetrySettings;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
@@ -3948,7 +3952,7 @@ export class Config {
   }
 
   getTelemetrySensitiveSpanAttributeMaxLength(): number {
-    return this.telemetrySettings.sensitiveSpanAttributeMaxLength!;
+    return this.telemetrySettings.sensitiveSpanAttributeMaxLength;
   }
 
   getTelemetryOtlpEndpoint(): string | undefined {

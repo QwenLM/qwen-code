@@ -219,6 +219,14 @@ describe('telemetry/config helpers', () => {
       await expect(
         resolveTelemetrySettings({
           settings: {
+            sensitiveSpanAttributeMaxLength: -1,
+          },
+        }),
+      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength.*got -1/i);
+
+      await expect(
+        resolveTelemetrySettings({
+          settings: {
             sensitiveSpanAttributeMaxLength:
               SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1,
           },

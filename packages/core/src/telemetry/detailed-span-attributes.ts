@@ -150,7 +150,10 @@ export function addToolSchemaAttributes(
         tool_name: name,
         tool_hash: hash,
         tool_definition: content,
-        ...(truncated && { tool_definition_truncated: true }),
+        ...(truncated && {
+          tool_definition_truncated: true,
+          tool_definition_original_length: declJson.length,
+        }),
       });
     }
   }
