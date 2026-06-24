@@ -76,40 +76,40 @@ Commands specifically for controlling interface and output language.
 
 Commands for managing AI tools and models.
 
-| Command          | Description                                   | Usage Examples                                                                |
-| ---------------- | --------------------------------------------- | ----------------------------------------------------------------------------- |
-| `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`, `/mcp auth`, `/mcp noauth` |
-| `/import-config` | Import MCP servers from Claude configs        | `/import-config claude-code`, `/import-config claude-desktop --scope project` |
-| `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                                                       |
-| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                                                   |
-| `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`                                         |
-| `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project`                                 |
-| → `plan`         | Analysis only, no execution                   | Secure review                                                                 |
-| → `default`      | Require approval for edits                    | Daily use                                                                     |
-| → `auto-edit`    | Automatically approve edits                   | Trusted environment                                                           |
-| → `auto`         | Classifier-evaluated approval                 | Autonomous sessions with safety guardrails                                    |
-| → `yolo`         | Automatically approve all                     | Quick prototyping                                                             |
-| `/model`         | Switch model used in current session          | `/model`, `/model <model-id>` (switch immediately)                            |
-| `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`                                             |
-| `/model --voice` | Set the model used for voice transcription    | `/model --voice <model-id>`                                                   |
-| `/extensions`    | Manage extensions                             | `/extensions list`, `/extensions manage`                                      |
-| → `list`         | List installed extensions                     | `/extensions list`                                                            |
-| → `manage`       | Manage installed extensions (interactive)     | `/extensions manage`                                                          |
-| → `explore`      | Open extensions page in browser               | `/extensions explore <Gemini\|ClaudeCode>`                                    |
-| → `install`      | Install an extension from a git repo or path  | `/extensions install <repo-or-path>`                                          |
-| `/memory`        | Open the Memory Manager dialog                | `/memory`                                                                     |
-| `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`                                            |
-| `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                                                             |
-| `/dream`         | Manually run auto-memory consolidation        | `/dream`                                                                      |
-| `/hooks`         | Manage Qwen Code hooks                        | `/hooks`, `/hooks list`                                                       |
-| `/permissions`   | Manage permission rules                       | `/permissions`                                                                |
-| `/agents`        | Manage subagents                              | `/agents manage`, `/agents create`                                            |
-| `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena stop`, `/arena status`, `/arena select`               |
-| `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`                                            |
-| `/tasks`         | List background tasks                         | `/tasks`                                                                      |
-| `/workflows`     | Inspect workflow runs                         | `/workflows`, `/workflows <runId>`                                            |
-| `/lsp`           | Show LSP server status                        | `/lsp`                                                                        |
-| `/trust`         | Manage folder trust settings                  | `/trust`                                                                      |
+| Command          | Description                                   | Usage Examples                                                                   |
+| ---------------- | --------------------------------------------- | -------------------------------------------------------------------------------- |
+| `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`, `/mcp auth`, `/mcp noauth`    |
+| `/import-config` | Import MCP servers from Claude configs        | `/import-config claude-code`, `/import-config claude-desktop --scope project`    |
+| `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                                                          |
+| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                                                      |
+| `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`                                            |
+| `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project`                                    |
+| → `plan`         | Analysis only, no execution                   | Secure review                                                                    |
+| → `default`      | Require approval for edits                    | Daily use                                                                        |
+| → `auto-edit`    | Automatically approve edits                   | Trusted environment                                                              |
+| → `auto`         | Classifier-evaluated approval                 | Autonomous sessions with safety guardrails                                       |
+| → `yolo`         | Automatically approve all                     | Quick prototyping                                                                |
+| `/model`         | Switch model used in current session          | `/model`, `/model <model-id>` (switch immediately)                               |
+| `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`                                                |
+| `/model --voice` | Set the model used for voice transcription    | `/model --voice <model-id>`                                                      |
+| `/extensions`    | Manage extensions                             | `/extensions list`, `/extensions manage`                                         |
+| → `list`         | List installed extensions                     | `/extensions list`                                                               |
+| → `manage`       | Manage installed extensions (interactive)     | `/extensions manage`                                                             |
+| → `explore`      | Open extensions page in browser               | `/extensions explore <Gemini\|ClaudeCode>`                                       |
+| → `install`      | Install an extension from a git repo or path  | `/extensions install <repo-or-path>`                                             |
+| `/memory`        | Open the Memory Manager dialog                | `/memory`                                                                        |
+| `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`                                               |
+| `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                                                                |
+| `/dream`         | Manually run auto-memory consolidation        | `/dream`                                                                         |
+| `/hooks`         | Manage Qwen Code hooks                        | `/hooks`, `/hooks list`                                                          |
+| `/permissions`   | Manage permission rules                       | `/permissions`                                                                   |
+| `/agents`        | Manage subagents                              | `/agents manage`, `/agents create`                                               |
+| `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`) |
+| `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`                                               |
+| `/tasks`         | List background tasks                         | `/tasks`                                                                         |
+| `/workflows`     | Inspect workflow runs                         | `/workflows`, `/workflows <runId>`                                               |
+| `/lsp`           | Show LSP server status                        | `/lsp`                                                                           |
+| `/trust`         | Manage folder trust settings                  | `/trust`                                                                         |
 
 > [!warning]
 >
@@ -303,30 +303,30 @@ In headless (`--prompt`) or non-interactive contexts, `/diff` prints a plain-tex
 
 Commands for obtaining information and performing system settings.
 
-| Command          | Description                                                                                                                                                                                                                                                                                     | Usage Examples                                                                      |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `/help`          | Display help information for available commands                                                                                                                                                                                                                                                 | `/help` or `/?`                                                                     |
-| `/status`        | Display version information                                                                                                                                                                                                                                                                     | `/status` or `/about`                                                               |
-| `/status paths`  | Display current session file and log paths                                                                                                                                                                                                                                                      | `/status paths`                                                                     |
-| `/stats`         | Open interactive usage statistics dashboard with three tabs: Session (live metrics), Activity (heatmap, token trend, project ranking), and Efficiency (cache rate, tool leaderboard, model comparison). Use `tab` to switch tabs, `r` to cycle time ranges, `←→` to pan months, `esc` to close. | `/stats` or `/usage`                                                                |
-| `/stats model`   | Show per-model token breakdown and estimated cost                                                                                                                                                                                                                                               | `/stats model`                                                                      |
-| `/stats tools`   | Show per-tool call counts                                                                                                                                                                                                                                                                       | `/stats tools`                                                                      |
-| `/stats daily`   | Show daily token usage statistics                                                                                                                                                                                                                                                               | `/stats daily`, `/stats day [YYYY-MM-DD]`                                           |
-| `/stats monthly` | Show monthly token usage statistics                                                                                                                                                                                                                                                             | `/stats monthly`, `/stats month [YYYY-MM]`                                          |
-| `/stats export`  | Export usage statistics to CSV or JSON                                                                                                                                                                                                                                                          | `/stats export <daily\|monthly> [date\|month] [--format csv\|json] [--output path]` |
-| `/settings`      | Open settings editor                                                                                                                                                                                                                                                                            | `/settings`                                                                         |
-| `/auth`          | Change authentication method                                                                                                                                                                                                                                                                    | `/auth`, `/connect`, `/login`                                                       |
-| `/doctor`        | Run installation and environment diagnostics                                                                                                                                                                                                                                                    | `/doctor`, `/doctor memory`                                                         |
-| → `memory`       | Show current process memory diagnostics                                                                                                                                                                                                                                                         | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
-| → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                                                                                                                                                                                               | `/doctor cpu-profile [--duration <seconds>]`                                        |
-| → `rollback`     | Roll back the standalone CLI binary to the previous version (standalone installs only; for conversation history use `/rewind`)                                                                                                                                                                  | `/doctor rollback`                                                                  |
-| `/docs`          | Open full Qwen Code documentation in browser                                                                                                                                                                                                                                                    | `/docs`                                                                             |
-| `/ide`           | Manage IDE integration                                                                                                                                                                                                                                                                          | `/ide status`, `/ide install`, `/ide enable`, `/ide disable`                        |
-| `/insight`       | Generate programming insights from chat history                                                                                                                                                                                                                                                 | `/insight`                                                                          |
-| `/setup-github`  | Set up GitHub Actions                                                                                                                                                                                                                                                                           | `/setup-github`                                                                     |
-| `/bug`           | Submit issue about Qwen Code                                                                                                                                                                                                                                                                    | `/bug Button click unresponsive`                                                    |
-| `/copy`          | Copy AI output to clipboard (`/copy N` = Nth-last AI message)                                                                                                                                                                                                                                   | `/copy` or `/copy 2`                                                                |
-| `/quit`          | Exit Qwen Code immediately                                                                                                                                                                                                                                                                      | `/quit` or `/exit`                                                                  |
+| Command          | Description                                                                                                                    | Usage Examples                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `/help`          | Display help information for available commands                                                                                | `/help` or `/?`                                                                     |
+| `/status`        | Display version information                                                                                                    | `/status` or `/about`                                                               |
+| `/status paths`  | Display current session file and log paths                                                                                     | `/status paths`                                                                     |
+| `/stats`         | Open the interactive usage statistics dashboard                                                                                | `/stats` or `/usage`                                                                |
+| `/stats model`   | Show per-model token breakdown and estimated cost                                                                              | `/stats model`                                                                      |
+| `/stats tools`   | Show per-tool call counts                                                                                                      | `/stats tools`                                                                      |
+| `/stats daily`   | Show daily token usage statistics                                                                                              | `/stats daily` (alias `day`), `/stats day [YYYY-MM-DD]`                             |
+| `/stats monthly` | Show monthly token usage statistics                                                                                            | `/stats monthly` (alias `month`), `/stats month [YYYY-MM]`                          |
+| `/stats export`  | Export usage statistics to CSV or JSON                                                                                         | `/stats export <daily\|monthly> [date\|month] [--format csv\|json] [--output path]` |
+| `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
+| `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
+| `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
+| → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
+| → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                              | `/doctor cpu-profile [--duration <seconds>]`                                        |
+| → `rollback`     | Roll back the standalone CLI binary to the previous version (standalone installs only; for conversation history use `/rewind`) | `/doctor rollback`                                                                  |
+| `/docs`          | Open full Qwen Code documentation in browser                                                                                   | `/docs`                                                                             |
+| `/ide`           | Manage IDE integration                                                                                                         | `/ide status`, `/ide install`, `/ide enable`, `/ide disable`                        |
+| `/insight`       | Generate programming insights from chat history                                                                                | `/insight`                                                                          |
+| `/setup-github`  | Set up GitHub Actions                                                                                                          | `/setup-github`                                                                     |
+| `/bug`           | Submit issue about Qwen Code                                                                                                   | `/bug Button click unresponsive`                                                    |
+| `/copy`          | Copy AI output to clipboard (`/copy N` = Nth-last AI message)                                                                  | `/copy` or `/copy 2`                                                                |
+| `/quit`          | Exit Qwen Code immediately                                                                                                     | `/quit` or `/exit`                                                                  |
 
 ### 1.10 Common Shortcuts
 
