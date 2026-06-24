@@ -31,7 +31,8 @@ const rootDir = join(__dirname, '..');
 // Bumped from 124KB to 125KB for rewind/branch transcript/session APIs.
 // Bumped from 125KB to 126KB for the workspace permissions rules API
 // (workspacePermissions + set/add/remove rule methods + types, ~718 bytes).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 126 * 1024;
+// Bumped from 126KB to 127KB for prompt clientId self-heal.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 127 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
