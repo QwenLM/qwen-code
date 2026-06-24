@@ -212,6 +212,7 @@ export default {
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
+  'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
