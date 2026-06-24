@@ -1190,8 +1190,17 @@ export class Session implements SessionContext {
     (continueRequest as { _meta?: Record<string, unknown> })._meta = {
       [DAEMON_CONTINUE_META_KEY]: true,
     };
-    void this.prompt(continueRequest).catch((error) => {
+    void this.prompt(continueRequest).catch(async (error) => {
       debugLogger.error('[Session] continueLastTurn failed', error);
+      // prompt()'s finally still emits conversation_finished, but the failure
+      // itself would otherwise be log-only — surface it to attached clients so
+      // a continuation error is visible rather than a silently stalled turn.
+      await this.#emitAgentDiagnosticMessageSafely(
+        `Continuation failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        '[Session] failed to emit continuation failure diagnostic',
+      );
     });
 
     return { accepted: true, interruption: detection.kind };
@@ -1374,6 +1383,12 @@ export class Session implements SessionContext {
                 this.#getCurrentChat().getHistory(),
               );
               if (detection.kind === 'none') {
+                // History moved between continueLastTurn()'s accept and this
+                // re-detection (e.g. a concurrent turn settled it). Nothing to
+                // continue; log so an abandoned continuation is diagnosable.
+                debugLogger.warn(
+                  `[Session] continue ${promptId}: no interrupted turn on re-detection, nothing to continue`,
+                );
                 return { stopReason: 'end_turn' };
               }
               if (detection.kind === 'interrupted_prompt') {
@@ -1534,12 +1549,19 @@ export class Session implements SessionContext {
             // Prepended exactly once, then cleared so it doesn't repeat on
             // subsequent turns.
             if (this.pendingWorktreeNotice) {
-              parts = [
-                {
-                  text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
-                },
-                ...parts,
-              ];
+              // Insert after any leading functionResponse parts (same reason as
+              // the reminders above): a continuation that closes dangling tool
+              // calls leads with functionResponses, and prepending text before
+              // them violates the tool_result-first ordering. Normal prompts
+              // have no leading functionResponses, so this still prepends.
+              const noticePart = {
+                text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+              };
+              const firstNonFr = parts.findIndex(
+                (part) => !part.functionResponse,
+              );
+              const at = firstNonFr === -1 ? parts.length : firstNonFr;
+              parts = [...parts.slice(0, at), noticePart, ...parts.slice(at)];
               this.pendingWorktreeNotice = null;
             }
 
@@ -1575,9 +1597,14 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                   if (!sendResult.responseStream) {
+                    // Preserve the full message (not just functionResponse
+                    // parts) for a continuation: its content was stripped from
+                    // history before the send, so dropping it here on a
+                    // non-cancelled failure would lose the orphaned turn the
+                    // user never got an answer to.
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
-                      sendResult.stopReason === 'cancelled',
+                      isContinue || sendResult.stopReason === 'cancelled',
                     );
                     return { stopReason: sendResult.stopReason };
                   }

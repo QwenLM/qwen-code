@@ -282,6 +282,7 @@ describe('Session', () => {
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
+      stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
@@ -479,6 +480,41 @@ describe('Session', () => {
 
       expect(result).toEqual({ accepted: false, interruption: 'none' });
       expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
+      // An interrupted prompt: an orphaned user turn the model never answered.
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      // Force the continuation send to fail NON-cancelled (session token limit)
+      // so it hits the `!responseStream` branch — the data-loss window.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValue({
+        originalTokenCount: 999,
+        newTokenCount: 999,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      const continueRequest = {
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0];
+      const result = await session.prompt(continueRequest);
+
+      expect(result).toEqual({ stopReason: 'max_tokens' });
+      // The orphan was stripped before the send; on a non-cancelled failure the
+      // full message must be preserved back into history, not dropped.
+      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'unanswered' }),
+          ]),
+        }),
+      );
     });
   });
 
