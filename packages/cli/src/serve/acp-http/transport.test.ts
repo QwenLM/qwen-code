@@ -18,6 +18,7 @@ import {
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionService } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import { WorkspaceVoiceError } from '../../services/voice-service.js';
 import {
   SetupGithubError,
@@ -1938,7 +1939,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           'batch failed',
           [
             {
-              scope: 'workspace',
+              scope: SettingScope.Workspace,
               key: 'voiceModel',
               value: 'qwen3-asr-flash',
             },
