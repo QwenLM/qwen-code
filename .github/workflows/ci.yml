@@ -128,7 +128,11 @@ jobs:
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
-          fetch-depth: 0
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
 
       - name: 'Verify PR checkout includes head commit'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
@@ -372,6 +376,11 @@ jobs:
     needs: 'classify_pr'
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
     runs-on: 'ubuntu-latest'
+    # Analysis normally finishes in ~7-9 min (22 min worst case observed). Without
+    # an explicit cap, a hosted runner that drops its heartbeat mid-analysis leaves
+    # the job "in_progress" for the default 6h, holding a scarce hosted Linux slot
+    # the whole time. 30 min reaps such an orphan fast while clearing real runs.
+    timeout-minutes: 30
     permissions:
       actions: 'read'
       contents: 'read'

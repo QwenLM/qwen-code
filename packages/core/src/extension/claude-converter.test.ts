@@ -15,6 +15,7 @@ import {
   isClaudePluginConfig,
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
+  normalizeClaudeMcpServer,
   type ClaudePluginConfig,
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
@@ -1452,5 +1453,85 @@ describe('convertClaudePluginPackage — string URL source', () => {
     expect(vi.mocked(downloadFromGitHubRelease)).toHaveBeenCalled();
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+});
+
+describe('normalizeClaudeMcpServer', () => {
+  // Cast helpers: inputs may carry Claude-only fields (`type:'http'` etc.) that
+  // aren't on MCPServerConfig, and outputs are inspected as plain records.
+  const norm = (raw: Record<string, unknown>): Record<string, unknown> =>
+    normalizeClaudeMcpServer(raw as never) as unknown as Record<
+      string,
+      unknown
+    >;
+
+  it('maps Claude type:http (url) to httpUrl and drops type/url', () => {
+    expect(norm({ type: 'http', url: 'https://example.com/mcp' })).toEqual({
+      httpUrl: 'https://example.com/mcp',
+    });
+  });
+
+  it('maps Claude type:sse (url) to url and drops type', () => {
+    expect(norm({ type: 'sse', url: 'https://example.com/sse' })).toEqual({
+      url: 'https://example.com/sse',
+    });
+  });
+
+  it('drops type from a Claude stdio server, keeping command', () => {
+    expect(norm({ type: 'stdio', command: 'node', args: ['s.js'] })).toEqual({
+      command: 'node',
+      args: ['s.js'],
+    });
+  });
+
+  it("preserves type:'sdk' (isSdkMcpServerConfig depends on it)", () => {
+    // sdk standalone, and sdk alongside a command — both must keep type:'sdk'.
+    expect(norm({ type: 'sdk', description: 'in-process' })).toEqual({
+      type: 'sdk',
+      description: 'in-process',
+    });
+    expect(norm({ type: 'sdk', command: 'node' })).toEqual({
+      type: 'sdk',
+      command: 'node',
+    });
+  });
+
+  it('drops a bogus non-sdk type from a websocket (tcp) config', () => {
+    // qwen reserves `type` for 'sdk' and selects websocket via the `tcp` field;
+    // any stray non-sdk `type` is meaningless and is removed.
+    expect(norm({ type: 'tcp', tcp: 'localhost:8000' })).toEqual({
+      tcp: 'localhost:8000',
+    });
+  });
+
+  it('preserves non-transport fields (headers, env, timeout)', () => {
+    expect(
+      norm({
+        type: 'http',
+        url: 'https://example.com/mcp',
+        headers: { Authorization: 'Bearer x' },
+        timeout: 5000,
+      }),
+    ).toEqual({
+      httpUrl: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer x' },
+      timeout: 5000,
+    });
+  });
+
+  it('passes through an already-Qwen-shaped config unchanged', () => {
+    expect(norm({ httpUrl: 'https://example.com/mcp' })).toEqual({
+      httpUrl: 'https://example.com/mcp',
+    });
+    expect(norm({ command: 'node', args: ['s.js'] })).toEqual({
+      command: 'node',
+      args: ['s.js'],
+    });
+  });
+
+  it('leaves a transport-less config untouched', () => {
+    expect(norm({ description: 'metadata only' })).toEqual({
+      description: 'metadata only',
+    });
   });
 });
