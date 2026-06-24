@@ -248,12 +248,12 @@ describe('<ToolGroupMessage />', () => {
         <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
       );
       const frame = lastFrame() ?? '';
-      // Both tools get forceShowResult because forceExpandAll is true
+      // forceShowResult is per-tool: only the errored tool gets it
       expect(frame).toContain('MockTool[ok1]');
-      expect(frame).toContain('[forceShow]');
-      // Count occurrences: both tools should have [forceShow]
+      expect(frame).toContain('MockTool[err1]');
+      // Only the Error tool has [forceShow]
       const forceShowCount = (frame.match(/\[forceShow\]/g) || []).length;
-      expect(forceShowCount).toBe(2);
+      expect(forceShowCount).toBe(1);
     });
 
     it('renders tool call awaiting confirmation', () => {

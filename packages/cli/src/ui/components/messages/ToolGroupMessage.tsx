@@ -287,8 +287,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
 
   // Memory-only groups get their own compact rendering with read/write
-  // counts. Check BEFORE showCompact so they aren't swallowed by the
-  // generic CompactToolGroupDisplay path.
+  // counts. Check BEFORE the partition logic so they aren't routed through
+  // the collapsible/non-collapsible split.
   const allMemOpsComplete =
     isMemoryOnlyGroup &&
     !hasErrorTool &&
@@ -333,49 +333,61 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Partition tools into collapsible (read/search/list → summary line)
   // and non-collapsible (edit/write/command/agent → individual display).
   // Matches Claude Code's `collapseReadSearchGroups` philosophy.
+  // Canceled tools always render individually so partial output stays visible.
   const collapsibleTools = forceExpandAll
     ? []
-    : inlineToolCalls.filter((t) => isCollapsibleTool(t.name));
+    : inlineToolCalls.filter(
+        (t) =>
+          isCollapsibleTool(t.name) && t.status !== ToolCallStatus.Canceled,
+      );
   const nonCollapsibleTools = forceExpandAll
     ? inlineToolCalls
-    : inlineToolCalls.filter((t) => !isCollapsibleTool(t.name));
+    : inlineToolCalls.filter(
+        (t) =>
+          !isCollapsibleTool(t.name) || t.status === ToolCallStatus.Canceled,
+      );
+
+  // Memory badge — shared between all-collapsible and mixed paths.
+  // In the all-collapsible path only read counts are reachable (write ops
+  // use non-collapsible tools like WriteFile/Edit).
+  const hasMemoryBadge =
+    !isMemoryOnlyGroup &&
+    ((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0);
+  const memoryBadge = hasMemoryBadge ? (
+    <Box paddingLeft={1}>
+      <Text dimColor>
+        {'● '}
+        {[
+          (memoryReadCount ?? 0) > 0 &&
+            `Recalled ${memoryReadCount} ${memoryReadCount === 1 ? 'memory' : 'memories'}`,
+          (memoryWriteCount ?? 0) > 0 &&
+            `Wrote ${memoryWriteCount} ${memoryWriteCount === 1 ? 'memory' : 'memories'}`,
+        ]
+          .filter(Boolean)
+          .join(', ')}
+      </Text>
+    </Box>
+  ) : null;
 
   // When all tools are collapsible (pure read/search/list batch),
   // render summary line + memory badge if applicable.
   if (collapsibleTools.length > 0 && nonCollapsibleTools.length === 0) {
-    const hasMemoryBadge =
-      !isMemoryOnlyGroup &&
-      ((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0);
     return (
       <Box flexDirection="column" width={contentWidth}>
         <CompactToolGroupDisplay
           toolCalls={collapsibleTools}
           contentWidth={contentWidth}
         />
-        {hasMemoryBadge &&
-          (() => {
-            const parts: string[] = [];
-            if ((memoryReadCount ?? 0) > 0) {
-              const n = memoryReadCount!;
-              parts.push(`Recalled ${n} ${n === 1 ? 'memory' : 'memories'}`);
-            }
-            if ((memoryWriteCount ?? 0) > 0) {
-              const n = memoryWriteCount!;
-              parts.push(`Wrote ${n} ${n === 1 ? 'memory' : 'memories'}`);
-            }
-            return (
-              <Box paddingLeft={1}>
-                <Text dimColor>● {parts.join(', ')}</Text>
-              </Box>
-            );
-          })()}
+        {memoryBadge}
       </Box>
     );
   }
 
   // Full expanded view for non-collapsible tools
   const collapsibleSummaryHeight = collapsibleTools.length > 0 ? 1 : 0;
-  const staticHeight = /* marginBottom */ 1 + collapsibleSummaryHeight;
+  const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
+  const staticHeight =
+    /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;
   const innerWidth = contentWidth - 2;
 
   let countToolCallsWithResults = 0;
@@ -405,25 +417,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {/* Memory badge for mixed groups (some memory ops + other ops) */}
-      {!isMemoryOnlyGroup &&
-        ((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0) &&
-        (() => {
-          const parts: string[] = [];
-          if ((memoryReadCount ?? 0) > 0) {
-            const n = memoryReadCount!;
-            parts.push(`Recalled ${n} ${n === 1 ? 'memory' : 'memories'}`);
-          }
-          if ((memoryWriteCount ?? 0) > 0) {
-            const n = memoryWriteCount!;
-            parts.push(`Wrote ${n} ${n === 1 ? 'memory' : 'memories'}`);
-          }
-          return (
-            <Box paddingLeft={1}>
-              <Text dimColor>● {parts.join(', ')}</Text>
-            </Box>
-          );
-        })()}
+      {memoryBadge}
       {nonCollapsibleTools.map((tool) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
         const isSubagentFocused =
@@ -447,7 +441,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
-                forceShowResult={forceExpandAll}
+                forceShowResult={
+                  isUserInitiated ||
+                  tool.status === ToolCallStatus.Confirming ||
+                  tool.status === ToolCallStatus.Error ||
+                  isAgentWithPendingConfirmation(tool.resultDisplay) ||
+                  isTerminalSubagentTool(tool)
+                }
                 isFocused={isSubagentFocused}
                 isPending={isPending}
               />

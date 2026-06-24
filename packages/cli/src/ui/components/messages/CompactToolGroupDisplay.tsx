@@ -87,6 +87,12 @@ const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
   'Read File': 'read',
   'Read File(s)': 'read',
   'Read Directory': 'list',
+  // Legacy display names (keys from ToolDisplayNamesMigration)
+  SearchFiles: 'search',
+  FindFiles: 'search',
+  ReadFolder: 'list',
+  Task: 'agent',
+  TodoWrite: 'other',
 };
 
 type CategoryTemplate = {

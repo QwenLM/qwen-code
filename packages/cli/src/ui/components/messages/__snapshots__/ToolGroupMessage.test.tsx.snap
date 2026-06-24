@@ -15,8 +15,8 @@ MockTool[tool-3]: o write_file - Write to file (medium)"
 `;
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders multiple tool calls with different statuses 1`] = `
-"MockTool[tool-1]: ✓ successful-tool - This tool succeeded (medium) [forceShow]
-MockTool[tool-2]: o pending-tool - This tool is pending (medium) [forceShow]
+"MockTool[tool-1]: ✓ successful-tool - This tool succeeded (medium)
+MockTool[tool-2]: o pending-tool - This tool is pending (medium)
 MockTool[tool-3]: x error-tool - This tool failed (medium) [forceShow]"
 `;
 
