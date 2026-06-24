@@ -550,6 +550,25 @@ describe('isWorkspaceTrusted', () => {
       source: 'file',
     });
   });
+
+  it('should match distrust rules through canonical symlink paths', () => {
+    mockCwd = '/real/project';
+    mockRules['/link/project'] = TrustLevel.DO_NOT_TRUST;
+    vi.spyOn(fs, 'realpathSync').mockImplementation((p) => {
+      const value = String(p);
+      if (value === '/link/project' || value === '/real/project') {
+        return '/real/project';
+      }
+      return value;
+    });
+
+    expect(
+      isWorkspaceTrusted(mockSettings, undefined, '/real/project'),
+    ).toEqual({
+      isTrusted: false,
+      source: 'file',
+    });
+  });
 });
 
 describe('isWorkspaceTrusted with IDE override', () => {
@@ -614,6 +633,24 @@ describe('isWorkspaceTrusted with IDE override', () => {
     expect(isWorkspaceTrusted(settings)).toEqual({
       isTrusted: true,
       source: undefined,
+    });
+  });
+
+  it('should not apply IDE trust to an explicit different workspace', () => {
+    ideContextStore.set({ workspaceState: { isTrusted: true } });
+    vi.spyOn(process, 'cwd').mockReturnValue('/home/user/current');
+    vi.spyOn(fs, 'existsSync').mockImplementation(
+      (p) => p === getTrustedFoldersPath(),
+    );
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(
+      JSON.stringify({ '/home/user/other': TrustLevel.DO_NOT_TRUST }),
+    );
+
+    expect(
+      isWorkspaceTrusted(mockSettings, undefined, '/home/user/other'),
+    ).toEqual({
+      isTrusted: false,
+      source: 'file',
     });
   });
 });
