@@ -211,6 +211,7 @@ describe('Session', () => {
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
+    isInitialized: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
@@ -283,6 +284,7 @@ describe('Session', () => {
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
+      isInitialized: vi.fn().mockReturnValue(true),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -403,6 +405,80 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  describe('continueLastTurn', () => {
+    it('returns none and starts no continuation when the last turn ended cleanly', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hi' }] },
+        { role: 'model', parts: [{ text: 'all done' }] },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('accepts an interrupted prompt and starts a continuation carrying the continue meta flag', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered question' }] },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      // prompt() is fired fire-and-forget; flush the microtask queue.
+      await Promise.resolve();
+      expect(promptSpy).toHaveBeenCalledTimes(1);
+      const request = promptSpy.mock.calls[0]![0] as {
+        prompt: unknown[];
+        _meta?: Record<string, unknown>;
+      };
+      expect(request.prompt).toEqual([]);
+      expect(request._meta?.['qwen.daemon.continueLastTurn']).toBe(true);
+    });
+
+    it('classifies a turn with dangling tool calls as interrupted_turn', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'read it' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+          ],
+        },
+      ]);
+      vi.spyOn(session, 'prompt').mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+    });
+
+    it('rejects when the gemini client is not initialized', async () => {
+      vi.mocked(mockGeminiClient.isInitialized).mockReturnValue(false);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('setMode', () => {

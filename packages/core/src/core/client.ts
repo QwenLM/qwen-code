@@ -1649,20 +1649,31 @@ export class GeminiClient {
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     let strippedRetryEntries: Content[] = [];
-    let retrySendStarted = false;
+    let historyLenAfterStrip = 0;
 
     const restoreStrippedRetryEntries = () => {
-      if (retrySendStarted || strippedRetryEntries.length === 0) {
+      if (strippedRetryEntries.length === 0) {
         return;
       }
-      for (const entry of strippedRetryEntries) {
-        this.getChat().addHistory(entry);
+      // `chat.sendMessageStream` pushes the re-submitted user content back into
+      // history before the API call. If that push already landed (history grew
+      // past the post-strip baseline), restoring the stripped entries would
+      // duplicate it — so only restore when the content is not currently in
+      // history (send never reached the push, or the push was rolled back).
+      // ponytail: length-snapshot guard; replaces a `retrySendStarted` flag
+      // that only flipped on the first streamed event and so missed failures
+      // landing after the push but before any event.
+      if (this.getChat().getHistory().length <= historyLenAfterStrip) {
+        for (const entry of strippedRetryEntries) {
+          this.getChat().addHistory(entry);
+        }
       }
       strippedRetryEntries = [];
     };
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      historyLenAfterStrip = this.getChat().getHistory().length;
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -2149,7 +2160,6 @@ export class GeminiClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
-        retrySendStarted = true;
         if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
           this.lastSentIdeContext = nextIdeContext;
           this.forceFullIdeContext = false;

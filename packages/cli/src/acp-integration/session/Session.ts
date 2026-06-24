@@ -65,6 +65,9 @@ import {
   getArenaSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
+  detectTurnInterruption,
+  buildSyntheticToolResponseParts,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -165,6 +168,7 @@ import {
 const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
+const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -1119,6 +1123,57 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Resume an unfinished previous turn — an interrupted prompt (the model never
+   * answered) or a turn left with dangling tool calls — without injecting a
+   * synthetic "continue" user message. Classifies from persisted history; if a
+   * continuation applies it runs as a normal turn, streamed through the usual
+   * session update channel. Idempotent no-op when the last turn ended cleanly
+   * or a prompt is already in flight.
+   *
+   * Returns immediately with the classification; the continuation runs
+   * fire-and-forget so the daemon control method can ack without blocking on
+   * the full turn. Powers `qwen/control/session/continue` and the SDK's
+   * `continueLastTurn`.
+   */
+  async continueLastTurn(): Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }> {
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) {
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const detection = detectTurnInterruption(
+      this.#getCurrentChat().getHistory(),
+    );
+    if (detection.kind === 'none') {
+      return { accepted: false, interruption: 'none' };
+    }
+    // A prompt (or an earlier continuation) is still in flight: there is no
+    // settled turn to continue. Reject rather than abort the live turn.
+    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) {
+      return { accepted: false, interruption: detection.kind };
+    }
+
+    // Fire-and-forget: prompt() re-detects and drives the continuation through
+    // the normal send/tool loop, streaming updates to attached clients. Errors
+    // surface on the session stream, so swallow here to keep the ack clean.
+    const continueRequest = {
+      prompt: [],
+      sessionId: this.sessionId,
+    } as PromptRequest;
+    (continueRequest as { _meta?: Record<string, unknown> })._meta = {
+      [DAEMON_CONTINUE_META_KEY]: true,
+    };
+    void this.prompt(continueRequest).catch((error) => {
+      debugLogger.error('[Session] continueLastTurn failed', error);
+    });
+
+    return { accepted: true, interruption: detection.kind };
+  }
+
+  /**
    * Generate a server-side follow-up suggestion for the just-completed
    * turn and push it to attached clients via the daemon's
    * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
@@ -1276,7 +1331,42 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RETRY_META_KEY
               ] === true;
-            if (isRetry) {
+
+            // Continue an interrupted previous turn without a synthetic user
+            // message. Classified from full history (the strip pass removes the
+            // entire trailing user run, so detection must see all of it):
+            // `interrupted_prompt` re-submits the orphaned user run after
+            // stripping it (history is neither duplicated nor lost),
+            // `interrupted_turn` closes dangling tool calls with synthesized
+            // error responses. Mirrors the stream-json path in
+            // nonInteractiveCli.ts so both surfaces behave identically.
+            const isContinue =
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_CONTINUE_META_KEY
+              ] === true;
+            let continuationParts: Part[] | null = null;
+            if (isContinue) {
+              const detection = detectTurnInterruption(
+                this.#getCurrentChat().getHistory(),
+              );
+              if (detection.kind === 'none') {
+                return { stopReason: 'end_turn' };
+              }
+              if (detection.kind === 'interrupted_prompt') {
+                this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+                continuationParts = detection.parts;
+              } else {
+                continuationParts = buildSyntheticToolResponseParts(
+                  detection.danglingCalls,
+                  ORPHAN_TOOL_USE_REPAIR_REASON,
+                );
+              }
+            }
+
+            if (isContinue) {
+              // The orphaned content is already persisted; recording a new user
+              // message would duplicate the turn in the transcript.
+            } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
@@ -1294,7 +1384,11 @@ export class Session implements SessionContext {
 
             let parts: Part[] | null;
 
-            if (isSlashCommand(inputText)) {
+            if (isContinue) {
+              // Non-null here: the `none` case returned early above, and both
+              // interruption branches assign a concrete part list.
+              parts = continuationParts!;
+            } else if (isSlashCommand(inputText)) {
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -1325,6 +1419,7 @@ export class Session implements SessionContext {
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
             if (
+              !isContinue &&
               hooksEnabled &&
               messageBus &&
               this.config.hasHooksForEvent?.('UserPromptSubmit')
@@ -1395,7 +1490,19 @@ export class Session implements SessionContext {
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (systemReminders.length > 0) {
-              parts = [...systemReminders, ...parts];
+              // Insert reminders after any leading functionResponse parts so a
+              // tool-result continuation (interrupted_turn) keeps tool_result
+              // blocks first, as Anthropic-compatible backends require. With no
+              // leading functionResponses this is equivalent to prepending.
+              const firstNonFr = parts.findIndex(
+                (part) => !part.functionResponse,
+              );
+              const at = firstNonFr === -1 ? parts.length : firstNonFr;
+              parts = [
+                ...parts.slice(0, at),
+                ...systemReminders,
+                ...parts.slice(at),
+              ];
             }
 
             // Phase C: one-shot worktree restore notice, set by acpAgent on

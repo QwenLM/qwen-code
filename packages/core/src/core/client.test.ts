@@ -6494,6 +6494,58 @@ Other open files:
         expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
       });
 
+      it('does not re-add stripped retry entries when the chat already pushed them before failing', async () => {
+        // Regression (I1): a Retry that fails AFTER chat.sendMessageStream has
+        // pushed the re-submitted user content (history grew past the post-strip
+        // baseline) but BEFORE any event streamed must not restore the stripped
+        // entries on top of the content the chat already holds — that would
+        // duplicate history. The length-snapshot guard suppresses the re-add.
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        // Live history the restore guard inspects. Starts at the post-strip
+        // baseline (length 0); the mocked turn simulates chat.sendMessageStream
+        // pushing the user content back in before the failure.
+        const historyRef: Content[] = [];
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn(() => historyRef),
+          getHistoryLength: vi.fn(() => historyRef.length),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            // Simulate the real chat pushing the re-submitted user content into
+            // history before the API call, then failing pre-event.
+            historyRef.push(orphanedPrompt);
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed after push, before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-post-push-failure',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed after push, before first event');
+
+        // The content is already in history (length 1 > baseline 0), so the
+        // restore must be suppressed — no duplicate addHistory.
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+      });
+
       it('should not increment sessionTurnCount for retry', async () => {
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),

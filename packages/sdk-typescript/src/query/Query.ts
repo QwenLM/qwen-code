@@ -78,6 +78,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   readonly initialized: Promise<void>;
   private closed = false;
   private messageRouterStarted = false;
+  private transportReadFinalized = false;
 
   private firstResultReceivedPromise?: Promise<void>;
   private firstResultReceivedResolve?: () => void;
@@ -332,7 +333,11 @@ export class Query implements AsyncIterable<SDKMessage> {
 
         this.finishTransportRead();
       } catch (error) {
-        this.inputStream.error(
+        // A transport-level crash (not clean EOF) must still reject every
+        // pending control + MCP request, otherwise continueLastTurn() and MCP
+        // callers hang until their timeout (MCP responses have none). Route
+        // through finishTransportRead so the real error propagates.
+        this.finishTransportRead(
           error instanceof Error ? error : new Error(String(error)),
         );
       }
@@ -392,8 +397,15 @@ export class Query implements AsyncIterable<SDKMessage> {
     this.inputStream.enqueue(message as SDKMessage);
   }
 
-  private finishTransportRead(): void {
+  private finishTransportRead(error?: Error): void {
+    // Idempotent: close() and the transport-read loop can both reach here.
+    if (this.transportReadFinalized) {
+      return;
+    }
+    this.transportReadFinalized = true;
+
     const rejectionError =
+      error ??
       this.transport.exitError ??
       new Error('Transport closed before control response');
 
@@ -409,10 +421,15 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
     this.pendingMcpResponses.clear();
 
-    if (this.abortController.signal.aborted) {
-      this.inputStream.error(new AbortError('Query aborted'));
-    } else {
-      this.inputStream.done();
+    // Skip stream finalization if close() already settled the stream.
+    if (this.inputStream.hasError === undefined) {
+      if (this.abortController.signal.aborted) {
+        this.inputStream.error(new AbortError('Query aborted'));
+      } else if (error) {
+        this.inputStream.error(error);
+      } else {
+        this.inputStream.done();
+      }
     }
   }
 

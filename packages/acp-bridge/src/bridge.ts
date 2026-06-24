@@ -3784,6 +3784,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async continueSession(sessionId) {
+      return requestSessionStatus<{
+        accepted: boolean;
+        interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+    },
+
     async getSessionStatsStatus(sessionId) {
       return requestSessionStatus<ServeSessionStatsStatus>(
         sessionId,

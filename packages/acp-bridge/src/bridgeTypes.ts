@@ -475,6 +475,18 @@ export interface AcpSessionBridge {
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
 
+  /**
+   * Resume a live session's unfinished previous turn — an interrupted prompt
+   * (model never answered) or a turn left with dangling tool calls — without
+   * injecting a synthetic "continue" user message. Idempotent no-op when the
+   * last turn ended cleanly. Mirrors the SDK's `continueLastTurn` and the core
+   * `detectTurnInterruption` classification.
+   */
+  continueSession(sessionId: string): Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }>;
+
   /** Read structured session usage stats (tokens, tools, files). */
   getSessionStatsStatus(sessionId: string): Promise<ServeSessionStatsStatus>;
 

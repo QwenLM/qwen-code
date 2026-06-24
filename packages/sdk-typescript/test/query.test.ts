@@ -78,6 +78,62 @@ class MockTransport implements Transport {
   }
 }
 
+/**
+ * Transport whose read loop crashes (throws) after the initialize handshake
+ * instead of closing cleanly via EOF. It replies to the INITIALIZE control
+ * request so `query.initialized` resolves, then — once the next control request
+ * has been written (e.g. continue_last_turn) — throws from `readMessages`,
+ * exercising the message-router catch path that calls `finishTransportRead(err)`.
+ */
+class ThrowingTransport implements Transport {
+  readonly isReady = true;
+  readonly exitError = null;
+  readonly writes: CLIControlRequest[] = [];
+
+  private readonly writeWaiters: Array<() => void> = [];
+
+  constructor(private readonly readError: Error) {}
+
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  waitForExit(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  write(message: string): void {
+    this.writes.push(JSON.parse(message) as CLIControlRequest);
+    for (const resolve of this.writeWaiters.splice(0)) {
+      resolve();
+    }
+  }
+
+  private waitForWrite(index: number): Promise<CLIControlRequest> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.writes.length > index) {
+          resolve(this.writes[index]!);
+          return;
+        }
+        this.writeWaiters.push(check);
+      };
+      check();
+    });
+  }
+
+  async *readMessages(): AsyncGenerator<unknown, void, unknown> {
+    // Reply to INITIALIZE so the handshake completes.
+    const initializeRequest = await this.waitForWrite(0);
+    yield controlSuccess(initializeRequest, null);
+
+    // Wait until the caller's follow-up control request is in flight, then
+    // crash the read loop instead of returning (clean EOF).
+    await this.waitForWrite(1);
+    throw this.readError;
+  }
+}
+
 function controlSuccess(
   request: CLIControlRequest,
   response: Record<string, unknown> | null,
@@ -153,6 +209,23 @@ describe('Query', () => {
     await expect(continuePromise).rejects.toThrow(
       'Transport closed before control response',
     );
+    await query.close();
+  });
+
+  it('rejects continueLastTurn when the transport read loop throws', async () => {
+    const readError = new Error('transport read crashed');
+    const transport = new ThrowingTransport(readError);
+    const query = new Query(transport, {
+      timeout: { controlRequest: 1000 },
+    });
+
+    await query.initialized;
+
+    // The control request write unblocks the read loop, which then throws and
+    // rejects this pending request via finishTransportRead(err).
+    const continuePromise = query.continueLastTurn();
+
+    await expect(continuePromise).rejects.toThrow('transport read crashed');
     await query.close();
   });
 

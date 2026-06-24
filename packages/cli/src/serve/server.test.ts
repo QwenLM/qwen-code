@@ -352,6 +352,10 @@ interface FakeBridgeOpts {
   clearSessionGoalImpl?: (
     sessionId: string,
   ) => Promise<{ cleared: boolean; condition?: string }>;
+  continueSessionImpl?: (sessionId: string) => Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }>;
   sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
     sessionId: string,
@@ -525,6 +529,7 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   clearSessionGoalCalls: string[];
+  continueSessionCalls: string[];
   sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -624,6 +629,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionTasksCalls: string[] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
+  const continueSessionCalls: string[] = [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
@@ -799,6 +805,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
     opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
+  const continueSessionImpl =
+    opts.continueSessionImpl ??
+    (async () => ({ accepted: false, interruption: 'none' as const }));
   const sessionHooksImpl =
     opts.sessionHooksImpl ??
     (async (sessionId: string) => ({
@@ -957,6 +966,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionTasksCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
+    continueSessionCalls,
     sessionHooksCalls,
     setModelCalls,
     setLanguageCalls,
@@ -1152,6 +1162,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
       return clearSessionGoalImpl(sessionId);
+    },
+    async continueSession(sessionId) {
+      continueSessionCalls.push(sessionId);
+      return continueSessionImpl(sessionId);
     },
     async getSessionHooksStatus(sessionId) {
       sessionHooksCalls.push(sessionId);
@@ -4144,6 +4158,55 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cleared: false });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+
+    it('continues a session through the bridge', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async () => ({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      expect(bridge.continueSessionCalls).toEqual(['s-1']);
+    });
+
+    it('maps session continue bridge errors', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/missing/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
     });
   });
 
@@ -10936,15 +10999,16 @@ describe('auth device-flow routes', () => {
     // through `sendBridgeError`'s generic 500 path. Build a fake
     // provider whose start always throws.
     const { UpstreamDeviceFlowError } = await import('./auth/device-flow.js');
-    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
-      providerId: 'qwen-oauth',
-      async start() {
-        throw new UpstreamDeviceFlowError('mocked upstream outage');
-      },
-      async poll() {
-        return { kind: 'pending' as const };
-      },
-    };
+    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider =
+      {
+        providerId: 'qwen-oauth',
+        async start() {
+          throw new UpstreamDeviceFlowError('mocked upstream outage');
+        },
+        async poll() {
+          return { kind: 'pending' as const };
+        },
+      };
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
       bridge,

@@ -481,6 +481,57 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
 
+  it('emits a terminal error result when an accepted continuation is abandoned by shutdown', async () => {
+    const { continueResults, getControlContext } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('first turn');
+
+    // Block the in-flight user turn so the continuation accepted below stays
+    // queued (pendingContinueTurn) instead of being picked up by the work loop.
+    let releaseFirstTurn!: () => void;
+    runNonInteractiveMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstTurn = resolve;
+        }),
+    );
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      // Wait until the first (user-message) turn is actually running.
+      await vi.waitFor(() => {
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+        expect(getControlContext()).toBeDefined();
+      });
+      // Accept a continuation: an interrupted turn exists and no continuation is
+      // pending yet, so pendingContinueTurn becomes true. ensureProcessingStarted
+      // is a no-op because the user-message work loop is already running.
+      continueResults.push(await getControlContext()?.onContinueLastTurn?.());
+      // Begin shutdown before the continuation can run, then let the work loop
+      // unwind. Its abort guard skips the still-pending continuation.
+      getControlContext()?.onInterrupt?.();
+      releaseFirstTurn();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(continueResults).toEqual([
+      { accepted: true, interruption: 'interrupted_prompt' },
+    ]);
+    // The continuation itself never ran (only the first user turn did).
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: 'Continuation abandoned: session shut down before it ran',
+      }),
+    );
+  });
+
   it('emits an error result when a scheduled continue turn fails', async () => {
     const { continueResults } = installContinueDispatch();
     createInitializedGeminiClient([
@@ -554,6 +605,45 @@ describe('runNonInteractiveStreamJson', () => {
         errorMessage: 'raw continue failure',
       }),
     );
+  });
+
+  it('emits a continue_turn_failed diagnostic when a continue turn fails after a result', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const initRequest = createControlRequest('initialize');
+    const continueRequest = createContinueRequest();
+    // The continuation flushes a result (onResultEmitted) and then crashes mid
+    // stream. Because the one-result contract is already spent, processContinueTurn
+    // surfaces a structured diagnostic instead of a silent stop.
+    runNonInteractiveMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[4] as {
+        onResultEmitted?: () => void;
+      };
+      options.onResultEmitted?.();
+      throw new Error('stream collapsed mid-turn');
+    });
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield continueRequest;
+      await vi.waitFor(() => {
+        expect(continueResults).toHaveLength(1);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(continueResults).toEqual([
+      { accepted: true, interruption: 'interrupted_prompt' },
+    ]);
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'continue_turn_failed',
+      { error: 'stream collapsed mid-turn' },
+    );
+    // The diagnostic replaces a terminal error result, so no extra result is emitted.
+    expect(mockOutputAdapter.emitResult).not.toHaveBeenCalled();
   });
 
   it('routes monitor notifications through the session queue', async () => {

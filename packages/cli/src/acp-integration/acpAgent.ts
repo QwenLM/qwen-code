@@ -5880,6 +5880,21 @@ class QwenAgent implements Agent {
           condition: cleared?.condition,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const result = await session.continueLastTurn();
+        debugLogger.info(
+          `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
+        );
+        return result;
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const name = params['name'];
         const config = params['config'];

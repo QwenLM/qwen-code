@@ -494,10 +494,9 @@ class Session {
     }
 
     const chat = geminiClient.getChat();
-    const historyTail = (
+    const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
-      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)
-    );
+      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
     const detection = detectTurnInterruption(historyTail);
     debugLogger.info('[Session] requestContinueLastTurn detection', {
       kind: detection.kind,
@@ -550,10 +549,17 @@ class Session {
       });
     } catch (error) {
       debugLogger.error('[Session] Continue turn execution error:', error);
+      const message = error instanceof Error ? error.message : String(error);
       if (resultAlreadyEmitted) {
+        // A result was already flushed before the failure, so we can't emit a
+        // terminal error result without breaking the one-result contract.
+        // Surface a structured diagnostic instead of a silent stop so SDK
+        // consumers still see that the continuation failed mid-stream.
+        this.outputAdapter.emitSystemMessage('continue_turn_failed', {
+          error: message,
+        });
         return;
       }
-      const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Continue turn failed: ${message}`, { cause: error });
     } finally {
       this.continueTurnInProgress = false;
@@ -754,6 +760,17 @@ class Session {
       } catch (error) {
         debugLogger.error('[Session] Error in user message processing:', error);
       }
+    }
+
+    // 4. A continuation accepted before shutdown may never have run: the work
+    // loop's `!isShuttingDown` guard skips it once shutdown begins, so an SDK
+    // consumer that received `{ accepted: true }` would wait forever. Emit a
+    // terminal error result so it learns the continuation was abandoned.
+    if (this.pendingContinueTurn) {
+      this.pendingContinueTurn = false;
+      this.emitErrorResult(
+        new Error('Continuation abandoned: session shut down before it ran'),
+      );
     }
   }
 

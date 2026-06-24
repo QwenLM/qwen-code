@@ -3136,6 +3136,28 @@ export function createServeApp(
     },
   );
 
+  app.post(
+    '/session/:id/continue',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      try {
+        res.status(200).json(await bridge.continueSession(sessionId));
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/continue',
+          sessionId,
+        });
+      }
+    },
+  );
+
   app.post('/session/:id/prompt', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
