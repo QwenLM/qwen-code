@@ -641,8 +641,7 @@ describe('runQwenServe runtime startup failures', () => {
   ])(
     'resolves QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS=%s to %s',
     (envValue, expected) => {
-      const originalEnv =
-        process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
+      const originalEnv = process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
       try {
         if (envValue === undefined) {
           delete process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];

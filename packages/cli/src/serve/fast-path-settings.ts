@@ -337,9 +337,7 @@ function buildTrustedFolderRules(
   trustedFolders: Record<string, string>,
 ): CachedTrustRule[] {
   const rules: CachedTrustRule[] = [];
-  for (const [rulePath, trustLevel] of Object.entries(
-    trustedFolders,
-  )) {
+  for (const [rulePath, trustLevel] of Object.entries(trustedFolders)) {
     if (trustLevel === TRUST_FOLDER) {
       rules.push({
         level: 'trusted',
