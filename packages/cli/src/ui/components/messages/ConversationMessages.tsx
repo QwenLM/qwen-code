@@ -22,6 +22,8 @@ import { formatDuration } from '../../utils/displayUtils.js';
 
 export const THINKING_ICON = '∴ ';
 
+const toggleKeyHint = process.platform === 'darwin' ? 'option+t' : 'alt+t';
+
 interface UserMessageProps {
   text: string;
 }
@@ -320,8 +322,6 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
 }) => {
   const durationSuffix =
     durationMs != null ? ` ${formatDuration(durationMs)}` : '';
-
-  const toggleKeyHint = process.platform === 'darwin' ? 'option+t' : 'alt+t';
 
   if (!isPending && !expanded) {
     const label =
