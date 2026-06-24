@@ -119,6 +119,26 @@ function specToModelConfig(
   };
 }
 
+function applyProviderCustomHeaders(
+  models: ProviderModelConfig[],
+  config: ProviderConfig,
+): ProviderModelConfig[] {
+  if (!config.customHeaders) return models;
+  return models.map((model) => {
+    const existing = model.generationConfig ?? {};
+    return {
+      ...model,
+      generationConfig: {
+        ...existing,
+        customHeaders: {
+          ...(config.customHeaders as Record<string, string>),
+          ...(existing.customHeaders as Record<string, string> | undefined),
+        },
+      },
+    };
+  });
+}
+
 function buildModelConfigs(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
@@ -126,17 +146,17 @@ function buildModelConfigs(
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
 
+  let models: ProviderModelConfig[];
+
   // Fixed ModelSpec[] (not editable) — use specs directly
   if (config.models && !config.modelsEditable) {
-    return config.models.map((spec) =>
+    models = config.models.map((spec) =>
       specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
     );
-  }
-
-  // Editable ModelSpec[] — look up per-model metadata for known IDs
-  if (config.models && config.modelsEditable) {
+  } else if (config.models && config.modelsEditable) {
+    // Editable ModelSpec[] — look up per-model metadata for known IDs
     const specMap = new Map(config.models.map((s) => [s.id, s]));
-    return inputs.modelIds.map((id) => {
+    models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id);
       if (spec) {
         return specToModelConfig(spec, prefix, inputs.baseUrl, envKey);
@@ -150,23 +170,23 @@ function buildModelConfigs(
         ...(genConfig ? { generationConfig: genConfig } : {}),
       };
     });
+  } else {
+    // No predefined models (custom provider) — use advancedConfig
+    const advCfg = inputs.advancedConfig;
+    const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
+    models = inputs.modelIds.map((id) => {
+      const genConfig = buildAdvancedGenerationConfig(advCfg);
+      return {
+        id,
+        name: displayName(id),
+        baseUrl: inputs.baseUrl,
+        envKey,
+        ...(genConfig ? { generationConfig: genConfig } : {}),
+      };
+    });
   }
 
-  // No predefined models (custom provider) — use advancedConfig
-  const advCfg = inputs.advancedConfig;
-
-  const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
-
-  return inputs.modelIds.map((id) => {
-    const genConfig = buildAdvancedGenerationConfig(advCfg);
-    return {
-      id,
-      name: displayName(id),
-      baseUrl: inputs.baseUrl,
-      envKey,
-      ...(genConfig ? { generationConfig: genConfig } : {}),
-    };
-  });
+  return applyProviderCustomHeaders(models, config);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +353,44 @@ function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
 
 export function getDefaultModelIds(config: ProviderConfig): string[] {
   return config.models?.map((s) => s.id) ?? [];
+}
+
+function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { id?: unknown }).id === 'string'
+  );
+}
+
+/**
+ * Find the model entries a user has already saved for `config` under the
+ * `modelProviders` map in settings. Returns the first protocol (in the
+ * provider's own preference order) that owns stored models, or `undefined`
+ * when none are saved. Used to pre-fill the auth wizard / connect form with
+ * existing model IDs instead of resetting to the provider's built-in defaults.
+ */
+export function findExistingProviderModels(
+  config: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+):
+  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
+  | undefined {
+  const ownsModel = resolveOwnsModel(config);
+  if (!ownsModel || !modelProviders) return undefined;
+  const protocols = config.protocolOptions?.length
+    ? config.protocolOptions
+    : [config.protocol];
+  for (const protocol of protocols) {
+    const raw = modelProviders[protocol];
+    if (!Array.isArray(raw)) continue;
+    const models = raw.filter(
+      (m): m is ProviderModelConfig =>
+        isProviderModelConfig(m) && ownsModel(m),
+    );
+    if (models.length > 0) return { protocol, models };
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -56,6 +56,8 @@ Thumbs.db
 
 # Ignore built ts files
 dist
+packages/audio-capture/build/
+packages/audio-capture/prebuilds/
 
 # Docker folder to help skip auth refreshes
 .docker
@@ -112,3 +114,4 @@ tmp/
 .venv
 .codegraph
 .qwen/computer-use/installed.json
+.playwright-mcp/

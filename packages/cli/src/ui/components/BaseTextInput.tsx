@@ -20,11 +20,8 @@
  */
 
 import type { ReactNode } from 'react';
-import { useCallback, useContext, useEffect, useRef } from 'react';
-import { Box, Text } from 'ink';
-import { addLayoutListener, type DOMElement } from 'ink/dom';
-import CursorContext from 'ink/components/CursorContext';
-import chalk from 'chalk';
+import { useCallback, useInsertionEffect, useRef } from 'react';
+import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -32,6 +29,7 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import stringWidth from 'string-width';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -88,7 +86,7 @@ export interface BaseTextInputProps {
 // ─── Default line renderer ──────────────────────────────────
 
 /**
- * Renders a single visual line with an inverse-video block cursor.
+ * Renders a single visual line with a high-contrast block cursor.
  * Uses codepoint-aware string operations for Unicode/emoji safety.
  */
 export function defaultRenderLine({
@@ -103,12 +101,12 @@ export function defaultRenderLine({
 
   const len = cpLen(lineText);
 
-  // Cursor past end of line — append inverse space
+  // Cursor past end of line — append cursor space
   if (cursorCol >= len) {
     return (
       <Text>
         {lineText}
-        {chalk.inverse(' ') + '\u200B'}
+        {renderSoftwareCursor(' ') + '\u200B'}
       </Text>
     );
   }
@@ -120,7 +118,7 @@ export function defaultRenderLine({
   return (
     <Text>
       {before}
-      {chalk.inverse(cursorChar)}
+      {renderSoftwareCursor(cursorChar)}
       {after}
     </Text>
   );
@@ -128,15 +126,61 @@ export function defaultRenderLine({
 
 // ─── Helpers ────────────────────────────────────────────────
 
-// Walk up Ink's internal DOM tree to find the root node (ink-root).
-// addLayoutListener requires the root node specifically.
-function findRootNode(
-  node: (Record<string, unknown> & { parentNode?: unknown }) | null,
-): DOMElement | undefined {
+export type PhysicalCursorState = {
+  hasMeasured: boolean;
+  showCursor: boolean;
+  cursorVisualRow: number;
+  cursorVisualCol: number;
+  scrollVisualRow: number;
+  linesToRender: string[];
+  prefixWidth: number;
+};
+
+export function getAbsolutePosition(
+  node: DOMElement | null,
+): { top: number; left: number } | undefined {
   if (!node) return undefined;
-  if (!node.parentNode)
-    return node['nodeName'] === 'ink-root' ? (node as DOMElement) : undefined;
-  return findRootNode(node.parentNode as Record<string, unknown>);
+
+  let top = 0;
+  let left = 0;
+  let current: DOMElement | undefined = node;
+  while (current) {
+    const layout = current.yogaNode?.getComputedLayout();
+    if (layout) {
+      top += layout.top;
+      left += layout.left;
+    }
+    current = current.parentNode;
+  }
+
+  return { top, left };
+}
+
+export function getPhysicalCursorPosition(
+  node: DOMElement | null,
+  {
+    hasMeasured,
+    showCursor,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    linesToRender,
+    prefixWidth,
+  }: PhysicalCursorState,
+): { x: number; y: number } | undefined {
+  if (!showCursor || !hasMeasured) return undefined;
+
+  const position = getAbsolutePosition(node);
+  if (!position) return undefined;
+
+  const relativeRow = cursorVisualRow - scrollVisualRow;
+  const lineText = linesToRender[relativeRow] || '';
+  const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
+  const physicalCol = stringWidth(textBeforeCursor);
+  return {
+    x: position.left + prefixWidth + physicalCol,
+    y: position.top + relativeRow + 1,
+  };
 }
 
 // ─── Component ──────────────────────────────────────────────
@@ -268,16 +312,11 @@ export const BaseTextInput = ({
   const scrollVisualRow = buffer.visualScrollRow;
 
   // ── Physical cursor positioning for IME ──
-  // addLayoutListener fires in resetAfterCommit AFTER calculateLayout()
-  // but BEFORE onRender() — yoga layout is fresh, terminal not yet written.
-  // addLayoutListener requires the root node (ink-root), not the component
-  // node. We find it by walking up the Ink DOM parent chain.
-  const rootRef = useRef(null);
-  const cursorCtx = useContext(CursorContext);
-
-  // Use a ref to hold mutable state so the layout listener callback
-  // always reads the latest values without needing to resubscribe.
-  const stateRef = useRef({
+  const boxRef = useRef<DOMElement | null>(null);
+  const { hasMeasured } = useBoxMetrics(boxRef);
+  const { setCursorPosition } = useCursor();
+  const cursorPosition = getPhysicalCursorPosition(boxRef.current, {
+    hasMeasured,
     showCursor,
     cursorVisualRow,
     cursorVisualCol,
@@ -285,62 +324,11 @@ export const BaseTextInput = ({
     linesToRender,
     prefixWidth,
   });
-  stateRef.current = {
-    showCursor,
-    cursorVisualRow,
-    cursorVisualCol,
-    scrollVisualRow,
-    linesToRender,
-    prefixWidth,
-  };
 
-  useEffect(() => {
-    const rootNode = findRootNode(rootRef.current);
-    if (!rootNode) return;
-    const unsub = addLayoutListener(rootNode, () => {
-      const {
-        showCursor: sc,
-        cursorVisualRow: vr,
-        cursorVisualCol: vc,
-        scrollVisualRow: sr,
-        linesToRender: lt,
-        prefixWidth: pw,
-      } = stateRef.current;
-      if (!sc) {
-        cursorCtx.setCursorPosition(undefined);
-        return;
-      }
-      const node = rootRef.current;
-      if (!node) return;
-      let absTop = 0;
-      let absLeft = 0;
-      let n: unknown = node;
-      while (n) {
-        const nd = n as {
-          yogaNode?: { getComputedLayout(): { top: number; left: number } };
-          parentNode?: unknown;
-        };
-        const layout = nd.yogaNode?.getComputedLayout();
-        if (layout) {
-          absTop += layout.top;
-          absLeft += layout.left;
-        }
-        n = nd.parentNode;
-      }
-      const relativeRow = vr - sr;
-      const lineText = lt[relativeRow] || '';
-      const textBeforeCursor = cpSlice(lineText, 0, vc);
-      const physicalCol = stringWidth(textBeforeCursor);
-      cursorCtx.setCursorPosition({
-        x: absLeft + pw + physicalCol,
-        y: absTop + relativeRow + 1,
-      });
-    });
-    return () => {
-      unsub();
-      cursorCtx.setCursorPosition(undefined);
-    };
-  }, [cursorCtx]);
+  useInsertionEffect(() => {
+    setCursorPosition(cursorPosition);
+    return () => setCursorPosition(undefined);
+  }, [setCursorPosition, cursorPosition]);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
@@ -357,7 +345,7 @@ export const BaseTextInput = ({
     : '─'.repeat(columns);
 
   return (
-    <Box ref={rootRef} flexDirection="column">
+    <Box ref={boxRef} flexDirection="column">
       <Text color={resolvedBorderColor} wrap="truncate-end">
         {topBorderLine}
       </Text>
@@ -370,11 +358,13 @@ export const BaseTextInput = ({
         borderColor={resolvedBorderColor}
       >
         {resolvedPrefix}
-        <Box flexGrow={1} flexDirection="column" backgroundColor={theme.background.primary}>
+        {/* No background fill: the input area blends into the terminal's own
+            background so it stays consistent across terminals and themes. */}
+        <Box flexGrow={1} flexDirection="column">
           {buffer.text.length === 0 && placeholder ? (
             showCursor ? (
               <Text>
-                {chalk.inverse(placeholder.slice(0, 1))}
+                {renderSoftwareCursor(placeholder.slice(0, 1))}
                 <Text color={theme.text.secondary}>{placeholder.slice(1)}</Text>
               </Text>
             ) : (

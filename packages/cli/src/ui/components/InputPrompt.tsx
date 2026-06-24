@@ -14,7 +14,7 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 import { logicalPosToOffset } from './shared/text-buffer.js';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import {
@@ -47,6 +47,7 @@ import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -61,6 +62,22 @@ import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
 import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
+import {
+  useVoiceInput,
+  type VoiceTranscriber,
+} from '../hooks/use-voice-input.js';
+import { createVoiceRecorder } from '../voice/voice-recorder.js';
+import {
+  assertVoiceBaseUrlNetworkAllowed,
+  isKeytermEcho,
+  isStreamingVoiceModel,
+  resolveVoiceStreamConfig,
+  transcribeVoiceAudio,
+} from '../voice/voice-transcriber.js';
+import { openQwenAsrRealtimeStream } from '../voice/qwen-asr-realtime-session.js';
+import { openVoiceStream } from '../voice/voice-stream-session.js';
+import { openVoiceStreamWithRetry } from '../voice/voice-stream-retry.js';
+import { VoiceIndicator } from './VoiceIndicator.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -151,6 +168,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const settings = useSettings();
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -166,6 +184,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setLivePanelSelectedIndex,
     enterDetailFromPanel: enterBgDetailFromPanel,
     setSelectedIndex: setBgSelectedIndex,
+    setPillFocused: setBgPillFocused,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
   const getVisibleBgAgents = useCallback(
@@ -288,6 +307,116 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     },
     config,
     isFocused: isShellFocused,
+  });
+
+  const rawVoiceModel = settings.merged.voiceModel;
+  const voiceModel =
+    typeof rawVoiceModel === 'string' && rawVoiceModel.trim().length > 0
+      ? rawVoiceModel.trim()
+      : undefined;
+  const voiceEnabled =
+    settings.merged.general?.voice?.enabled === true && Boolean(voiceModel);
+  const voiceMode =
+    settings.merged.general?.voice?.mode === 'tap' ? 'tap' : 'hold';
+  // handleSubmitAndClear is defined below; bridge with a ref so tap-mode voice
+  // can submit the prompt once the transcript is inserted.
+  const voiceSubmitRef = useRef<(text: string) => void>(() => {});
+  const transcribeVoice = useCallback<VoiceTranscriber>(
+    (audio, { voiceModel }) =>
+      transcribeVoiceAudio(audio, { config, settings, voiceModel }),
+    [config, settings],
+  );
+  const voiceMicWarnedStatusRef = useRef<string | null>(null);
+  const voiceRecorderRef = useRef<ReturnType<
+    typeof createVoiceRecorder
+  > | null>(null);
+  const getVoiceRecorder = useCallback(() => {
+    voiceRecorderRef.current ??= createVoiceRecorder();
+    return voiceRecorderRef.current;
+  }, []);
+  const warmupVoice = useCallback(() => {
+    const recorder = getVoiceRecorder();
+    void Promise.resolve(recorder.warmup?.()).catch(() => {});
+    void Promise.resolve(recorder.microphoneStatus?.())
+      .then((status) => {
+        if (voiceMicWarnedStatusRef.current === status) {
+          return;
+        }
+        if (status === 'denied') {
+          voiceMicWarnedStatusRef.current = status;
+          uiState.historyManager?.addItem(
+            {
+              type: 'error',
+              text: t(
+                'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.',
+              ),
+            },
+            Date.now(),
+          );
+        } else if (status === 'prompt') {
+          // notDetermined: macOS raises the permission dialog on first capture,
+          // so that first recording can come back empty. Tell the user once
+          // instead of letting it look like a silent no-op.
+          voiceMicWarnedStatusRef.current = status;
+          uiState.historyManager?.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
+              ),
+            },
+            Date.now(),
+          );
+        }
+      })
+      .catch(() => {});
+  }, [getVoiceRecorder, uiState.historyManager]);
+  const voiceStreaming = voiceModel ? isStreamingVoiceModel(voiceModel) : false;
+  const openVoiceStreamSession = useCallback(
+    (callbacks: {
+      onInterim: (text: string) => void;
+      onError?: (error: Error) => void;
+    }) => {
+      if (!voiceModel) {
+        return Promise.reject(new Error('No voice model selected.'));
+      }
+      const streamConfig = resolveVoiceStreamConfig({
+        config,
+        settings,
+        voiceModel,
+      });
+      return assertVoiceBaseUrlNetworkAllowed(streamConfig)
+        .then(() =>
+          openVoiceStreamWithRetry(() =>
+            streamConfig.transport === 'qwen-asr-realtime'
+              ? openQwenAsrRealtimeStream(streamConfig, callbacks)
+              : openVoiceStream(streamConfig, callbacks),
+          ),
+        )
+        .then((session) => ({
+          ...session,
+          finish: async () => {
+            const transcript = await session.finish();
+            return isKeytermEcho(transcript, streamConfig.keytermsContext)
+              ? ''
+              : transcript;
+          },
+        }));
+    },
+    [config, settings, voiceModel],
+  );
+  const voiceInput = useVoiceInput({
+    enabled: voiceEnabled,
+    mode: voiceMode,
+    voiceModel,
+    buffer,
+    addItem: uiState.historyManager?.addItem,
+    createRecorder: getVoiceRecorder,
+    transcribe: transcribeVoice,
+    onSubmit: (text) => voiceSubmitRef.current(text),
+    warmup: warmupVoice,
+    streaming: voiceStreaming,
+    openStream: voiceStreaming ? openVoiceStreamSession : undefined,
   });
 
   const resetCompletionState = completion.resetCompletionState;
@@ -427,6 +556,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     ],
   );
 
+  // Tap-mode voice dictation submits the prompt after the transcript lands.
+  voiceSubmitRef.current = (text) => handleSubmitAndClear(text);
+
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       buffer.setText(newText);
@@ -526,19 +658,30 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   // Down from an empty composer (bottom edge, history exhausted), in visual
   // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
-  // Arena) → stay put. Always consumes the key.
+  // Arena) → background-tasks pill (if bg entries) → stay put. Always
+  // consumes the key. When both an Arena tab bar and the pill are shown,
+  // ↓ stops at the tab bar; AgentTabBar's own ↓ then descends into the pill.
   const descendFromComposer = useCallback((): boolean => {
     if (getVisibleBgAgents().length > 0) {
       setLivePanelFocused(true);
     } else if (hasAgents) {
       setAgentTabBarFocused(true);
+    } else if (bgEntries.length > 0) {
+      // No live-agent panel and no Arena tab bar to descend into, but the
+      // background-tasks pill IS shown (e.g. a workflow run with no live
+      // sub-agents) — focus it so ↓ still reaches the dialog. Without this
+      // branch a workflow-only session can never open the BackgroundTasksDialog
+      // (and thus never reach the per-run detail view or the save action).
+      setBgPillFocused(true);
     }
     return true;
   }, [
     getVisibleBgAgents,
     hasAgents,
+    bgEntries,
     setLivePanelFocused,
     setAgentTabBarFocused,
+    setBgPillFocused,
   ]);
 
   // Single source of truth for "is there a suggestion the user can accept right
@@ -553,6 +696,31 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      // When the Background tasks dialog is open, swallow every key so
+      // nothing reaches the composer buffer — the dialog's own keypress
+      // handler owns selection, open/close, and stop actions. Keep this ahead
+      // of active voice handling so modal UI remains the key owner.
+      if (bgDialogOpen) {
+        return true;
+      }
+
+      // Handle feedback dialog keyboard interactions before global voice
+      // handling so modal UI gets first chance to consume the key.
+      if (uiState.isFeedbackDialogOpen) {
+        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
+        if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
+          return true;
+        } else {
+          // For any other key, close feedback dialog temporarily and continue with normal processing
+          uiActions.temporaryCloseFeedbackDialog();
+          // Continue processing the key for normal input handling
+        }
+      }
+
+      if (voiceInput.status !== 'idle') {
+        return voiceInput.handleKeypress(key);
+      }
+
       // When the Arena tab bar or background pill has focus, block
       // non-printable keys so arrow keys and shortcuts don't interfere.
       // Printable characters fall through to BaseTextInput's default
@@ -646,16 +814,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true; // consume non-printable keys
       }
 
-      // When the Background tasks dialog is open, swallow every key so
-      // nothing reaches the composer buffer — the dialog's own keypress
-      // handler owns selection, open/close, and stop actions. Unlike
-      // the tab bar we do NOT let printable chars type through, because
-      // the dialog doesn't auto-close on printable input and users
-      // would leak text into the hidden composer.
-      if (bgDialogOpen) {
-        return true;
-      }
-
       // TODO(jacobr): this special case is likely not needed anymore.
       // We should probably stop supporting paste if the InputPrompt is not
       // focused.
@@ -716,16 +874,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      // Handle feedback dialog keyboard interactions when dialog is open
-      if (uiState.isFeedbackDialogOpen) {
-        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
-        if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
-          return true;
-        } else {
-          // For any other key, close feedback dialog temporarily and continue with normal processing
-          uiActions.temporaryCloseFeedbackDialog();
-          // Continue processing the key for normal input handling
-        }
+      if (
+        !shellModeActive &&
+        !reverseSearchActive &&
+        !commandSearchActive &&
+        !showCompletionSuggestions &&
+        !isAttachmentMode &&
+        buffer.text.length === 0 &&
+        voiceInput.handleKeypress(key)
+      ) {
+        return true;
       }
 
       // Helper: pop all queued messages into the input buffer,
@@ -1469,6 +1627,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
+      voiceInput,
     ],
   );
 
@@ -1518,7 +1677,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               cursorVisualColAbsolute - segStart + 1,
             );
             const highlighted = showCursorOpt
-              ? chalk.inverse(charToHighlight)
+              ? renderSoftwareCursor(charToHighlight)
               : charToHighlight;
             display =
               cpSlice(seg.text, 0, cursorVisualColAbsolute - segStart) +
@@ -1546,7 +1705,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (ghostText && showCursorOpt && ghostText.text.length > 0) {
           if (ghostText.showCursorBeforeText) {
             renderedLine.push(
-              <Text key="ghost-cursor">{chalk.inverse(' ')}</Text>,
+              <Text key="ghost-cursor">{renderSoftwareCursor(' ')}</Text>,
             );
             renderedLine.push(
               <Text key="ghost-rest" color={theme.text.secondary}>
@@ -1554,11 +1713,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               </Text>,
             );
           } else {
-            // First ghost char: inverted (as cursor). Rest: dimmed gray.
+            // First ghost char: software cursor. Rest: dimmed gray.
             const firstChar = ghostText.text[0]!;
             const rest = ghostText.text.slice(firstChar.length);
             renderedLine.push(
-              <Text key="ghost-cursor">{chalk.inverse(firstChar)}</Text>,
+              <Text key="ghost-cursor">{renderSoftwareCursor(firstChar)}</Text>,
             );
             if (rest.length > 0) {
               renderedLine.push(
@@ -1573,7 +1732,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
           renderedLine.push(
             <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
-              {showCursorOpt ? chalk.inverse(' ') + '\u200B' : ' \u200B'}
+              {showCursorOpt ? renderSoftwareCursor(' ') + '\u200B' : ' \u200B'}
             </Text>,
           );
         }
@@ -1677,6 +1836,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? (statusColor ?? theme.border.focused)
       : theme.border.default;
 
+  const voiceStatusLabel =
+    voiceInput.status === 'recording'
+      ? t('Voice: recording')
+      : voiceInput.status === 'transcribing'
+        ? t('Voice: transcribing')
+        : undefined;
+
   const prefixNode = (
     <Text
       color={statusColor ?? theme.text.accent}
@@ -1730,6 +1896,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           ))}
         </Box>
       )}
+      <VoiceIndicator
+        status={voiceInput.status}
+        interimText={voiceInput.interimText}
+        audioLevel={voiceInput.audioLevel}
+      />
       <BaseTextInput
         buffer={buffer}
         onSubmit={handleSubmitAndClear}
@@ -1739,7 +1910,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         prefix={prefixNode}
         prefixWidth={prefixWidth}
         borderColor={borderColor}
-        topRightLabel={uiState.sessionName || undefined}
+        topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
       />

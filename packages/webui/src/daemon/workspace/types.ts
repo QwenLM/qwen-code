@@ -19,6 +19,7 @@ import type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   ExtensionMutationResponse,
+  ExtensionOperationStatus,
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
@@ -227,6 +228,9 @@ export interface DaemonWorkspaceActions {
     params: ExtensionInstallRequest,
     clientId?: string,
   ): Promise<ExtensionInstallResponse>;
+  extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus>;
   checkExtensionUpdates(
     clientId?: string,
   ): Promise<ExtensionUpdateCheckResponse>;

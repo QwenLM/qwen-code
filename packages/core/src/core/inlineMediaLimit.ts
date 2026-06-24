@@ -17,7 +17,7 @@ export const DEFAULT_MAX_INLINE_MEDIA_BYTES = 10 * 1024 * 1024;
 /**
  * Resolve the inline-media byte ceiling, allowing override via the
  * `QWEN_CODE_MAX_INLINE_MEDIA_BYTES` env var. Falls back to the default for
- * missing, non-numeric, or non-positive values.
+ * missing, non-numeric, non-integer, or non-positive values.
  */
 export function getMaxInlineMediaBytes(): number {
   const raw = process.env['QWEN_CODE_MAX_INLINE_MEDIA_BYTES'];
@@ -25,8 +25,8 @@ export function getMaxInlineMediaBytes(): number {
     return DEFAULT_MAX_INLINE_MEDIA_BYTES;
   }
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0
-    ? Math.floor(parsed)
+  return Number.isInteger(parsed) && parsed > 0
+    ? parsed
     : DEFAULT_MAX_INLINE_MEDIA_BYTES;
 }
 

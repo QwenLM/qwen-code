@@ -62,6 +62,26 @@ describe('preprocessLinks', () => {
       expect(preprocessLinks(input)).toBe('Check out [example.com](http://example.com) for details')
     })
 
+    // Regression: bare filenames whose extension is also a TLD (.md=Moldova, .py=Paraguay,
+    // .sh=St. Helena) must be treated as file paths, not web domains. Otherwise clicking
+    // `readme.md` opens http://readme.md (a parked/ad domain) instead of the file preview.
+    it('treats a bare filename with a ccTLD extension as a file path, not a URL', () => {
+      expect(preprocessLinks('Open readme.md to start')).toBe('Open [readme.md](readme.md) to start')
+      expect(preprocessLinks('Run main.py now')).toBe('Run [main.py](main.py) now')
+
+      const link = detectLinks('readme.md')[0]
+      expect(link?.type).toBe('file')
+    })
+
+    // Regression: paths with non-ASCII (e.g. CJK) segments must still be detected.
+    // `\w`-based regexes only match ASCII, so a path like /Users/x/项目/笔记.md would
+    // not be linkified and could not be opened in the preview.
+    it('wraps absolute file paths containing non-ASCII (CJK) characters', () => {
+      const input = '查看 /Users/dragonzhang/项目/笔记.md 文件'
+      expect(preprocessLinks(input)).toBe('查看 [/Users/dragonzhang/项目/笔记.md](/Users/dragonzhang/项目/笔记.md) 文件')
+      expect(isFilePathTarget('/Users/dragonzhang/sessions/260623-测试预览/main.py')).toBe(true)
+    })
+
     it('wraps bare URL but preserves adjacent markdown link', () => {
       const input = 'See https://bare.example.com and [linked.example.com - Title](https://linked.example.com/page)'
       const result = preprocessLinks(input)

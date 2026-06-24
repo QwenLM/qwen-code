@@ -124,3 +124,32 @@ export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   }
   return -1;
 }
+
+/**
+ * For each `gemini_thought` item that is immediately followed by one or
+ * more `gemini_thought_content` continuations, build the concatenated
+ * full text (header + continuations joined by newlines).  Items with no
+ * continuation are omitted from the result — callers fall back to
+ * `item.text` in that case.
+ */
+export function buildThinkingFullTextMap(
+  items: readonly HistoryItem[],
+): Map<HistoryItem, string> {
+  const map = new Map<HistoryItem, string>();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (item.type !== 'gemini_thought') continue;
+    let fullText = item.text;
+    let hasContinuation = false;
+    for (let j = i + 1; j < items.length; j++) {
+      const next = items[j]!;
+      if (next.type !== 'gemini_thought_content') break;
+      fullText += '\n' + next.text;
+      hasContinuation = true;
+    }
+    if (hasContinuation) {
+      map.set(item, fullText);
+    }
+  }
+  return map;
+}

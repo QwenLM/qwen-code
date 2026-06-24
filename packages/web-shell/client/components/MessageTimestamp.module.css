@@ -29,3 +29,67 @@
 .row:hover > .tip {
   opacity: 1;
 }
+
+/* Chat mode: timestamp shown at bottom-right on hover */
+.chatRow {
+  position: relative;
+}
+
+.chatTip {
+  color: var(--text-dimmed);
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatActions {
+  position: absolute;
+  right: 4px;
+  bottom: -22px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatActions .chatTip {
+  opacity: 1;
+}
+
+.copyButton {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  color: var(--text-dimmed);
+  cursor: pointer;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.copyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chatRow:hover > .chatActions,
+.chatRow:focus-within > .chatActions {
+  opacity: 1;
+}

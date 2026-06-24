@@ -201,9 +201,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const result = await processSingleFileContent(
       this.params.file_path,
       this.config,
-      this.params.offset,
-      this.params.limit,
-      this.params.pages,
+      {
+        offset: this.params.offset,
+        limit: this.params.limit,
+        pages: this.params.pages,
+      },
     );
 
     if (result.error) {
@@ -479,7 +481,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
 
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.file_path)) {
-      return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
+      return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
     }
 
     return null;

@@ -1,6 +1,5 @@
 .group {
-  margin-bottom: 12px;
-  margin-left: 14px;
+  margin: 5px 0;
   padding: 8px 14px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius);
@@ -15,6 +14,135 @@
 .line {
   padding: 2px 0;
   min-width: 0;
+}
+
+.chatGroupWrap {
+  margin: 2px 0;
+}
+
+.chatSummary {
+  width: 100%;
+  margin: 0;
+  padding: 2px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #a1a2a3;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chatSummary:hover,
+.chatSummary:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.chatSummaryIcon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.chatSummaryIcon svg {
+  display: block;
+}
+
+.chatSummaryToolIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.chatSummaryText {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.chatSummaryTextActive {
+  color: #a1a2a3;
+  background-image: linear-gradient(
+    105deg,
+    #a1a2a3 0%,
+    #a1a2a3 46%,
+    rgba(255, 255, 255, 0.92) 50%,
+    #a1a2a3 54%,
+    #a1a2a3 100%
+  );
+  background-size: 300% 100%;
+  background-position: 150% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-summary-shine 5s linear infinite;
+}
+
+@keyframes chat-summary-shine {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -150% 0;
+  }
+}
+
+.chatChevronRight,
+.chatChevronDown {
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chatSummary:hover .chatChevronRight,
+.chatSummary:hover .chatChevronDown,
+.chatSummary:focus-visible .chatChevronRight,
+.chatSummary:focus-visible .chatChevronDown {
+  opacity: 1;
+}
+
+.chatChevronRight {
+  transform: rotate(-45deg);
+}
+
+.chatChevronDown {
+  transform: rotate(45deg);
+  margin-top: -3px;
+  opacity: 1;
+}
+
+.chatSummaryContentClip {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 180ms ease;
+}
+
+.chatSummaryContentCollapsed {
+  grid-template-rows: 0fr;
+}
+
+.chatSummaryContentInner {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .lineMain {
@@ -187,12 +315,11 @@
 }
 
 .todoBody {
-  padding: 4px 0 2px 24px;
+  padding: 4px 0 2px 14px;
 }
 
 .compactGroup {
   margin-bottom: 12px;
-  margin-left: 14px;
   padding: 8px 14px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius);

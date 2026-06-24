@@ -81,6 +81,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
   session_stats: { since: 'v1' },
+  session_lsp: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
@@ -130,6 +131,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_settings: { since: 'v1' },
+  workspace_permissions: { since: 'v1' },
   // `POST /workspace/init` scaffolds an empty
   // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
@@ -230,6 +232,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
+  // streams raw PCM, the daemon transcribes server-side via the configured
+  // `voiceModel` (credentials never reach the client). Advertised
+  // UNCONDITIONALLY (like `auth_device_flow`): presence means the endpoint
+  // exists, not that a voice model is configured. The WS returns an `error`
+  // frame when no transcribable `voiceModel` is set, so clients probe by
+  // connecting rather than reading ambient settings into `/capabilities` (which
+  // would make the envelope depend on the user's home config). `modes`
+  // enumerates the two transcription paths (realtime vs. on-stop batch).
+  voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -249,6 +261,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
+  voiceWsAvailable?: boolean;
 }
 
 /**
@@ -305,11 +318,24 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
   [
+    'workspace_permissions',
+    (toggles) => toggles.persistSettingAvailable === true,
+  ],
+  [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  [
+    // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
+    // token (or `--require-auth`) no longer suppresses it: browsers can't set
+    // an `Authorization` header on a WebSocket, so the Web Shell carries the
+    // bearer token in the `Sec-WebSocket-Protocol` subprotocol, which the ACP
+    // upgrade listener verifies (see acp-http/index.ts).
+    'voice_transcribe',
+    (toggles) => toggles.voiceWsAvailable !== false,
+  ],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

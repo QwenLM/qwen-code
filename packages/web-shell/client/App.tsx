@@ -2,9 +2,11 @@ import {
   createContext,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from 'react';
 import {
@@ -30,10 +32,14 @@ import type {
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
-import { Editor, type EditorHandle } from './components/Editor';
+import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
+import {
+  ChatEditor,
+  type ComposerToolbarAction,
+} from './components/ChatEditor';
+import type { EditorHandle } from './hooks/useComposerCore';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
-import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
   ToastHost,
@@ -42,40 +48,31 @@ import {
 } from './components/ToastHost';
 import { TodoPanel } from './components/panels/TodoPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import {
-  APPROVAL_MODE_ACTIVE_EVENT,
-  ApprovalModeMessage,
-} from './components/messages/ApprovalModeMessage';
+import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
+import { DialogShell } from './components/dialogs/DialogShell';
 import {
-  AGENTS_ACTIVE_EVENT,
+  ModelDialog,
+  type ModelDialogMode,
+} from './components/dialogs/ModelDialog';
+import {
   AgentsMessage,
   type AgentsInitialMode,
 } from './components/messages/AgentsMessage';
-import {
-  MEMORY_ACTIVE_EVENT,
-  MemoryMessage,
-} from './components/messages/MemoryMessage';
-import {
-  MODEL_ACTIVE_EVENT,
-  ModelMessage,
-  type ModelInlineMode,
-} from './components/messages/ModelMessage';
-import {
-  AUTH_ACTIVE_EVENT,
-  AuthMessage,
-} from './components/messages/AuthMessage';
+import { MemoryMessage } from './components/messages/MemoryMessage';
+import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
-import {
-  SETTINGS_ACTIVE_EVENT,
-  SettingsMessage,
-} from './components/messages/SettingsMessage';
+import { SettingsMessage } from './components/messages/SettingsMessage';
 import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
+import { isAskUserQuestionToolName } from './components/messages/toolFormatting';
+import { ToolApproval } from './components/messages/ToolApproval';
+import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
+import { RewindDialog } from './components/dialogs/RewindDialog';
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
@@ -101,7 +98,6 @@ import {
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
-import { handleTasksSlashCommand } from './utils/tasksCommand';
 import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
   DAEMON_APPROVAL_MODES,
@@ -119,8 +115,9 @@ import {
 import {
   MCP_STATUS_ACTIVE_EVENT,
   parseMcpStatusMessage,
-  serializeMcpStatusMessage,
+  type SerializedMcpStatusMessage,
 } from './components/messages/McpStatusMessage';
+import { McpDialog } from './components/dialogs/McpDialog';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
@@ -153,6 +150,9 @@ import {
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
   type WelcomeHeaderRenderer,
+  type WelcomeFooterRenderer,
+  type ComposerToolbarStartRenderer,
+  type ComposerToolbarEndRenderer,
   type FooterRenderer,
   type WebShellTaskInfo,
 } from './customization';
@@ -204,11 +204,15 @@ function TodoContextsProvider({
 }
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
-const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
+const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
+
+function isVisibleComposerModel(model: { id: string }): boolean {
+  return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
+}
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
@@ -256,17 +260,22 @@ type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
   data?: unknown;
 };
 
+function parseGoalStatusFromBlock(block: DaemonTranscriptBlock) {
+  const statusBlock = block as GoalStatusTranscriptBlock;
+  if (statusBlock.source !== 'goal') return null;
+  return (
+    parseGoalStatusMessage(statusBlock.data) ??
+    parseGoalStatusMessage(statusBlock.text)
+  );
+}
+
 function getLatestActiveGoalFromBlocks(
   blocks: readonly DaemonTranscriptBlock[],
 ): ActiveGoalStatus | null {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
     if (block.kind !== 'status') continue;
-    const statusBlock = block as GoalStatusTranscriptBlock;
-    const status =
-      statusBlock.source === 'goal'
-        ? parseGoalStatusMessage(statusBlock.data)
-        : parseGoalStatusMessage(statusBlock.text);
+    const status = parseGoalStatusFromBlock(block);
     if (!status) continue;
     if (status.kind === 'set' || status.kind === 'checking') {
       return {
@@ -301,11 +310,11 @@ export interface BugReportInfo {
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string) => void;
-  /** Visual theme for the embedded shell. Defaults to the dark terminal skin. */
+  /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
   onThemeChange?: (theme: WebShellTheme) => void;
-  /** UI language for the Web terminal. Defaults to `?language=` or browser language. */
+  /** UI language for the web-shell. Defaults to `?language=` or browser language. */
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
@@ -313,6 +322,10 @@ export interface WebShellProps {
   className?: string;
   /** Inline styles applied to the root element. */
   style?: React.CSSProperties;
+  /** Maximum chat content width in regular mode. Defaults to 1000px. */
+  chatMaxWidth?: number;
+  /** Built-in composer toolbar actions to show. Defaults to all actions. */
+  composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
@@ -335,6 +348,12 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  /** Custom renderer shown below the chat composer in the empty welcome state. */
+  renderWelcomeFooter?: WelcomeFooterRenderer;
+  /** Custom renderer inserted before the built-in chat composer toolbar controls. */
+  renderComposerToolbarStart?: ComposerToolbarStartRenderer;
+  /** Custom renderer inserted after the built-in composer toolbar controls. */
+  renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
@@ -349,11 +368,17 @@ export interface WebShellProps {
   onToast?: (tone: ToastTone, message: string) => void;
   /** Imperative handle for externally controlling the composer input. */
   composerRef?: React.Ref<WebShellComposerApi>;
+  /** Called once the real composer API is mounted and safe to call. */
+  onComposerReady?: (api: WebShellComposerApi) => void;
   /** Declarative composer input value. Increment composerInputVersion to replay the same value. */
   composerInput?: WebShellComposerInput;
   /** Replay key for composerInput. */
   composerInputVersion?: number;
 }
+
+type SessionActionsWithCreate = {
+  createSession: () => Promise<{ sessionId: string }>;
+};
 
 const emptyComposerApi: WebShellComposerApi = {
   insertText: () => {},
@@ -363,6 +388,51 @@ const emptyComposerApi: WebShellComposerApi = {
   clear: () => {},
   submit: () => {},
 };
+
+type ChatWidthMode = '1000' | 'wide';
+
+const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
+const DEFAULT_CHAT_MAX_WIDTH = 1000;
+const CHAT_SHELL_HORIZONTAL_PADDING = 40;
+
+function readChatWidthMode(): ChatWidthMode {
+  if (typeof window === 'undefined') return '1000';
+  try {
+    return window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY) === 'wide'
+      ? 'wide'
+      : '1000';
+  } catch {
+    return '1000';
+  }
+}
+
+function writeChatWidthMode(mode: ChatWidthMode): void {
+  try {
+    window.localStorage.setItem(CHAT_WIDTH_STORAGE_KEY, mode);
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
+
+function getChatMaxWidth(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_CHAT_MAX_WIDTH;
+}
+
+function getChatWidthStyle(
+  mode: ChatWidthMode,
+  chatMaxWidth: number | undefined,
+): CSSProperties {
+  const contentWidth = `${getChatMaxWidth(chatMaxWidth)}px`;
+  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  return {
+    '--chat-regular-content-width': contentWidth,
+    '--chat-regular-shell-width': shellWidth,
+    '--chat-content-width': mode === 'wide' ? '100%' : contentWidth,
+    '--chat-shell-width': mode === 'wide' ? '100%' : shellWidth,
+  } as CSSProperties;
+}
 
 function assignComposerRef(
   ref: React.Ref<WebShellComposerApi> | undefined,
@@ -535,6 +605,17 @@ function isEditToolPermission(request: PermissionRequest): boolean {
   return request.toolKind === 'edit';
 }
 
+function isAskUserPermission(request: PermissionRequest | null): boolean {
+  if (
+    !request?.rawInput?.questions ||
+    !Array.isArray(request.rawInput.questions)
+  ) {
+    return false;
+  }
+  if (!request.toolName) return true;
+  return isAskUserQuestionToolName(request.toolName);
+}
+
 function parseRenameArgument(
   raw: string,
 ):
@@ -654,15 +735,22 @@ function translateCopyMessage(
 function QueuedPromptDisplay({
   prompts,
   t,
+  onDelete,
+  onInsert,
+  onEditLast,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
+  onDelete: (id: number) => void;
+  onInsert: (id: number) => void;
+  onEditLast: () => void;
 }) {
   if (prompts.length === 0) return null;
+  const lastPromptId = prompts[prompts.length - 1]?.id;
 
   return (
     <div className={styles.queuedPrompts}>
-      {prompts.slice(0, MAX_DISPLAYED_QUEUED_PROMPTS).map((prompt) => {
+      {prompts.map((prompt) => {
         const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
         const preview =
           normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
@@ -671,20 +759,69 @@ function QueuedPromptDisplay({
         const imageCount = prompt.images?.length ?? 0;
         return (
           <div key={prompt.id} className={styles.queuedPrompt}>
-            {preview}
-            {imageCount > 0
-              ? ` ${t('queue.imageCount', { count: imageCount })}`
-              : ''}
+            <span className={styles.queuedPromptText}>
+              {preview}
+              {imageCount > 0
+                ? ` ${t('queue.imageCount', { count: imageCount })}`
+                : ''}
+            </span>
+            <span className={styles.queuedPromptActions}>
+              <button
+                type="button"
+                className={styles.queuedPromptAction}
+                onClick={() => onDelete(prompt.id)}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3.5 4.5h9M6.5 2.5h3M5 4.5l.5 8h5l.5-8"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                {t('queue.delete')}
+              </button>
+              {imageCount === 0 && (
+                <button
+                  type="button"
+                  className={styles.queuedPromptAction}
+                  onClick={() => onInsert(prompt.id)}
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M8 3.5v7M4.5 7 8 10.5 11.5 7M3.5 12.5h9"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  {t('queue.insert')}
+                </button>
+              )}
+              {prompt.id === lastPromptId && (
+                <button
+                  type="button"
+                  className={styles.queuedPromptAction}
+                  onClick={onEditLast}
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M3.5 11.5 4 9l6.7-6.7a1.1 1.1 0 0 1 1.6 0l1.4 1.4a1.1 1.1 0 0 1 0 1.6L7 12l-2.5.5h-1z"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  {t('queue.edit')}
+                </button>
+              )}
+            </span>
           </div>
         );
       })}
-      {prompts.length > MAX_DISPLAYED_QUEUED_PROMPTS && (
-        <div className={styles.queuedPrompt}>
-          {t('queue.more', {
-            count: prompts.length - MAX_DISPLAYED_QUEUED_PROMPTS,
-          })}
-        </div>
-      )}
       <div className={styles.queuedHint}>{t('queue.footer')}</div>
     </div>
   );
@@ -706,7 +843,12 @@ export function App({
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
   renderWelcomeHeader,
+  renderWelcomeFooter,
+  renderComposerToolbarStart,
+  renderComposerToolbarEnd,
   renderFooter,
+  chatMaxWidth,
+  composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
   virtualScrollThreshold,
@@ -714,9 +856,12 @@ export function App({
   onTranscriptChange,
   onToast,
   composerRef,
+  onComposerReady,
   composerInput,
   composerInputVersion,
 }: WebShellProps = {}) {
+  const [chatWidthMode, setChatWidthMode] =
+    useState<ChatWidthMode>(readChatWidthMode);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
       providedLanguage === undefined
@@ -728,6 +873,9 @@ export function App({
     () => ({
       renderToolHeaderExtra,
       renderWelcomeHeader,
+      renderWelcomeFooter,
+      renderComposerToolbarStart,
+      renderComposerToolbarEnd,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -736,6 +884,9 @@ export function App({
     [
       renderToolHeaderExtra,
       renderWelcomeHeader,
+      renderWelcomeFooter,
+      renderComposerToolbarStart,
+      renderComposerToolbarEnd,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -784,10 +935,9 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-  // Scopes the best-effort mid-turn enqueue POST(s) to the turn they were typed
-  // in. Aborted when the turn settles so a slow/late push can't arrive during a
-  // SUBSEQUENT turn (e.g. the browser's own next-turn resend of the same text)
-  // and get injected there — cross-turn double delivery.
+  // Scopes explicit "insert queued message" POST(s) to the current turn.
+  // Aborted when the turn settles so a slow/late insert can't arrive during a
+  // subsequent turn and get injected in the wrong place.
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
@@ -833,9 +983,13 @@ export function App({
     [messageBlocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
+  const pendingAskUserApproval = isAskUserPermission(pendingApproval)
+    ? pendingApproval
+    : null;
+  const pendingToolApproval =
+    pendingApproval && !pendingAskUserApproval ? pendingApproval : null;
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = pendingApproval;
-  const shouldHideComposer = pendingApproval !== null;
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -904,34 +1058,51 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
+  const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
+    useState(0);
   const backgroundTasks = useBackgroundTasks(
     backgroundTaskActivityKey,
     connection.status === 'connected',
+    backgroundTasksRefreshTrigger,
   );
   const footerTasks = useMemo(
     () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
     [backgroundTasks, renderFooter],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
+  const messageListRef = useRef<MessageListHandle | null>(null);
   const editorRef = useRef<EditorHandle | null>(null);
+  const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const previousFooterRectRef = useRef<DOMRect | null>(null);
+  const previousEmptyStateRef = useRef(false);
+  const resumeChatBottomFollow = useCallback(
+    (behavior: ScrollBehavior = 'smooth') => {
+      setShowScrollToBottom(false);
+      requestAnimationFrame(() => {
+        messageListRef.current?.scrollToBottom(behavior);
+        requestAnimationFrame(() => {
+          messageListRef.current?.scrollToBottom(behavior);
+        });
+      });
+    },
+    [],
+  );
   const setEditorHandle = useCallback(
     (handle: EditorHandle | null) => {
       editorRef.current = handle;
       assignComposerRef(composerRef, handle ?? emptyComposerApi);
+      if (handle && notifiedComposerReadyRef.current !== handle) {
+        notifiedComposerReadyRef.current = handle;
+        onComposerReady?.(handle);
+      }
     },
-    [composerRef],
+    [composerRef, onComposerReady],
   );
   useEffect(() => {
     assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
   }, [composerRef]);
-  const messageListRef = useRef<MessageListHandle>(null);
-  const handleLocateFloatingTodos = useCallback(() => {
-    if (!floatingTodosState.sourceMessageId) return;
-    messageListRef.current?.scrollToMessage(
-      floatingTodosState.sourceMessageId,
-      floatingTodosState.sourceCallId ?? undefined,
-    );
-  }, [floatingTodosState.sourceMessageId, floatingTodosState.sourceCallId]);
   const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
   const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
   activeGoalRef.current = activeGoal;
@@ -975,6 +1146,26 @@ export function App({
   );
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  const localStreamingStartedAtRef = useRef(Date.now());
+  const previousStreamingStateRef =
+    useRef<DaemonStreamingState>(streamingState);
+  if (
+    previousStreamingStateRef.current === 'idle' &&
+    streamingState !== 'idle'
+  ) {
+    localStreamingStartedAtRef.current = Date.now();
+  }
+  previousStreamingStateRef.current = streamingState;
+  const activeTurnStartedAt = useMemo(() => {
+    if (streamingState === 'idle') return undefined;
+    for (let i = displayMessages.length - 1; i >= 0; i--) {
+      const message = displayMessages[i];
+      if (message?.role === 'user') {
+        return message.timestamp ?? localStreamingStartedAtRef.current;
+      }
+    }
+    return localStreamingStartedAtRef.current;
+  }, [displayMessages, streamingState]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const retryableTurnErrorIdRef = useRef<string | null>(null);
@@ -998,19 +1189,23 @@ export function App({
       .catch(() => {});
   }, [connected, workspaceActions]);
 
-  const [modelInlineMode, setModelInlineMode] =
-    useState<ModelInlineMode | null>(null);
-  const [approvalModeInlineOpen, setApprovalModeInlineOpen] = useState(false);
+  const [modelDialogMode, setModelDialogMode] =
+    useState<ModelDialogMode | null>(null);
+  const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
+  const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
+  const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
-  const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
-  const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
-  const [authInlineOpen, setAuthInlineOpen] = useState(false);
+  const [mcpDialogMessage, setMcpDialogMessage] =
+    useState<SerializedMcpStatusMessage | null>(null);
+  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [showMemoryDialog, setShowMemoryDialog] = useState(false);
+  const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
 
@@ -1082,24 +1277,15 @@ export function App({
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
     'workspace',
   );
-  const [agentsInlineMode, setAgentsInlineMode] =
+  const [agentsDialogMode, setAgentsDialogMode] =
     useState<AgentsInitialMode | null>(null);
-  const [memoryPortalHost, setMemoryPortalHost] =
-    useState<HTMLDivElement | null>(null);
-  const [showShortcuts, setShowShortcuts] = useState(false);
   const [escapeHintVisible, setEscapeHintVisible] = useState(false);
   const escPressCountRef = useRef(0);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const approvalModePanelActive = usePanelActive(APPROVAL_MODE_ACTIVE_EVENT);
-  const [tasksPanelMessage, setTasksPanelMessage] =
+  const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
   const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
   const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
-  const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
-  const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
-  const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
-  const settingsPanelActive = usePanelActive(SETTINGS_ACTIVE_EVENT);
-  const authPanelActive = usePanelActive(AUTH_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -1111,6 +1297,18 @@ export function App({
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const queuedTexts = useMemo(
+    () => queuedPrompts.map((prompt) => prompt.text),
+    [queuedPrompts],
+  );
+  const availableModels = useMemo(
+    () =>
+      (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
+        id: m.id,
+        label: m.label,
+      })),
+    [connection.models],
+  );
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const nextQueuedPromptIdRef = useRef(1);
   const drainingQueueRef = useRef(false);
@@ -1118,28 +1316,21 @@ export function App({
     showResumeDialog ||
     showDeleteDialog ||
     showReleaseDialog ||
+    showRewindDialog ||
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
-    showExtensionsDialog;
-  const inlinePanelOpen =
-    approvalModeInlineOpen ||
-    authInlineOpen ||
-    agentsInlineMode !== null ||
-    memoryInlineOpen ||
-    modelInlineMode !== null ||
-    settingsInlineOpen;
-  const bottomHidden =
-    dialogOpen ||
-    inlinePanelOpen ||
-    approvalModePanelActive ||
-    mcpPanelActive ||
-    tasksPanelActive ||
-    agentsPanelActive ||
-    memoryPanelActive ||
-    modelPanelActive ||
-    settingsPanelActive ||
-    authPanelActive;
+    showExtensionsDialog ||
+    modelDialogMode !== null ||
+    showApprovalModeDialog ||
+    tasksDialogMessage !== null ||
+    mcpDialogMessage !== null ||
+    agentsDialogMode !== null ||
+    showSettingsDialog ||
+    showMemoryDialog ||
+    showAuthDialog;
+  const bottomHidden = mcpPanelActive || tasksPanelActive;
+  const interactionBlocked = dialogOpen || bottomHidden;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -1182,7 +1373,7 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
-    setTasksPanelMessage(null);
+    setTasksDialogMessage(null);
     lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId]);
 
@@ -1285,7 +1476,7 @@ export function App({
 
   useEffect(() => {
     const onBtwShortcut = (e: KeyboardEvent) => {
-      if (bottomHidden || pendingApproval) return;
+      if (interactionBlocked || pendingApproval) return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 
@@ -1324,7 +1515,7 @@ export function App({
 
     window.addEventListener('keydown', onBtwShortcut, true);
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
-  }, [bottomHidden, btwMessage, dismissBtwMessage, pendingApproval]);
+  }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
 
   useEffect(() => {
     queuedPromptsRef.current = queuedPrompts;
@@ -1334,7 +1525,6 @@ export function App({
     (text: string, images?: PromptImage[], onComplete?: () => void) => {
       const trimmed = text.trim();
       if (!trimmed) return true;
-      const hasImages = !!images && images.length > 0;
       const nextPrompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
         text: trimmed,
@@ -1343,36 +1533,14 @@ export function App({
       };
       queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
       setQueuedPrompts(queuedPromptsRef.current);
-      // Best-effort: also offer text-only messages to the running turn so the
-      // daemon can drain them mid-turn (text-only because the drain channel
-      // carries plain strings — messages with images stay queued for the next
-      // turn). On success the daemon emits `mid_turn_message_injected`, which
-      // the effect below removes from the queue so it isn't resent. If idle /
-      // unsupported / failed, the message harmlessly stays queued.
-      if (!hasImages) {
-        // One controller per turn: all mid-turn pushes typed during the same
-        // turn share it, and the settle effect aborts it so a late arrival
-        // can't land in the next turn. An aborted push resolves
-        // `{ accepted: false }`, so the message simply stays queued and is
-        // resent next turn — exactly-once preserved.
-        let abort = midTurnEnqueueAbortRef.current;
-        if (!abort) {
-          abort = new AbortController();
-          midTurnEnqueueAbortRef.current = abort;
-        }
-        void sessionActions.enqueueMidTurnMessage(trimmed, {
-          signal: abort.signal,
-        });
-      }
       return true;
     },
-    [sessionActions],
+    [],
   );
 
-  // When the turn settles, abort any still-in-flight mid-turn push so it can't
-  // arrive during the next turn and be injected twice (see midTurnEnqueueAbortRef).
-  // The aborted push resolves `{ accepted: false }`; the message is already in
-  // queuedPrompts and follows the normal next-turn path.
+  // When the turn settles, abort any still-in-flight explicit insert so it can't
+  // arrive during the next turn (see midTurnEnqueueAbortRef). If aborted, the
+  // message remains in queuedPrompts.
   useEffect(() => {
     if (streamingState !== 'idle') return;
     const ctrl = midTurnEnqueueAbortRef.current;
@@ -1397,10 +1565,56 @@ export function App({
   const popQueuedPromptsForEdit = useCallback((): string | null => {
     const current = queuedPromptsRef.current;
     if (current.length === 0) return null;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    return current.map((prompt) => prompt.text).join('\n\n');
+    const next = current.slice(0, -1);
+    const prompt = current[current.length - 1];
+    queuedPromptsRef.current = next;
+    setQueuedPrompts(next);
+    return prompt?.text ?? null;
   }, []);
+
+  const removeQueuedPrompt = useCallback((id: number) => {
+    const next = queuedPromptsRef.current.filter((prompt) => prompt.id !== id);
+    if (next.length === queuedPromptsRef.current.length) return;
+    queuedPromptsRef.current = next;
+    setQueuedPrompts(next);
+  }, []);
+
+  const insertQueuedPrompt = useCallback(
+    async (id: number) => {
+      const prompt = queuedPromptsRef.current.find((item) => item.id === id);
+      if (!prompt || (prompt.images?.length ?? 0) > 0) return;
+      let abort = midTurnEnqueueAbortRef.current;
+      if (!abort) {
+        abort = new AbortController();
+        midTurnEnqueueAbortRef.current = abort;
+      }
+      let result: Awaited<
+        ReturnType<typeof sessionActions.enqueueMidTurnMessage>
+      >;
+      try {
+        result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
+          signal: abort.signal,
+        });
+      } catch (error) {
+        reportError(error, t('queue.insertFailed'));
+        return;
+      }
+      if (!result.accepted) return;
+      const next = queuedPromptsRef.current.filter((item) => item.id !== id);
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+    },
+    [reportError, sessionActions, t],
+  );
+
+  const editLastQueuedPrompt = useCallback(() => {
+    const queuedText = popQueuedPromptsForEdit();
+    if (!queuedText) return;
+    const current = editorRef.current?.getText() ?? '';
+    const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
+    editorRef.current?.setText(next);
+    editorRef.current?.focus();
+  }, [popQueuedPromptsForEdit]);
 
   const clearQueuedPrompts = useCallback((): boolean => {
     if (queuedPromptsRef.current.length === 0) return false;
@@ -1485,14 +1699,7 @@ export function App({
   );
 
   const handleToggleShortcuts = useCallback(() => {
-    setShowShortcuts((prev) => !prev);
-  }, []);
-
-  // Idempotent close for the shortcuts panel's outside-press / Escape dismissal.
-  // Must not toggle: on touch, touchstart and the synthesized mousedown both
-  // fire, and a toggle would reopen the panel right after closing it.
-  const handleCloseShortcuts = useCallback(() => {
-    setShowShortcuts(false);
+    setShowHelpDialog(true);
   }, []);
 
   const workspaceSettingsState = useSettings({
@@ -1503,9 +1710,6 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
-  const compactModeSetting = workspaceSettings.find(
-    (setting) => setting.key === COMPACT_MODE_SETTING_KEY,
-  );
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
   );
@@ -1515,17 +1719,16 @@ export function App({
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
+  const currentVoiceModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'voiceModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
-
-  useEffect(() => {
-    const value = compactModeSetting?.values.effective;
-    if (typeof value === 'boolean') {
-      setCompactMode(value);
-    }
-  }, [compactModeSetting?.values.effective]);
 
   useEffect(() => {
     if (providedTheme) {
@@ -1620,14 +1823,6 @@ export function App({
         .then((result) => {
           const effectiveMode = result.mode || modeId;
           setCurrentMode(effectiveMode);
-          if (effectiveMode === 'auto') {
-            // TODO: CLI also shows stripped dangerous allow rules via
-            // PermissionManager.getStrippedDangerousRules(). The daemon
-            // API (DaemonApprovalModeResult) doesn't expose this info yet.
-            // Once the daemon returns strippedRules in the response, display
-            // them here like CLI's emitAutoModeEntryNotices does.
-            store.dispatch([{ type: 'status', text: t('mode.auto.notice') }]);
-          }
           const approval = pendingApprovalRef.current;
           if (!approval) return;
           const shouldAutoApprove =
@@ -1704,16 +1899,12 @@ export function App({
   }, [connection.error, onError]);
 
   useEffect(() => {
-    if (connection.currentModel) {
-      setCurrentModel(connection.currentModel);
-    }
-  }, [connection.currentModel]);
+    setCurrentModel(connection.currentModel ?? '');
+  }, [connection.currentModel, connection.sessionId]);
 
   useEffect(() => {
-    if (connection.currentMode) {
-      setCurrentMode(connection.currentMode);
-    }
-  }, [connection.currentMode]);
+    setCurrentMode(connection.currentMode ?? 'default');
+  }, [connection.currentMode, connection.sessionId]);
 
   useEffect(() => {
     if (connection.sessionId) {
@@ -1830,12 +2021,13 @@ export function App({
               text: serializeContextUsageMessage(result),
             },
           ]);
+          resumeChatBottomFollow('smooth');
         })
         .catch((error: unknown) => {
           reportError(error, 'Failed to load context usage');
         });
     },
-    [store, sessionActions, reportError],
+    [store, sessionActions, reportError, resumeChatBottomFollow],
   );
 
   // Stable reference: this travels through the memoized MessageList →
@@ -1844,11 +2036,50 @@ export function App({
     showContextUsage('/context detail', true);
   }, [showContextUsage]);
 
+  const branchCurrentSession = useCallback(
+    (name?: string) => {
+      sessionActions
+        .branchSession(name || undefined)
+        .then((result) => {
+          store.dispatch([
+            {
+              type: 'status',
+              text: t('branch.success', {
+                name: result.displayName,
+              }),
+            },
+          ]);
+        })
+        .catch((error: unknown) => {
+          reportError(error, t('branch.failed'));
+        });
+    },
+    [reportError, sessionActions, store, t],
+  );
+  const handleBranchCurrentSession = useCallback(() => {
+    branchCurrentSession();
+  }, [branchCurrentSession]);
+
+  const createNewSession = useCallback(() => {
+    (sessionActions as typeof sessionActions & SessionActionsWithCreate)
+      .createSession()
+      .then((session) => {
+        if (onSessionIdChange) {
+          onSessionIdChange(session.sessionId);
+          return;
+        }
+        return sessionActions.loadSession(session.sessionId);
+      })
+      .catch((error: unknown) => {
+        reportError(error, 'Failed to create a new session');
+      });
+  }, [onSessionIdChange, reportError, sessionActions]);
+
   const openTasksPanel = useCallback(() => {
     sessionActions
       .getTasks()
       .then((snapshot) => {
-        setTasksPanelMessage({ snapshot });
+        setTasksDialogMessage({ snapshot });
       })
       .catch((error: unknown) => {
         reportError(error, 'Failed to load tasks');
@@ -1899,6 +2130,28 @@ export function App({
       return true;
     },
     [reportError, sessionActions, store],
+  );
+
+  const loadRewindSnapshots = useCallback(
+    () => sessionActions.getRewindSnapshots(),
+    [sessionActions],
+  );
+
+  const rewindConversationOnly = useCallback(
+    (promptId: string) =>
+      sessionActions
+        .rewindSession(promptId, { rewindFiles: false })
+        .then(() => undefined),
+    [sessionActions],
+  );
+
+  const handleRewindError = useCallback(
+    (error: unknown) => {
+      if (isAlreadyDispatched(error)) return;
+      const reason = error instanceof Error ? error.message : String(error);
+      pushToast('error', t('rewind.failed', { reason }));
+    },
+    [pushToast, t],
   );
 
   const handleGoalSlashCommand = useCallback(
@@ -1967,18 +2220,19 @@ export function App({
         const match = text.match(/^\/([\w-]+)/);
         if (match) {
           const cmd = match[1];
+          if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
+            if (promptBlocked) return enqueuePrompt(text, images);
+            sendPrompt(text, images).catch((error: unknown) =>
+              reportError(error, 'Failed to send hidden slash command'),
+            );
+            return true;
+          }
           if (cmd === 'help') {
             setShowHelpDialog(true);
             return true;
           }
           if (cmd === 'tasks') {
-            store.appendLocalUserMessage(text);
-            handleTasksSlashCommand({
-              cmd,
-              getTasks: sessionActions.getTasks,
-              dispatch: (events) => store.dispatch(events),
-              reportError,
-            });
+            openTasksPanel();
             return true;
           }
           if (cmd === 'goal') {
@@ -2083,22 +2337,77 @@ export function App({
             setShowReleaseDialog(true);
             return true;
           }
+          if (cmd === 'rewind') {
+            setShowRewindDialog(true);
+            return true;
+          }
+          if (cmd === 'branch') {
+            if (promptBlocked) return enqueuePrompt(text, images);
+            const branchName = text.slice(match[0].length).trim();
+            branchCurrentSession(branchName || undefined);
+            return true;
+          }
+          if (cmd === 'fork') {
+            if (promptBlocked) return enqueuePrompt(text, images);
+            const directive = text.slice(match[0].length).trim();
+            if (!directive) {
+              pushToast('error', t('fork.empty'));
+              return true;
+            }
+            sessionActions
+              .forkSession(directive)
+              .then((result) => {
+                if (!result.launched) {
+                  pushToast('warning', t('fork.notStarted'));
+                  return;
+                }
+                setBackgroundTasksRefreshTrigger((value) => value + 1);
+                pushToast(
+                  'success',
+                  t('fork.started', { name: result.description }),
+                );
+              })
+              .catch((error: unknown) => {
+                const reason =
+                  error instanceof Error ? error.message : String(error);
+                reportError(error, t('fork.failed', { reason }));
+              });
+            return true;
+          }
           if (cmd === 'auth') {
-            store.appendLocalUserMessage(text);
-            setAuthInlineOpen(true);
+            setShowAuthDialog(true);
             return true;
           }
           if (cmd === 'model') {
             const modelArg = text.slice(match[0].length).trim();
             if (modelArg === '--fast') {
-              store.appendLocalUserMessage(text);
-              setModelInlineMode('fast');
+              setModelDialogMode('fast');
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
               if (promptBlocked) return enqueuePrompt(text, images);
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --fast'),
+              );
+              return true;
+            }
+            if (modelArg === '--voice') {
+              store.appendLocalUserMessage(text);
+              workspaceActions
+                .loadProviders()
+                .then((status) => {
+                  setVoiceModels(extractVoiceModels(status));
+                  setModelDialogMode('voice');
+                })
+                .catch((error: unknown) =>
+                  reportError(error, t('model.setVoice')),
+                );
+              return true;
+            }
+            if (modelArg.startsWith('--voice ')) {
+              if (promptBlocked) return enqueuePrompt(text, images);
+              sendPrompt(text, images).catch((error: unknown) =>
+                reportError(error, 'Failed to send /model --voice'),
               );
               return true;
             }
@@ -2112,8 +2421,7 @@ export function App({
                   reportError(error, t('model.switch'));
                 });
             } else {
-              store.appendLocalUserMessage(text);
-              setModelInlineMode('main');
+              setModelDialogMode('main');
             }
             return true;
           }
@@ -2140,14 +2448,12 @@ export function App({
             if (modeArg) {
               handleSetMode(modeArg);
             } else {
-              store.appendLocalUserMessage(text);
-              setApprovalModeInlineOpen(true);
+              setShowApprovalModeDialog(true);
             }
             return true;
           }
           if (cmd === 'mcp') {
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
-            store.appendLocalUserMessage(text);
             workspaceActions
               .loadMcpStatus()
               .then(async (status) => {
@@ -2165,18 +2471,13 @@ export function App({
                     }
                   }),
                 );
-                store.dispatch([
-                  {
-                    type: 'status',
-                    text: serializeMcpStatusMessage({
-                      status,
-                      toolsByServer,
-                      showDescriptions: mcpArg === 'desc',
-                      showSchema: mcpArg === 'schema',
-                      showTips: !mcpArg,
-                    }),
-                  },
-                ]);
+                setMcpDialogMessage({
+                  status,
+                  toolsByServer,
+                  showDescriptions: mcpArg === 'desc',
+                  showSchema: mcpArg === 'schema',
+                  showTips: !mcpArg,
+                });
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load MCP status');
@@ -2215,6 +2516,7 @@ export function App({
                       },
                     ]);
                   }
+                  resumeChatBottomFollow('smooth');
                 })
                 .catch((error: unknown) => {
                   reportError(error, 'Failed to load skills');
@@ -2245,6 +2547,7 @@ export function App({
                       },
                     ]);
                   }
+                  resumeChatBottomFollow('smooth');
                 })
                 .catch((error: unknown) => {
                   reportError(error, 'Failed to load tools');
@@ -2253,13 +2556,7 @@ export function App({
             return true;
           }
           if (cmd === 'settings') {
-            if (hideSettings) {
-              store.appendLocalUserMessage(text);
-              store.dispatch([{ type: 'status', text: t('command.hidden') }]);
-              return true;
-            }
-            store.appendLocalUserMessage(text);
-            setSettingsInlineOpen(true);
+            setShowSettingsDialog(true);
             return true;
           }
           if (cmd === 'context') {
@@ -2278,7 +2575,6 @@ export function App({
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
-            store.appendLocalUserMessage(text);
             if (memoryArg === 'refresh') {
               setMemoryRefreshSignal((signal) => signal + 1);
             } else if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
@@ -2290,12 +2586,11 @@ export function App({
               );
               setMemoryAddSignal((signal) => signal + 1);
             }
-            setMemoryInlineOpen(true);
+            setShowMemoryDialog(true);
             return true;
           }
           if (cmd === 'agents') {
             const subCommand = text.slice(match[0].length).trim().toLowerCase();
-            store.appendLocalUserMessage(text);
             let agentsMode: AgentsInitialMode = 'menu';
             if (subCommand === 'create') {
               agentsMode = 'create';
@@ -2312,14 +2607,13 @@ export function App({
             } else if (subCommand === 'manage') {
               agentsMode = 'manage';
             }
-            setAgentsInlineMode(agentsMode);
+            setAgentsDialogMode(agentsMode);
             return true;
           }
           if (cmd === 'extensions') {
             const args = text.slice(match[0].length).trim();
             const subCommand = args.split(/\s+/)[0]?.toLowerCase();
             if (!subCommand || subCommand === 'manage') {
-              store.appendLocalUserMessage(text);
               setShowExtensionsDialog(true);
               return true;
             }
@@ -2440,15 +2734,11 @@ export function App({
             return true;
           }
           if (cmd === 'clear') {
-            sessionActions.newSession().catch((error: unknown) => {
-              reportError(error, 'Failed to create a new session');
-            });
+            createNewSession();
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
-            sessionActions.newSession().catch((error: unknown) => {
-              reportError(error, 'Failed to create a new session');
-            });
+            createNewSession();
             return true;
           }
           if (cmd === 'rename') {
@@ -2514,6 +2804,7 @@ export function App({
                     text: serializeStatsMessage(result, statsView),
                   },
                 ]);
+                resumeChatBottomFollow('smooth');
               })
               .catch(() => {});
             return true;
@@ -2579,6 +2870,7 @@ export function App({
               store.dispatch([
                 { type: 'status', text: serializeStatusMessage(info) },
               ]);
+              resumeChatBottomFollow('smooth');
             });
             return true;
           }
@@ -2662,16 +2954,20 @@ export function App({
       sessionActions,
       store,
       enqueuePrompt,
+      branchCurrentSession,
+      createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
-      hideSettings,
+      openTasksPanel,
+      hiddenCommands,
       pushToast,
       reportError,
       runVisibleRecap,
       runVisibleBtw,
+      resumeChatBottomFollow,
       selectedLanguage,
       showContextUsage,
       t,
@@ -2679,11 +2975,22 @@ export function App({
     ],
   );
 
+  const handleEditorSubmit = useCallback(
+    (text: string, images?: PromptImage[]) => {
+      const accepted = handleSubmit(text, images);
+      if (accepted !== false) {
+        resumeChatBottomFollow('smooth');
+      }
+      return accepted;
+    },
+    [handleSubmit, resumeChatBottomFollow],
+  );
+
   useEffect(() => {
     if (drainingQueueRef.current) return;
     if (!connected) return;
     if (streamingState !== 'idle') return;
-    if (bottomHidden) return;
+    if (interactionBlocked) return;
     if (pendingApproval) return;
     if (queuedPrompts.length === 0) return;
 
@@ -2715,7 +3022,7 @@ export function App({
     };
   }, [
     connected,
-    bottomHidden,
+    interactionBlocked,
     handleSubmit,
     pendingApproval,
     popNextQueuedPrompt,
@@ -2741,9 +3048,9 @@ export function App({
   }, [sessionActions, reportError]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
-    if (bottomHidden) return false;
+    if (interactionBlocked) return false;
     return statusBarRef.current?.focusTaskPill() ?? false;
-  }, [bottomHidden]);
+  }, [interactionBlocked]);
 
   const handleReturnToEditor = useCallback((text?: string) => {
     if (text) {
@@ -2751,6 +3058,9 @@ export function App({
       return;
     }
     editorRef.current?.focus();
+  }, []);
+  const handleFollowStateChange = useCallback((isFollowing: boolean) => {
+    setShowScrollToBottom(!isFollowing);
   }, []);
 
   const handleRetry = useCallback(() => {
@@ -2778,7 +3088,7 @@ export function App({
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
-      if (bottomHidden) return;
+      if (interactionBlocked) return;
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         if (e.key === 'l') {
           e.preventDefault();
@@ -2800,7 +3110,7 @@ export function App({
     window.addEventListener('keydown', onGlobalShortcut, true);
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
   }, [
-    bottomHidden,
+    interactionBlocked,
     handleClearScreen,
     handleToggleCompact,
     handleRetry,
@@ -2825,23 +3135,14 @@ export function App({
         if (escPressCountRef.current > 0) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !bottomHidden) {
+        if (e.key === 'Tab' && e.shiftKey && !interactionBlocked) {
           e.preventDefault();
           handleCycleMode();
         }
         return;
       }
 
-      if (pendingApproval || bottomHidden) return;
-
-      if (tasksPanelMessage) {
-        e.preventDefault();
-        e.stopPropagation();
-        setTasksPanelMessage(null);
-        handleReturnToEditor();
-        resetEscapeState();
-        return;
-      }
+      if (pendingApproval || interactionBlocked) return;
 
       if (clearQueuedPrompts()) {
         e.preventDefault();
@@ -2889,13 +3190,11 @@ export function App({
     handleCancel,
     handleCycleMode,
     pendingApproval,
-    bottomHidden,
-    tasksPanelMessage,
-    handleReturnToEditor,
+    interactionBlocked,
     clearQueuedPrompts,
   ]);
 
-  const isDisabled = !connected;
+  const isDisabled = !connected || connection.catchingUp;
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
@@ -2920,12 +3219,32 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') return;
+      if (streamingState !== 'idle') {
+        enqueuePrompt(`/model --fast ${modelId}`);
+        return;
+      }
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [sendPrompt, streamingState, reportError],
+    [enqueuePrompt, sendPrompt, streamingState, reportError],
+  );
+
+  // Persist via the prompt channel (like `/model --fast`): the daemon's command
+  // processor writes `voiceModel` to settings. The `/workspace/settings` route
+  // is token-gated, but browser voice runs on loopback-no-token — so this is
+  // the path that actually works there. The daemon's /voice/stream reads it back.
+  const handleVoiceModelSelect = useCallback(
+    (modelId: string) => {
+      if (streamingState !== 'idle') {
+        enqueuePrompt(`/model --voice ${modelId}`);
+        return;
+      }
+      sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
+        reportError(error, t('model.setVoice'));
+      });
+    },
+    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
   );
 
   const commands = useMemo(() => {
@@ -2970,9 +3289,21 @@ export function App({
       ),
     [renderWelcomeHeader, welcomeHeaderProps],
   );
+  const welcomeFooter = useMemo(
+    () => renderWelcomeFooter?.(welcomeHeaderProps),
+    [renderWelcomeFooter, welcomeHeaderProps],
+  );
+  const isChatEmptyState =
+    displayMessages.length === 0 &&
+    !showFloatingTodos &&
+    !pendingApproval &&
+    !btwMessage;
+  const chatWidthToggleMin = getChatMaxWidth(chatMaxWidth);
 
   const appClassName = [
     styles.app,
+    styles.appChat,
+    isChatEmptyState ? styles.appChatEmpty : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
@@ -2980,91 +3311,326 @@ export function App({
   ]
     .filter(Boolean)
     .join(' ');
+  const appStyle = useMemo(
+    () => ({
+      ...externalStyle,
+      ...getChatWidthStyle(chatWidthMode, chatMaxWidth),
+    }),
+    [chatMaxWidth, chatWidthMode, externalStyle],
+  );
+  const handleChatWidthModeChange = useCallback((mode: ChatWidthMode) => {
+    setChatWidthMode(mode);
+    writeChatWidthMode(mode);
+  }, []);
+
+  useLayoutEffect(() => {
+    const footer = footerRef.current;
+    if (!footer) return;
+
+    const previousRect = previousFooterRectRef.current;
+    const wasEmpty = previousEmptyStateRef.current;
+    const nextRect = footer.getBoundingClientRect();
+
+    if (wasEmpty && !isChatEmptyState && previousRect) {
+      const offsetY = previousRect.top - nextRect.top;
+      if (Math.abs(offsetY) > 1) {
+        footer.style.transition = 'width 320ms ease';
+        footer.style.transform = `translateY(${offsetY}px)`;
+        requestAnimationFrame(() => {
+          footer.style.transition = 'width 320ms ease, transform 280ms ease';
+          footer.style.transform = '';
+        });
+        window.setTimeout(() => {
+          footer.style.transition = '';
+        }, 320);
+      }
+    }
+
+    previousFooterRectRef.current = nextRect;
+    previousEmptyStateRef.current = isChatEmptyState;
+  }, [isChatEmptyState]);
 
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        <div className={appClassName} style={externalStyle} data-web-shell-root>
+        <div className={appClassName} style={appStyle} data-web-shell-root>
           {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
-          {dialogOpen && (
-            <div className={styles.dialogOverlay} data-keyboard-scope>
-              {showResumeDialog && (
-                <ResumeDialog
-                  onSelect={(sessionId) => {
-                    sessionActions
-                      .loadSession(sessionId)
-                      .catch((error: unknown) => {
-                        reportError(error, 'Failed to load session');
-                      });
-                  }}
-                  onClose={() => setShowResumeDialog(false)}
-                />
-              )}
-              {showDeleteDialog && (
-                <DeleteSessionDialog
-                  onDeleted={(sessionIds) => {
-                    store.dispatch([
-                      {
-                        type: 'status',
-                        text:
-                          sessionIds.length === 1
-                            ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
-                            : t('delete.deletedCount', {
-                                count: sessionIds.length,
-                              }),
-                      },
-                    ]);
-                  }}
-                  onError={(error) => {
-                    if (isAlreadyDispatched(error)) return;
-                    const reason =
-                      error instanceof Error ? error.message : String(error);
-                    pushToast('error', t('delete.failed', { reason }));
-                  }}
-                  onClose={() => setShowDeleteDialog(false)}
-                />
-              )}
-              {showReleaseDialog && (
-                <ReleaseSessionDialog
-                  onReleased={(sessionId) => {
-                    store.dispatch([
-                      {
-                        type: 'status',
-                        text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
-                      },
-                    ]);
-                  }}
-                  onError={(error) => {
-                    if (isAlreadyDispatched(error)) return;
-                    const reason =
-                      error instanceof Error ? error.message : String(error);
-                    pushToast('error', t('release.failed', { reason }));
-                  }}
-                  onClose={() => setShowReleaseDialog(false)}
-                />
-              )}
-              {showHelpDialog && (
-                <HelpDialog
-                  commands={commands}
-                  onClose={() => setShowHelpDialog(false)}
-                />
-              )}
-              {showThemeDialog && (
-                <ThemeDialog
-                  currentTheme={selectedTheme}
-                  onSelect={handleThemeChange}
-                  onClose={() => setShowThemeDialog(false)}
-                />
-              )}
-              {showToolsDialog && (
-                <ToolsDialog onClose={() => setShowToolsDialog(false)} />
-              )}
-              {showExtensionsDialog && (
-                <ExtensionsDialog
-                  onClose={() => setShowExtensionsDialog(false)}
-                />
-              )}
-            </div>
+          {showResumeDialog && (
+            <DialogShell
+              title={t('resume.title')}
+              size="lg"
+              onClose={() => setShowResumeDialog(false)}
+            >
+              <ResumeDialog
+                onSelect={(sessionId) => {
+                  sessionActions
+                    .loadSession(sessionId)
+                    .catch((error: unknown) => {
+                      reportError(error, 'Failed to load session');
+                    });
+                }}
+                onClose={() => setShowResumeDialog(false)}
+              />
+            </DialogShell>
+          )}
+          {modelDialogMode && (
+            <DialogShell
+              title={
+                modelDialogMode === 'fast'
+                  ? t('model.setFast')
+                  : modelDialogMode === 'voice'
+                    ? t('model.setVoice')
+                    : t('model.select')
+              }
+              size="lg"
+              onClose={() => setModelDialogMode(null)}
+            >
+              <ModelDialog
+                mode={modelDialogMode}
+                models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                currentModelId={
+                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                }
+                onSelect={(modelId) => {
+                  if (modelDialogMode === 'fast') {
+                    handleFastModelSelect(modelId);
+                  } else if (modelDialogMode === 'voice') {
+                    handleVoiceModelSelect(modelId);
+                  } else {
+                    handleModelSelect(modelId);
+                  }
+                  setModelDialogMode(null);
+                }}
+              />
+            </DialogShell>
+          )}
+          {showApprovalModeDialog && (
+            <DialogShell
+              title={t('mode.select')}
+              size="sm"
+              onClose={() => setShowApprovalModeDialog(false)}
+            >
+              <ApprovalModeDialog
+                currentMode={currentMode}
+                onSelect={(modeId) => {
+                  handleSetMode(modeId);
+                  setShowApprovalModeDialog(false);
+                }}
+              />
+            </DialogShell>
+          )}
+          {showToolsDialog && (
+            <DialogShell
+              title={t('tools.title')}
+              size="lg"
+              onClose={() => setShowToolsDialog(false)}
+            >
+              <ToolsDialog />
+            </DialogShell>
+          )}
+          {showExtensionsDialog && (
+            <DialogShell
+              title={t('extensions.manage.title')}
+              size="lg"
+              onClose={() => setShowExtensionsDialog(false)}
+            >
+              <ExtensionsDialog />
+            </DialogShell>
+          )}
+          {mcpDialogMessage && (
+            <DialogShell
+              title={t('mcp.manageServers')}
+              size="lg"
+              onClose={() => setMcpDialogMessage(null)}
+            >
+              <McpDialog
+                message={mcpDialogMessage}
+                onClose={() => setMcpDialogMessage(null)}
+              />
+            </DialogShell>
+          )}
+          {tasksDialogMessage && (
+            <DialogShell
+              title={t('tasks.title')}
+              size="lg"
+              onClose={() => setTasksDialogMessage(null)}
+            >
+              <TasksStatusMessage
+                message={tasksDialogMessage}
+                embedded
+                manageActiveEvent={false}
+                onClose={() => setTasksDialogMessage(null)}
+              />
+            </DialogShell>
+          )}
+          {agentsDialogMode && (
+            <DialogShell
+              title={
+                agentsDialogMode === 'manage'
+                  ? t('agent.manage')
+                  : agentsDialogMode === 'menu'
+                    ? t('agents.title')
+                    : t('agent.create')
+              }
+              size="lg"
+              onClose={() => setAgentsDialogMode(null)}
+            >
+              <AgentsMessage
+                mode={agentsDialogMode}
+                embedded
+                onMessage={(text) => store.dispatch([{ type: 'status', text }])}
+                onClose={() => setAgentsDialogMode(null)}
+              />
+            </DialogShell>
+          )}
+          {showSettingsDialog && (
+            <DialogShell
+              title={t('settings.title')}
+              size="lg"
+              onClose={() => setShowSettingsDialog(false)}
+            >
+              <SettingsMessage
+                settingsState={workspaceSettingsState}
+                embedded
+                onLanguageChange={handleSettingsLanguageChange}
+                onThemeChange={handleThemeChange}
+                chatWidthMode={chatWidthMode}
+                onChatWidthModeChange={handleChatWidthModeChange}
+                onSubDialog={(key) => {
+                  setShowSettingsDialog(false);
+                  if (key === 'fastModel') setModelDialogMode('fast');
+                  else if (key === 'tools.approvalMode')
+                    setShowApprovalModeDialog(true);
+                }}
+              />
+            </DialogShell>
+          )}
+          {showMemoryDialog && (
+            <DialogShell
+              title={t('memory.menu')}
+              size="lg"
+              onClose={() => setShowMemoryDialog(false)}
+            >
+              <MemoryMessage
+                refreshSignal={memoryRefreshSignal}
+                addSignal={memoryAddSignal}
+                addScope={memoryAddScope}
+                onMessage={(text, type = 'status') => {
+                  store.dispatch([{ type, text }]);
+                }}
+              />
+            </DialogShell>
+          )}
+          {showHelpDialog && (
+            <DialogShell
+              title={t('help.title')}
+              size="md"
+              onClose={() => setShowHelpDialog(false)}
+            >
+              <HelpDialog commands={commands} />
+            </DialogShell>
+          )}
+          {showThemeDialog && (
+            <DialogShell
+              title={t('theme.title')}
+              size="sm"
+              onClose={() => setShowThemeDialog(false)}
+            >
+              <ThemeDialog
+                currentTheme={selectedTheme}
+                onSelect={handleThemeChange}
+                onClose={() => setShowThemeDialog(false)}
+              />
+            </DialogShell>
+          )}
+          {showAuthDialog && (
+            <DialogShell
+              title={t('auth.title')}
+              size="lg"
+              onClose={() => setShowAuthDialog(false)}
+            >
+              <AuthMessage
+                onMessage={(text, type = 'status') => {
+                  store.dispatch([
+                    type === 'error'
+                      ? { type: 'error', text }
+                      : { type: 'status', text },
+                  ]);
+                }}
+                onClose={() => setShowAuthDialog(false)}
+              />
+            </DialogShell>
+          )}
+          {showDeleteDialog && (
+            <DialogShell
+              title={t('delete.title')}
+              size="lg"
+              onClose={() => setShowDeleteDialog(false)}
+            >
+              <DeleteSessionDialog
+                onDeleted={(sessionIds) => {
+                  store.dispatch([
+                    {
+                      type: 'status',
+                      text:
+                        sessionIds.length === 1
+                          ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
+                          : t('delete.deletedCount', {
+                              count: sessionIds.length,
+                            }),
+                    },
+                  ]);
+                }}
+                onError={(error) => {
+                  if (isAlreadyDispatched(error)) return;
+                  const reason =
+                    error instanceof Error ? error.message : String(error);
+                  pushToast('error', t('delete.failed', { reason }));
+                }}
+                onClose={() => setShowDeleteDialog(false)}
+              />
+            </DialogShell>
+          )}
+          {showReleaseDialog && (
+            <DialogShell
+              title={t('release.title')}
+              size="lg"
+              onClose={() => setShowReleaseDialog(false)}
+            >
+              <ReleaseSessionDialog
+                onReleased={(sessionId) => {
+                  store.dispatch([
+                    {
+                      type: 'status',
+                      text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
+                    },
+                  ]);
+                }}
+                onError={(error) => {
+                  if (isAlreadyDispatched(error)) return;
+                  const reason =
+                    error instanceof Error ? error.message : String(error);
+                  pushToast('error', t('release.failed', { reason }));
+                }}
+                onClose={() => setShowReleaseDialog(false)}
+              />
+            </DialogShell>
+          )}
+          {showRewindDialog && (
+            <DialogShell
+              title={t('rewind.title')}
+              subtitle={t('rewind.subtitle')}
+              size="lg"
+              onClose={() => setShowRewindDialog(false)}
+            >
+              <RewindDialog
+                blocks={blocks}
+                loadSnapshots={loadRewindSnapshots}
+                rewind={rewindConversationOnly}
+                onError={handleRewindError}
+                onClose={() => setShowRewindDialog(false)}
+              />
+            </DialogShell>
           )}
 
           <WebShellCustomizationProvider value={customization}>
@@ -3074,125 +3640,37 @@ export function App({
                 details={todoDetails}
               >
                 <div
-                  className={
-                    showFloatingTodos
-                      ? `${styles.content} ${styles.contentHasMessages}`
-                      : styles.content
-                  }
-                  style={dialogOpen ? { visibility: 'hidden' } : undefined}
+                  className={[
+                    styles.content,
+                    showFloatingTodos ||
+                    displayMessages.length > 0 ||
+                    pendingApproval
+                      ? styles.contentHasMessages
+                      : undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
                 >
                   <MessageList
                     ref={messageListRef}
                     messages={displayMessages}
-                    pendingApproval={pendingApproval}
+                    pendingApproval={pendingToolApproval}
                     onConfirm={handleConfirm}
                     onShowContextDetail={handleShowContextDetail}
                     catchingUp={connection.catchingUp}
                     isResponding={streamingState !== 'idle'}
+                    activeTurnStartedAt={activeTurnStartedAt}
                     workspaceCwd={connection.workspaceCwd || ''}
                     shellOutputMaxLines={shellOutputMaxLines}
                     showRetryHint={showRetryHint}
                     onRetryClick={handleRetry}
-                    welcomeHeader={welcomeHeader}
-                    tailContent={
-                      agentsInlineMode ||
-                      memoryInlineOpen ||
-                      modelInlineMode ||
-                      authInlineOpen ||
-                      approvalModeInlineOpen ||
-                      settingsInlineOpen ? (
-                        <>
-                          {authInlineOpen && (
-                            <AuthMessage
-                              onMessage={(text, type = 'status') => {
-                                store.dispatch([
-                                  type === 'error'
-                                    ? { type: 'error', text }
-                                    : { type: 'status', text },
-                                ]);
-                              }}
-                              onClose={() => setAuthInlineOpen(false)}
-                            />
-                          )}
-                          {approvalModeInlineOpen && (
-                            <ApprovalModeMessage
-                              currentMode={currentMode}
-                              onSelect={handleSetMode}
-                              onClose={() => setApprovalModeInlineOpen(false)}
-                            />
-                          )}
-                          {modelInlineMode && (
-                            <ModelMessage
-                              mode={modelInlineMode}
-                              onSelect={
-                                modelInlineMode === 'fast'
-                                  ? handleFastModelSelect
-                                  : handleModelSelect
-                              }
-                              onClose={() => setModelInlineMode(null)}
-                            />
-                          )}
-                          {agentsInlineMode && (
-                            <AgentsMessage
-                              mode={agentsInlineMode}
-                              onMessage={(text) =>
-                                store.dispatch([{ type: 'status', text }])
-                              }
-                              onClose={() => setAgentsInlineMode(null)}
-                            />
-                          )}
-                          {memoryInlineOpen && (
-                            <MemoryMessage
-                              refreshSignal={memoryRefreshSignal}
-                              addSignal={memoryAddSignal}
-                              addScope={memoryAddScope}
-                              portalHost={memoryPortalHost}
-                              onMessage={(text, type = 'status') => {
-                                store.dispatch([{ type, text }]);
-                              }}
-                              onClose={() => setMemoryInlineOpen(false)}
-                            />
-                          )}
-                          {settingsInlineOpen && (
-                            <SettingsMessage
-                              settingsState={workspaceSettingsState}
-                              onClose={() => setSettingsInlineOpen(false)}
-                              onLanguageChange={handleSettingsLanguageChange}
-                              onThemeChange={handleThemeChange}
-                              onSubDialog={(key) => {
-                                setSettingsInlineOpen(false);
-                                if (key === 'fastModel')
-                                  setModelInlineMode('fast');
-                                else if (key === 'tools.approvalMode')
-                                  setApprovalModeInlineOpen(true);
-                              }}
-                            />
-                          )}
-                        </>
-                      ) : undefined
-                    }
-                    tailKey={
-                      agentsInlineMode ||
-                      memoryInlineOpen ||
-                      modelInlineMode ||
-                      authInlineOpen ||
-                      approvalModeInlineOpen ||
-                      settingsInlineOpen
-                        ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
-                        : undefined
-                    }
-                    // The approval-mode/model pickers and the settings panel are
-                    // reachable by mouse from the status bar, so they reveal
-                    // themselves when opened while the user is scrolled up; the
-                    // agents/memory panels keep the user's scroll position.
-                    autoScrollTailIntoView={
-                      approvalModeInlineOpen ||
-                      modelInlineMode !== null ||
-                      settingsInlineOpen
-                    }
+                    onBranchSession={handleBranchCurrentSession}
+                    welcomeHeader={isChatEmptyState ? welcomeHeader : undefined}
+                    tailContent={undefined}
+                    tailKey={undefined}
+                    onFollowStateChange={handleFollowStateChange}
                     virtualScrollThreshold={virtualScrollThreshold}
                   />
-
                   {btwMessage?.role === 'btw' && (
                     <div className={styles.btwPanel}>
                       <BtwMessage
@@ -3202,59 +3680,114 @@ export function App({
                       />
                     </div>
                   )}
-
-                  <StreamingStatus />
                 </div>
-                <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
               </TodoContextsProvider>
             </CompactModeContext.Provider>
-          </WebShellCustomizationProvider>
 
-          <div
-            className={
-              bottomHidden
-                ? `${styles.footer} ${styles.footerHidden}`
-                : styles.footer
-            }
-          >
-            {showFloatingTodos && !tasksPanelMessage && (
-              <div className={styles.bottomPanels}>
-                <TodoPanel
-                  todos={floatingTodos}
-                  onLocateSource={
-                    floatingTodosState.sourceMessageId
-                      ? handleLocateFloatingTodos
-                      : undefined
+            <div
+              ref={footerRef}
+              className={
+                bottomHidden
+                  ? `${styles.footer} ${styles.footerHidden}`
+                  : styles.footer
+              }
+            >
+              {showScrollToBottom && (
+                <div
+                  className={
+                    showFloatingTodos
+                      ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
+                      : styles.scrollToBottomLayer
                   }
-                />
-              </div>
-            )}
-            {!shouldHideComposer && (
+                >
+                  <button
+                    type="button"
+                    className={styles.scrollToBottomButton}
+                    aria-label={t('chat.scrollToBottom')}
+                    onClick={() => resumeChatBottomFollow('smooth')}
+                  >
+                    <svg
+                      className={styles.scrollToBottomIcon}
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              )}
+              {showFloatingTodos && (
+                <div className={styles.bottomPanels}>
+                  <TodoPanel todos={floatingTodos} />
+                </div>
+              )}
+              {pendingToolApproval && (
+                <div className={styles.approvalOverlay}>
+                  <ToolApproval
+                    request={pendingToolApproval}
+                    onConfirm={handleConfirm}
+                    variant="floating"
+                  />
+                </div>
+              )}
+              {pendingAskUserApproval && (
+                <div className={styles.approvalOverlay}>
+                  <AskUserQuestion
+                    request={pendingAskUserApproval}
+                    onConfirm={handleConfirm}
+                    variant="floating"
+                  />
+                </div>
+              )}
               <div className={styles.composer}>
-                <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
-                <Editor
+                <StreamingStatus startedAt={activeTurnStartedAt} />
+                <QueuedPromptDisplay
+                  prompts={queuedPrompts}
+                  t={t}
+                  onDelete={removeQueuedPrompt}
+                  onInsert={insertQueuedPrompt}
+                  onEditLast={editLastQueuedPrompt}
+                />
+                <ChatEditor
                   ref={setEditorHandle}
-                  onSubmit={handleSubmit}
+                  onSubmit={handleEditorSubmit}
                   onCycleMode={handleCycleMode}
                   onToggleShortcuts={handleToggleShortcuts}
-                  disabled={isDisabled}
+                  onCancel={handleCancel}
+                  isRunning={streamingState !== 'idle'}
+                  disabled={isDisabled || pendingApproval !== null}
                   commands={commands}
                   skills={loadedSkills}
                   slashCommandCategoryOrder={slashCommandCategoryOrder}
-                  queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
+                  queuedMessages={queuedTexts}
                   onFocusFooter={handleFocusTaskPill}
                   onPopQueuedMessages={popQueuedPromptsForEdit}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
+                  currentModel={currentModel}
+                  chatWidthMode={chatWidthMode}
+                  showChatWidthToggle={!isChatEmptyState}
+                  chatWidthToggleMin={chatWidthToggleMin}
+                  visibleToolbarActions={composerToolbarActions}
+                  availableModels={availableModels}
+                  onSelectMode={handleSetMode}
+                  onSelectModel={handleModelSelect}
+                  onChatWidthModeChange={handleChatWidthModeChange}
                   sessionName={sessionDisplayName}
-                  dialogOpen={bottomHidden || tasksPanelMessage !== null}
+                  dialogOpen={interactionBlocked}
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
                   composerInput={composerInput}
                   composerInputVersion={composerInputVersion}
                   placeholderText={
-                    !connected
+                    !connected || connection.catchingUp
                       ? t('common.loading')
                       : streamingState !== 'idle'
                         ? t('editor.processing')
@@ -3262,24 +3795,7 @@ export function App({
                   }
                 />
               </div>
-            )}
-            {tasksPanelMessage && (
-              <div className={styles.tasksBottomPanel}>
-                <TasksStatusMessage
-                  message={tasksPanelMessage}
-                  manageActiveEvent={false}
-                  onClose={() => {
-                    setTasksPanelMessage(null);
-                    handleReturnToEditor();
-                  }}
-                />
-              </div>
-            )}
-            {!shouldHideComposer &&
-              !tasksPanelMessage &&
-              (showShortcuts ? (
-                <ShortcutsPanel onClose={handleCloseShortcuts} />
-              ) : CustomFooter ? (
+              {CustomFooter ? (
                 <CustomFooter
                   connected={connected}
                   mode={currentMode}
@@ -3294,28 +3810,26 @@ export function App({
                   activeGoal={activeGoal}
                   tasks={footerTasks}
                   availableModes={MODES_CYCLE}
-                  availableModels={(connection.models ?? []).map((m) => ({
-                    id: m.id,
-                    label: m.label,
-                    contextWindow: m.contextWindow,
-                  }))}
+                  availableModels={(connection.models ?? [])
+                    .filter(isVisibleComposerModel)
+                    .map((m) => ({
+                      id: m.id,
+                      label: m.label,
+                      contextWindow: m.contextWindow,
+                    }))}
                   skills={loadedSkills}
-                  onSelectMode={(mode) => handleSetMode(mode)}
-                  onSelectModel={(model) => {
-                    sessionActions.setModel(model).then(() => {
-                      setCurrentModel(model);
-                    });
-                  }}
+                  onSelectMode={handleSetMode}
+                  onSelectModel={handleModelSelect}
                 />
               ) : (
                 <StatusBar
                   escapeHint={escapeHintVisible}
-                  onSelectMode={() => setApprovalModeInlineOpen((v) => !v)}
+                  onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
                   onSelectModel={() =>
-                    setModelInlineMode((v) => (v ? null : 'main'))
+                    setModelDialogMode((v) => (v ? null : 'main'))
                   }
                   onShowContext={() => showContextUsage('/context', false)}
-                  onOpenSettings={() => setSettingsInlineOpen((v) => !v)}
+                  onOpenSettings={() => setShowSettingsDialog(true)}
                   ref={statusBarRef}
                   onOpenTasks={() => openTasksPanel()}
                   onReturnToInput={handleReturnToEditor}
@@ -3323,9 +3837,14 @@ export function App({
                   activeGoal={activeGoal}
                   hideSettings={hideSettings}
                   onToggleShortcuts={handleToggleShortcuts}
+                  compact={true}
                 />
-              ))}
-          </div>
+              )}
+              {isChatEmptyState && welcomeFooter && (
+                <div className={styles.emptyWelcomeFooter}>{welcomeFooter}</div>
+              )}
+            </div>
+          </WebShellCustomizationProvider>
         </div>
       </I18nProvider>
     </ThemeProvider>

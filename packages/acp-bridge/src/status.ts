@@ -108,6 +108,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
+  sessionLspStatus: 'qwen/status/session/lsp',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -125,6 +126,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   sessionBranch: 'qwen/control/session/branch',
+  sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
@@ -379,6 +381,7 @@ export interface ServeWorkspaceProvidersStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
@@ -450,6 +453,30 @@ export interface ServeSessionSupportedCommandsStatus {
   sessionId: string;
   availableCommands: AvailableCommand[];
   availableSkills: string[];
+}
+
+export interface ServeLspServerStatus {
+  name: string;
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+  languages: string[];
+  transport?: string;
+  command?: string;
+  error?: string;
+}
+
+export interface ServeSessionLspStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  enabled: boolean;
+  configuredServers: number;
+  readyServers: number;
+  failedServers: number;
+  inProgressServers: number;
+  notStartedServers: number;
+  statusUnavailable?: true;
+  initializationError?: string;
+  servers: ServeLspServerStatus[];
 }
 
 export type ServeSessionTaskLifecycleStatus =
@@ -859,7 +886,8 @@ export type ServeExtensionInstallType =
   | 'local'
   | 'link'
   | 'github-release'
-  | 'npm';
+  | 'npm'
+  | 'archive-url';
 
 export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
@@ -1018,7 +1046,7 @@ export function createIdleWorkspaceProvidersStatus(
  * tests, embedded callers that don't need daemon-host cells). Single
  * construction site so future optional-field additions to
  * `ServeWorkspaceEnvStatus` only need updating in one place — the
- * production builder in `cli/src/serve/envSnapshot.ts buildEnvStatusFromProcess`
+ * production builder in `cli/src/serve/env-snapshot.ts buildEnvStatusFromProcess`
  * and this helper would otherwise diverge silently (TS won't flag a
  * missing optional field).
  *

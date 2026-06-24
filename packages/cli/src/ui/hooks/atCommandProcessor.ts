@@ -15,6 +15,7 @@ import {
   isSubpath,
   unescapePath,
   readManyFiles,
+  shouldRunVisionBridge,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemToolGroup,
@@ -534,6 +535,7 @@ export async function resolveAtCommandQuery({
       const result = await readManyFiles(config, {
         paths: pathSpecsToRead,
         signal,
+        preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
       });
 
       const parts = Array.isArray(result.contentParts)

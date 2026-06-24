@@ -12,11 +12,11 @@ We offer a suite of extension management tools using both `qwen extensions` CLI 
 
 You can manage extensions at runtime within the interactive CLI using `/extensions` slash commands. These commands support hot-reloading, meaning changes take effect immediately without restarting the application.
 
-| Command                               | Description                                                                  |
-| ------------------------------------- | ---------------------------------------------------------------------------- |
-| `/extensions` or `/extensions manage` | Manage all installed extensions                                              |
-| `/extensions install <source>`        | Install an extension from a git URL, local path, npm package, or marketplace |
-| `/extensions explore [source]`        | Open extensions source page(Gemini or ClaudeCode) in your browser            |
+| Command                               | Description                                                                                          |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `/extensions` or `/extensions manage` | Manage all installed extensions                                                                      |
+| `/extensions install <source>`        | Install an extension from a git URL, local path or archive, archive URL, npm package, or marketplace |
+| `/extensions explore [source]`        | Open extensions source page(Gemini or ClaudeCode) in your browser                                    |
 
 #### The interactive extension manager
 
@@ -141,7 +141,25 @@ This will install the github mcp server extension.
 qwen extensions install /path/to/your/extension
 ```
 
+Local `.zip` and `.tar.gz` archives are also supported:
+
+```bash
+qwen extensions install /path/to/your/extension.zip
+qwen extensions install /path/to/your/extension.tar.gz
+```
+
+The archive must contain a complete extension at its root, or a single top-level directory containing the extension.
+
 Note that we create a copy of the installed extension, so you will need to run `qwen extensions update` to pull in changes from both locally-defined extensions and those on GitHub.
+
+#### From Archive URL
+
+```bash
+qwen extensions install https://example.com/your/extension.zip
+qwen extensions install https://example.com/your/extension.tar.gz
+```
+
+Archive URLs can be updated later as long as the URL continues to point at a newer archive for the same extension.
 
 #### Choosing an install scope
 
@@ -193,7 +211,7 @@ This is useful if you have an extension disabled at the top-level and only enabl
 
 ### Updating an extension
 
-For extensions installed from a local path, a git repository, or an npm registry, you can explicitly update to the latest version with `qwen extensions update extension-name`. For npm extensions installed without a version pin (e.g. `@scope/pkg`), updates check the `latest` dist-tag. For those installed with a specific dist-tag (e.g. `@scope/pkg@beta`), updates track that tag. Extensions pinned to an exact version (e.g. `@scope/pkg@1.2.0`) are always considered up-to-date.
+For extensions installed from a local path or archive, an archive URL, a git repository, or an npm registry, you can explicitly update to the latest version with `qwen extensions update extension-name`. For npm extensions installed without a version pin (e.g. `@scope/pkg`), updates check the `latest` dist-tag. For those installed with a specific dist-tag (e.g. `@scope/pkg@beta`), updates track that tag. Extensions pinned to an exact version (e.g. `@scope/pkg@1.2.0`) are always considered up-to-date.
 
 You can update all extensions with:
 
@@ -245,7 +263,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 
 - `name`: The name of the extension. This is used to uniquely identify the extension and for conflict resolution when extension commands have the same name as user or project commands. The name should be lowercase or numbers and use dashes instead of underscores or spaces. This is how users will refer to your extension in the CLI. Note that we expect this name to match the extension directory name.
 - `version`: The version of the extension.
-- `mcpServers`: A map of MCP servers to configure. The key is the name of the server, and the value is the server configuration. These servers will be loaded on startup just like MCP servers configured in a [`settings.json` file](./cli/configuration.md). If both an extension and a `settings.json` file configure an MCP server with the same name, the server defined in the `settings.json` file takes precedence.
+- `mcpServers`: A map of MCP servers to configure. The key is the name of the server, and the value is the server configuration. These servers will be loaded on startup just like MCP servers configured in a [`settings.json` file](../configuration/settings.md). If both an extension and a `settings.json` file configure an MCP server with the same name, the server defined in the `settings.json` file takes precedence.
   - Note that all MCP server configuration options are supported except for `trust`.
 - `channels`: A map of custom channel adapters. The key is the channel type name, and the value has an `entry` (path to compiled JS entry point) and optional `displayName`. The entry point must export a `plugin` object conforming to the `ChannelPlugin` interface. See [Channel Plugins](../features/channels/plugins) for a full guide.
 - `contextFileName`: The name of the file that contains the context for the extension. This will be used to load the context from the extension directory. If this property is not used but a `QWEN.md` file is present in your extension directory, then that file will be loaded.
@@ -269,22 +287,10 @@ Extensions can require configuration through settings (such as API keys or crede
 qwen extensions settings set <extension-name> <setting-name> [--scope user|workspace]
 ```
 
-**List all settings for an extension:**
+**List all settings and current values for an extension:**
 
 ```bash
 qwen extensions settings list <extension-name>
-```
-
-**View current values (user and workspace):**
-
-```bash
-qwen extensions settings show <extension-name> <setting-name>
-```
-
-**Remove a setting value:**
-
-```bash
-qwen extensions settings unset <extension-name> <setting-name> [--scope user|workspace]
 ```
 
 Settings can be configured at two levels:
@@ -298,7 +304,7 @@ When Qwen Code starts, it loads all the extensions and merges their configuratio
 
 ### Custom commands
 
-Extensions can provide [custom commands](./cli/commands.md#custom-commands) by placing Markdown files in a `commands/` subdirectory within the extension directory. These commands follow the same format as user and project custom commands and use standard naming conventions.
+Extensions can provide [custom commands](../features/commands.md#4-custom-commands) by placing Markdown files in a `commands/` subdirectory within the extension directory. These commands follow the same format as user and project custom commands and use standard naming conventions.
 
 > **Note:** The command format has been updated from TOML to Markdown. TOML files are deprecated but still supported. You can migrate existing TOML commands using the automatic migration prompt that appears when TOML files are detected.
 

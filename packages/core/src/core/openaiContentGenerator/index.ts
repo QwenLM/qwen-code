@@ -17,8 +17,6 @@ import {
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
-  RequestyOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -34,8 +32,6 @@ export {
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
-  RequestyOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -82,22 +78,6 @@ export function determineProvider(
 
   if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {
     return new MiMoOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
-  }
-
-  // Check for OpenRouter provider
-  if (OpenRouterOpenAICompatibleProvider.isOpenRouterProvider(config)) {
-    return new OpenRouterOpenAICompatibleProvider(
-      contentGeneratorConfig,
-      cliConfig,
-    );
-  }
-
-  // Check for Requesty provider
-  if (RequestyOpenAICompatibleProvider.isRequestyProvider(config)) {
-    return new RequestyOpenAICompatibleProvider(
-      contentGeneratorConfig,
-      cliConfig,
-    );
   }
 
   // Check for ModelScope provider

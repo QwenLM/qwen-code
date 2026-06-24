@@ -221,7 +221,7 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'assistant.done':
-      finishAssistant(next);
+      finishAssistant(next, event);
       // PR-E cancellation propagation: when the assistant turn ENDS
       // abnormally, any in-flight tool block whose status the daemon
       // never updated to a terminal state would otherwise spin forever.
@@ -327,6 +327,17 @@ function applyDaemonTranscriptEvent(
       // stream (or `selectors`) to drop a catch-up indicator. No
       // transcript mutation.
       break;
+    case 'session.rewound':
+      rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      break;
+    case 'session.branched':
+      appendStatusBlock(
+        next,
+        'status',
+        `Branched conversation "${event.displayName}". You are now in the branch.`,
+        event,
+      );
+      break;
     case 'workspace.memory.changed':
     case 'workspace.agent.changed':
     case 'workspace.tool.toggled':
@@ -407,16 +418,24 @@ export function selectPendingPermissionBlocks(
 function finalizeStreamingTextBlock(
   state: DaemonTranscriptState,
   blockId: string | undefined,
+  event?: DaemonUiEvent,
 ): void {
   const block = getWritableBlockById(state, blockId);
   if (block?.kind === 'assistant' || block?.kind === 'thought') {
     block.streaming = false;
     block.updatedAt = state.now;
+    if (event?.eventId !== undefined) block.eventId = event.eventId;
+    if (event?.serverTimestamp !== undefined) {
+      block.serverTimestamp = event.serverTimestamp;
+    }
   }
 }
 
-function clearActiveAssistant(state: DaemonTranscriptState): void {
-  finalizeStreamingTextBlock(state, state.activeAssistantBlockId);
+function clearActiveAssistant(
+  state: DaemonTranscriptState,
+  event?: DaemonUiEvent,
+): void {
+  finalizeStreamingTextBlock(state, state.activeAssistantBlockId, event);
   state.activeAssistantBlockId = undefined;
 }
 
@@ -451,18 +470,23 @@ function applyAssistantUsage(
   block.updatedAt = state.now;
 }
 
-function clearActiveThought(state: DaemonTranscriptState): void {
-  finalizeStreamingTextBlock(state, state.activeThoughtBlockId);
+function clearActiveThought(
+  state: DaemonTranscriptState,
+  event?: DaemonUiEvent,
+): void {
+  finalizeStreamingTextBlock(state, state.activeThoughtBlockId, event);
   state.activeThoughtBlockId = undefined;
 }
 
 function clearActiveAssistantForParent(
   state: DaemonTranscriptState,
   parentToolCallId: string,
+  event?: DaemonUiEvent,
 ): void {
   finalizeStreamingTextBlock(
     state,
     state.activeAssistantBlockByParent[parentToolCallId],
+    event,
   );
   delete state.activeAssistantBlockByParent[parentToolCallId];
 }
@@ -470,10 +494,12 @@ function clearActiveAssistantForParent(
 function clearActiveThoughtForParent(
   state: DaemonTranscriptState,
   parentToolCallId: string,
+  event?: DaemonUiEvent,
 ): void {
   finalizeStreamingTextBlock(
     state,
     state.activeThoughtBlockByParent[parentToolCallId],
+    event,
   );
   delete state.activeThoughtBlockByParent[parentToolCallId];
 }
@@ -509,12 +535,19 @@ function appendTextDelta(
     parentMap && parentId != null ? parentMap[parentId] : state[activeKey];
 
   const existing = getWritableBlockById(state, effectiveId);
-  if (existing && existing.kind === kind) {
+  if (
+    existing &&
+    existing.kind === kind &&
+    canMergeTextDelta(existing, event)
+  ) {
     existing.text = appendBoundedText(existing.text, text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.serverTimestamp !== undefined) {
       existing.serverTimestamp = event.serverTimestamp;
+    }
+    if ('meta' in event && event.meta) {
+      existing.meta = { ...existing.meta, ...event.meta };
     }
     if (kind === 'assistant' || kind === 'thought') existing.streaming = true;
     return;
@@ -526,6 +559,7 @@ function appendTextDelta(
     text,
     event.eventId,
     event.serverTimestamp,
+    'meta' in event ? event.meta : undefined,
   );
   if (kind === 'assistant' || kind === 'thought') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
@@ -554,16 +588,34 @@ function appendTextDelta(
   }
 }
 
-function finishAssistant(state: DaemonTranscriptState): void {
-  clearActiveAssistant(state);
+function canMergeTextDelta(
+  existing: DaemonTranscriptBlock,
+  event: DaemonUiEvent,
+): boolean {
+  if (
+    existing.kind !== 'user' &&
+    existing.kind !== 'assistant' &&
+    existing.kind !== 'thought'
+  ) {
+    return false;
+  }
+  if (existing.meta?.qwenDiscreteMessage === true) return false;
+  return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
+}
+
+function finishAssistant(
+  state: DaemonTranscriptState,
+  event?: DaemonUiEvent,
+): void {
+  clearActiveAssistant(state, event);
 
   for (const parentId of Object.keys(state.activeAssistantBlockByParent)) {
-    clearActiveAssistantForParent(state, parentId);
+    clearActiveAssistantForParent(state, parentId, event);
   }
   for (const parentId of Object.keys(state.activeThoughtBlockByParent)) {
-    clearActiveThoughtForParent(state, parentId);
+    clearActiveThoughtForParent(state, parentId, event);
   }
-  clearActiveThought(state);
+  clearActiveThought(state, event);
 }
 
 function upsertToolBlock(
@@ -969,6 +1021,16 @@ function appendStatusBlock(
     event.data !== undefined
       ? { data: event.data }
       : {}),
+    ...(event?.type === 'session.branched'
+      ? {
+          source: 'session_branched',
+          data: {
+            sourceSessionId: event.sourceSessionId,
+            newSessionId: event.newSessionId,
+            displayName: event.displayName,
+          },
+        }
+      : {}),
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
@@ -1000,6 +1062,7 @@ function createTextBlock(
   text: string,
   eventId?: number,
   serverTimestamp?: number,
+  meta?: Record<string, unknown>,
 ): DaemonTextTranscriptBlock {
   return {
     id: allocateBlockId(state, kind),
@@ -1010,6 +1073,7 @@ function createTextBlock(
     updatedAt: state.now,
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(meta ? { meta: { ...meta } } : {}),
   };
 }
 
@@ -1171,6 +1235,72 @@ function takeBlocksOwnership(state: DaemonTranscriptState): void {
   state.blocks = [...state.blocks];
   state.blockIndexById = { ...state.blockIndexById };
   ownedBlocks.set(state, state.blocks);
+}
+
+// Applies a daemon rewind event to this in-memory transcript only. The target
+// user turn and everything after it are removed so the rendered session view
+// matches the already-rewound backend state.
+function rewindTranscriptToUserTurn(
+  state: DaemonTranscriptState,
+  targetTurnIndex: number,
+): void {
+  let userTurnIndex = 0;
+  let lastUserIndex = -1;
+
+  for (let index = 0; index < state.blocks.length; index += 1) {
+    if (state.blocks[index]?.kind !== 'user') continue;
+    lastUserIndex = index;
+    if (userTurnIndex === targetTurnIndex) {
+      truncateTranscriptBeforeBlock(state, index);
+      return;
+    }
+    userTurnIndex += 1;
+  }
+
+  if (lastUserIndex >= 0 && targetTurnIndex >= userTurnIndex) {
+    truncateTranscriptBeforeBlock(state, lastUserIndex);
+  }
+}
+
+function truncateTranscriptBeforeBlock(
+  state: DaemonTranscriptState,
+  blockIndex: number,
+): void {
+  takeBlocksOwnership(state);
+  state.blocks = state.blocks.slice(0, blockIndex);
+  ownedBlocks.set(state, state.blocks);
+  rebuildTranscriptIndexes(state);
+}
+
+function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
+  state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  state.toolBlockByCallId = {};
+  state.permissionBlockByRequestId = {};
+  state.trimmedToolNotificationByCallId = {};
+  state.activeUserBlockId = undefined;
+  state.activeAssistantBlockId = undefined;
+  state.activeThoughtBlockId = undefined;
+  state.activeAssistantBlockByParent = {};
+  state.activeThoughtBlockByParent = {};
+  state.currentToolCallId = undefined;
+  state.pendingUserShellCommand = undefined;
+  state.lastFollowupSuggestion = undefined;
+
+  const liveToolCallIds = new Set<string>();
+  for (const block of state.blocks) {
+    if (block.kind === 'tool') {
+      state.toolBlockByCallId[block.toolCallId] = block.id;
+      liveToolCallIds.add(block.toolCallId);
+    } else if (block.kind === 'permission') {
+      state.permissionBlockByRequestId[block.requestId] = block.id;
+    }
+  }
+
+  for (const toolCallId of Object.keys(state.toolProgress)) {
+    if (!liveToolCallIds.has(toolCallId)) {
+      delete state.toolProgress[toolCallId];
+    }
+  }
 }
 
 function appendBlock(

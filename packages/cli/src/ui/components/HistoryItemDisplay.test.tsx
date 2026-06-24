@@ -15,12 +15,18 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { CompactModeProvider } from '../contexts/CompactModeContext.js';
+import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
   ToolGroupMessage: vi.fn(() => <div />),
+}));
+
+vi.mock('../hooks/useMouseEvents.js', () => ({
+  useMouseEvents: vi.fn(),
 }));
 
 describe('<HistoryItemDisplay />', () => {
@@ -336,7 +342,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('●');
   });
 
-  it('renders committed thinking text in full transcript mode', () => {
+  it('renders committed thinking collapsed by default', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_thought',
@@ -352,10 +358,11 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('Inspecting the repository');
+    expect(output).toContain('alt+t to expand');
+    expect(output).not.toContain('Inspecting the repository');
   });
 
-  it('renders committed thinking continuations in full transcript mode', () => {
+  it('renders committed thinking continuations hidden by default', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_thought_content',
@@ -368,10 +375,10 @@ describe('<HistoryItemDisplay />', () => {
       </CompactModeProvider>,
     );
 
-    expect(lastFrame()).toContain('Continuing the reasoning');
+    expect(lastFrame()).not.toContain('Continuing the reasoning');
   });
 
-  it('keeps committed thinking collapsed in compact mode', () => {
+  it('keeps committed thinking collapsed in compact mode too', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_thought',
@@ -387,8 +394,28 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('ctrl+o to expand');
+    expect(output).toContain('alt+t to expand');
     expect(output).not.toContain('Inspecting the repository');
+  });
+
+  it('renders committed thinking expanded when ThoughtExpandedProvider is true', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ThoughtExpandedProvider value={true}>
+        <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />
+      </ThoughtExpandedProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain('alt+t to collapse');
+    expect(output).toContain('Inspecting the repository');
   });
 
   it('keeps committed thinking continuations hidden in compact mode', () => {
@@ -405,5 +432,80 @@ describe('<HistoryItemDisplay />', () => {
     );
 
     expect(lastFrame()).not.toContain('Continuing the reasoning');
+  });
+
+  describe('showTimestamps', () => {
+    const timestampItem: HistoryItem = {
+      ...baseItem,
+      type: 'gemini',
+      text: 'Hello from assistant',
+      timestamp: new Date('2026-01-15T14:30:45').getTime(),
+    };
+
+    const makeTimestampSettings = () =>
+      new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { output: { showTimestamps: true } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+
+    it('does not render timestamp when showTimestamps is disabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame()).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('renders [HH:MM:SS] timestamp when showTimestamps is enabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={false}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('renders timestamp even when isPending is true (streaming)', () => {
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={timestampItem}
+          isPending={true}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
+
+    it('does not render timestamp when timestamp field is missing', () => {
+      const noTimestampItem: HistoryItem = {
+        id: 1,
+        type: 'gemini',
+        text: 'Hello',
+      };
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          {...baseItem}
+          item={noTimestampItem}
+          isPending={false}
+        />,
+        { settings: makeTimestampSettings() },
+      );
+      expect(lastFrame()).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    });
   });
 });

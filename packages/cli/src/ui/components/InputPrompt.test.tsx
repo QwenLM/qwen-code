@@ -26,10 +26,11 @@ import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
+import { useVoiceInput } from '../hooks/use-voice-input.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import {
@@ -54,6 +55,7 @@ vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
+vi.mock('../hooks/use-voice-input.js');
 vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
@@ -184,6 +186,7 @@ describe('InputPrompt', () => {
   const mockedUseReverseSearchCompletion = vi.mocked(
     useReverseSearchCompletion,
   );
+  const mockedUseVoiceInput = vi.mocked(useVoiceInput);
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -325,6 +328,12 @@ describe('InputPrompt', () => {
     mockedUseReverseSearchCompletion.mockReturnValue(
       mockReverseSearchCompletion,
     );
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: vi.fn(() => false),
+    });
 
     props = {
       buffer: mockBuffer,
@@ -349,6 +358,136 @@ describe('InputPrompt', () => {
       focus: true,
       placeholder: '  Type your message or @path/to/file',
     };
+  });
+
+  it('routes Space through voice input when the prompt is empty', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('keeps normal Space typing when the prompt already has text', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    props.buffer.setText('hello');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(props.buffer.handleInput).toHaveBeenCalled();
+    });
+    expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets Space stop voice recording even when shell mode is active', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    props.shellModeActive = true;
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('does not route voice keys while the background dialog is open', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseBackgroundTaskViewState.mockReturnValue({
+      entries: [],
+      selectedIndex: 0,
+      dialogMode: 'list',
+      dialogOpen: true,
+      pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets the feedback dialog consume option keys before active voice input', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: true,
+      messageQueue: [],
+      pendingGeminiHistoryItems: [],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write('1');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets non-voice keys fall through while voice recording is active', async () => {
+    const handleVoiceKeypress = vi.fn(() => false);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write('a');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).toHaveBeenCalled();
+    unmount();
   });
 
   // Two microtask yields are intentional: Ink 7 + React 19 split a render
@@ -2880,8 +3019,8 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      // The component will render the text with the character at the cursor inverted.
-      expect(frame).toContain(`hel${chalk.inverse('l')}o world`);
+      // The component will render the text with the character at the cursor styled.
+      expect(frame).toContain(`hel${renderSoftwareCursor('l')}o world`);
       unmount();
     });
 
@@ -2897,11 +3036,11 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('h')}ello`);
+      expect(frame).toContain(`${renderSoftwareCursor('h')}ello`);
       unmount();
     });
 
-    it('should display cursor at the end of the line as an inverted space', async () => {
+    it('should display cursor at the end of the line as a styled space', async () => {
       mockBuffer.text = 'hello';
       mockBuffer.lines = ['hello'];
       mockBuffer.viewportVisualLines = ['hello'];
@@ -2913,7 +3052,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -2930,7 +3069,7 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       // The token '@path/to/file' is colored, and the cursor highlights one char inside it.
-      expect(frame).toContain(`@path/${chalk.inverse('t')}o/file`);
+      expect(frame).toContain(`@path/${renderSoftwareCursor('t')}o/file`);
       unmount();
     });
 
@@ -2947,7 +3086,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello ${chalk.inverse('👍')} world`);
+      expect(frame).toContain(`hello ${renderSoftwareCursor('👍')} world`);
       unmount();
     });
 
@@ -2964,7 +3103,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello 👍${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello 👍${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -2980,7 +3119,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(chalk.inverse(' '));
+      expect(frame).toContain(renderSoftwareCursor(' '));
       unmount();
     });
 
@@ -2996,7 +3135,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}world`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}world`);
       unmount();
     });
 
@@ -3018,7 +3157,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`sec${chalk.inverse('o')}nd line`);
+      expect(frame).toContain(`sec${renderSoftwareCursor('o')}nd line`);
       unmount();
     });
 
@@ -3039,7 +3178,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('s')}econd line`);
+      expect(frame).toContain(`${renderSoftwareCursor('s')}econd line`);
       unmount();
     });
 
@@ -3060,7 +3199,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`first line${chalk.inverse(' ')}`);
+      expect(frame).toContain(`first line${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -3083,9 +3222,9 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       const lines = frame!.split('\n');
-      // The line with the cursor should just be an inverted space inside the box border
+      // The line with the cursor should just be a styled space inside the box border
       expect(
-        lines.find((l) => l.includes(chalk.inverse(' '))),
+        lines.find((l) => l.includes(renderSoftwareCursor(' '))),
       ).not.toBeUndefined();
       unmount();
     });
@@ -3115,7 +3254,7 @@ describe('InputPrompt', () => {
       // Check that all lines, including the empty one, are rendered.
       // This implicitly tests that the Box wrapper provides height for the empty line.
       expect(frame).toContain('hello');
-      expect(frame).toContain(`world${chalk.inverse(' ')}`);
+      expect(frame).toContain(`world${renderSoftwareCursor(' ')}`);
 
       const outputLines = frame!.split('\n');
       // The number of lines should be 2 for the border plus 3 for the content.
@@ -3853,9 +3992,9 @@ describe('InputPrompt', () => {
         <InputPrompt {...props} />,
       );
       await wait();
-      expect(stdout.lastFrame()).not.toContain(`{chalk.inverse(' ')}`);
+      expect(stdout.lastFrame()).not.toContain(`{renderSoftwareCursor(' ')}`);
       // This snapshot is good to make sure there was an input prompt but does
-      // not show the inverted cursor because snapshots do not show colors.
+      // not show the software cursor because snapshots do not show colors.
       expect(stdout.lastFrame()).toMatchSnapshot();
       unmount();
     });
@@ -4768,6 +4907,47 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down focuses the background-tasks pill when only the pill is shown (workflow-only session)', async () => {
+      // Branch 3 of descendFromComposer: no Arena roster (agents empty) and no
+      // live bg-agent panel, but a workflow run keeps the background-tasks pill
+      // on screen. ↓ from the empty composer must focus the pill so the run's
+      // detail/save dialog stays reachable — without this branch a
+      // workflow-only session could never open it.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('[B'); // Down arrow at the bottom edge
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
       expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
       unmount();
     });

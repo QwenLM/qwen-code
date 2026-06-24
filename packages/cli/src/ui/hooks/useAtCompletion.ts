@@ -9,19 +9,91 @@ import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
 import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
-import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
+import { t } from '../../i18n/index.js';
 
 /**
- * `@server:uri` MCP resource completion. Returns suggestions when `pattern`
- * is of the form `<server>:<partial>` and `<server>` is a configured MCP
- * server (so a plain file path containing ':' is never hijacked); returns
- * `null` otherwise to let the caller fall through to filesystem search.
+ * Resource → suggestion input shape. Structurally satisfied by core's
+ * `DiscoveredMCPResource` (typed locally to avoid a core import / rebuild).
+ */
+type CompletableResource = {
+  uri: string;
+  name?: string;
+  title?: string;
+  serverName: string;
+};
+
+/**
+ * Lower rank = better match; `Infinity` means no match (filtered out). Shared by
+ * the per-server and global resource paths so their ranking can't drift, best
+ * first: URI prefix, then friendly-name prefix, then URI substring, then name
+ * substring. `query` must already be lower-cased.
+ */
+function rankResourceMatch(
+  uri: string,
+  friendly: string,
+  query: string,
+): number {
+  if (uri.startsWith(query)) return 0;
+  if (friendly.startsWith(query)) return 1;
+  if (uri.includes(query)) return 2;
+  if (friendly.includes(query)) return 3;
+  return Infinity;
+}
+
+/**
+ * Rank `resources` against `query` (already lower-cased) and project the matches
+ * onto completion suggestions, best first (ties break by the canonical
+ * `@server:uri` reference for a stable order).
  *
- * Matching is a case-sensitive substring on the URI (an empty partial matches
- * every resource — `'x'.includes('')` is `true`), with prefix matches ranked
- * above mid-string matches. The resource list comes from the post-discovery
- * `ResourceRegistry`, so an empty result before discovery completes simply
- * shows no suggestions.
+ * The partial is matched case-INsensitively against each resource's URI AND its
+ * friendly name/title (the same `title || name` the `/mcp` dialog shows), so a
+ * user who only remembers the human-readable name — not the URI — still gets
+ * completions. An empty `query` matches every resource (`''` is a substring of
+ * every string); callers gate that where it is unwanted.
+ *
+ * The injected `value` is always the canonical `@server:uri` reference (the
+ * friendly name is not a referenceable identifier); the name rides along as the
+ * suggestion `description` only when it adds information beyond the URI (mirrors
+ * the `/mcp` resource list, which dims a redundant name).
+ */
+function rankResourcesToSuggestions(
+  resources: CompletableResource[],
+  query: string,
+): Suggestion[] {
+  return resources
+    .map((resource) => {
+      const friendly = resource.title || resource.name || '';
+      return {
+        resource,
+        friendly,
+        ref: buildMcpResourceRef(resource.serverName, resource.uri),
+        rank: rankResourceMatch(
+          resource.uri.toLowerCase(),
+          friendly.toLowerCase(),
+          query,
+        ),
+      };
+    })
+    .filter((m) => m.rank !== Infinity)
+    .sort((a, b) => a.rank - b.rank || a.ref.localeCompare(b.ref))
+    .slice(0, MAX_SUGGESTIONS_TO_SHOW * 3)
+    .map((m) => ({
+      label: m.ref,
+      value: m.ref,
+      description:
+        m.friendly && m.friendly !== m.resource.uri ? m.friendly : undefined,
+      isDirectory: false,
+    }));
+}
+
+/**
+ * `@server:uri` per-server MCP resource completion. Returns suggestions when
+ * `pattern` is of the form `<server>:<partial>` and `<server>` is a configured
+ * MCP server (so a plain file path containing ':' is never hijacked); returns
+ * `null` otherwise to let the caller fall through to filesystem search (and the
+ * global path below). The resource list comes from the post-discovery
+ * `ResourceRegistry`, so an empty result before discovery simply shows nothing.
  */
 function getMcpResourceSuggestions(
   config: Config | undefined,
@@ -37,24 +109,77 @@ function getMcpResourceSuggestions(
   const mcpServers = config.getMcpServers?.() || {};
   const match = matchMcpServerPrefix(pattern, Object.keys(mcpServers));
   if (!match) return null;
-  const serverName = match.serverName;
-  const partialUri = match.rest;
   const resources =
-    config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
-  const matches = resources
-    .filter((r) => r.uri.includes(partialUri))
-    .sort((a, b) => {
-      // Rank URIs that start with the partial above mid-string matches,
-      // then alphabetically for a stable order.
-      const aPrefix = a.uri.startsWith(partialUri) ? 0 : 1;
-      const bPrefix = b.uri.startsWith(partialUri) ? 0 : 1;
-      return aPrefix - bPrefix || a.uri.localeCompare(b.uri);
-    });
-  return matches.slice(0, MAX_SUGGESTIONS_TO_SHOW * 3).map((r) => ({
-    label: `${serverName}:${r.uri}`,
-    value: `${serverName}:${r.uri}`,
-    isDirectory: false,
-  }));
+    config.getResourceRegistry?.()?.getResourcesByServer(match.serverName) ??
+    [];
+  return rankResourcesToSuggestions(resources, match.rest.toLowerCase());
+}
+
+/**
+ * Bare `@<partial>` GLOBAL MCP resource completion. When the partial carries no
+ * `<server>:` prefix (so `getMcpResourceSuggestions` doesn't apply), match it
+ * against EVERY discovered resource across all servers, so a user can pull up a
+ * resource by a memorable fragment of its URI/name without first recalling which
+ * server exposes it. The injected `value` is still the canonical `@server:uri`.
+ *
+ * Returns `[]` (never `null`): like `getMcpServerSuggestions`, these are
+ * surfaced ALONGSIDE the filesystem results, never replacing them. The empty
+ * partial (bare `@`) is intentionally excluded — every resource would otherwise
+ * match — keeping the bare `@` a files-only view.
+ */
+function getGlobalMcpResourceSuggestions(
+  config: Config | undefined,
+  pattern: string,
+): Suggestion[] {
+  if (!config) return [];
+  if (config.isTrustedFolder?.() === false) return [];
+  if (pattern.length === 0) return [];
+  const resources = config.getResourceRegistry?.()?.getAllResources?.() ?? [];
+  return rankResourcesToSuggestions(resources, pattern.toLowerCase());
+}
+
+/**
+ * `@<partial>` MCP server discovery. BEFORE any `<server>:` has been typed,
+ * surface configured MCP servers that (a) expose at least one resource and
+ * (b) whose name starts (case-insensitively) with the partial, so a user who
+ * doesn't know a resource URI can drill in without first memorizing the exact
+ * server name.
+ *
+ * Returns `[]` (never `null`): these are PREPENDED to the filesystem results
+ * rather than replacing them, so typing `@<partial>` never hides files. The
+ * bare `@` trigger (empty partial) is intentionally left as a files-only view
+ * — both to keep the common case unchanged and because every name
+ * `.startsWith('')`, so an empty partial would otherwise match every server.
+ *
+ * Each suggestion expands to `@<server>:` and is flagged `isDirectory` so
+ * `handleAutocomplete` appends no trailing space, letting completion re-trigger
+ * straight into that server's resource list (the `getMcpResourceSuggestions`
+ * path above).
+ */
+function getMcpServerSuggestions(
+  config: Config | undefined,
+  pattern: string,
+): Suggestion[] {
+  if (!config) return [];
+  if (config.isTrustedFolder?.() === false) return [];
+  if (pattern.length === 0) return [];
+  const registry = config.getResourceRegistry?.();
+  if (!registry) return [];
+  const mcpServers = config.getMcpServers?.() || {};
+  const query = pattern.toLowerCase();
+  return Object.keys(mcpServers)
+    .filter(
+      (name) =>
+        name.toLowerCase().startsWith(query) &&
+        (registry.getResourcesByServer(name)?.length ?? 0) > 0,
+    )
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({
+      label: `${name}:`,
+      value: `${name}:`,
+      description: t('MCP resource server'),
+      isDirectory: true,
+    }));
 }
 
 export enum AtCompletionStatus {
@@ -220,6 +345,8 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
             config?.getFileFilteringOptions()?.respectGitIgnore ?? true,
           useQwenignore:
             config?.getFileFilteringOptions()?.respectQwenIgnore ?? true,
+          customIgnoreFiles:
+            config?.getFileFilteringOptions()?.customIgnoreFiles,
           cache: true,
           cacheTtl: 30, // 30 seconds
           enableRecursiveFileSearch:
@@ -267,7 +394,30 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         return;
       }
 
+      // No `<server>:` prefix yet — offer, ALONGSIDE the filesystem results
+      // (never hiding files): matching MCP servers (discovery, so the user can
+      // drill in without knowing a URI) AND resources matched globally by
+      // URI/name across all servers. Both computed synchronously and prepended
+      // below.
+      const serverSuggestions = getMcpServerSuggestions(config, state.pattern);
+      const globalResourceSuggestions = getGlobalMcpResourceSuggestions(
+        config,
+        state.pattern,
+      );
+      const mcpSuggestions = [
+        ...serverSuggestions,
+        ...globalResourceSuggestions,
+      ];
+
       if (!fileSearch.current) {
+        // File index not ready yet; still surface any MCP matches so they
+        // don't have to wait on the crawler.
+        if (mcpSuggestions.length > 0) {
+          if (slowSearchTimer.current) {
+            clearTimeout(slowSearchTimer.current);
+          }
+          dispatch({ type: 'SEARCH_SUCCESS', payload: mcpSuggestions });
+        }
         return;
       }
 
@@ -299,15 +449,24 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         // isDirectory relies on crawler.ts in @qwen-code/qwen-code-core
         // always normalizing paths with posix '/' via fdir.withPathSeparator('/').
         // If the crawler ever switches to path.sep, this check must be updated.
-        const suggestions = results.map((p) => ({
+        const fileSuggestions = results.map((p) => ({
           label: p,
           value: escapePath(p),
           isDirectory: p.endsWith('/'),
         }));
-        dispatch({ type: 'SEARCH_SUCCESS', payload: suggestions });
+        dispatch({
+          type: 'SEARCH_SUCCESS',
+          payload: [...mcpSuggestions, ...fileSuggestions],
+        });
       } catch (error) {
         if (!(error instanceof Error && error.name === 'AbortError')) {
-          dispatch({ type: 'ERROR' });
+          // A file-search failure shouldn't swallow MCP matches we already
+          // have; show those rather than dropping to an error state.
+          if (mcpSuggestions.length > 0) {
+            dispatch({ type: 'SEARCH_SUCCESS', payload: mcpSuggestions });
+          } else {
+            dispatch({ type: 'ERROR' });
+          }
         }
       }
     };

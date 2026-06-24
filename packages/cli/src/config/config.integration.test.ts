@@ -81,6 +81,10 @@ describe('Configuration Integration Tests', () => {
       const config = new Config(configParams);
 
       expect(config.getFileFilteringRespectGitIgnore()).toBe(true);
+      expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+        '.agentignore',
+        '.aiignore',
+      ]);
     });
 
     it('should load custom file filtering settings from configuration', async () => {
@@ -98,6 +102,28 @@ describe('Configuration Integration Tests', () => {
       const config = new Config(configParams);
 
       expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
+    });
+
+    it('should load custom ignore file settings from configuration', async () => {
+      const configParams: ConfigParameters = {
+        cwd: '/tmp',
+        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
+        embeddingModel: 'test-embedding-model',
+        targetDir: tempDir,
+        debugMode: false,
+        fileFiltering: {
+          customIgnoreFiles: ['.cursorignore'],
+        },
+      };
+
+      const config = new Config(configParams);
+
+      expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+        '.cursorignore',
+      ]);
+      expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
     });
 
     it('should merge user and workspace file filtering settings', async () => {
