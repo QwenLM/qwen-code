@@ -1467,5 +1467,73 @@ describe('modelCommand', () => {
         content: expect.stringContaining('fast-model'),
       });
     });
+
+    it('should reject fastOnly models from --vision selection', async () => {
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --vision fast-model',
+          name: 'model',
+          args: '--vision fast-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'main-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              { id: 'main-model', label: 'Main' },
+              { id: 'fast-model', label: 'Fast', fastOnly: true },
+            ]),
+            setVisionModel: vi.fn(),
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--vision fast-model',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('fast-model'),
+      });
+    });
+
+    it('should reject voiceOnly models from --vision selection', async () => {
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --vision voice-model',
+          name: 'model',
+          args: '--vision voice-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'main-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              { id: 'main-model', label: 'Main' },
+              { id: 'voice-model', label: 'Voice', voiceOnly: true },
+            ]),
+            setVisionModel: vi.fn(),
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--vision voice-model',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('voice-model'),
+      });
+    });
   });
 });

@@ -1440,6 +1440,8 @@ export default {
   'Toggle voice dictation input': 'Toggle voice dictation input',
   'Set the model for voice transcription':
     'Set the model for voice transcription',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    'Set the image-capable model used to transcribe images for a text-only main model',
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
   'Select Voice Model': 'Select Voice Model',

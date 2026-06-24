@@ -1351,6 +1351,8 @@ export default {
     '设置用于输入建议和推测执行的轻量模型',
   'Toggle voice dictation input': '切换语音听写输入',
   'Set the model for voice transcription': '设置语音转写模型',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    '设置用于为纯文本主模型转写图像的图像能力模型',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
   'Select Voice Model': '选择语音模型',

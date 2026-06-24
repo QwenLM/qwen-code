@@ -1237,6 +1237,8 @@ export default {
     '設置用於輸入建議和推測執行的輕量模型',
   'Toggle voice dictation input': '切換語音聽寫輸入',
   'Set the model for voice transcription': '設定語音轉寫模型',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    '設定用於為純文字主模型轉寫圖像的圖像能力模型',
   'Select Fast Model': '選擇快速模型',
   'Select Vision Model': '選擇視覺模型',
   'Select Voice Model': '選擇語音模型',
