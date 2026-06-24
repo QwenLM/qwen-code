@@ -22,10 +22,14 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterAll, describe, expect, it } from 'vitest';
 
-import type { DaemonStartupPreheatStatus } from '../../packages/cli/src/serve/daemon-status.js';
+import type {
+  DaemonStartupPreheatStatus,
+  DaemonStartupSnapshot,
+} from '../../packages/cli/src/serve/daemon-status.js';
 import {
   DEFAULT_REPO_ROOT,
   gitHead,
+  LISTENING_LINE_RE,
   makeTempWorkspace,
   percentiles,
   sleep,
@@ -57,6 +61,12 @@ const BOOT_TIMEOUT_MS = Number(
 const EXTERNAL_P99_MAX_MS = Number(
   process.env['BENCHMARK_DAEMON_STARTUP_P99_MAX_MS'] ?? 15_000,
 );
+const PROCESS_P99_MAX_MS = Number(
+  process.env['BENCHMARK_PROCESS_P99_MAX_MS'] ?? 5_000,
+);
+const RUN_SERVE_P99_MAX_MS = Number(
+  process.env['BENCHMARK_RUN_SERVE_P99_MAX_MS'] ?? 5_000,
+);
 const STATUS_FETCH_TIMEOUT_MS = Number(
   process.env['BENCHMARK_DAEMON_STATUS_TIMEOUT_MS'] ?? 5_000,
 );
@@ -84,21 +94,9 @@ const PREHEAT_STATUSES = Object.keys(
   PREHEAT_STATUS_SET,
 ) as DaemonStartupPreheatStatus[];
 
-interface DaemonStartupStatus {
-  processStartedAt: string;
-  listenerReadyAt?: string;
-  processToListenMs?: number;
-  runQwenServeToListenMs?: number;
-  preheat?: {
-    status?: DaemonStartupPreheatStatus;
-    durationMs?: number;
-    error?: string;
-  };
-}
-
 interface DaemonStatusResponse {
   daemon?: {
-    startup?: DaemonStartupStatus;
+    startup?: DaemonStartupSnapshot;
   };
 }
 
@@ -124,6 +122,8 @@ interface StartupBenchmarkSnapshot {
     warmupIterations: number;
     bootTimeoutMs: number;
     externalP99MaxMs: number;
+    processP99MaxMs: number;
+    runServeP99MaxMs: number;
     statusFetchTimeoutMs: number;
     stderrTimingTimeoutMs: number;
   };
@@ -145,6 +145,8 @@ const snapshot: StartupBenchmarkSnapshot = {
     warmupIterations: WARMUP_ITERATIONS,
     bootTimeoutMs: BOOT_TIMEOUT_MS,
     externalP99MaxMs: EXTERNAL_P99_MAX_MS,
+    processP99MaxMs: PROCESS_P99_MAX_MS,
+    runServeP99MaxMs: RUN_SERVE_P99_MAX_MS,
     statusFetchTimeoutMs: STATUS_FETCH_TIMEOUT_MS,
     stderrTimingTimeoutMs: STDERR_TIMING_TIMEOUT_MS,
   },
@@ -157,8 +159,6 @@ const snapshot: StartupBenchmarkSnapshot = {
   runs: [],
 };
 
-const LISTENING_RE =
-  /^(qwen serve listening on http:\/\/127\.0\.0\.1:(\d+) \(mode=.*\))$/m;
 const STDERR_TIMING_RE =
   /qwen serve: startup timing: processToListenMs=(\d+) runQwenServeToListenMs=(\d+)/;
 
@@ -281,13 +281,15 @@ async function runStartupIteration(
       };
       const onStdout = (chunk: Buffer) => {
         stdout += chunk.toString();
-        const match = stdout.match(LISTENING_RE);
-        if (!match) return;
+        const match = stdout.match(LISTENING_LINE_RE);
+        const line = match?.groups?.['line'];
+        const port = match?.groups?.['port'];
+        if (!line || !port) return;
         settled = true;
         cleanup();
         resolve({
-          line: match[1],
-          port: Number(match[2]),
+          line,
+          port: Number(port),
           externalCommandToListeningMs: Math.round(
             performance.now() - startedAt,
           ),
@@ -316,13 +318,11 @@ async function runStartupIteration(
     const timing = await waitForStderrTiming(() => stderr);
     let status: DaemonStatusResponse;
     try {
-      const res = await fetch(
-        `http://127.0.0.1:${listening.port}/daemon/status?detail=full`,
-        {
-          headers: { authorization: `Bearer ${TOKEN}` },
-          signal: AbortSignal.timeout(STATUS_FETCH_TIMEOUT_MS),
-        },
-      );
+      const statusUrl = `http://127.0.0.1:${listening.port}/daemon/status`;
+      const res = await fetch(statusUrl, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+        signal: AbortSignal.timeout(STATUS_FETCH_TIMEOUT_MS),
+      });
       if (!res.ok) {
         throw new Error(`/daemon/status returned ${res.status}`);
       }
@@ -345,9 +345,8 @@ async function runStartupIteration(
       expect(startup?.listenerReadyAt).toEqual(expect.any(String));
       expect(processToListenMs).toEqual(Number(timing[1]));
       expect(runQwenServeToListenMs).toEqual(Number(timing[2]));
-      expect(processToListenMs).toEqual(expect.any(Number));
-      expect(runQwenServeToListenMs).toEqual(expect.any(Number));
       expect(processToListenMs).toBeGreaterThanOrEqual(runQwenServeToListenMs!);
+      expect(startup?.preheat).toEqual(expect.any(Object));
       expect(preheatStatus).toEqual(expect.any(String));
       expect(PREHEAT_STATUSES).toContain(preheatStatus);
     };
@@ -416,8 +415,16 @@ async function runStartupIteration(
         expect(snapshot.externalCommandToListening.p99).toBeLessThan(
           EXTERNAL_P99_MAX_MS,
         );
+        expect(snapshot.processToListen.p99).toBeLessThan(PROCESS_P99_MAX_MS);
+        expect(snapshot.runQwenServeToListen.p99).toBeLessThan(
+          RUN_SERVE_P99_MAX_MS,
+        );
       },
-      (WARMUP_ITERATIONS + ITERATIONS) * (BOOT_TIMEOUT_MS + 5_000),
+      (WARMUP_ITERATIONS + ITERATIONS) *
+        (BOOT_TIMEOUT_MS +
+          STDERR_TIMING_TIMEOUT_MS +
+          STATUS_FETCH_TIMEOUT_MS +
+          5_000),
     );
 
     afterAll(() => {
