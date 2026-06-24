@@ -171,6 +171,50 @@ describe('useLoadingIndicator', () => {
     expect(result.current.elapsedTime).toBe(3);
   });
 
+  it('should exclude tokens produced while a tool is executing from the rate baseline', async () => {
+    const { result, rerender } = renderHook(
+      ({ currentCandidatesTokens, currentStreamingChars, isToolExecuting }) =>
+        useLoadingIndicator(
+          StreamingState.Responding,
+          undefined,
+          currentCandidatesTokens,
+          currentStreamingChars,
+          isToolExecuting,
+        ),
+      {
+        initialProps: {
+          currentCandidatesTokens: 0,
+          currentStreamingChars: 400,
+          isToolExecuting: false,
+        },
+      },
+    );
+
+    expect(result.current.taskStartTokens).toBe(0);
+    expect(result.current.taskStartStreamingChars).toBe(400);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+      rerender({
+        currentCandidatesTokens: 0,
+        currentStreamingChars: 400,
+        isToolExecuting: true,
+      });
+    });
+
+    await act(async () => {
+      rerender({
+        currentCandidatesTokens: 8000,
+        currentStreamingChars: 400,
+        isToolExecuting: true,
+      });
+    });
+
+    expect(result.current.taskStartTokens).toBe(8000);
+    expect(result.current.taskStartStreamingChars).toBe(400);
+    expect(result.current.elapsedTime).toBe(1);
+  });
+
   describe('token tracking', () => {
     it('should capture token snapshot when task starts', () => {
       const { result, rerender } = renderHook(

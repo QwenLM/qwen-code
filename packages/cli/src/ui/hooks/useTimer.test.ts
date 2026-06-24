@@ -166,4 +166,67 @@ describe('useTimer', () => {
     });
     expect(result.current).toBe(3);
   });
+
+  it('should reset while paused when resetKey changes', () => {
+    const { result, rerender } = renderHook(
+      ({ resetKey, isPaused }) => useTimer(true, resetKey, isPaused),
+      { initialProps: { resetKey: 0, isPaused: false } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(1);
+
+    rerender({ resetKey: 0, isPaused: true });
+    rerender({ resetKey: 1, isPaused: true });
+    expect(result.current).toBe(0);
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(0);
+
+    rerender({ resetKey: 1, isPaused: false });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(result.current).toBe(0.5);
+  });
+
+  it('should accumulate elapsedTime across multiple pause and resume cycles', () => {
+    const { result, rerender } = renderHook(
+      ({ isPaused }) => useTimer(true, 0, isPaused),
+      { initialProps: { isPaused: false } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(1);
+
+    rerender({ isPaused: true });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(1);
+
+    rerender({ isPaused: false });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(result.current).toBe(1.5);
+
+    rerender({ isPaused: true });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(1.5);
+
+    rerender({ isPaused: false });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(result.current).toBe(2);
+  });
 });

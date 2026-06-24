@@ -6,7 +6,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 
-const TIMER_REFRESH_INTERVAL_MS = 250;
+const TIMER_REFRESH_INTERVAL_MS = 500;
 
 function elapsedSeconds(elapsedMs: number): number {
   return Number((Math.max(0, elapsedMs) / 1000).toFixed(1));
