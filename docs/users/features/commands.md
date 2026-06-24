@@ -325,8 +325,12 @@ Commands for obtaining information and performing system settings.
 | `/insight`       | Generate programming insights from chat history                                                                                | `/insight`                                                                          |
 | `/setup-github`  | Set up GitHub Actions                                                                                                          | `/setup-github`                                                                     |
 | `/bug`           | Submit issue about Qwen Code                                                                                                   | `/bug Button click unresponsive`                                                    |
-| `/copy`          | Copy AI output to clipboard (`/copy N` = Nth-last AI message)                                                                  | `/copy` or `/copy 2`                                                                |
+| `/copy`          | Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid                                                                    | `/copy`, `/copy 2`, `/copy python`, `/copy latex`, `/copy mermaid`                  |
 | `/quit`          | Exit Qwen Code immediately                                                                                                     | `/quit` or `/exit`                                                                  |
+
+> [!warning]
+>
+> `/doctor memory --snapshot` writes a V8 heap snapshot that may contain prompts, file contents, API keys, and tool results from the current session. Review the file before sharing it.
 
 ### 1.10 Common Shortcuts
 
