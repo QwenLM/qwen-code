@@ -2627,6 +2627,25 @@ describe('McpClientManager — PR 14 guardrails', () => {
     }
   });
 
+  it('readBudgetFromEnv rejects non-decimal budget values (hex / scientific / float)', async () => {
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (const bad of ['0x10', '1e2', '1.0']) {
+        process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = bad;
+        const manager = mkManager({ config: configWithServers({}) });
+        // Pre-fix Number('0x10')=16 / Number('1e2')=100 slipped through as a budget.
+        expect(manager.getMcpClientBudget()).toBeUndefined();
+      }
+      // a plain decimal integer is still accepted.
+      process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '16';
+      const ok = mkManager({ config: configWithServers({}) });
+      expect(ok.getMcpClientBudget()).toBe(16);
+    } finally {
+      writeSpy.mockRestore();
+      delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    }
+  });
+
   it('readResource rejects existing-but-now-disabled servers (wenshao R7 #5 line 1342)', async () => {
     // Pre-fix: a server connected pre-disable and then operator-
     // disabled mid-session via settings reload would still serve

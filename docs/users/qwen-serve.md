@@ -465,7 +465,15 @@ The bridge keeps **one channel per daemon** (one daemon per workspace, per §02)
 
 ## Logging in to a remote daemon (issue #4175 PR 21)
 
-When the daemon runs on a remote pod (no shared display with you), you can still log in to a Qwen account by triggering an OAuth device flow over HTTP. The daemon polls the IdP itself; your job is just to open a URL on whatever device has a browser.
+When the daemon runs on a remote pod (no shared display with you), a client can
+trigger an OAuth device flow over HTTP. The daemon polls the IdP itself; your job
+is just to open a URL on whatever device has a browser.
+
+> [!note]
+>
+> Qwen OAuth free tier was discontinued on 2026-04-15. The `qwen-oauth`
+> examples below document the device-flow protocol shape and legacy provider
+> identifier; new setups should use a currently supported auth provider.
 
 ```bash
 # 1. Start a flow. The daemon contacts the IdP, returns a code + URL.

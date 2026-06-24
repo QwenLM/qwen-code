@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AuthDialog } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
+import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
@@ -1250,6 +1251,78 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'should pre-fill the Model IDs step with previously saved custom model IDs',
+    async () => {
+      // User previously saved a custom model ID for Token Plan in settings.
+      const savedSettings = {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+        modelProviders: {
+          openai: [
+            {
+              id: 'my-custom-token-model',
+              name: '[ModelStudio Token Plan] my-custom-token-model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+            },
+          ],
+        },
+      } as unknown as Settings;
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: savedSettings,
+          originalSettings: savedSettings,
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      stdin.write('\r');
+      await waitForSelectedOption(lastFrame, 'Coding Plan');
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 1/2 · API Key',
+      );
+
+      await typeText(stdin, 'sk-token-plan');
+
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/2 · Model IDs',
+      );
+
+      // The Model IDs input is pre-filled with the saved custom model id
+      // (which only exists in settings, never among the built-in defaults).
+      expect(lastFrame()).toContain('my-custom-token-model');
 
       unmount();
     },

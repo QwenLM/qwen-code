@@ -2970,6 +2970,119 @@ describe('ACP WebSocket transport security', () => {
     ws.close();
   });
 
+  // ── Bearer token via Sec-WebSocket-Protocol (browser clients) ──────
+  // Browsers can't set an Authorization header on a WebSocket, so the token
+  // rides in a `qwen-bearer.<base64url(token)>` subprotocol that the upgrade
+  // listener decodes (extractUpgradeBearer). Matches the web-shell encoder.
+  function bearerProto(token: string): string {
+    return `qwen-bearer.${Buffer.from(token).toString('base64url')}`;
+  }
+  // Non-secret marker the web-shell offers alongside the bearer subprotocol so
+  // the daemon can select it (never the secret) and the handshake completes.
+  const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
+
+  function wsConnectWithSubprotocols(
+    protocols: string[],
+  ): Promise<{ code: number; protocol: string }> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, protocols, {
+        handshakeTimeout: 2000,
+      });
+      ws.once('open', () => {
+        const { protocol } = ws;
+        ws.close();
+        resolve({ code: 101, protocol });
+      });
+      ws.once('unexpected-response', (_req, res) =>
+        resolve({ code: res.statusCode ?? 0, protocol: '' }),
+      );
+      ws.once('error', () => resolve({ code: 0, protocol: '' }));
+    });
+  }
+
+  it('accepts WS upgrade with a valid token in the subprotocol', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await wsConnectWithSubprotocols([
+      WS_AUTH_SUBPROTOCOL,
+      bearerProto('secret-token-123'),
+    ]);
+    expect(result.code).toBe(101);
+  });
+
+  it('falls back to bearer subprotocol when Authorization bearer is empty', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await new Promise<{ code: number }>((resolve) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/acp`,
+        [WS_AUTH_SUBPROTOCOL, bearerProto('secret-token-123')],
+        {
+          headers: { Authorization: 'Bearer ' },
+          handshakeTimeout: 2000,
+        },
+      );
+      ws.once('open', () => {
+        ws.close();
+        resolve({ code: 101 });
+      });
+      ws.once('unexpected-response', (_req, res) =>
+        resolve({ code: res.statusCode ?? 0 }),
+      );
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+    expect(result.code).toBe(101);
+  });
+
+  it('never echoes the secret subprotocol back in the handshake', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await wsConnectWithSubprotocols([
+      WS_AUTH_SUBPROTOCOL,
+      bearerProto('secret-token-123'),
+    ]);
+    expect(result.code).toBe(101);
+    // The daemon selects the non-secret marker, never the bearer value.
+    expect(result.protocol).toBe(WS_AUTH_SUBPROTOCOL);
+    expect(result.protocol).not.toContain('qwen-bearer.');
+  });
+
+  it('selects a non-secret subprotocol, never the bearer one', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await wsConnectWithSubprotocols([
+      'acp.v1',
+      bearerProto('secret-token-123'),
+    ]);
+    expect(result.code).toBe(101);
+    expect(result.protocol).toBe('acp.v1');
+  });
+
+  it('rejects WS upgrade with a wrong token in the subprotocol', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await wsConnectWithSubprotocols([
+      WS_AUTH_SUBPROTOCOL,
+      bearerProto('wrong-token'),
+    ]);
+    expect(result.code).toBe(401);
+  });
+
+  it('rejects WS upgrade with a malformed bearer subprotocol', async () => {
+    await startServer({ token: 'secret-token-123' });
+    // `----` is a valid subprotocol token but decodes to garbage bytes (not the
+    // token) — exercises the non-throwing decode + constant-time mismatch path.
+    const result = await wsConnectWithSubprotocols([
+      WS_AUTH_SUBPROTOCOL,
+      'qwen-bearer.----',
+    ]);
+    expect(result.code).toBe(401);
+  });
+
+  it('ignores the subprotocol on a no-token loopback daemon', async () => {
+    await startServer();
+    const result = await wsConnectWithSubprotocols([
+      WS_AUTH_SUBPROTOCOL,
+      bearerProto('anything'),
+    ]);
+    expect(result.code).toBe(101);
+  });
+
   // ── maxPayload ─────────────────────────────────────────────────────
   it('closes WS on oversized frame (>10MB)', async () => {
     await startServer();

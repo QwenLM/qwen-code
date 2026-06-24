@@ -6,8 +6,14 @@
   border: 1px solid var(--border-color);
   border-radius: 4px;
   padding: 10px 14px;
-  background: var(--bg-primary);
-  margin: 0 14px;
+  background: var(--command-panel-bg);
+}
+
+.embeddedPanel {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
 }
 
 .title {
@@ -54,9 +60,38 @@
 
 .nameCell {
   display: inline-block;
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.status {
+  flex: 0 0 auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chevronCell {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-secondary);
+}
+
+.chevron {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+  transition: transform 120ms ease;
+}
+
+.chevronExpanded {
+  transform: rotate(90deg);
 }
 
 .truncate {
@@ -73,6 +108,17 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.task {
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+}
+
+.taskExpanded {
+  background: var(--bg-tertiary);
+  padding: 4px;
 }
 
 .success {
@@ -96,16 +142,163 @@
   padding-right: 4px;
 }
 
-.detailField {
-  display: grid;
-  grid-template-columns: 18ch minmax(0, 1fr);
+.detailTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detailTopMain {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.embeddedPanel .detail {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+
+.embeddedPanel .list {
+  gap: 3px;
+}
+
+.embeddedPanel .row {
+  align-items: center;
+  min-height: 32px;
   gap: 8px;
-  align-items: baseline;
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.embeddedPanel .row:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.embeddedPanel .selected {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.embeddedPanel .pointer {
+  display: none;
+}
+
+.embeddedPanel .inlineDetail {
+  padding: 0;
+}
+
+.embeddedPanel .detail {
+  margin: 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  padding: 8px;
+}
+
+.embeddedPanel .nameCell {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.taskIcon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.taskIcon::before,
+.taskIcon::after {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+}
+
+.taskIcon::before {
+  top: 4px;
+}
+
+.taskIcon::after {
+  top: 8px;
+}
+
+.detailField {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 6px;
 }
 
 .detailFieldLabel {
   color: var(--text-primary);
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.detailContent {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.compactSummary {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 4px 6px;
+}
+
+.actionBar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.actionHint {
+  color: var(--warning-color);
+  font-size: 12px;
+}
+
+.actionButton {
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 9px;
+}
+
+.actionButton:hover:not(:disabled) {
+  border-color: var(--accent-color);
+}
+
+.actionButton:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.dangerButton {
+  color: var(--error-color);
 }
 
 .shortcuts {
@@ -126,19 +319,21 @@
 
 .activityCurrent {
   color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .activityPast {
   color: var(--text-dimmed);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .promptContent {
   color: var(--text-secondary);
-  font-size: 0.9em;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }

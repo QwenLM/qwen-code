@@ -7,10 +7,11 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
-import { InputPrompt } from './InputPrompt.js';
+import { InputPrompt, classifyPastedImagePaths } from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -344,6 +345,7 @@ describe('InputPrompt', () => {
         getProjectRoot: () => path.join('test', 'project'),
         getTargetDir: () => path.join('test', 'project', 'src'),
         getVimMode: () => false,
+        getFastModel: () => undefined,
         getWorkspaceContext: () => ({
           getDirectories: () => ['/test/project/src'],
         }),
@@ -444,6 +446,41 @@ describe('InputPrompt', () => {
       expect(handleVoiceKeypress).not.toHaveBeenCalled();
     });
     expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('passes a voice refinement callback when a fast model is configured', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: expect.any(Function) }),
+    );
+    unmount();
+  });
+
+  it('omits voice refinement when refineTranscript is disabled', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+    const settings = {
+      merged: {
+        general: { voice: { refineTranscript: false } },
+      },
+    } as LoadedSettings;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />, {
+      settings,
+    });
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: undefined }),
+    );
     unmount();
   });
 
@@ -5170,3 +5207,42 @@ function clean(str: string | undefined): string {
   // Remove ANSI escape codes and trim whitespace
   return stripAnsi(str).trim();
 }
+
+describe('classifyPastedImagePaths', () => {
+  it('treats a lone @-prefixed image path (terminal Cmd+V injection) as all-image', () => {
+    const result = classifyPastedImagePaths(
+      '@/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',
+    );
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual([
+      '/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',
+    ]);
+  });
+
+  it('splits multiple space- and newline-separated image paths', () => {
+    const result = classifyPastedImagePaths(
+      '/a/one.png /b/two.jpg\n/c/three.webp',
+    );
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual([
+      '/a/one.png',
+      '/b/two.jpg',
+      '/c/three.webp',
+    ]);
+  });
+
+  it('unwraps surrounding quotes and shell-escaped spaces', () => {
+    const result = classifyPastedImagePaths('"/a/my image.png"');
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual(['/a/my image.png']);
+  });
+
+  it('does not treat plain text or non-image paths as image paste', () => {
+    expect(classifyPastedImagePaths('just some text').allImages).toBe(false);
+    expect(classifyPastedImagePaths('/src/index.ts').imagePaths).toEqual([]);
+    // A path followed by free text is left for normal text handling.
+    expect(
+      classifyPastedImagePaths('@/a/img.png describe this').allImages,
+    ).toBe(false);
+  });
+});

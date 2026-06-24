@@ -11,6 +11,8 @@ function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
     blockIndexById: Object.fromEntries(
       blocks.map((block, index) => [block.id, index]),
     ),
+    activeAssistantBlockByParent: {},
+    activeThoughtBlockByParent: {},
     toolBlockByCallId: {},
     trimmedToolNotificationByCallId: {},
     permissionBlockByRequestId: {},

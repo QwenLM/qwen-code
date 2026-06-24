@@ -1,15 +1,8 @@
-import {
-  forwardRef,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-  useCallback,
-  useState,
-  type MouseEvent as ReactMouseEvent,
-} from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Decoration,
   EditorView,
+  ViewPlugin,
   WidgetType,
   keymap,
   placeholder,
@@ -31,7 +24,7 @@ import {
   completionStatus,
   moveCompletionSelection,
   startCompletion,
-  type CompletionSource,
+  type Completion,
 } from '@codemirror/autocomplete';
 import { minimalSetup } from 'codemirror';
 import type { CommandInfo } from '../adapters/types';
@@ -41,12 +34,16 @@ import {
   type UseDaemonFollowupSuggestionReturn,
 } from '@qwen-code/webui/daemon-react-sdk';
 import {
-  slashCompletionSource,
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
+  getSlashCommandCompletionResult,
   type SkillInfo,
+  type SlashCommandCompletionResult,
 } from '../completions/slashCompletion';
-import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
+import {
+  DEFAULT_COMMAND_CATEGORY_ORDER,
+  type CommandDisplayCategoryOrder,
+} from '../utils/commandDisplay';
 import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
 import { useI18n } from '../i18n';
@@ -55,7 +52,6 @@ import {
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
-import { PromptChevron } from './PromptChevron';
 import type {
   WebShellComposerApi,
   WebShellComposerInput,
@@ -63,45 +59,338 @@ import type {
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
 } from '../customization';
-import styles from './Editor.module.css';
 
-interface EditorProps {
-  onSubmit: (text: string, images?: PromptImage[]) => boolean | void;
-  onCycleMode?: () => void;
-  onToggleShortcuts?: () => void;
-  disabled?: boolean;
-  placeholderText?: string;
-  commands: CommandInfo[];
-  skills?: SkillInfo[];
-  slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
-  queuedMessages?: string[];
-  onPopQueuedMessages?: () => string | null;
-  onClearQueuedMessages?: () => boolean;
-  currentMode?: string;
-  draftText?: string;
-  draftVersion?: number;
-  onFocusFooter?: () => boolean;
-  dialogOpen?: boolean;
-  followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
-  onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
-  onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
-  sessionName?: string;
-  composerInput?: WebShellComposerInput;
-  composerInputVersion?: number;
-}
+// ---- Large paste handling (shared utilities) ----
 
-export interface EditorHandle extends WebShellComposerApi {
-  clearText(): void;
-  focus(): void;
-  getText(): string;
-  hasInput(): boolean;
-  retryLast(): void;
-}
-
-const editableCompartment = new Compartment();
-const placeholderCompartment = new Compartment();
 const LARGE_PASTE_CHAR_THRESHOLD = 1000;
 const LARGE_PASTE_LINE_THRESHOLD = 10;
+const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
+const TOOLTIP_STYLES = `
+[data-web-shell-tooltip-portal] {
+  pointer-events: none;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip {
+  z-index: var(--web-shell-tooltip-z-index, 1000);
+  pointer-events: auto;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete {
+  --web-shell-completion-label-width: 20ch;
+  --web-shell-completion-column-gap: 2ch;
+  --web-shell-completion-detail-start: calc(
+    var(--web-shell-completion-label-width) +
+      var(--web-shell-completion-column-gap)
+  );
+  min-width: 500px !important;
+  max-width: 700px !important;
+  max-height: 400px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+  background: var(--bg-primary, #0d0d0d) !important;
+  border: 1px solid var(--border-color, #2a2a2a) !important;
+  border-radius: 6px !important;
+  overflow: visible;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul {
+  max-height: 380px !important;
+  overflow: auto;
+  border-radius: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li {
+  display: flex !important;
+  align-items: baseline;
+  min-width: 0;
+  padding: 4px 8px !important;
+  color: var(--text-primary, #e4e4e4) !important;
+  overflow: hidden;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:hover {
+  background: var(--bg-tertiary, #1e1e1e) !important;
+  color: var(--text-primary, #e4e4e4) !important;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li[aria-selected] {
+  background: var(--bg-tertiary, #1e1e1e) !important;
+  color: var(--text-primary, #e4e4e4) !important;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:is(:hover, [aria-selected]) .cm-completionLabel {
+  color: var(--accent-color, #4a9eff);
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section {
+  display: block !important;
+  height: 0;
+  margin: 6px 10px 3px;
+  padding: 0 !important;
+  border-bottom: 1px solid var(--border-color) !important;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section:first-of-type {
+  display: none !important;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionLabel {
+  font-family: var(--font-mono, monospace);
+  flex-shrink: 0;
+  width: var(--web-shell-completion-label-width);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionDetail {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-style: normal;
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-left: var(--web-shell-completion-column-gap);
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-file-completion .cm-completionLabel {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-command-info-completion {
+  display: grid !important;
+  grid-template-columns: var(--web-shell-completion-label-width) minmax(0, 1fr);
+  column-gap: var(--web-shell-completion-column-gap);
+  align-items: baseline !important;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-command-info-completion .cm-completionLabel {
+  min-width: 0;
+  max-width: none;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-command-info-completion .cm-completionDetail {
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo {
+  z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
+  width: min(320px, calc(100vw - 32px));
+  max-width: min(320px, calc(100vw - 32px)) !important;
+  max-height: min(280px, calc(100vh - 32px));
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--border-color, #2a2a2a);
+  border-radius: 6px;
+  background: var(--bg-secondary, #161616);
+  color: var(--text-primary, #e4e4e4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+[data-web-shell-tooltip-portal] .cm-completionInfo-hover {
+  pointer-events: auto;
+  z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+[data-web-shell-tooltip-portal] .cm-completionInfo.cm-completionInfo-right {
+  margin-left: var(--web-shell-completion-column-gap);
+}
+
+[data-web-shell-tooltip-portal] .cm-completionInfo.cm-completionInfo-right-narrow {
+  left: var(--web-shell-completion-detail-start);
+}
+
+[data-web-shell-tooltip-portal] .cm-completionInfo.cm-completionInfo-left {
+  margin-right: var(--web-shell-completion-column-gap);
+}
+
+[data-web-shell-tooltip-portal] .cm-completionInfo.cm-completionInfo-left-narrow {
+  right: var(--web-shell-completion-detail-start);
+}
+`;
+
+function ensureTooltipStyles() {
+  if (document.getElementById(TOOLTIP_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = TOOLTIP_STYLE_ID;
+  style.textContent = TOOLTIP_STYLES;
+  document.head.appendChild(style);
+}
+
+/**
+ * Compute the next selected index for an open, composer-owned slash-command
+ * menu. History-recalled slash commands suppress the menu before this runs, so
+ * arrow keys can keep walking input history in that path.
+ * Returns null when there is nothing to select.
+ */
+function nextSlashSelectionIndex(
+  selectedIndex: number,
+  count: number,
+  direction: 'up' | 'down',
+): number | null {
+  if (count <= 0) return null;
+  const delta = direction === 'up' ? -1 : 1;
+  return (((selectedIndex + delta) % count) + count) % count;
+}
+
+function isSlashCommandCompletion(completion: Completion): boolean {
+  return (
+    typeof completion.apply === 'string' &&
+    completion.apply.trim().startsWith('/')
+  );
+}
+
+function hasCommandHoverInfo(completion: Completion): boolean {
+  return isSlashCommandCompletion(completion);
+}
+
+function getCompletionInfoTitle(completion: Completion): string {
+  if (typeof completion.apply === 'string') {
+    return completion.apply.trim();
+  }
+  return completion.displayLabel?.trim() || completion.label;
+}
+
+function clearCompletionHoverInfo(portal: Element) {
+  portal.querySelectorAll('.cm-completionInfo-hover').forEach((node) => {
+    node.remove();
+  });
+}
+
+function showCompletionHoverInfo(
+  anchor: HTMLElement,
+  completion: Completion,
+  event: MouseEvent,
+) {
+  if (!completion.detail || !hasCommandHoverInfo(completion)) return;
+  const portal = anchor.closest('[data-web-shell-tooltip-portal]');
+  if (!portal) return;
+
+  let info = portal.querySelector<HTMLElement>('.cm-completionInfo-hover');
+  if (!info) {
+    info = document.createElement('div');
+    info.className =
+      'cm-tooltip cm-completionInfo cm-completionInfo-hover cm-completionInfo-right-narrow';
+    portal.appendChild(info);
+  }
+  info.textContent = `${getCompletionInfoTitle(completion)}\n\n${completion.detail}`;
+  const hideTimerId = info.dataset['hideTimerId'];
+  if (hideTimerId) {
+    window.clearTimeout(Number(hideTimerId));
+    delete info.dataset['hideTimerId'];
+  }
+
+  const infoRect = info.getBoundingClientRect();
+  const offsetX = 18;
+  const offsetY = 12;
+  const padding = 12;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const preferredLeft = event.clientX + offsetX;
+  const left =
+    preferredLeft + infoRect.width + padding > viewportWidth
+      ? Math.max(padding, event.clientX - infoRect.width - offsetX)
+      : preferredLeft;
+  const top = Math.min(
+    Math.max(padding, event.clientY + offsetY),
+    Math.max(padding, viewportHeight - infoRect.height - padding),
+  );
+
+  info.style.position = 'fixed';
+  info.style.left = `${left}px`;
+  info.style.top = `${top}px`;
+  info.style.right = 'auto';
+  info.style.bottom = 'auto';
+}
+
+function scheduleClearCompletionHoverInfo(portal: Element) {
+  const info = portal.querySelector<HTMLElement>('.cm-completionInfo-hover');
+  if (!info) return;
+  const timerId = window.setTimeout(() => {
+    info.remove();
+  }, 180);
+  info.dataset['hideTimerId'] = String(timerId);
+  info.addEventListener(
+    'mouseenter',
+    () => {
+      window.clearTimeout(timerId);
+      delete info.dataset['hideTimerId'];
+    },
+    { once: true },
+  );
+  info.addEventListener(
+    'mouseleave',
+    () => {
+      info.remove();
+    },
+    { once: true },
+  );
+}
+
+function renderCompletionHoverInfo(completion: Completion): HTMLElement | null {
+  if (!completion.detail || !hasCommandHoverInfo(completion)) return null;
+  const anchor = document.createElement('span');
+  anchor.className = 'cm-command-hover-info-anchor';
+  anchor.setAttribute('aria-hidden', 'true');
+  queueMicrotask(() => {
+    const option = anchor.closest('li');
+    if (!option || option.hasAttribute('data-web-shell-hover-info')) return;
+    option.setAttribute('data-web-shell-hover-info', 'true');
+    option.addEventListener('mouseenter', (event) => {
+      showCompletionHoverInfo(anchor, completion, event);
+    });
+    option.addEventListener('mouseleave', () => {
+      const portal = anchor.closest('[data-web-shell-tooltip-portal]');
+      if (portal) scheduleClearCompletionHoverInfo(portal);
+    });
+  });
+  return anchor;
+}
 
 export function normalizePastedText(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
@@ -162,21 +451,9 @@ export function expandLargePastePlaceholders(
   );
 }
 
-function getModeClass(mode: string, shellMode: boolean): string {
-  if (shellMode) return '';
-  switch (mode) {
-    case 'plan':
-      return styles.modePlan;
-    case 'auto-edit':
-      return styles.modeAutoEdit;
-    case 'yolo':
-      return styles.modeYolo;
-    default:
-      return '';
-  }
-}
+// ---- Tag serialization (shared) ----
 
-function serializeComposerTag(tag: WebShellComposerTag): string {
+export function serializeComposerTag(tag: WebShellComposerTag): string {
   return tag.value?.trim() || tag.label?.trim() || tag.id;
 }
 
@@ -184,19 +461,19 @@ function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
   return tags.map(serializeComposerTag).join('\n');
 }
 
-function getComposerTagLabel(tag: WebShellComposerTag): string {
+export function getComposerTagLabel(tag: WebShellComposerTag): string {
   return tag.label?.trim() ?? '';
 }
 
-function getComposerTagValue(tag: WebShellComposerTag): string {
+export function getComposerTagValue(tag: WebShellComposerTag): string {
   return tag.value?.trim() ?? '';
 }
 
-function getComposerTagDisplay(tag: WebShellComposerTag): string {
+export function getComposerTagDisplay(tag: WebShellComposerTag): string {
   return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
 }
 
-function buildComposerPrompt(
+export function buildComposerPrompt(
   text: string,
   tags: readonly WebShellComposerTag[],
 ): string {
@@ -205,6 +482,8 @@ function buildComposerPrompt(
   if (!text) return tagText;
   return `${tagText}\n\n${text}`;
 }
+
+// ---- Inline tag CodeMirror extension (shared) ----
 
 interface InlineTagRange {
   from: number;
@@ -216,13 +495,13 @@ interface InlineTagDecorationSpec {
   tag: WebShellComposerTag;
 }
 
-const addInlineTagEffect = StateEffect.define<InlineTagRange>({
+export const addInlineTagEffect = StateEffect.define<InlineTagRange>({
   map: (value) => value,
 });
-const removeInlineTagEffect = StateEffect.define<{
+export const removeInlineTagEffect = StateEffect.define<{
   predicate?: (tag: WebShellComposerTag) => boolean;
 }>();
-const clearInlineTagsEffect = StateEffect.define<void>();
+export const clearInlineTagsEffect = StateEffect.define<void>();
 
 class ComposerTagWidget extends WidgetType {
   constructor(private readonly tag: WebShellComposerTag) {
@@ -240,25 +519,29 @@ class ComposerTagWidget extends WidgetType {
 
   toDOM(view: EditorView): HTMLElement {
     const chip = document.createElement('span');
-    chip.className = styles.inlineTag;
+    chip.style.cssText =
+      'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-tertiary);color:var(--text-primary);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
     const tagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
 
     if (tagLabel) {
       const label = document.createElement('span');
-      label.className = styles.tagLabel;
+      label.style.cssText =
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--accent-color);';
       label.textContent = tagLabel;
       chip.appendChild(label);
     }
 
     if (tagValue) {
       const value = document.createElement('span');
-      value.className = styles.tagValue;
+      value.style.cssText =
+        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--text-secondary);';
       value.textContent = tagValue;
       chip.appendChild(value);
     } else if (!tagLabel) {
       const fallback = document.createElement('span');
-      fallback.className = styles.tagLabel;
+      fallback.style.cssText =
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--accent-color);';
       fallback.textContent = this.tag.id;
       chip.appendChild(fallback);
     }
@@ -266,11 +549,12 @@ class ComposerTagWidget extends WidgetType {
     if (this.tag.removable !== false) {
       const remove = document.createElement('button');
       remove.type = 'button';
-      remove.className = styles.tagRemove;
       remove.setAttribute(
         'aria-label',
         `Remove ${getComposerTagDisplay(this.tag)}`,
       );
+      remove.style.cssText =
+        'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--text-dimmed);font:inherit;line-height:22px;cursor:pointer;';
       remove.textContent = '×';
       remove.addEventListener('mousedown', (event) => event.preventDefault());
       remove.addEventListener('click', (event) => {
@@ -293,6 +577,12 @@ class ComposerTagWidget extends WidgetType {
           scrollIntoView: true,
         });
         view.focus();
+      });
+      remove.addEventListener('mouseenter', () => {
+        remove.style.color = 'var(--error-color)';
+      });
+      remove.addEventListener('mouseleave', () => {
+        remove.style.color = 'var(--text-dimmed)';
       });
       chip.appendChild(remove);
     }
@@ -343,7 +633,7 @@ const inlineComposerTagField = StateField.define<DecorationSet>({
   ],
 });
 
-function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
+export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
   const tags: WebShellComposerTag[] = [];
   view.state
     .field(inlineComposerTagField)
@@ -354,8 +644,240 @@ function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
   return tags;
 }
 
-export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
-  {
+// ---- EditorHandle type (shared) ----
+
+export interface EditorHandle extends WebShellComposerApi {
+  clearText(): void;
+  focus(): void;
+  getText(): string;
+  hasInput(): boolean;
+  retryLast(): void;
+}
+
+// ---- Compartments (shared) ----
+
+export const editableCompartment = new Compartment();
+export const placeholderCompartment = new Compartment();
+export const followupGhostCompartment = new Compartment();
+
+function getFollowupCompletion(
+  text: string,
+  suggestion: string | null | undefined,
+): string | null {
+  if (!suggestion) return null;
+  if (text.length === 0) return suggestion;
+  return suggestion.startsWith(text) ? suggestion : null;
+}
+
+function getFollowupRemainder(
+  text: string,
+  suggestion: string | null | undefined,
+): string | null {
+  const completion = getFollowupCompletion(text, suggestion);
+  if (!completion || text.length === 0) return null;
+  const remainder = completion.slice(text.length);
+  return remainder.length > 0 ? remainder : null;
+}
+
+class FollowupGhostWidget extends WidgetType {
+  constructor(private readonly text: string) {
+    super();
+  }
+
+  eq(other: FollowupGhostWidget): boolean {
+    return this.text === other.text;
+  }
+
+  toDOM(): HTMLElement {
+    const ghost = document.createElement('span');
+    ghost.className = 'cm-followup-ghost';
+    ghost.textContent = this.text;
+    return ghost;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+function createFollowupGhostExtension(suggestion: string | null) {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+
+      constructor(view: EditorView) {
+        this.decorations = this.buildDecorations(view);
+      }
+
+      update(update: {
+        view: EditorView;
+        docChanged: boolean;
+        selectionSet: boolean;
+      }) {
+        if (update.docChanged || update.selectionSet) {
+          this.decorations = this.buildDecorations(update.view);
+        }
+      }
+
+      private buildDecorations(view: EditorView): DecorationSet {
+        if (!suggestion) return Decoration.none;
+        const selection = view.state.selection.main;
+        const text = view.state.doc.toString();
+        const remainder = getFollowupRemainder(text, suggestion);
+        if (!remainder || !selection.empty || selection.head !== text.length) {
+          return Decoration.none;
+        }
+        return Decoration.set([
+          Decoration.widget({
+            widget: new FollowupGhostWidget(remainder),
+            side: 1,
+          }).range(text.length),
+        ]);
+      }
+    },
+    {
+      decorations: (plugin) => plugin.decorations,
+    },
+  );
+}
+
+// ---- Hook options ----
+
+export interface UseComposerCoreOptions {
+  onSubmit: (text: string, images?: PromptImage[]) => boolean | void;
+  onCycleMode?: () => void;
+  onToggleShortcuts?: () => void;
+  disabled?: boolean;
+  placeholderText?: string;
+  commands: CommandInfo[];
+  skills?: SkillInfo[];
+  slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  queuedMessages?: string[];
+  onPopQueuedMessages?: () => string | null;
+  onClearQueuedMessages?: () => boolean;
+  currentMode?: string;
+  onFocusFooter?: () => boolean;
+  dialogOpen?: boolean;
+  followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
+  onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
+  onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionName?: string;
+  composerInput?: WebShellComposerInput;
+  composerInputVersion?: number;
+  /** CodeMirror theme extension for the editor view. Each variant provides its own. */
+  editorTheme: Parameters<typeof EditorView.theme>[0];
+}
+
+export interface SearchState {
+  searchMode: boolean;
+  searchQuery: string;
+  searchMatches: string[];
+  searchActiveIndex: number;
+  searchInputRef: React.RefObject<HTMLInputElement | null>;
+  searchUiRef: React.RefObject<HTMLDivElement | null>;
+  openHistorySearch: () => void;
+  closeSearch: (restoreDraft: boolean, keepFocus?: boolean) => void;
+  submitSearchMatch: (match: string) => void;
+  handleSearchKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  handleSearchInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  handleSearchCompositionEnd: (
+    e: React.CompositionEvent<HTMLInputElement>,
+  ) => void;
+}
+
+export interface SlashMenuState extends SlashCommandCompletionResult {
+  selectedIndex: number;
+}
+
+type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
+
+function handleMultilineHistoryBoundary(
+  view: EditorView,
+  direction: 'up' | 'down',
+): MultilineHistoryBoundary {
+  const doc = view.state.doc;
+  if (doc.lines <= 1) return 'history';
+
+  const selection = view.state.selection.main;
+  if (!selection.empty) return 'editor';
+
+  const head = selection.head;
+  const line = doc.lineAt(head);
+
+  // Let CodeMirror handle normal multi-line cursor movement first. Once the
+  // cursor is on the edge line, one more arrow key snaps to the true edge;
+  // the next press can browse prompt history instead of feeling stuck.
+  if (direction === 'up') {
+    if (line.number > 1) return 'editor';
+    if (head > line.from) {
+      view.dispatch({
+        selection: { anchor: line.from },
+        scrollIntoView: true,
+      });
+      return 'handled';
+    }
+    return 'history';
+  }
+
+  if (line.number < doc.lines) return 'editor';
+  if (head < line.to) {
+    view.dispatch({
+      selection: { anchor: line.to },
+      scrollIntoView: true,
+    });
+    return 'handled';
+  }
+  return 'history';
+}
+
+export interface UseComposerCoreReturn {
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  viewRef: React.RefObject<EditorView | null>;
+  focus: () => void;
+  submitText: () => void;
+  clearText: () => void;
+  getText: () => string;
+  hasInput: () => boolean;
+  hasContent: boolean;
+  handle: EditorHandle;
+  pastedImages: PromptImage[];
+  removeImage: (index: number) => void;
+  composerTags: WebShellComposerTag[];
+  removeTopTag: (id: string) => void;
+  addTags: (
+    tags: readonly WebShellComposerTag[],
+    options?: WebShellComposerTagOptions,
+  ) => void;
+  removeInlineTags: (predicate?: (tag: WebShellComposerTag) => boolean) => void;
+  insertText: (text: string, options?: WebShellComposerTextOptions) => void;
+  setText: (text: string) => void;
+  submit: (input?: WebShellComposerInput) => void;
+  clear: (options?: { text?: boolean; tags?: boolean }) => void;
+  retryLast: () => void;
+  replaceEditorText: (text: string) => void;
+  shellMode: boolean;
+  setShellMode: React.Dispatch<React.SetStateAction<boolean>>;
+  toggleShellMode: () => void;
+  currentMode: string;
+  sessionName: string | undefined;
+  searchState: SearchState;
+  navigatePrevHistory: () => void;
+  navigateNextHistory: () => void;
+  showShortcutHints: boolean;
+  followupState: UseDaemonFollowupSuggestionReturn['followupState'];
+  disabled: boolean;
+  onAcceptFollowup: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
+  onDismissFollowup: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  slashMenu: SlashMenuState | null;
+  closeSlashMenu: () => void;
+  selectSlashCompletion: (index: number) => boolean;
+  acceptSlashCompletion: (index?: number) => boolean;
+}
+
+export function useComposerCore(
+  options: UseComposerCoreOptions,
+): UseComposerCoreReturn {
+  const {
     onSubmit,
     onCycleMode,
     onToggleShortcuts,
@@ -368,8 +890,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     onPopQueuedMessages,
     onClearQueuedMessages,
     currentMode = 'default',
-    draftText,
-    draftVersion,
     onFocusFooter,
     dialogOpen = false,
     followupState,
@@ -378,9 +898,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     sessionName,
     composerInput,
     composerInputVersion,
-  },
-  ref,
-) {
+    editorTheme,
+  } = options;
+
   const workspace = useOptionalWorkspace();
   const { language, t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -422,6 +942,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const [shellMode, setShellMode] = useState(false);
   const shellModeRef = useRef(shellMode);
   shellModeRef.current = shellMode;
+  const toggleShellMode = useCallback(() => {
+    if (followupStateRef.current?.isVisible) {
+      onDismissFollowupRef.current?.();
+    }
+    setShellMode((value) => !value);
+    viewRef.current?.focus();
+  }, []);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
@@ -445,9 +972,124 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       tagsOverride?: readonly WebShellComposerTag[],
     ) => boolean
   >(() => true);
-  // Tracks a trigger char ('/' or '@') inserted by a hint button so it can be
-  // removed if the user cancels completion (Escape) without typing past it.
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
+  const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
+  const slashMenuRef = useRef<SlashMenuState | null>(null);
+
+  // True while the user is paging through input history with the arrow keys
+  // and has not typed since. Unlike history.isNavigating() (which stays set
+  // until submit), this resets the moment the user edits the text, so a
+  // recalled slash command like "/theme" keeps the slash menu closed while a
+  // freshly typed "/" lets arrows drive the menu. See the ArrowUp/ArrowDown
+  // keymap handlers.
+  const historyBrowseActiveRef = useRef(false);
+
+  const setSlashMenu = useCallback((next: SlashMenuState | null) => {
+    slashMenuRef.current = next;
+    setSlashMenuState(next);
+  }, []);
+
+  const refreshSlashMenuForView = useCallback(
+    (view: EditorView | null, preferredIndex?: number) => {
+      if (!view || disabledRef.current || shellModeRef.current) {
+        setSlashMenu(null);
+        return;
+      }
+      // While browsing history, a recalled slash command (e.g. "/theme")
+      // should not pop its argument menu — the user is browsing, not composing.
+      // Editing the line re-arms it (historyBrowseActiveRef clears on edit).
+      if (historyBrowseActiveRef.current) {
+        setSlashMenu(null);
+        return;
+      }
+      const selection = view.state.selection.main;
+      if (!selection.empty) {
+        setSlashMenu(null);
+        return;
+      }
+      const result = getSlashCommandCompletionResult(
+        view.state.doc.toString(),
+        selection.head,
+        commandsRef.current,
+        skillsRef.current,
+        languageRef.current,
+        (key) => tRef.current(key),
+        slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+      );
+      if (!result) {
+        setSlashMenu(null);
+        return;
+      }
+      const currentIndex =
+        preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
+      const selectedIndex = Math.max(
+        0,
+        Math.min(currentIndex, result.items.length - 1),
+      );
+      setSlashMenu({ ...result, selectedIndex });
+    },
+    [setSlashMenu],
+  );
+
+  const closeSlashMenu = useCallback(() => {
+    setSlashMenu(null);
+  }, [setSlashMenu]);
+
+  const selectSlashCompletion = useCallback(
+    (index: number) => {
+      const current = slashMenuRef.current;
+      if (!current || index < 0 || index >= current.items.length) {
+        return false;
+      }
+      if (current.selectedIndex === index) return true;
+      setSlashMenu({ ...current, selectedIndex: index });
+      return true;
+    },
+    [setSlashMenu],
+  );
+
+  const moveSlashCompletionSelection = useCallback(
+    (direction: 'up' | 'down') => {
+      const current = slashMenuRef.current;
+      if (!current) return false;
+      const nextIndex = nextSlashSelectionIndex(
+        current.selectedIndex,
+        current.items.length,
+        direction,
+      );
+      if (nextIndex === null) return false;
+      setSlashMenu({ ...current, selectedIndex: nextIndex });
+      return true;
+    },
+    [setSlashMenu],
+  );
+
+  const acceptSlashCompletion = useCallback((index?: number) => {
+    const view = viewRef.current;
+    const current = slashMenuRef.current;
+    if (!view || !current) return false;
+    const item = current.items[index ?? current.selectedIndex];
+    if (!item) return false;
+    view.dispatch({
+      changes: { from: current.from, to: current.to, insert: item.apply },
+      selection: { anchor: current.from + item.apply.length },
+      scrollIntoView: true,
+    });
+    view.focus();
+    return true;
+  }, []);
+
+  // Track whether editor has content for send button state
+  const [hasContent, setHasContent] = useState(false);
+
+  // Update hasContent when tags or images change
+  useEffect(() => {
+    const view = viewRef.current;
+    const text = view?.state.doc.toString().trim() ?? '';
+    setHasContent(
+      text.length > 0 || composerTags.length > 0 || pastedImages.length > 0,
+    );
+  }, [composerTags, pastedImages]);
 
   const promptHistory = useInputHistory();
   const shellHistory = useInputHistory('qwen-web-shell-command-history');
@@ -486,42 +1128,46 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   shellHistoryActionsRef.current = shellHistory;
   pastedImagesRef.current = pastedImages;
 
-  // Open the reverse-i-search history panel. Shared by the Ctrl+R keymap and
-  // the mouse-discoverable history button so both stay in lockstep.
+  const getSearchMatches = useCallback((query: string) => {
+    const isShellMode = shellModeRef.current;
+    const history = isShellMode
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    const matches = history.getReverseMatches(query);
+    return isShellMode
+      ? matches
+      : matches.filter((item) => !item.trimStart().startsWith('/'));
+  }, []);
+
   const openHistorySearch = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
+    closeSlashMenu();
     const query = view.state.doc.toString();
     searchDraftRef.current = query;
     setSearchMode(true);
-    setSearchQuery(query);
+    setSearchQuery('');
     const history = shellModeRef.current
       ? shellHistoryActionsRef.current
       : historyActionsRef.current;
-    setSearchMatches(history.getReverseMatches(query));
+    setSearchMatches(getSearchMatches(''));
     setSearchActiveIndex(0);
     history.resetSearch();
     setTimeout(() => searchInputRef.current?.focus(), 0);
-  }, []);
+  }, [closeSlashMenu, getSearchMatches]);
   const openHistorySearchRef = useRef(openHistorySearch);
   openHistorySearchRef.current = openHistorySearch;
 
-  // Fill the editor with the previous history entry (mirrors ArrowUp), used by
-  // the clickable "history" hint so mouse users can walk history too.
   const navigatePrevHistory = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
-    // Match the ArrowUp keymap: when the completion menu is open, move its
-    // selection instead of navigating history.
     if (completionStatus(view.state) === 'active') {
       moveCompletionSelection(false)(view);
       view.focus();
       return;
     }
-    // ...and leave multi-line input alone rather than replacing a multi-line
-    // draft with a single history entry.
     if (view.state.doc.lines > 1) {
       view.focus();
       return;
@@ -540,21 +1186,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     view.focus();
   }, []);
 
-  // Step toward newer history (mirrors ArrowDown); paired with the "previous"
-  // hint so mouse users can walk history in both directions.
   const navigateNextHistory = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
-    // Match the ArrowDown keymap: when the completion menu is open, move its
-    // selection instead of navigating history.
     if (completionStatus(view.state) === 'active') {
       moveCompletionSelection(true)(view);
       view.focus();
       return;
     }
-    // ...and leave multi-line input alone rather than replacing a multi-line
-    // draft with a single history entry.
     if (view.state.doc.lines > 1) {
       view.focus();
       return;
@@ -572,13 +1212,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     view.focus();
   }, []);
 
+  // ---- Create CodeMirror EditorView ----
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Create a tooltip portal div on document.body so autocomplete
-    // dropdowns escape any ancestor `overflow: hidden` (e.g. the host
-    // app's container). We sync the current theme class and computed CSS
-    // variables so the portal keeps the same colors after theme changes.
+    ensureTooltipStyles();
     const tooltipPortal = document.createElement('div');
     tooltipPortal.setAttribute('data-web-shell-tooltip-portal', '');
     tooltipPortal.style.position = 'fixed';
@@ -618,16 +1256,12 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         el = el.parentElement;
       }
       if (themeClass) {
-        // Keep only the theme class on the portal - old theme class
-        // from a previous sync is replaced atomically.
         tooltipPortal.className = themeClass;
       }
     };
     syncTheme();
     document.body.appendChild(tooltipPortal);
 
-    // Observe class changes on every ancestor up to (and including)
-    // the themed one, so light↔dark switches propagate to the portal.
     const observer = new MutationObserver(syncTheme);
     let el: Element | null = containerRef.current;
     while (el) {
@@ -659,6 +1293,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         images.length > 0 ? [...images] : undefined,
       );
       if (accepted === false) return true;
+      setSlashMenu(null);
       onDismissFollowupRef.current?.();
       pendingPastesRef.current.clear();
       nextPasteIdRef.current = 1;
@@ -669,6 +1304,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         historyActionsRef.current.push(text);
         historyActionsRef.current.reset();
       }
+      historyBrowseActiveRef.current = false;
       setComposerTags([]);
       setPastedImages([]);
       view.dispatch({
@@ -679,23 +1315,37 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     };
     submitTextRef.current = submitText;
 
-    const completionSources: CompletionSource[] = [
-      slashCompletionSource(
-        () => commandsRef.current,
-        () => skillsRef.current,
-        () => languageRef.current,
-        (key) => tRef.current(key),
-        () => slashCommandCategoryOrderRef.current,
-      ),
+    const completionSources = [
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
       ),
     ];
 
-    // Shared newline handler for all multi-line input shortcuts. Inserts a
-    // literal '\n' at the cursor instead of submitting.
     const insertNewline = (view: EditorView) => {
       view.dispatch(view.state.replaceSelection('\n'));
+      return true;
+    };
+
+    const acceptFollowupIntoEditor = (
+      view: EditorView,
+      method: 'tab' | 'right',
+    ): boolean => {
+      const followup = followupStateRef.current;
+      const suggestion = followup?.suggestion;
+      const completion = getFollowupCompletion(
+        view.state.doc.toString(),
+        suggestion,
+      );
+      if (!followup?.isVisible || !completion) {
+        return false;
+      }
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: completion },
+        selection: { anchor: completion.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+      onAcceptFollowupRef.current?.(method, { skipOnAccept: true });
       return true;
     };
 
@@ -747,22 +1397,22 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       {
         key: 'Enter',
         run: (view) => {
+          if (slashMenuRef.current) {
+            return acceptSlashCompletion();
+          }
           if (completionStatus(view.state) === 'active') return false;
           const followup = followupStateRef.current;
-          if (
-            view.state.doc.toString().length === 0 &&
-            followup?.isVisible &&
-            followup.suggestion
-          ) {
+          const followupCompletion = getFollowupCompletion(
+            view.state.doc.toString(),
+            followup?.suggestion,
+          );
+          if (followup?.isVisible && followupCompletion) {
             onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-            return submitText(view, followup.suggestion);
+            return submitText(view, followupCompletion);
           }
           return submitText(view);
         },
       },
-      // Newline shortcuts, mirroring the CLI TUI's NEWLINE bindings:
-      // Shift+Enter, Ctrl+J, Ctrl+Enter / Cmd+Enter (Mod-Enter), and
-      // Option/Alt+Enter for terminal muscle memory.
       {
         key: 'Shift-Enter',
         run: insertNewline,
@@ -782,6 +1432,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       {
         key: 'Escape',
         run: () => {
+          if (slashMenuRef.current) {
+            closeSlashMenu();
+            return true;
+          }
           if (shellModeRef.current) {
             setShellMode(false);
             return true;
@@ -808,18 +1462,28 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           const history = shellModeRef.current
             ? shellHistoryActionsRef.current
             : historyActionsRef.current;
-          const isBrowsingHistory = history.isNavigating();
-          if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return moveCompletionSelection(false)(view);
-          }
-          if (isBrowsingHistory) {
+          const isBrowsingHistory = historyBrowseActiveRef.current;
+          // Not browsing history → arrows drive the slash menu / native
+          // completion. While browsing → arrows keep walking history and any
+          // auto-opened menu is closed. (Gate uses historyBrowseActiveRef, not
+          // the sticky history.isNavigating — see its declaration.)
+          if (!isBrowsingHistory) {
+            if (moveSlashCompletionSelection('up')) return true;
+            if (completionStatus(view.state) === 'active') {
+              return moveCompletionSelection(false)(view);
+            }
+          } else {
             closeCompletion(view);
+            closeSlashMenu();
           }
-          if (view.state.doc.lines > 1) return false;
+          const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
+          if (multilineBoundary === 'handled') return true;
+          if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
             const current = view.state.doc.toString();
             const prev = history.navigateUp(current);
             if (prev === null) return true;
+            historyBrowseActiveRef.current = true;
             view.dispatch({
               changes: { from: 0, to: view.state.doc.length, insert: prev },
               selection: { anchor: prev.length },
@@ -843,6 +1507,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           const current = view.state.doc.toString();
           const prev = history.navigateUp(current);
           if (prev === null) return false;
+          historyBrowseActiveRef.current = true;
           view.dispatch({
             changes: { from: 0, to: view.state.doc.length, insert: prev },
             selection: { anchor: prev.length },
@@ -856,17 +1521,29 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           const history = shellModeRef.current
             ? shellHistoryActionsRef.current
             : historyActionsRef.current;
-          const isBrowsingHistory = history.isNavigating();
-          if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return moveCompletionSelection(true)(view);
-          }
-          if (isBrowsingHistory) {
+          const isBrowsingHistory = historyBrowseActiveRef.current;
+          // Symmetric with ArrowUp: history navigation wins while browsing;
+          // the slash menu and native completion only capture arrows once the
+          // user is no longer paging through history.
+          if (!isBrowsingHistory) {
+            if (moveSlashCompletionSelection('down')) return true;
+            if (completionStatus(view.state) === 'active') {
+              return moveCompletionSelection(true)(view);
+            }
+          } else {
             closeCompletion(view);
+            closeSlashMenu();
           }
-          if (view.state.doc.lines > 1) return false;
+          const multilineBoundary = handleMultilineHistoryBoundary(
+            view,
+            'down',
+          );
+          if (multilineBoundary === 'handled') return true;
+          if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
             const next = history.navigateDown();
             if (next === null) return true;
+            historyBrowseActiveRef.current = history.isNavigating();
             view.dispatch({
               changes: { from: 0, to: view.state.doc.length, insert: next },
               selection: { anchor: next.length },
@@ -877,6 +1554,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           if (next === null) {
             return onFocusFooterRef.current?.() ?? false;
           }
+          historyBrowseActiveRef.current = history.isNavigating();
           view.dispatch({
             changes: { from: 0, to: view.state.doc.length, insert: next },
             selection: { anchor: next.length },
@@ -893,8 +1571,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Tab',
-        // Priority: active menu > implicit subcommand > missing "/" prefix > followup suggestion
         run: (view) => {
+          if (acceptFollowupIntoEditor(view, 'tab')) {
+            return true;
+          }
+          if (slashMenuRef.current) {
+            return acceptSlashCompletion();
+          }
           if (completionStatus(view.state) === 'active') {
             return acceptCompletion(view);
           }
@@ -930,25 +1613,16 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             });
             return true;
           }
-          const followup = followupStateRef.current;
-          if (text.length === 0 && followup?.isVisible && followup.suggestion) {
-            onAcceptFollowupRef.current?.('tab');
-            return true;
-          }
           return true;
         },
       },
       {
         key: 'ArrowRight',
         run: (view) => {
-          const followup = followupStateRef.current;
           if (
             completionStatus(view.state) !== 'active' &&
-            view.state.doc.toString().length === 0 &&
-            followup?.isVisible &&
-            followup.suggestion
+            acceptFollowupIntoEditor(view, 'right')
           ) {
-            onAcceptFollowupRef.current?.('right');
             return true;
           }
           return false;
@@ -963,10 +1637,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
     ]);
 
-    const slashCompletionRestarter = EditorView.updateListener.of((update) => {
-      if (!update.docChanged && !update.selectionSet) {
-        return;
-      }
+    const composerUpdateListener = EditorView.updateListener.of((update) => {
       if (update.docChanged && pendingPastesRef.current.size > 0) {
         const nextPasteId = prunePendingPastes(
           pendingPastesRef.current,
@@ -976,27 +1647,20 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           nextPasteIdRef.current = nextPasteId;
         }
       }
-      const selection = update.state.selection.main;
-      if (!selection.empty) return;
-      const line = update.state.doc.lineAt(selection.head);
-      const shouldCompleteSlash = line.from === 0 && line.text.startsWith('/');
-      if (!shouldCompleteSlash) return;
-      window.setTimeout(() => {
-        const view = viewRef.current;
-        if (!view || completionStatus(view.state) === 'active') return;
-        const nextSelection = view.state.selection.main;
-        if (!nextSelection.empty) return;
-        const nextLine = view.state.doc.lineAt(nextSelection.head);
-        if (nextLine.from === 0 && nextLine.text.startsWith('/')) {
-          startCompletion(view);
-        }
-      }, 0);
+      // A genuine edit (typing/deleting/pasting) ends history-browse mode, so
+      // arrows go back to driving any open menu. Programmatic history recall
+      // dispatches carry no user event, so they do not clear the flag.
+      const userEdited = update.transactions.some(
+        (tr) => tr.isUserEvent('input') || tr.isUserEvent('delete'),
+      );
+      if (userEdited) {
+        historyBrowseActiveRef.current = false;
+      }
+      if (update.docChanged || update.selectionSet) {
+        refreshSlashMenuForView(update.view);
+      }
     });
 
-    // Remove a hint-button-inserted trigger ('/' or '@') when its completion
-    // menu closes for any reason — Escape, click-away, blur — and the user
-    // never typed past it. Watching the completion status covers every
-    // dismissal path, not just the Escape key.
     let prevCompletionActive = false;
     const triggerCleanupListener = EditorView.updateListener.of((update) => {
       const trigger = autoTriggerRef.current;
@@ -1007,7 +1671,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           doc.length === trigger.from + trigger.text.length &&
           doc.sliceString(trigger.from) === trigger.text;
         if (!intact) {
-          // The user typed/edited past the trigger — keep their content.
           autoTriggerRef.current = null;
         } else if (prevCompletionActive && !nowActive) {
           autoTriggerRef.current = null;
@@ -1016,7 +1679,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           window.setTimeout(() => {
             if (viewRef.current !== view) return;
             const d = view.state.doc;
-            // Re-check in case the user typed between close and this callback.
             if (
               d.length === from + trigger.text.length &&
               d.sliceString(from) === trigger.text
@@ -1027,6 +1689,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         }
       }
       prevCompletionActive = nowActive;
+      if (!nowActive) {
+        clearCompletionHoverInfo(tooltipPortal);
+      }
     });
 
     const state = EditorState.create({
@@ -1043,9 +1708,16 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           optionClass: (completion) =>
             completion.type === 'file'
               ? 'cm-file-completion'
-              : completion.info
+              : hasCommandHoverInfo(completion)
                 ? 'cm-command-info-completion'
                 : '',
+          addToOptions: [
+            {
+              render: renderCompletionHoverInfo,
+              position: 90,
+            },
+          ],
+          maxRenderedOptions: 300,
           aboveCursor: true,
           positionInfo: (_view, list, option, info, space) => {
             const infoHeight = info.bottom - info.top;
@@ -1065,11 +1737,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             typeof completion.apply === 'string' &&
             completion.apply.endsWith(' '),
         }),
-        // Render tooltips (including autocomplete panel) inside a portal
-        // div on document.body so host-app containers with
-        // `overflow: hidden` cannot clip the dropdown.
         tooltips({ parent: tooltipPortal }),
         placeholderCompartment.of(placeholder('')),
+        followupGhostCompartment.of(createFollowupGhostExtension(null)),
         EditorView.lineWrapping,
         editableCompartment.of(EditorView.editable.of(true)),
         inputHighlight(
@@ -1078,22 +1748,26 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         ),
         inputHighlightTheme,
         inlineComposerTagField,
-        slashCompletionRestarter,
+        composerUpdateListener,
         triggerCleanupListener,
-        EditorView.inputHandler.of((view, from, to, insert) => {
-          if (
-            insert.length > 0 &&
-            view.state.doc.toString() === '' &&
-            followupStateRef.current?.isVisible
-          ) {
-            onDismissFollowupRef.current?.();
+        // Update hasContent state when document changes
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            const text = update.state.doc.toString().trim();
+            setHasContent(
+              text.length > 0 ||
+                composerTagsRef.current.length > 0 ||
+                pastedImagesRef.current.length > 0,
+            );
           }
+        }),
+        EditorView.inputHandler.of((view, from, to, insert) => {
           if (
             insert === '!' &&
             view.state.doc.toString() === '' &&
             completionStatus(view.state) !== 'active'
           ) {
-            setShellMode((value) => !value);
+            toggleShellMode();
             return true;
           }
           if (
@@ -1107,12 +1781,19 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           return false;
         }),
         EditorView.domEventHandlers({
+          blur() {
+            closeSlashMenu();
+            return false;
+          },
           paste(event) {
             const items = event.clipboardData?.items;
             if (!items) return false;
             let hasImage = false;
             for (const item of items) {
-              if (item.type.startsWith('image/')) {
+              if (
+                item.type.startsWith('image/') &&
+                /^image\/(png|jpeg|gif|webp)$/i.test(item.type)
+              ) {
                 hasImage = true;
                 const file = item.getAsFile();
                 if (!file) continue;
@@ -1144,7 +1825,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             ) {
               onDismissFollowupRef.current?.();
             }
-            const { placeholderText, nextPasteId } =
+            const { placeholderText: pt, nextPasteId } =
               createLargePastePlaceholder(
                 pendingPastesRef.current,
                 nextPasteIdRef.current,
@@ -1156,43 +1837,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
               changes: {
                 from: selection.from,
                 to: selection.to,
-                insert: placeholderText,
+                insert: pt,
               },
-              selection: { anchor: selection.from + placeholderText.length },
+              selection: { anchor: selection.from + pt.length },
               scrollIntoView: true,
             });
             return true;
           },
         }),
-        EditorView.theme({
-          '&': {
-            fontSize: '14px',
-            background: 'transparent',
-            border: 'none',
-          },
-          '&.cm-focused': {
-            outline: 'none',
-          },
-          '.cm-scroller': {
-            overflow: 'visible',
-          },
-          '.cm-content': {
-            padding: '0',
-            fontFamily: 'var(--font-mono, "SF Mono", "Fira Code", monospace)',
-            color: 'var(--text-primary, #e0e0e0)',
-            caretColor: 'var(--accent-color, #4a9eff)',
-          },
-          '.cm-line': {
-            padding: '0',
-          },
-          '.cm-placeholder': {
-            color: 'var(--text-dimmed, #666)',
-          },
-          '.cm-cursor': {
-            borderLeftColor: 'var(--accent-color, #4a9eff)',
-            borderLeftWidth: '2px',
-          },
-        }),
+        EditorView.theme(editorTheme),
       ],
     });
 
@@ -1204,13 +1857,23 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     viewRef.current = view;
     view.focus();
 
+    // Initial check
+    const initialText = view.state.doc.toString().trim();
+    setHasContent(
+      initialText.length > 0 ||
+        composerTagsRef.current.length > 0 ||
+        pastedImagesRef.current.length > 0,
+    );
+
     return () => {
       view.destroy();
       viewRef.current = null;
       observer.disconnect();
       tooltipPortal.remove();
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- Reactions to prop changes ----
 
   useEffect(() => {
     const view = viewRef.current;
@@ -1229,24 +1892,28 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     const view = viewRef.current;
     if (!view) return;
     const followupSuggestion =
-      followupState?.isVisible && followupState.suggestion
+      !disabled && followupState?.isVisible && followupState.suggestion
         ? followupState.suggestion
         : null;
-    const nextPlaceholder = followupSuggestion ?? placeholderText;
+    const nextPlaceholder =
+      followupSuggestion ??
+      (shellMode ? t('editor.shellPlaceholder') : placeholderText);
     view.dispatch({
-      effects: placeholderCompartment.reconfigure(placeholder(nextPlaceholder)),
+      effects: [
+        placeholderCompartment.reconfigure(placeholder(nextPlaceholder)),
+        followupGhostCompartment.reconfigure(
+          createFollowupGhostExtension(followupSuggestion),
+        ),
+      ],
     });
-  }, [placeholderText, followupState?.isVisible, followupState?.suggestion]);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view || draftText === undefined) return;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: draftText },
-      selection: { anchor: draftText.length },
-    });
-    view.focus();
-  }, [draftText, draftVersion]);
+  }, [
+    disabled,
+    placeholderText,
+    shellMode,
+    t,
+    followupState?.isVisible,
+    followupState?.suggestion,
+  ]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -1259,28 +1926,64 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     }, 0);
   }, [language]);
 
+  const slashMenuDataKey = [
+    commands
+      .map((command) =>
+        [
+          command.name,
+          command.description ?? '',
+          command.source ?? '',
+          command.displayCategory ?? '',
+          command.argumentHint ?? '',
+          command.subcommands?.join(',') ?? '',
+        ].join('\u0000'),
+      )
+      .join('\u0001'),
+    skills
+      .map((skill) => [skill.name, skill.description].join('\u0000'))
+      .join('\u0001'),
+    slashCommandCategoryOrder?.join('|') ?? '',
+  ].join('\u0002');
+
+  useEffect(() => {
+    if (slashMenuRef.current) {
+      refreshSlashMenuForView(viewRef.current);
+    }
+  }, [slashMenuDataKey, language, refreshSlashMenuForView]);
+
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
     if (dialogOpen) {
+      closeSlashMenu();
       view.contentDOM.blur();
     } else {
       view.focus();
     }
-  }, [dialogOpen]);
+  }, [dialogOpen, closeSlashMenu]);
 
+  // Global keydown handler for focus-stealing
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
+      // Only capture keystrokes if the target is within the web-shell container
+      // or if no specific element has focus (document.body is active)
+      const target = event.target as Node;
+      const isWithinContainer = containerRef.current?.contains(target);
+      const isBodyFocused = document.activeElement === document.body;
+      if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;
+      const followupCompletion = getFollowupCompletion(
+        view?.state.doc.toString() ?? '',
+        followup?.suggestion,
+      );
       if (
         view &&
         !view.hasFocus &&
         followup?.isVisible &&
-        followup.suggestion &&
-        view.state.doc.toString().length === 0 &&
+        followupCompletion &&
         !isEditableTarget(event.target)
       ) {
         if (
@@ -1292,7 +1995,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           completionStatus(view.state) !== 'active'
         ) {
           event.preventDefault();
-          onAcceptFollowupRef.current?.('tab');
+          view.dispatch({
+            changes: {
+              from: 0,
+              to: view.state.doc.length,
+              insert: followupCompletion,
+            },
+            selection: { anchor: followupCompletion.length },
+            scrollIntoView: true,
+          });
+          view.focus();
+          onAcceptFollowupRef.current?.('tab', { skipOnAccept: true });
           return;
         }
         if (
@@ -1304,7 +2017,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           completionStatus(view.state) !== 'active'
         ) {
           event.preventDefault();
-          onAcceptFollowupRef.current?.('right');
+          view.dispatch({
+            changes: {
+              from: 0,
+              to: view.state.doc.length,
+              insert: followupCompletion,
+            },
+            selection: { anchor: followupCompletion.length },
+            scrollIntoView: true,
+          });
+          view.focus();
+          onAcceptFollowupRef.current?.('right', { skipOnAccept: true });
           return;
         }
       }
@@ -1316,11 +2039,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
 
       event.preventDefault();
       if (event.key === '!' && view.state.doc.toString() === '') {
-        if (followupStateRef.current?.isVisible) {
-          onDismissFollowupRef.current?.();
-        }
-        setShellMode((value) => !value);
-        view.focus();
+        toggleShellMode();
         return;
       }
       const selection = view.state.selection.main;
@@ -1330,7 +2049,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         scrollIntoView: true,
       });
       view.focus();
-      if (event.key === '/' || event.key === '@') {
+      if (event.key === '/') {
+        window.setTimeout(() => {
+          refreshSlashMenuForView(viewRef.current);
+        }, 0);
+      } else if (event.key === '@') {
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
@@ -1342,7 +2065,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchMode, dialogOpen]);
+  }, [searchMode, dialogOpen, refreshSlashMenuForView, toggleShellMode]);
+
+  // ---- Imperative methods ----
 
   const focus = useCallback(() => {
     viewRef.current?.focus();
@@ -1367,26 +2092,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       }
       const selection = view.state.selection.main;
       let insert = text;
-      // Make the trigger characters idempotent so a second click re-opens the
-      // menu instead of inserting a duplicate.
       let skipInsert = false;
       let caretOverride: number | null = null;
-      // Whether to open the completion menu afterwards. A mid-line '/' no-op
-      // (non-empty draft) must not, since the slash source needs a line-leading
-      // '/' and would otherwise pop an empty/unrelated menu.
-      let openMenu = text === '/' || text === '@';
+      const openAtMenu = text === '@';
+      let openSlashMenu = text === '/';
       if (text === '/') {
-        // The slash-command menu only triggers on a line-leading '/'. Re-open the
-        // menu (don't insert) when the line already starts with '/', and no-op
-        // when the editor holds other text: inserting a mid-line '/' wouldn't open
-        // the menu, and replacing the draft would silently destroy it. The user
-        // can clear the draft themselves to start a command on an empty line.
         const line = view.state.doc.lineAt(selection.head);
         if (line.text.startsWith('/')) {
-          skipInsert = true; // re-open the menu on the existing command
+          skipInsert = true;
         } else if (view.state.doc.length > 0) {
           skipInsert = true;
-          openMenu = false; // no-op on a non-empty draft; don't pop an empty menu
+          openSlashMenu = false;
         }
       } else if (text === '@') {
         const before =
@@ -1398,16 +2114,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           selection.from + 1,
         );
         if (after === '@') {
-          // Cursor sits directly before an existing '@'; step over it instead of
-          // inserting a duplicate, so the menu opens on the existing mention.
           skipInsert = true;
           caretOverride = selection.from + 1;
         } else if (before === '@') {
-          // Already an '@' right before the cursor — just re-open the menu.
           skipInsert = true;
         } else if (before && !/\s/.test(before)) {
-          // An @-mention only parses at a token boundary, so when it lands
-          // mid-word prepend a space to detach it.
           insert = ' @';
         }
       }
@@ -1417,9 +2128,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           selection: { anchor: selection.from + insert.length },
           scrollIntoView: true,
         });
-        // Remember the click-inserted trigger so Escape can undo it if the user
-        // never types past it (see the Escape keymap).
-        if (openMenu) {
+        if (openAtMenu) {
           autoTriggerRef.current = { text: insert, from: selection.from };
         }
       } else if (caretOverride !== null) {
@@ -1429,7 +2138,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         });
       }
       view.focus();
-      if (openMenu) {
+      if (openSlashMenu) {
+        window.setTimeout(() => {
+          refreshSlashMenuForView(viewRef.current);
+        }, 0);
+      } else if (openAtMenu) {
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
@@ -1438,7 +2151,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         }, 0);
       }
     },
-    [],
+    [refreshSlashMenuForView],
   );
 
   const getText = useCallback(() => {
@@ -1481,23 +2194,23 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
 
   const clear = useCallback(
     (options?: { text?: boolean; tags?: boolean }) => {
-      const clearText = options?.text ?? true;
+      const clearTextOpt = options?.text ?? true;
       const clearTags = options?.tags ?? true;
       const view = viewRef.current;
-      if (clearText && view && view.state.doc.length > 0) {
+      if (clearTextOpt && view && view.state.doc.length > 0) {
         view.dispatch({
           changes: { from: 0, to: view.state.doc.length, insert: '' },
           effects: clearInlineTagsEffect.of(),
         });
       }
-      if (clearText) {
+      if (clearTextOpt) {
         setPastedImages([]);
         pendingPastesRef.current.clear();
         nextPasteIdRef.current = 1;
       }
       if (clearTags) {
         setComposerTags([]);
-        if (!clearText) {
+        if (!clearTextOpt) {
           removeInlineTags();
         }
       }
@@ -1512,10 +2225,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const addTags = useCallback(
     (
       tags: readonly WebShellComposerTag[],
-      options?: WebShellComposerTagOptions,
+      tagOptions?: WebShellComposerTagOptions,
     ) => {
       if (tags.length === 0) return;
-      if (options?.placement === 'inline') {
+      if (tagOptions?.placement === 'inline') {
         const view = viewRef.current;
         if (!view) return;
         const selection = view.state.selection.main;
@@ -1523,10 +2236,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         const ranges: InlineTagRange[] = [];
         const insert = tags
           .map((tag) => {
-            const text = serializeComposerTag(tag);
-            ranges.push({ from: at, to: at + text.length, tag });
-            at += text.length + 1;
-            return text;
+            const tagText = serializeComposerTag(tag);
+            ranges.push({ from: at, to: at + tagText.length, tag });
+            at += tagText.length + 1;
+            return tagText;
           })
           .join(' ');
         const text = insert ? `${insert} ` : '';
@@ -1558,7 +2271,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     [],
   );
 
-  const removeTag = useCallback(
+  const removeTopTag = useCallback(
     (id: string) => {
       setComposerTags((current) =>
         current.filter((tag) => tag.id !== id || tag.removable === false),
@@ -1617,35 +2330,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     setPastedImages([]);
   }, []);
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      clearText,
-      clear,
-      focus,
-      getText,
-      hasInput,
-      setText,
-      addTags,
-      removeTag,
-      insertText,
-      retryLast,
-      submit,
-    }),
-    [
-      addTags,
-      clear,
-      clearText,
-      focus,
-      getText,
-      hasInput,
-      insertText,
-      removeTag,
-      retryLast,
-      setText,
-      submit,
-    ],
-  );
+  const replaceEditorText = useCallback((text: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+      selection: { anchor: text.length },
+      scrollIntoView: true,
+    });
+  }, []);
+
+  // ---- composerInput sync ----
 
   useEffect(() => {
     const input = composerInputRef.current;
@@ -1671,15 +2366,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       if (inlineTags.length > 0) {
         let from = 0;
         for (const tag of inlineTags) {
-          const text = serializeComposerTag(tag);
+          const tagText = serializeComposerTag(tag);
           effects.push(
             addInlineTagEffect.of({
               from,
-              to: from + text.length,
+              to: from + tagText.length,
               tag,
             }),
           );
-          from += text.length + 1;
+          from += tagText.length + 1;
         }
       }
       view.dispatch({
@@ -1709,15 +2404,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     };
   }, [composerInputVersion, submit]);
 
-  const replaceEditorText = useCallback((text: string) => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: text },
-      selection: { anchor: text.length },
-      scrollIntoView: true,
-    });
-  }, []);
+  // ---- Search state ----
 
   const closeSearch = useCallback(
     (restoreDraft: boolean, keepFocus = true) => {
@@ -1732,8 +2419,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         ? shellHistoryActionsRef.current
         : historyActionsRef.current;
       history.resetSearch();
-      // Outside-click dismissal passes keepFocus=false so focus isn't stolen
-      // from whatever the user clicked (e.g. a button/link in the transcript).
       if (keepFocus) {
         viewRef.current?.focus();
       }
@@ -1741,14 +2426,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     [replaceEditorText],
   );
 
-  // While the reverse-i-search panel is open, a primary-button / touch press
-  // outside it behaves like Escape: cancel the search and restore the draft.
-  // Mirrors the inline-panel dismissal (Settings/Mode pickers).
   useEffect(() => {
     if (!searchMode) return;
     const onPointerOutside = (event: Event) => {
-      // Only the primary (left) button dismisses; middle-click pastes and
-      // right-click opens a context menu. Touch events have no button.
       if (event instanceof MouseEvent && event.button !== 0) return;
       if (event.defaultPrevented) return;
       const panel = searchUiRef.current;
@@ -1797,6 +2477,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   );
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // While an IME is composing, keys belong to the IME. For example, Enter
+    // commits the candidate instead of submitting the history search.
+    if (e.nativeEvent.isComposing) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       closeSearch(true);
@@ -1820,252 +2503,120 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       if (searchMatches.length > 0) {
         setSearchActiveIndex((index) => (index + 1) % searchMatches.length);
       }
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (searchMatches.length > 0) {
-        setSearchActiveIndex((index) => (index + 1) % searchMatches.length);
-      }
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (searchMatches.length > 0) {
-        setSearchActiveIndex(
-          (index) => (index - 1 + searchMatches.length) % searchMatches.length,
-        );
-      }
     }
+  };
+
+  const runHistorySearch = (q: string) => {
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    setSearchMatches(getSearchMatches(q));
+    setSearchActiveIndex(0);
+    history.resetSearch();
   };
 
   const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const q = e.target.value;
     setSearchQuery(q);
-    const history = shellModeRef.current
-      ? shellHistoryActionsRef.current
-      : historyActionsRef.current;
-    setSearchMatches(history.getReverseMatches(q));
-    setSearchActiveIndex(0);
-    history.resetSearch();
+    if ((e.nativeEvent as InputEvent).isComposing) return;
+    runHistorySearch(q);
   };
 
-  const modeClass = getModeClass(currentMode, shellMode);
-  const containerClass = [
-    styles.container,
-    shellMode ? styles.shellMode : '',
-    modeClass,
-  ]
-    .filter(Boolean)
-    .join(' ');
-  const visibleSearchStart = Math.max(
-    0,
-    Math.min(searchActiveIndex - 2, searchMatches.length - 6),
-  );
-  const visibleSearchMatches = searchMatches.slice(
-    visibleSearchStart,
-    visibleSearchStart + 6,
-  );
-  const prefixClass = [
-    styles.prefix,
-    shellMode
-      ? styles.prefixShell
-      : currentMode === 'yolo'
-        ? styles.prefixYolo
-        : currentMode === 'auto-edit'
-          ? styles.prefixAutoEdit
-          : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
-  const prefixContent = shellMode ? (
-    '!'
-  ) : currentMode === 'yolo' ? (
-    '*'
-  ) : (
-    <PromptChevron />
-  );
-  // A faint, always-on hint row that surfaces the otherwise-hidden input
-  // shortcuts (history search, slash commands, file mentions) so they stay
-  // discoverable even while typing. Hidden where it would conflict or not
-  // apply: shell mode (different prefix), reverse-i-search (its own hint bar),
-  // a followup suggestion occupying the placeholder, while disabled (the
-  // buttons would otherwise bypass the editor's disabled guard), or while a
-  // dialog is open (matching the Ctrl+R keymap guard).
+  const handleSearchCompositionEnd = (
+    e: React.CompositionEvent<HTMLInputElement>,
+  ) => {
+    const q = e.currentTarget.value;
+    setSearchQuery(q);
+    runHistorySearch(q);
+  };
+
+  const removeImage = useCallback((index: number) => {
+    setPastedImages((prev) => prev.filter((_, idx) => idx !== index));
+  }, []);
+
+  // ---- Computed ----
+
   const showShortcutHints =
     !shellMode &&
     !searchMode &&
     !followupState?.isVisible &&
     !disabled &&
     !dialogOpen;
-  // Enable/disable the ↑/↓ history hints based on whether there's an older /
-  // newer entry to move to (mirrors the keyboard no-op at the ends).
-  const histNav = (shellMode ? shellHistory : promptHistory).nav;
-  // Shared props for the hint-row buttons: keep focus in the editor
-  // (preventDefault on mousedown) and don't bubble to the container's click-
-  // to-focus handler (stopPropagation on click).
-  const hintProps = (handler: () => void, haspopup?: 'dialog' | 'listbox') => ({
-    type: 'button' as const,
-    className: styles.hintItem,
-    ...(haspopup ? { 'aria-haspopup': haspopup } : {}),
-    onMouseDown: (e: ReactMouseEvent<HTMLButtonElement>) => e.preventDefault(),
-    onClick: (e: ReactMouseEvent<HTMLButtonElement>) => {
-      e.stopPropagation();
-      handler();
-    },
-  });
-  const renderComposerTagContent = (tag: WebShellComposerTag) => {
-    const tagLabel = getComposerTagLabel(tag);
-    const tagValue = getComposerTagValue(tag);
-    if (!tagLabel && !tagValue) {
-      return <span className={styles.tagLabel}>{tag.id}</span>;
-    }
-    return (
-      <>
-        {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
-        {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
-      </>
-    );
+
+  // ---- Imperative handle ----
+
+  const handle: EditorHandle = {
+    clearText,
+    clear,
+    focus,
+    getText,
+    hasInput,
+    setText,
+    addTags,
+    removeTag: removeTopTag,
+    insertText,
+    retryLast,
+    submit,
   };
 
-  return (
-    <div className={containerClass} onClick={focus}>
-      <div className={styles.borderTop}>
-        {sessionName && (
-          <span className={styles.borderTopLabel}>{sessionName}</span>
-        )}
-      </div>
-      {searchMode && (
-        <div ref={searchUiRef}>
-          <div className={styles.searchBar}>
-            <span className={styles.searchLabel}>
-              {t('editor.searchLabel')}
-            </span>
-            <input
-              ref={searchInputRef}
-              className={styles.searchInput}
-              value={searchQuery}
-              onChange={handleSearchInput}
-              onKeyDown={handleSearchKeyDown}
-              placeholder={t('editor.searchPlaceholder')}
-            />
-            <span className={styles.searchHint}>{t('editor.searchHint')}</span>
-          </div>
-          {searchMatches.length > 0 && (
-            <div className={styles.searchResults}>
-              {visibleSearchMatches.map((match, index) => {
-                const matchIndex = visibleSearchStart + index;
-                return (
-                  <button
-                    key={`${match}-${matchIndex}`}
-                    type="button"
-                    className={`${styles.searchResult} ${
-                      matchIndex === searchActiveIndex
-                        ? styles.searchResultActive
-                        : ''
-                    }`}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      replaceEditorText(match);
-                      closeSearch(false);
-                    }}
-                  >
-                    <span className={styles.searchResultMarker}>
-                      {matchIndex === searchActiveIndex ? '›' : ''}
-                    </span>
-                    <span className={styles.searchResultText}>{match}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {searchMatches.length === 0 && (
-            <div className={styles.searchEmpty}>{t('editor.noHistory')}</div>
-          )}
-        </div>
-      )}
-      {pastedImages.length > 0 && (
-        <div className={styles.images}>
-          {pastedImages.map((img, i) => (
-            <div key={i} className={styles.imageThumb}>
-              <img src={`data:${img.media_type};base64,${img.data}`} alt="" />
-              <button
-                className={styles.imageRemove}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setPastedImages((prev) => prev.filter((_, idx) => idx !== i));
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      {composerTags.length > 0 && (
-        <div className={styles.tags}>
-          {composerTags.map((tag) => (
-            <span key={tag.id} className={styles.tag}>
-              {renderComposerTagContent(tag)}
-              {tag.removable !== false && (
-                <button
-                  type="button"
-                  className={styles.tagRemove}
-                  aria-label={`Remove ${getComposerTagDisplay(tag)}`}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    removeTag(tag.id);
-                    viewRef.current?.focus();
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Backspace' && event.key !== 'Delete') {
-                      return;
-                    }
-                    event.preventDefault();
-                    removeTag(tag.id);
-                    viewRef.current?.focus();
-                  }}
-                >
-                  ×
-                </button>
-              )}
-            </span>
-          ))}
-        </div>
-      )}
-      <div className={styles.line}>
-        <span className={prefixClass}>{prefixContent}</span>
-        <div ref={containerRef} className={styles.wrapper} />
-      </div>
-      {showShortcutHints && (
-        <div className={styles.hints}>
-          <button {...hintProps(navigatePrevHistory)} disabled={!histNav.canUp}>
-            <span className={styles.hintKey}>↑</span>
-            {t('editor.hintPrev')}
-          </button>
-          <span className={styles.hintSep}>·</span>
-          <button
-            {...hintProps(navigateNextHistory)}
-            disabled={!histNav.canDown}
-          >
-            <span className={styles.hintKey}>↓</span>
-            {t('editor.hintNext')}
-          </button>
-          <span className={styles.hintSep}>·</span>
-          <button {...hintProps(openHistorySearch, 'dialog')}>
-            <span className={styles.hintKey}>ctrl+r</span>
-            {t('editor.hintSearch')}
-          </button>
-          <span className={styles.hintSep}>·</span>
-          <button {...hintProps(() => insertText('/'), 'listbox')}>
-            <span className={styles.hintKey}>/</span>
-            {t('editor.hintCommands')}
-          </button>
-          <span className={styles.hintSep}>·</span>
-          <button {...hintProps(() => insertText('@'), 'listbox')}>
-            <span className={styles.hintKey}>@</span>
-            {t('editor.hintFiles')}
-          </button>
-        </div>
-      )}
-      <div className={styles.borderBottom} />
-    </div>
-  );
-});
+  return {
+    containerRef,
+    viewRef,
+    focus,
+    submitText: useCallback(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      submitTextRef.current(view);
+    }, []),
+    clearText,
+    getText,
+    hasInput,
+    hasContent,
+    handle,
+    pastedImages,
+    removeImage,
+    composerTags,
+    removeTopTag,
+    addTags,
+    removeInlineTags,
+    insertText,
+    setText,
+    submit,
+    clear,
+    retryLast,
+    replaceEditorText,
+    shellMode,
+    setShellMode,
+    toggleShellMode,
+    currentMode,
+    sessionName,
+    searchState: {
+      searchMode,
+      searchQuery,
+      searchMatches,
+      searchActiveIndex,
+      searchInputRef,
+      searchUiRef,
+      openHistorySearch,
+      closeSearch,
+      submitSearchMatch,
+      handleSearchKeyDown,
+      handleSearchInput,
+      handleSearchCompositionEnd,
+    },
+    navigatePrevHistory,
+    navigateNextHistory,
+    showShortcutHints,
+    followupState:
+      followupState as UseDaemonFollowupSuggestionReturn['followupState'],
+    disabled,
+    onAcceptFollowup:
+      onAcceptFollowup as UseDaemonFollowupSuggestionReturn['onAcceptFollowup'],
+    onDismissFollowup:
+      onDismissFollowup as UseDaemonFollowupSuggestionReturn['onDismissFollowup'],
+    slashMenu,
+    closeSlashMenu,
+    selectSlashCompletion,
+    acceptSlashCompletion,
+  };
+}

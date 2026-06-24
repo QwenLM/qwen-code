@@ -25,6 +25,12 @@ describe('toolFormatting', () => {
     expect(formatToolDisplayName('run_shell_command')).toBe('Shell');
   });
 
+  it('normalizes web fetch display names', () => {
+    expect(formatToolDisplayName('web_fetch')).toBe('WebFetch');
+    expect(formatToolDisplayName('webFetch')).toBe('WebFetch');
+    expect(formatToolDisplayName('fetch')).toBe('WebFetch');
+  });
+
   it('does not show the cwd for user shell commands', () => {
     expect(
       getToolDescription(

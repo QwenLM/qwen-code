@@ -37,6 +37,7 @@ function ScrollableList<T>(
   // latent name collision if VirtualizedList ever adds the same prop.
   const { hasFocus, ...virtualizedListProps } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
+  const isDraggingScrollbar = useRef(false);
 
   useImperativeHandle(
     ref,
@@ -48,6 +49,10 @@ function ScrollableList<T>(
         virtualizedListRef.current?.scrollToIndex(params),
       scrollToItem: (params) =>
         virtualizedListRef.current?.scrollToItem(params),
+      hitTestScrollbar: (location) =>
+        virtualizedListRef.current?.hitTestScrollbar(location) ?? false,
+      scrollToScrollbarRow: (row) =>
+        virtualizedListRef.current?.scrollToScrollbarRow(row),
       getScrollIndex: () => virtualizedListRef.current?.getScrollIndex() ?? 0,
       getScrollState: () =>
         virtualizedListRef.current?.getScrollState() ?? {
@@ -95,22 +100,28 @@ function ScrollableList<T>(
     { isActive: hasFocus },
   );
 
-  // Mouse wheel scrolling. Legacy `<Static>` mode let the host terminal
-  // handle wheel events (they scrolled the native scrollback); in VP mode
-  // we own the visible region, so the terminal hands wheel events to us
-  // via SGR mouse protocol. Without this, opening the VP gate would cost
-  // users the most-felt mouse interaction.
-  //
-  // Hit-testing is intentionally absent: the ScrollableList occupies the
-  // conversation pane between the (small) pinned header and the (small)
-  // input prompt, so any wheel event the terminal forwards is overwhelm-
-  // ingly aimed at scrolling history. Precise per-pane hit-testing (and
-  // scrollbar drag) needs screen-absolute element coordinates which the
-  // stock ink 7 `useBoxMetrics` hook reports relative to the parent — see
-  // V.4 follow-up.
+  // Mouse scrolling. Legacy `<Static>` mode let the host terminal scroll its
+  // native scrollback. In VP mode the list owns the visible region, so route
+  // wheel ticks and scrollbar drags to the virtualized viewport.
   const WHEEL_LINES_PER_TICK = 3;
   const handleMouseEvent = useCallback((event: MouseEvent) => {
     if (!virtualizedListRef.current) return;
+    if (event.name === 'left-release') {
+      isDraggingScrollbar.current = false;
+      return;
+    }
+    if (event.name === 'left-press') {
+      isDraggingScrollbar.current =
+        virtualizedListRef.current.hitTestScrollbar(event);
+      if (isDraggingScrollbar.current) {
+        virtualizedListRef.current.scrollToScrollbarRow(event.row);
+      }
+      return;
+    }
+    if (event.name === 'move' && isDraggingScrollbar.current) {
+      virtualizedListRef.current.scrollToScrollbarRow(event.row);
+      return;
+    }
     if (event.name === 'scroll-up') {
       virtualizedListRef.current.scrollBy(-WHEEL_LINES_PER_TICK);
     } else if (event.name === 'scroll-down') {

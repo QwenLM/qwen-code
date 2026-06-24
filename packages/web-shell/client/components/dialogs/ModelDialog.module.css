@@ -1,0 +1,108 @@
+.layout {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  font-size: 12px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.row:hover,
+.selected {
+  background: var(--bg-tertiary);
+}
+
+.selected .label {
+  color: var(--accent-color);
+}
+
+.divider {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 6px 8px 0;
+  background: var(--border-color);
+}
+
+.number {
+  min-width: 28px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.provider {
+  flex: 0 0 auto;
+  color: var(--accent-color);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.detailRow {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 6px;
+}
+
+.detailLabel {
+  min-width: 12ch;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.detailValue {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  padding: 14px 0;
+  color: var(--text-secondary);
+}
