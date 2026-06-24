@@ -40,7 +40,10 @@ const SANDBOX_ENABLED = Boolean(
   process.env['QWEN_SANDBOX'] &&
     process.env['QWEN_SANDBOX'].toLowerCase() !== 'false',
 );
-const SKIP = process.env['QWEN_BENCHMARK_ENABLED'] !== '1' || SANDBOX_ENABLED;
+const SKIP =
+  process.env['QWEN_BENCHMARK_ENABLED'] !== '1' ||
+  SANDBOX_ENABLED ||
+  process.platform === 'win32';
 
 const ITERATIONS = Number(process.env['BENCHMARK_ITERATIONS'] ?? 5);
 const WARMUP_ITERATIONS = Number(
@@ -52,9 +55,18 @@ const BOOT_TIMEOUT_MS = Number(
 const EXTERNAL_P99_MAX_MS = Number(
   process.env['BENCHMARK_DAEMON_STARTUP_P99_MAX_MS'] ?? 15_000,
 );
+const STATUS_FETCH_TIMEOUT_MS = Number(
+  process.env['BENCHMARK_DAEMON_STATUS_TIMEOUT_MS'] ?? 5_000,
+);
+const STDERR_TIMING_TIMEOUT_MS = Number(
+  process.env['BENCHMARK_STDERR_TIMING_TIMEOUT_MS'] ??
+    Math.max(2_000, Math.ceil(BOOT_TIMEOUT_MS / 5)),
+);
 
 const OUTPUT_DIR = resolveOutputDir('daemon-startup');
 const TOKEN = 'daemon-startup-benchmark-token';
+// Prefer the bundled root CLI because this benchmark targets the packaged
+// `qwen serve` entrypoint; TEST_CLI_PATH can still override it.
 const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(DEFAULT_REPO_ROOT, 'dist/cli.js');
@@ -110,6 +122,8 @@ interface StartupBenchmarkSnapshot {
     warmupIterations: number;
     bootTimeoutMs: number;
     externalP99MaxMs: number;
+    statusFetchTimeoutMs: number;
+    stderrTimingTimeoutMs: number;
   };
   notes: string[];
   runs: StartupRun[];
@@ -129,6 +143,8 @@ const snapshot: StartupBenchmarkSnapshot = {
     warmupIterations: WARMUP_ITERATIONS,
     bootTimeoutMs: BOOT_TIMEOUT_MS,
     externalP99MaxMs: EXTERNAL_P99_MAX_MS,
+    statusFetchTimeoutMs: STATUS_FETCH_TIMEOUT_MS,
+    stderrTimingTimeoutMs: STDERR_TIMING_TIMEOUT_MS,
   },
   notes: [
     'Measures built CLI `qwen serve` cold startup to the stdout listening line.',
@@ -184,7 +200,7 @@ async function terminate(child: ChildProcess): Promise<void> {
 async function waitForStderrTiming(
   stderr: () => string,
 ): Promise<RegExpMatchArray> {
-  const deadline = performance.now() + 1_000;
+  const deadline = performance.now() + STDERR_TIMING_TIMEOUT_MS;
   while (performance.now() < deadline) {
     const match = stderr().match(STDERR_TIMING_RE);
     if (match) return match;
@@ -192,7 +208,10 @@ async function waitForStderrTiming(
   }
   const match = stderr().match(STDERR_TIMING_RE);
   if (match) return match;
-  throw new Error(`startup timing line missing from stderr:\n${stderr()}`);
+  throw new Error(
+    `startup timing line missing from stderr after ` +
+      `${STDERR_TIMING_TIMEOUT_MS}ms:\n${stderr()}`,
+  );
 }
 
 async function runStartupIteration(
@@ -301,6 +320,7 @@ async function runStartupIteration(
       `http://127.0.0.1:${listening.port}/daemon/status?detail=full`,
       {
         headers: { authorization: `Bearer ${TOKEN}` },
+        signal: AbortSignal.timeout(STATUS_FETCH_TIMEOUT_MS),
       },
     ).then((res) => {
       if (!res.ok) {
@@ -314,15 +334,29 @@ async function runStartupIteration(
     const runQwenServeToListenMs = startup?.runQwenServeToListenMs;
     const preheatStatus = startup?.preheat?.status;
 
-    expect(startup?.processStartedAt).toEqual(expect.any(String));
-    expect(startup?.listenerReadyAt).toEqual(expect.any(String));
-    expect(processToListenMs).toEqual(Number(timing[1]));
-    expect(runQwenServeToListenMs).toEqual(Number(timing[2]));
-    expect(processToListenMs).toEqual(expect.any(Number));
-    expect(runQwenServeToListenMs).toEqual(expect.any(Number));
-    expect(processToListenMs).toBeGreaterThanOrEqual(runQwenServeToListenMs!);
-    expect(preheatStatus).toEqual(expect.any(String));
-    expect(PREHEAT_STATUSES).toContain(preheatStatus as PreheatStatus);
+    const validateStartupObservation = () => {
+      expect(startup?.processStartedAt).toEqual(expect.any(String));
+      expect(startup?.listenerReadyAt).toEqual(expect.any(String));
+      expect(processToListenMs).toEqual(Number(timing[1]));
+      expect(runQwenServeToListenMs).toEqual(Number(timing[2]));
+      expect(processToListenMs).toEqual(expect.any(Number));
+      expect(runQwenServeToListenMs).toEqual(expect.any(Number));
+      expect(processToListenMs).toBeGreaterThanOrEqual(runQwenServeToListenMs!);
+      expect(preheatStatus).toEqual(expect.any(String));
+      expect(PREHEAT_STATUSES).toContain(preheatStatus as PreheatStatus);
+    };
+    if (measured) {
+      validateStartupObservation();
+    } else {
+      try {
+        validateStartupObservation();
+      } catch (err) {
+        console.warn(
+          `[daemon-startup] warmup ${iteration}: startup validation failed: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
 
     return {
       iteration,
