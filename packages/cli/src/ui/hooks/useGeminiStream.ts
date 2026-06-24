@@ -12,23 +12,22 @@ import {
   useMemo,
   useLayoutEffect,
 } from 'react';
-import type {
-  Config,
-  EditorType,
-  GeminiClient,
-  Logger,
-  RetryInfo,
-  ServerGeminiChatCompressedEvent,
-  ServerGeminiContentEvent as ContentEvent,
-  ServerGeminiFinishedEvent,
-  ServerGeminiStreamEvent as GeminiEvent,
-  ThoughtSummary,
-  ToolCallRequestInfo,
-  GeminiErrorEventValue,
-  StopFailureErrorType,
-  ActiveGoal,
-} from '@qwen-code/qwen-code-core';
 import {
+  type Config,
+  type EditorType,
+  type GeminiClient,
+  type Logger,
+  type RetryInfo,
+  type ServerGeminiChatCompressedEvent,
+  type ServerGeminiContentEvent as ContentEvent,
+  type ServerGeminiFinishedEvent,
+  type ServerGeminiStreamEvent as GeminiEvent,
+  type ThoughtSummary,
+  type ToolCallRequestInfo,
+  type GeminiErrorEventValue,
+  type StopFailureErrorType,
+  type ActiveGoal,
+  type VisionBridgeResult,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -51,6 +50,10 @@ import {
   ApiCancelEvent,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  hasImageParts,
+  splitImageParts,
   generateToolUseSummary,
   getActiveGoal,
   activeGoalEquals,
@@ -104,11 +107,63 @@ const debugLogger = createDebugLogger('GEMINI_STREAM');
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
+const VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT = 2048;
+// Untrusted vision-model output is shown in the terminal; strip ANSI/C0+C1
+// control escapes (keep \t, \n) so a crafted image can't inject sequences.
+// eslint-disable-next-line no-control-regex
+const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
   responseParts: Part[];
+}
+
+function truncateVisionBridgeTranscript(transcript: string): string {
+  const safe = transcript.replace(TERMINAL_CONTROL_CHARS, '');
+  if (safe.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
+    return safe;
+  }
+  return `${safe
+    .slice(0, VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT)
+    .trimEnd()}\n[Transcript truncated]`;
+}
+
+/**
+ * Build the user-facing notice shown when the vision bridge runs. On success it
+ * states which model was used, how many images were converted (and omitted),
+ * discloses the data egress (and endpoint, since auto-select can route to a
+ * different host than the primary model), and includes the generated
+ * transcription so the user can catch misreads. On failure it surfaces the
+ * reason.
+ *
+ * @param result The structured result returned by the vision bridge.
+ * @returns A multi-line notice string for the message history.
+ */
+function formatVisionBridgeNotice(result: VisionBridgeResult): string {
+  const modelName = result.modelId ?? 'vision model';
+  const target = result.modelEndpoint
+    ? `${modelName} (${result.modelEndpoint})`
+    : modelName;
+  const egressNote = result.egressOccurred
+    ? ` Your image and prompt/context were sent to ${target}.`
+    : '';
+  if (result.status === 'failed') {
+    const reason = result.egressOccurred
+      ? 'the vision model request failed'
+      : 'the vision bridge could not run';
+    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+  }
+  if (result.status === 'skipped') {
+    return `🔎 Vision bridge cancelled.${egressNote}`;
+  }
+  // On success the image was always sent, so disclose egress unconditionally.
+  const omitted =
+    result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
+  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
+  return result.transcript
+    ? `${header}\n${truncateVisionBridgeTranscript(result.transcript)}`
+    : header;
 }
 
 /**
@@ -791,6 +846,56 @@ export const useGeminiStream = (
     getPromptCount,
   ]);
 
+  const applyVisionBridgeIfNeeded = useCallback(
+    async (
+      parts: PartListUnion | null,
+      timestamp: number,
+      signal: AbortSignal,
+    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
+      if (
+        parts === null ||
+        !hasImageParts(parts) ||
+        !shouldRunVisionBridge(config)
+      ) {
+        return { parts, shouldProceed: true };
+      }
+
+      debugLogger.debug('vision bridge: gate matched, running conversion');
+      const bridgeResult = await runVisionBridge({ config, parts, signal });
+      debugLogger.debug(
+        `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
+      );
+      // Surface one notice: egress + transcript on success, reason on failure,
+      // and egress disclosure after cancellation if data was already sent.
+      if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+        addItem(
+          {
+            type:
+              bridgeResult.status === 'failed'
+                ? MessageType.ERROR
+                : MessageType.INFO,
+            text: formatVisionBridgeNotice(bridgeResult),
+          },
+          timestamp,
+        );
+      }
+      if (signal.aborted) {
+        return { parts: null, shouldProceed: false };
+      }
+      if (bridgeResult.applied && bridgeResult.parts != null) {
+        return { parts: bridgeResult.parts, shouldProceed: true };
+      }
+      // The bridge produced no usable replacement. Never forward images to a
+      // text-only model (it can't read them): drop them and proceed on the
+      // remaining text, or stop if nothing is left.
+      const textOnly = splitImageParts(parts).nonImageParts;
+      return textOnly.length > 0
+        ? { parts: textOnly, shouldProceed: true }
+        : { parts: null, shouldProceed: false };
+    },
+    [addItem, config],
+  );
+
   const prepareQueryForGemini = useCallback(
     async (
       query: PartListUnion,
@@ -937,6 +1042,16 @@ export const useGeminiStream = (
           }
           localQueryToSendToGemini = atCommandResult.processedQuery;
         }
+
+        const bridgeResult = await applyVisionBridgeIfNeeded(
+          localQueryToSendToGemini,
+          userMessageTimestamp,
+          abortSignal,
+        );
+        if (!bridgeResult.shouldProceed) {
+          return { queryToSend: null, shouldProceed: false };
+        }
+        localQueryToSendToGemini = bridgeResult.parts;
       } else {
         // It's a function response (PartListUnion that isn't a string)
         localQueryToSendToGemini = query;
@@ -959,6 +1074,7 @@ export const useGeminiStream = (
       logger,
       shellModeActive,
       scheduleToolCalls,
+      applyVisionBridgeIfNeeded,
     ],
   );
 
@@ -1842,7 +1958,18 @@ export const useGeminiStream = (
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
       dualOutput?.finalizeAssistantMessage();
-      if (toolCallRequests.length > 0 && !signal.aborted) {
+      // When a loop was detected, halt without scheduling the calls collected
+      // before the guard fired. The core splice/clear only touches
+      // turn.pendingToolCalls, which the TUI does not execute from — without
+      // this gate the pre-detection (and, for the always-on consecutive guard,
+      // potentially repeated) calls would still run before the halt dialog
+      // appears. Mirrors the non-interactive runner, which returns on
+      // LoopDetected before scheduling.
+      if (
+        toolCallRequests.length > 0 &&
+        !signal.aborted &&
+        !loopDetectedRef.current
+      ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
         const duplicateResponseParts: Part[] = [];
         let duplicatePromptId: string | undefined;
@@ -1960,6 +2087,15 @@ export const useGeminiStream = (
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
+
+      // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
+      // events), so it must reflect only this turn's state. Reset it
+      // unconditionally at entry: if the previous turn detected a loop but threw
+      // before its own post-stream reset, a stuck `true` would otherwise make
+      // every later turn silently drop its tool calls. A ToolResult/btw
+      // continuation never carries a pending loop (a detected loop schedules
+      // nothing), so clearing it here is a no-op for those paths.
+      loopDetectedRef.current = false;
 
       // Reset turn-local ownership trackers at the very top of every
       // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
@@ -2742,7 +2878,7 @@ export const useGeminiStream = (
                   );
                 }
                 if (atCommandResult.recording) {
-                  config.getChatRecordingService()?.recordAtCommand?.({
+                  config.getChatRecordingService?.()?.recordAtCommand?.({
                     filesRead: atCommandResult.recording.filesRead,
                     status: atCommandResult.recording.status,
                     ...(atCommandResult.recording.message
@@ -2777,6 +2913,19 @@ export const useGeminiStream = (
               }
             }
 
+            const bridgeResult = await applyVisionBridgeIfNeeded(
+              resolvedMidTurnQuery,
+              midTurnTimestamp + index,
+              midTurnAbort.signal,
+            );
+            if (!bridgeResult.shouldProceed) {
+              if (midTurnAbort.signal.aborted) {
+                break;
+              }
+              continue;
+            }
+            resolvedMidTurnQuery = bridgeResult.parts ?? resolvedMidTurnQuery;
+
             const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
               resolvedMidTurnQuery,
               msg,
@@ -2795,7 +2944,7 @@ export const useGeminiStream = (
             }
             responsesToSend.push(...midTurnUserMessageParts);
             config
-              .getChatRecordingService()
+              .getChatRecordingService?.()
               ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
             addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
           }
@@ -2827,6 +2976,7 @@ export const useGeminiStream = (
       addItem,
       dualOutput,
       onDebugMessage,
+      applyVisionBridgeIfNeeded,
     ],
   );
 

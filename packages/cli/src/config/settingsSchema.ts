@@ -15,6 +15,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
@@ -747,6 +748,16 @@ const SETTINGS_SCHEMA = {
         description: 'Hide the window title bar',
         showInDialog: false,
       },
+      disableWorkflowKeywordTrigger: {
+        type: 'boolean',
+        label: 'Disable Workflow Keyword Trigger',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+        showInDialog: true,
+      },
       showStatusInTitle: {
         type: 'boolean',
         label: 'Show Status in Title',
@@ -1301,7 +1312,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.',
+          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -1532,7 +1543,13 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: 5 as number,
             description:
-              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+              'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            jsonSchemaOverride: {
+              type: 'integer',
+              default: 5,
+              description:
+                'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            },
             showInDialog: false,
           },
           toolResultsTotalCharsThreshold: {
@@ -1571,8 +1588,20 @@ const SETTINGS_SCHEMA = {
             category: 'Context',
             requiresRestart: true,
             default: true,
-            description: 'Respect .qwenignore files when searching',
+            description:
+              'Respect .qwenignore and configured custom ignore files when searching',
             showInDialog: true,
+          },
+          customIgnoreFiles: {
+            type: 'array',
+            label: 'Custom Ignore Files',
+            category: 'Context',
+            requiresRestart: true,
+            default: [...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES] as string[],
+            description:
+              'Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.',
+            showInDialog: false,
+            items: { type: 'string' },
           },
           enableRecursiveFileSearch: {
             type: 'boolean',
@@ -2566,6 +2595,11 @@ const SETTINGS_SCHEMA = {
     // This is an advanced safety valve for runaway hook loops, not a common
     // interactive preference.
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'integer',
+      minimum: 1,
+      default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    },
   },
 
   hooks: {
@@ -2804,6 +2838,16 @@ const SETTINGS_SCHEMA = {
       'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
     showInDialog: false,
     properties: {
+      autoOpen: {
+        type: 'boolean',
+        label: 'Auto-open Artifacts',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.',
+        showInDialog: false,
+      },
       publisher: {
         type: 'enum',
         label: 'Artifact Publisher',

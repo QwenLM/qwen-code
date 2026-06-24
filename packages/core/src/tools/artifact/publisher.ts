@@ -9,14 +9,16 @@ import path from 'node:path';
 
 /**
  * Backend-agnostic contract for publishing an artifact. The local backend
- * (option B) writes to disk and returns a file:// URL; a future host backend
- * (option C) uploads to a user-configured static host and returns an https://
+ * writes to disk and returns a file:// URL; the host/oss backends upload to a
+ * configured destination and return an https://
  * link. The {@link ArtifactTool} depends only on this interface so backends are
  * swappable without touching the tool.
  */
+export type ArtifactPublisherKind = 'local' | 'host' | 'oss';
+
 export interface ArtifactPublisher {
   /** Backend identifier, e.g. 'local'. */
-  readonly kind: string;
+  readonly kind: ArtifactPublisherKind;
   /**
    * Publishes (or redeploys) the document. Implementations MUST be idempotent
    * for a given {@link PublishArtifactInput.id}: the same id redeploys to the
@@ -47,7 +49,7 @@ export interface PublishedArtifact {
 }
 
 /**
- * Config for the host publisher (option C). The artifact is uploaded by running
+ * Config for the host publisher. The artifact is uploaded by running
  * a user-supplied command; `{file}` (the local HTML path) and `{key}` (the
  * remote object key) are substituted, and `urlTemplate`'s `{key}` yields the
  * shareable URL. Credentials live in the user's command/environment — qwen
@@ -63,7 +65,7 @@ export interface ArtifactHostConfig {
 }
 
 /**
- * Config for the native Aliyun OSS publisher (option C, zero-dependency). The
+ * Config for the native Aliyun OSS publisher (zero-dependency). The
  * artifact is uploaded with a self-signed PUT Object request. Credentials come
  * from the environment (OSS_* / ALIBABA_CLOUD_*), never from settings.
  */

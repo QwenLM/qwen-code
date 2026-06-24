@@ -283,8 +283,7 @@ export const McpStatus: React.FC<McpStatusProps> = ({
             {t('to hide descriptions')}
           </Text>
           <Text>
-            {'  '}- {t('Use')}{' '}
-            <Text color={theme.text.accent}>/mcp auth &lt;server-name&gt;</Text>{' '}
+            {'  '}- {t('Use')} <Text color={theme.text.accent}>/mcp</Text>{' '}
             {t('to authenticate with OAuth-enabled servers')}
           </Text>
           <Text>

@@ -29,8 +29,10 @@ import type {
   DaemonSessionContextUsageStatus,
   BranchSessionRequest,
   DaemonBranchedSession,
+  DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionLspStatus,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
@@ -79,17 +81,21 @@ import type {
   DaemonToolToggleResult,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
+  ForkSessionRequest,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
   ExtensionInstallResponse,
+  ExtensionOperationStatus,
   ExtensionScopeRequest,
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
   DaemonWorkspaceHooksStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonPermissionRuleType,
+  DaemonWorkspacePermissionsStatus,
 } from './types.js';
 
 /**
@@ -708,6 +714,15 @@ export class DaemonClient {
     );
   }
 
+  async extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus> {
+    return await this.jsonRequest<ExtensionOperationStatus>(
+      `/workspace/extensions/operations/${encodeURIComponent(operationId)}`,
+      'GET /workspace/extensions/operations/:operationId',
+    );
+  }
+
   async checkExtensionUpdates(
     clientId?: string,
   ): Promise<ExtensionUpdateCheckResponse> {
@@ -1265,6 +1280,27 @@ export class DaemonClient {
     );
   }
 
+  async forkSession(
+    sessionId: string,
+    req: ForkSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonForkSessionResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/fork`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ directive: req.directive }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/fork');
+        }
+        return (await res.json()) as DaemonForkSessionResult;
+      },
+    );
+  }
+
   async sessionContext(
     sessionId: string,
     clientId?: string,
@@ -1334,6 +1370,22 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/tasks');
         }
         return (await res.json()) as DaemonSessionTasksStatus;
+      },
+    );
+  }
+
+  async sessionLspStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionLspStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/lsp`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/lsp');
+        }
+        return (await res.json()) as DaemonSessionLspStatus;
       },
     );
   }
@@ -1491,7 +1543,7 @@ export class DaemonClient {
   async rewindSession(
     sessionId: string,
     promptId: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
@@ -1501,7 +1553,12 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ promptId }),
+        body: JSON.stringify({
+          promptId,
+          ...(opts?.rewindFiles !== undefined
+            ? { rewindFiles: opts.rewindFiles }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -1728,6 +1785,81 @@ export class DaemonClient {
         return (await res.json()) as DaemonSettingUpdateResult;
       },
     );
+  }
+
+  async workspacePermissions(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspacePermissionsStatus> {
+    return this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'GET /workspace/permissions',
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async setWorkspacePermissionRules(
+    scope: 'workspace',
+    ruleType: DaemonPermissionRuleType,
+    rules: readonly string[],
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    return this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'POST /workspace/permissions',
+      {
+        method: 'POST',
+        body: { scope, ruleType, rules: [...rules] },
+        clientId: opts?.clientId,
+      },
+    );
+  }
+
+  /**
+   * Convenience helper that appends a single rule to the specified scope/type
+   * list. Performs a non-atomic read-modify-write: GETs the current rules,
+   * appends the new rule locally, then POSTs the full replacement list.
+   *
+   * @remarks Not safe for concurrent use — a concurrent modification between
+   * the GET and POST will be silently overwritten (lost-update / TOCTOU).
+   */
+  async addWorkspacePermissionRule(
+    scope: 'workspace',
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalizedRule = rule.trim();
+    const status = await this.workspacePermissions(opts);
+    const currentRules = status[scope].rules[ruleType];
+    if (currentRules.includes(normalizedRule)) return status;
+    return this.setWorkspacePermissionRules(
+      scope,
+      ruleType,
+      [...currentRules, normalizedRule],
+      opts,
+    );
+  }
+
+  /**
+   * Convenience helper that removes a single rule from the specified scope/type
+   * list. Performs a non-atomic read-modify-write: GETs the current rules,
+   * removes the rule locally, then POSTs the full replacement list.
+   *
+   * @remarks Not safe for concurrent use — a concurrent modification between
+   * the GET and POST will be silently overwritten (lost-update / TOCTOU).
+   */
+  async removeWorkspacePermissionRule(
+    scope: 'workspace',
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalizedRule = rule.trim();
+    const status = await this.workspacePermissions(opts);
+    const currentRules = status[scope].rules[ruleType];
+    const nextRules = currentRules.filter((item) => item !== normalizedRule);
+    if (nextRules.length === currentRules.length) return status;
+    return this.setWorkspacePermissionRules(scope, ruleType, nextRules, opts);
   }
 
   /**

@@ -23,6 +23,10 @@ import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
+  parseSGRMouseEvent,
+  type MouseEvent as SgrMouseEvent,
+} from '../utils/mouse.js';
+import {
   BACKSLASH_ENTER_DETECTION_WINDOW_MS,
   CHAR_CODE_ESC,
   KITTY_CTRL_C,
@@ -110,10 +114,13 @@ export interface Key {
 }
 
 export type KeypressHandler = (key: Key) => void;
+export type MouseHandler = (event: SgrMouseEvent) => void;
 
 interface KeypressContextValue {
   subscribe: (handler: KeypressHandler) => void;
   unsubscribe: (handler: KeypressHandler) => void;
+  subscribeMouse: (handler: MouseHandler) => void;
+  unsubscribeMouse: (handler: MouseHandler) => void;
   pasteWorkaround: boolean;
 }
 
@@ -149,6 +156,7 @@ export function KeypressProvider({
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
+  const mouseSubscribers = useRef<Set<MouseHandler>>(new Set()).current;
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
@@ -162,6 +170,20 @@ export function KeypressProvider({
       subscribers.delete(handler);
     },
     [subscribers],
+  );
+
+  const subscribeMouse = useCallback(
+    (handler: MouseHandler) => {
+      mouseSubscribers.add(handler);
+    },
+    [mouseSubscribers],
+  );
+
+  const unsubscribeMouse = useCallback(
+    (handler: MouseHandler) => {
+      mouseSubscribers.delete(handler);
+    },
+    [mouseSubscribers],
   );
 
   useEffect(() => {
@@ -194,6 +216,7 @@ export function KeypressProvider({
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
     let swallowingSgrMouse = false;
+    let sgrMouseBuffer = '';
     let sgrMouseTimeout: NodeJS.Timeout | null = null;
 
     const updateKittyBuffer = (value: string) => {
@@ -677,37 +700,47 @@ export function KeypressProvider({
         return;
       }
 
-      // SGR mouse sequences (\x1b[<...M or \x1b[<...m) are handled by
-      // useMouseEvents via ink's useInput pipeline. readline's CSI parser
-      // treats the `<` parameter byte as a final byte, splitting the
-      // sequence into a CSI event (\x1b[<) followed by individual character
-      // events (digits, semicolons, M/m). Without this filter, those
-      // trailing characters would appear as typed text in the input box.
+      // SGR mouse sequences (\x1b[<...M or \x1b[<...m): readline's CSI
+      // parser treats `<` as a final byte, splitting the sequence into
+      // \x1b[< followed by individual character events. We buffer the
+      // fragments, reconstruct the full sequence, parse it, and forward
+      // to registered mouse handlers.
       if (swallowingSgrMouse) {
         if (key.ctrl && key.name === 'c') {
           swallowingSgrMouse = false;
+          sgrMouseBuffer = '';
           if (sgrMouseTimeout) {
             clearTimeout(sgrMouseTimeout);
             sgrMouseTimeout = null;
           }
         } else {
+          sgrMouseBuffer += key.sequence;
           if (key.name === 'm' || key.sequence === 'M') {
             swallowingSgrMouse = false;
             if (sgrMouseTimeout) {
               clearTimeout(sgrMouseTimeout);
               sgrMouseTimeout = null;
             }
+            const parsed = parseSGRMouseEvent(sgrMouseBuffer);
+            if (parsed) {
+              for (const handler of mouseSubscribers) {
+                handler(parsed.event);
+              }
+            }
+            sgrMouseBuffer = '';
           }
           return;
         }
       }
       if (key.sequence === `${ESC}[<`) {
         swallowingSgrMouse = true;
+        sgrMouseBuffer = `${ESC}[<`;
         if (sgrMouseTimeout) {
           clearTimeout(sgrMouseTimeout);
         }
         sgrMouseTimeout = setTimeout(() => {
           swallowingSgrMouse = false;
+          sgrMouseBuffer = '';
           sgrMouseTimeout = null;
         }, KITTY_SEQUENCE_TIMEOUT_MS);
         return;
@@ -1198,6 +1231,7 @@ export function KeypressProvider({
         sgrMouseTimeout = null;
       }
       swallowingSgrMouse = false;
+      sgrMouseBuffer = '';
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);
@@ -1225,12 +1259,19 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    mouseSubscribers,
     initialCapturedInput,
   ]);
 
   return (
     <KeypressContext.Provider
-      value={{ subscribe, unsubscribe, pasteWorkaround }}
+      value={{
+        subscribe,
+        unsubscribe,
+        subscribeMouse,
+        unsubscribeMouse,
+        pasteWorkaround,
+      }}
     >
       {children}
     </KeypressContext.Provider>

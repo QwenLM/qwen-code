@@ -91,6 +91,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
@@ -104,6 +105,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO_EDIT);
     });
@@ -115,6 +117,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
     });
@@ -126,6 +129,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
+        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.YOLO);
     });

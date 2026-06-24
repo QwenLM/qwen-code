@@ -31,13 +31,9 @@
 .content p {
   margin: 6px 0;
 }
-
-.content ul,
-.content ol {
-  margin: 6px 0;
+.content ul {
   padding-left: 20px;
 }
-
 .content li {
   margin: 2px 0;
 }
@@ -63,9 +59,9 @@
   font-family: var(--font-mono);
   font-size: 0.9em;
   padding: 1px 5px;
-  background: var(--subtle-bg-strong);
+  background: var(--inline-code-bg);
   border-radius: 3px;
-  color: var(--accent-color);
+  color: var(--text-primary);
 }
 
 .link {
@@ -151,7 +147,7 @@
   overflow-x: auto;
   font-size: 13px;
   line-height: 1.5;
-  background: var(--editor-bg);
+  background: var(--inline-code-bg);
   max-width: 100%;
 }
 

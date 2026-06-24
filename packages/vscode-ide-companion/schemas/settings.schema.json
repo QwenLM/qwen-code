@@ -238,6 +238,11 @@
           "type": "boolean",
           "default": false
         },
+        "disableWorkflowKeywordTrigger": {
+          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
+          "type": "boolean",
+          "default": false
+        },
         "showStatusInTitle": {
           "description": "Show Qwen Code session name and status in the terminal window title",
           "type": "boolean",
@@ -563,7 +568,7 @@
           "default": false
         },
         "skipLoopDetection": {
-          "description": "Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.",
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.",
           "type": "boolean",
           "default": true
         },
@@ -679,9 +684,9 @@
               "default": 60
             },
             "toolResultsNumToKeep": {
-              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
-              "type": "number",
-              "default": 5
+              "type": "integer",
+              "default": 5,
+              "description": "Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1."
             },
             "toolResultsTotalCharsThreshold": {
               "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
@@ -700,9 +705,20 @@
               "default": true
             },
             "respectQwenIgnore": {
-              "description": "Respect .qwenignore files when searching",
+              "description": "Respect .qwenignore and configured custom ignore files when searching",
               "type": "boolean",
               "default": true
+            },
+            "customIgnoreFiles": {
+              "description": "Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                ".agentignore",
+                ".aiignore"
+              ]
             },
             "enableRecursiveFileSearch": {
               "description": "Enable recursive file search functionality",
@@ -1201,9 +1217,10 @@
       "default": false
     },
     "stopHookBlockingCap": {
-      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
-      "type": "number",
-      "default": 8
+      "type": "integer",
+      "minimum": 1,
+      "default": 8,
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP."
     },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",
@@ -2683,6 +2700,11 @@
       "description": "Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
       "type": "object",
       "properties": {
+        "autoOpen": {
+          "description": "Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.",
+          "type": "boolean",
+          "default": true
+        },
         "publisher": {
           "description": "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload). Options: local, host, oss",
           "enum": [

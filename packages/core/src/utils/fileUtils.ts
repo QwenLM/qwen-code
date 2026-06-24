@@ -830,6 +830,18 @@ export interface ProcessedFileReadResult {
   stats?: import('node:fs').Stats;
 }
 
+export interface ProcessSingleFileContentOptions {
+  offset?: number;
+  limit?: number;
+  pages?: string;
+  /**
+   * When true, keep an image inline for a text-only model instead of replacing
+   * it with an "unsupported" note. Only the interactive `@`-resolution path
+   * sets this after deciding the vision bridge should handle the image.
+   */
+  preserveUnsupportedImage?: boolean;
+}
+
 /**
  * For media file types, returns the corresponding modality key.
  * Returns undefined for non-media types (text, binary, svg, notebook) which are always supported.
@@ -866,18 +878,37 @@ function unsupportedModalityMessage(
  * Reads and processes a single file, handling text, images, PDFs, and notebooks.
  * @param filePath Absolute path to the file.
  * @param config Config instance for truncation settings.
- * @param offset Optional offset for text files (0-based line number).
- * @param limit Optional limit for text files (number of lines to read).
- * @param pages Optional page range for PDF files (e.g. "1-5", "3", "10-20").
+ * @param options Optional read behavior controls.
  * @returns ProcessedFileReadResult object.
  */
+export async function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  options?: ProcessSingleFileContentOptions,
+): Promise<ProcessedFileReadResult>;
 export async function processSingleFileContent(
   filePath: string,
   config: Config,
   offset?: number,
   limit?: number,
   pages?: string,
+): Promise<ProcessedFileReadResult>;
+export async function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  optionsOrOffset?: ProcessSingleFileContentOptions | number,
+  legacyLimit?: number,
+  legacyPages?: string,
 ): Promise<ProcessedFileReadResult> {
+  const options =
+    typeof optionsOrOffset === 'object' && optionsOrOffset !== null
+      ? optionsOrOffset
+      : {
+          offset: optionsOrOffset,
+          limit: legacyLimit,
+          pages: legacyPages,
+        };
+  const { offset, limit, pages, preserveUnsupportedImage = false } = options;
   const rootDirectory = config.getTargetDir();
   try {
     let stats: import('node:fs').Stats;
@@ -968,15 +999,25 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
-        const message = unsupportedModalityMessage(modality, displayName);
-        debugLogger.warn(
-          `Model '${config.getModel()}' does not support ${modality} input. ` +
-            `Skipping file: ${relativePathForDisplay}`,
+        // On the interactive @-resolution path, the caller can keep image parts
+        // inline so the vision bridge can transcribe them downstream for a
+        // text-only model. Other media (audio/video) are always skipped.
+        const bridgeWillHandleImage =
+          modality === 'image' && preserveUnsupportedImage;
+        if (!bridgeWillHandleImage) {
+          const message = unsupportedModalityMessage(modality, displayName);
+          debugLogger.warn(
+            `Model '${config.getModel()}' does not support ${modality} input. ` +
+              `Skipping file: ${relativePathForDisplay}`,
+          );
+          return {
+            llmContent: message,
+            returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
+          };
+        }
+        debugLogger.debug(
+          `Preserving unsupported image for vision bridge: ${relativePathForDisplay}`,
         );
-        return {
-          llmContent: message,
-          returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
-        };
       }
     }
 
