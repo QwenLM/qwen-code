@@ -509,6 +509,14 @@ export function mountAcpHttp(
       : undefined;
 
     upgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+      const rawAddr =
+        (socket as unknown as { remoteAddress?: string }).remoteAddress ??
+        'ws-unknown';
+      const logReject = (reason: string) => {
+        writeStderrLine(
+          `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
+        );
+      };
       let url: URL;
       try {
         url = new URL(
@@ -516,6 +524,7 @@ export function mountAcpHttp(
           `http://${req.headers.host ?? 'localhost'}`,
         );
       } catch {
+        logReject('invalid-url');
         socket.destroy();
         return;
       }
@@ -523,6 +532,7 @@ export function mountAcpHttp(
         (route) => route.path === url.pathname,
       );
       if (url.pathname !== path && !extraRoute) {
+        logReject(`unknown-path ${url.pathname}`);
         socket.destroy();
         return;
       }
@@ -544,6 +554,7 @@ export function mountAcpHttp(
           `host.docker.internal:${localPort}`,
         ]);
         if (!allowed.has(host)) {
+          logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
           return;
@@ -562,11 +573,13 @@ export function mountAcpHttp(
             originHost !== 'localhost' &&
             originHost !== '::1'
           ) {
+            logReject(`origin-not-allowed ${originHost}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;
           }
         } catch {
+          logReject('invalid-origin');
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
           return;
@@ -589,11 +602,13 @@ export function mountAcpHttp(
           actual.length !== expectedTokenHash.length ||
           !timingSafeEqual(expectedTokenHash, actual)
         ) {
+          logReject('auth-mismatch');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;
         }
       } else if (!fromLoopback) {
+        logReject('non-loopback-without-token');
         socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
         socket.destroy();
         return;
@@ -618,9 +633,6 @@ export function mountAcpHttp(
         initTimer.unref?.();
         let connRef: AcpConnection | undefined;
         let messageQueue = Promise.resolve();
-        const rawAddr =
-          (socket as unknown as { remoteAddress?: string }).remoteAddress ??
-          'ws-unknown';
         const wsKey = rawAddr.startsWith('::ffff:')
           ? rawAddr.slice(7)
           : rawAddr;

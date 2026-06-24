@@ -12,6 +12,7 @@ export interface VoiceModelOption {
   authType?: string;
   baseUrl?: string;
   contextWindow?: number;
+  modalities?: { audio?: boolean };
 }
 
 /**
@@ -67,6 +68,7 @@ export function extractVoiceModels(
         ...(typeof model.contextLimit === 'number'
           ? { contextWindow: model.contextLimit }
           : {}),
+        modalities: { audio: true },
       });
     }
   }

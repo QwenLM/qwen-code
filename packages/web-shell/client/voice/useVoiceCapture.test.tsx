@@ -205,6 +205,30 @@ describe('useVoiceCapture', () => {
     expect(capture?.status).toBe('error');
   });
 
+  it('delivers final transcripts and returns to idle', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+
+    await act(async () => {
+      ws.onopen?.();
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'final',
+          text: 'hello from voice',
+        }),
+      } as MessageEvent);
+    });
+
+    expect(onFinal).toHaveBeenCalledWith('hello from voice');
+    expect(onError).not.toHaveBeenCalled();
+    expect(capture?.status).toBe('idle');
+  });
+
   it('fails instead of staying transcribing when the socket closes early', async () => {
     const result = await renderHookHost();
 
