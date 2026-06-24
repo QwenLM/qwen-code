@@ -519,6 +519,60 @@ describe('use-voice-input', () => {
     });
   });
 
+  it('refines streamed transcripts before inserting and submitting', async () => {
+    buffer = createBuffer();
+    const recorder = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue({
+        data: new Uint8Array(),
+        mimeType: 'audio/wav',
+      }),
+      drain: vi.fn().mockReturnValue(new Uint8Array(0)),
+    };
+    const streamSession = {
+      pushAudio: vi.fn(),
+      finish: vi.fn().mockResolvedValue('um streamed text'),
+      abort: vi.fn(),
+    };
+    const transcribe = vi.fn();
+    const refine = vi.fn().mockResolvedValue('streamed text');
+    const onSubmit = vi.fn();
+
+    const { result } = renderHook(() =>
+      useVoiceInput({
+        enabled: true,
+        mode: 'tap',
+        voiceModel: 'qwen3-asr-flash-realtime',
+        buffer,
+        createRecorder: () => recorder,
+        transcribe,
+        refine,
+        onSubmit,
+        streaming: true,
+        openStream: vi.fn().mockResolvedValue(streamSession),
+      }),
+    );
+
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+    });
+    await act(async () => {
+      result.current.handleKeypress(voiceKey);
+    });
+
+    await waitFor(() => {
+      expect(streamSession.finish).toHaveBeenCalledTimes(1);
+      expect(transcribe).not.toHaveBeenCalled();
+      expect(refine).toHaveBeenCalledWith(
+        'um streamed text',
+        expect.any(AbortSignal),
+      );
+      expect(buffer.insert).toHaveBeenCalledWith('streamed text');
+      expect(onSubmit).toHaveBeenCalledWith('streamed text');
+      expect(result.current.status).toBe('idle');
+    });
+  });
+
   it('stops the recorder when streaming requires an unsupported backend', async () => {
     buffer = createBuffer();
     const addItem = vi.fn();
