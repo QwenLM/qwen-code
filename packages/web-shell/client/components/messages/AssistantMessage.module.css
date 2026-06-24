@@ -1,8 +1,54 @@
 .message {
-  margin-bottom: 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.messageFooter {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--text-dimmed);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.message:hover .messageFooter,
+.message:focus-within .messageFooter {
+  opacity: 1;
+}
+
+.copyButton {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dimmed);
+  cursor: pointer;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  outline: none;
+}
+
+.copyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.footerTime {
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .prefix {
@@ -16,7 +62,6 @@
   display: flex;
   align-items: flex-start;
   gap: 0;
-  margin-bottom: 4px;
 }
 
 .thinking .prefix {
@@ -56,33 +101,133 @@
   word-break: break-word;
 }
 
-.thinkingPreviewWrap,
-.thinkingExpandedWrap {
-  position: relative;
-}
-
-.thinkingPreview {
-  display: -webkit-box;
-  -webkit-line-clamp: 5;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  padding-right: 18px;
-  line-height: inherit;
-}
-
-.thinkingPreviewTail {
-  display: block;
-  max-height: calc(5 * 1.5em);
-  overflow-y: hidden;
-}
-
-.thinkingPreview > [data-markdown-source='thinking'] {
+.thinkingSummary {
+  width: 100%;
+  margin: 0;
+  padding: 2px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #a1a2a3;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
   font: inherit;
-  line-height: inherit;
 }
 
-.thinkingPreview > [data-markdown-source='thinking'] > :first-child {
-  margin-top: 0;
+.thinkingSummary:hover,
+.thinkingSummary:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.thinkingSummaryIcon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.thinkingSummaryIcon svg {
+  display: block;
+}
+
+.thinkingSummaryToolIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.thinkingSummaryText {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.thinkingSummaryTextActive {
+  color: #a1a2a3;
+  background-image: linear-gradient(
+    105deg,
+    #a1a2a3 0%,
+    #a1a2a3 46%,
+    rgba(255, 255, 255, 0.92) 50%,
+    #a1a2a3 54%,
+    #a1a2a3 100%
+  );
+  background-size: 300% 100%;
+  background-position: 150% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-summary-shine 5s linear infinite;
+}
+
+@keyframes thinking-summary-shine {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -150% 0;
+  }
+}
+
+.thinkingChevronRight,
+.thinkingChevronDown {
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.thinkingSummary:hover .thinkingChevronRight,
+.thinkingSummary:hover .thinkingChevronDown,
+.thinkingSummary:focus-visible .thinkingChevronRight,
+.thinkingSummary:focus-visible .thinkingChevronDown {
+  opacity: 1;
+}
+
+.thinkingChevronRight {
+  transform: rotate(-45deg);
+}
+
+.thinkingChevronDown {
+  transform: rotate(45deg);
+  margin-top: -3px;
+  opacity: 1;
+}
+
+.thinkingExpandedWrap {
+  margin-top: 4px;
+}
+
+.thinkingExpandedClip {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 180ms ease;
+}
+
+.thinkingExpandedCollapsed {
+  grid-template-rows: 0fr;
+}
+
+.thinkingExpandedInner {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .expandToggle {
@@ -96,7 +241,6 @@
   margin: 2px 0 0 auto;
 }
 
-.thinkingPreviewWrap .expandToggle,
 .thinkingExpandedWrap .expandToggle {
   position: absolute;
   right: 0;
@@ -108,24 +252,6 @@
   transition: opacity 0.12s ease;
 }
 
-.thinkingPreviewOverflow::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 16px;
-  pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    transparent,
-    color-mix(in srgb, var(--bg-primary) 70%, transparent)
-  );
-  opacity: 0.45;
-}
-
-.thinkingPreviewWrap:hover .expandToggle,
-.thinkingPreviewWrap .expandToggle:focus-visible,
 .thinkingExpandedWrap:hover .expandToggle,
 .thinkingExpandedWrap .expandToggle:focus-visible {
   opacity: 1;
@@ -133,7 +259,10 @@
 }
 
 @media (hover: none) {
-  .thinkingPreviewWrap .expandToggle,
+  .messageFooter {
+    opacity: 1;
+  }
+
   .thinkingExpandedWrap .expandToggle {
     opacity: 1;
     pointer-events: auto;

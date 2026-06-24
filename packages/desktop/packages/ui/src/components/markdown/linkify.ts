@@ -11,18 +11,25 @@ import { FILE_EXTENSIONS_PATTERN } from '../../lib/file-classification'
 // Initialize linkify-it with default settings (fuzzy URLs, emails enabled)
 const linkify = new LinkifyIt()
 
+// Path character classes — Unicode-aware (note the `u` flag below) so paths containing
+// non-ASCII characters are detected. `\w` / [A-Za-z0-9_] only match ASCII, which would drop
+// any path with CJK or accented segments (e.g. /Users/me/项目/笔记.md, ~/Dokumente/Übung.md),
+// leaving the path un-linkified and therefore not clickable for preview.
+const PATH_START_CHAR = '[\\p{L}\\p{N}_]'
+const PATH_CHAR = '[\\p{L}\\p{N}_\\-./@]'
+
 // File path regex - detects absolute/home/explicit-relative/bare-relative paths with common extensions
-// Examples: /Users/foo.ts, ~/src/app.tsx, ./README.md, ../guide.md, apps/electron/src/main.ts
+// Examples: /Users/foo.ts, ~/src/app.tsx, ./README.md, ../guide.md, apps/electron/src/main.ts, /项目/笔记.md
 // Extensions derived from file-classification.ts to stay in sync with preview support
-const FILE_PATH_REGEX_SOURCE = `(?:^|[\\s([\\{<])((?:/|~/|\\./|\\.\\./|[A-Za-z0-9_][\\w\\-./@]*)[\\w\\-./@]*\\.(?:${FILE_EXTENSIONS_PATTERN}))(?=[\\s)\\]}\\.,:;!?>]|$)`
-const FILE_PATH_REGEX = new RegExp(FILE_PATH_REGEX_SOURCE, 'gi')
-const FILE_PATH_PRETEST_REGEX = new RegExp(FILE_PATH_REGEX_SOURCE, 'i')
+const FILE_PATH_REGEX_SOURCE = `(?:^|[\\s([\\{<])((?:/|~/|\\./|\\.\\./|${PATH_START_CHAR}${PATH_CHAR}*)${PATH_CHAR}*\\.(?:${FILE_EXTENSIONS_PATTERN}))(?=[\\s)\\]}\\.,:;!?>]|$)`
+const FILE_PATH_REGEX = new RegExp(FILE_PATH_REGEX_SOURCE, 'giu')
+const FILE_PATH_PRETEST_REGEX = new RegExp(FILE_PATH_REGEX_SOURCE, 'iu')
 
 // File-path regex for markdown anchor targets (entire href/text value)
 // Used by Markdown.tsx click handler to route file links to onFileClick.
 const FILE_PATH_TARGET_REGEX = new RegExp(
-  `^(?!https?://|mailto:|ftp://|data:)(?:/|~/|\./|\.\./|[A-Za-z0-9_][\\w\\-./@]*)[\\w\\-./@]*\\.(?:${FILE_EXTENSIONS_PATTERN})$`,
-  'i'
+  `^(?!https?://|mailto:|ftp://|data:)(?:/|~/|\\./|\\.\\./|${PATH_START_CHAR}${PATH_CHAR}*)${PATH_CHAR}*\\.(?:${FILE_EXTENSIONS_PATTERN})$`,
+  'iu'
 )
 
 interface DetectedLink {
@@ -130,6 +137,18 @@ export function detectLinks(text: string): DetectedLink[] {
   // Note: _ and ~ are valid URL chars so we only strip *
   const trailingMarkdownRe = /\*+$/
   for (const match of urlMatches) {
+    // Fuzzy (scheme-less) matches whose text is actually a local filename/path collide
+    // with TLDs that double as file extensions: .md (Moldova), .py (Paraguay),
+    // .sh (St. Helena), plus new gTLDs like .zip/.mov/.app. In a coding assistant these
+    // strings are overwhelmingly file paths, not web domains — so skip the URL match and
+    // let the file-path detector below claim them. Otherwise clicking a bare `readme.md`
+    // launches the browser to http://readme.md (a real, ad-serving parked domain) instead
+    // of opening the in-app file preview. Explicit `http(s)://readme.md` keeps its scheme
+    // and is left as a URL.
+    if (!match.schema && isFilePathTarget(match.text)) {
+      continue
+    }
+
     let matchText = match.text
     let matchUrl = match.url
     let matchEnd = match.lastIndex

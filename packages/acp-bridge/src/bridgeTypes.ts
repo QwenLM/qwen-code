@@ -20,6 +20,7 @@ import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
+  ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceExtensionsStatus,
@@ -39,6 +40,7 @@ export interface RewindSnapshotInfo {
 
 export interface RewindRequest {
   promptId: string;
+  rewindFiles?: boolean;
 }
 
 export interface RewindResponse {
@@ -302,10 +304,10 @@ export interface AcpSessionBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `PromptQueueFullError` and pre-aborted signals throw
-   * synchronously so HTTP routes can reject before returning 202. Deferred
-   * failures such as `SessionNotFoundError` may be returned as rejected
-   * promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject before
+   * returning 202. Deferred failures such as `SessionNotFoundError` may be
+   * returned as rejected promises.
    */
   sendPrompt(
     sessionId: string,
@@ -468,6 +470,9 @@ export interface AcpSessionBridge {
 
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+
+  /** Read sanitized LSP server status for a live session. */
+  getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
   /** Cancel a background task in a live session. */
   cancelSessionTask(

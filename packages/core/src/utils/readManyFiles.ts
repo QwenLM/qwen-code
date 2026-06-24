@@ -26,6 +26,14 @@ export interface ReadManyFilesOptions {
    * Optional AbortSignal for cancellation support.
    */
   signal?: AbortSignal;
+
+  /**
+   * When true and the vision bridge is enabled, keep images inline for a
+   * text-only model (instead of an "unsupported" note) so the bridge can
+   * transcribe them. Set only by the interactive `@`-resolution path, not by
+   * the agent `read_many_files` tool.
+   */
+  preserveUnsupportedImageForBridge?: boolean;
 }
 
 /**
@@ -92,7 +100,7 @@ export async function readManyFiles(
   config: Config,
   options: ReadManyFilesOptions,
 ): Promise<ReadManyFilesResult> {
-  const { paths: inputPatterns } = options;
+  const { paths: inputPatterns, preserveUnsupportedImageForBridge } = options;
 
   const seenFiles = new Set<string>();
   const contentParts: Part[] = [];
@@ -118,7 +126,11 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
-        const readResult = await readFileContent(config, fullPath);
+        const readResult = await readFileContent(
+          config,
+          fullPath,
+          preserveUnsupportedImageForBridge,
+        );
         if (readResult) {
           contentParts.push(...readResult.contentParts);
           files.push(readResult.info);
@@ -173,9 +185,12 @@ async function readDirectory(
 async function readFileContent(
   config: Config,
   filePath: string,
+  preserveUnsupportedImage = false,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
-    const fileReadResult = await processSingleFileContent(filePath, config);
+    const fileReadResult = await processSingleFileContent(filePath, config, {
+      preserveUnsupportedImage,
+    });
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
 

@@ -162,13 +162,32 @@ async function pruneSnapshots(dir: string): Promise<void> {
       // resume journal). Removing only the `<runId>.json` snapshot would leave
       // those journal dirs to grow without bound, so prune both together.
       const runId = s.f.replace(/\.json$/, '');
+      // ...but gate the recursive delete on a well-formed run id. The list is a
+      // plain `.json` glob, so a file named `...json` yields `runId = ".."` and
+      // `fs.rm(`${dir}/..`, {recursive,force})` would delete the runs dir's
+      // PARENT; `notarun.json` would delete a sibling `notarun/`. A malicious
+      // repo could ship such a file and trip it once pruning kicks in. Only the
+      // generated `wf_<hex>` shape (mirrors workflow.ts's resumeFromRunId guard)
+      // may drive `fs.rm`. The `.json` unlink stays unconditional — it removes
+      // exactly that one file, never a directory.
+      const isRunDir = /^wf_[0-9a-f]+$/.test(runId);
       return Promise.all([
-        fs.unlink(`${dir}/${s.f}`).catch((e) =>
-          debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
-        ),
-        fs.rm(`${dir}/${runId}`, { recursive: true, force: true }).catch((e) =>
-          debugLogger.warn(`prune journal dir failed for ${runId}: ${e}`),
-        ),
+        fs
+          .unlink(`${dir}/${s.f}`)
+          .catch((e) =>
+            debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
+          ),
+        ...(isRunDir
+          ? [
+              fs
+                .rm(`${dir}/${runId}`, { recursive: true, force: true })
+                .catch((e) =>
+                  debugLogger.warn(
+                    `prune journal dir failed for ${runId}: ${e}`,
+                  ),
+                ),
+            ]
+          : []),
       ]);
     }),
   );

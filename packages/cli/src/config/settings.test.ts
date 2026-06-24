@@ -62,9 +62,11 @@ import {
   SETTINGS_DIRECTORY_NAME, // This is from the original module, but used by the mock.
   type Settings,
   loadEnvironment,
+  reloadEnvironment,
   SETTINGS_VERSION,
   SETTINGS_VERSION_KEY,
   resetHomeEnvBootstrapForTesting,
+  resetEnvironmentTrackingForTesting,
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
 } from './settings.js';
@@ -195,6 +197,7 @@ describe('Settings Loading and Merging', () => {
       source: 'file',
     });
     resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
     // Ensure the mock delegates to the real implementation by default
     // (set up in vi.mock factory above).
   });
@@ -468,9 +471,6 @@ describe('Settings Loading and Merging', () => {
         },
         allowMCPServers: ['legacy-server-1'],
         someUnrecognizedSetting: 'should-be-preserved',
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       (fs.readFileSync as Mock).mockImplementation(
@@ -513,13 +513,55 @@ describe('Settings Loading and Merging', () => {
           allowed: ['legacy-server-1'],
         },
         someUnrecognizedSetting: 'should-be-preserved',
+      });
+    });
+
+    it('should downgrade a v5 settings file (revert of #5089) to v4 on load', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const v5SettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 1,
         modelProviders: {
           openai: {
             protocol: 'openai',
-            models: [{ id: 'gpt-4o' }],
+            models: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+          },
+          'vertex-ai': {
+            protocol: 'gemini',
+            models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
           },
         },
-      });
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(v5SettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const merged = settings.merged as Record<string, unknown>;
+
+      const expectedModelProviders = {
+        openai: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+        'vertex-ai': [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+      };
+
+      expect(merged[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect(merged['modelProviders']).toEqual(expectedModelProviders);
+
+      // The downgrade must also be persisted to disk (writeWithBackupSync
+      // writes to a .tmp file first), otherwise the file stays at $version: 5
+      // and the downgrade re-runs on every startup.
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      const persisted = JSON.parse(writeCall![1] as string);
+      expect(persisted[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect(persisted['modelProviders']).toEqual(expectedModelProviders);
     });
 
     it('should warn about ignored legacy keys in a v2 settings file', () => {
@@ -718,9 +760,6 @@ describe('Settings Loading and Merging', () => {
       const legacySettingsContent = {
         theme: 'dark',
         model: 'qwen-coder',
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -826,9 +865,6 @@ describe('Settings Loading and Merging', () => {
           name: 'qwen-coder',
         },
         autoAccept: false, // V1 key
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -940,9 +976,6 @@ describe('Settings Loading and Merging', () => {
         $version: 2,
         general: {
           enableAutoUpdate: true,
-        },
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
         },
       };
       (fs.readFileSync as Mock).mockImplementation(
@@ -3612,6 +3645,200 @@ describe('Settings Loading and Merging', () => {
       cwdSpy.mockRestore();
     });
 
+    it('uses user .qwen/.env as fallback when the project .env lacks an API key', () => {
+      delete process.env['OPENCODE_GO_API_KEY'];
+      delete process.env['PROJECT_ONLY_VAR'];
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValue(MOCK_WORKSPACE_DIR);
+      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+      const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [projectEnvPath, userQwenEnvPath].includes(p.toString()),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === projectEnvPath) return 'PROJECT_ONLY_VAR=from_project';
+          if (p === userQwenEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_user_qwen_env';
+          return '{}';
+        },
+      );
+
+      const loaded = loadSettings(MOCK_WORKSPACE_DIR, {
+        skipLoadEnvironment: true,
+      });
+      loadEnvironment(loaded.merged);
+
+      expect(process.env['PROJECT_ONLY_VAR']).toEqual('from_project');
+      expect(process.env['OPENCODE_GO_API_KEY']).toEqual('from_user_qwen_env');
+
+      cwdSpy.mockRestore();
+    });
+
+    it('lets the project .env win over user .qwen/.env when both define the API key', () => {
+      delete process.env['OPENCODE_GO_API_KEY'];
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValue(MOCK_WORKSPACE_DIR);
+      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+      const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [projectEnvPath, userQwenEnvPath].includes(p.toString()),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === projectEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_project_env';
+          if (p === userQwenEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_user_qwen_env';
+          return '{}';
+        },
+      );
+
+      const loaded = loadSettings(MOCK_WORKSPACE_DIR, {
+        skipLoadEnvironment: true,
+      });
+      loadEnvironment(loaded.merged);
+
+      expect(process.env['OPENCODE_GO_API_KEY']).toEqual('from_project_env');
+
+      cwdSpy.mockRestore();
+    });
+
+    it('still loads user .qwen/.env fallback when the workspace is untrusted', () => {
+      delete process.env['OPENCODE_GO_API_KEY'];
+      delete process.env['PROJECT_ENV_VAR'];
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValue(MOCK_WORKSPACE_DIR);
+      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+      const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [projectEnvPath, userQwenEnvPath].includes(p.toString()),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
+          if (p === userQwenEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_user_qwen_env';
+          return '{}';
+        },
+      );
+
+      const loaded = loadSettings(MOCK_WORKSPACE_DIR, {
+        skipLoadEnvironment: true,
+      });
+      loadEnvironment(loaded.merged);
+
+      expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+      expect(process.env['OPENCODE_GO_API_KEY']).toEqual('from_user_qwen_env');
+
+      cwdSpy.mockRestore();
+    });
+
+    it('does not continue loading parent workspace .env files after finding the first workspace .env', () => {
+      delete process.env['OPENCODE_GO_API_KEY'];
+      delete process.env['FIRST_WORKSPACE_VAR'];
+      delete process.env['PARENT_WORKSPACE_VAR'];
+      const nestedWorkspaceDir = path.join(MOCK_WORKSPACE_DIR, 'project');
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValue(path.join(nestedWorkspaceDir, 'nested'));
+      const firstWorkspaceEnvPath = path.join(nestedWorkspaceDir, '.env');
+      const parentWorkspaceEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+      const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [
+          firstWorkspaceEnvPath,
+          parentWorkspaceEnvPath,
+          userQwenEnvPath,
+        ].includes(p.toString()),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === firstWorkspaceEnvPath)
+            return 'FIRST_WORKSPACE_VAR=from_first_workspace';
+          if (p === parentWorkspaceEnvPath)
+            return 'PARENT_WORKSPACE_VAR=from_parent_workspace';
+          if (p === userQwenEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_user_qwen_env';
+          return '{}';
+        },
+      );
+
+      const loaded = loadSettings(nestedWorkspaceDir, {
+        skipLoadEnvironment: true,
+      });
+      loadEnvironment(loaded.merged);
+
+      expect(process.env['FIRST_WORKSPACE_VAR']).toEqual(
+        'from_first_workspace',
+      );
+      expect(process.env['PARENT_WORKSPACE_VAR']).toBeUndefined();
+      expect(process.env['OPENCODE_GO_API_KEY']).toEqual('from_user_qwen_env');
+
+      cwdSpy.mockRestore();
+    });
+
+    it('uses the same .env priority order for Cloud Shell GOOGLE_CLOUD_PROJECT', () => {
+      delete process.env['GOOGLE_CLOUD_PROJECT'];
+      process.env['CLOUD_SHELL'] = 'true';
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValue(MOCK_WORKSPACE_DIR);
+      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+      const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [projectEnvPath, userQwenEnvPath].includes(p.toString()),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === projectEnvPath)
+            return 'GOOGLE_CLOUD_PROJECT=from_project_env';
+          if (p === userQwenEnvPath)
+            return 'GOOGLE_CLOUD_PROJECT=from_user_qwen_env';
+          return '{}';
+        },
+      );
+
+      const loaded = loadSettings(MOCK_WORKSPACE_DIR, {
+        skipLoadEnvironment: true,
+      });
+      loadEnvironment(loaded.merged);
+
+      expect(process.env['GOOGLE_CLOUD_PROJECT']).toEqual('from_project_env');
+
+      delete process.env['CLOUD_SHELL'];
+      delete process.env['GOOGLE_CLOUD_PROJECT'];
+      cwdSpy.mockRestore();
+    });
+
     describe('settings.env field', () => {
       const originalEnv = { ...process.env };
 
@@ -4283,6 +4510,83 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('reloadEnvironment', () => {
+    const normalizeFsPath = (
+      p: fs.PathLike | fs.PathOrFileDescriptor,
+    ): string => path.normalize(p.toString());
+
+    it('uses user .qwen/.env as fallback when the project .env lacks an API key', () => {
+      delete process.env['OPENCODE_GO_API_KEY'];
+      delete process.env['PROJECT_ONLY_VAR'];
+      const projectEnvPath = path.resolve(MOCK_WORKSPACE_DIR, '.env');
+      const userQwenEnvPath = path.normalize(
+        path.join('/mock/home/user', QWEN_DIR, '.env'),
+      );
+      const envPaths = new Set([projectEnvPath, userQwenEnvPath]);
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        envPaths.has(normalizeFsPath(p)),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          const filePath = normalizeFsPath(p);
+          if (filePath === projectEnvPath)
+            return 'PROJECT_ONLY_VAR=from_project';
+          if (filePath === userQwenEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_user_qwen_env';
+          return '{}';
+        },
+      );
+
+      const result = reloadEnvironment({}, MOCK_WORKSPACE_DIR);
+
+      expect(process.env['PROJECT_ONLY_VAR']).toEqual('from_project');
+      expect(process.env['OPENCODE_GO_API_KEY']).toEqual('from_user_qwen_env');
+      expect(result.updatedKeys).toEqual([
+        'PROJECT_ONLY_VAR',
+        'OPENCODE_GO_API_KEY',
+      ]);
+      expect(result.removedKeys).toEqual([]);
+    });
+
+    it('keeps the project .env value during reload when user .qwen/.env also defines it', () => {
+      delete process.env['OPENCODE_GO_API_KEY'];
+      const projectEnvPath = path.resolve(MOCK_WORKSPACE_DIR, '.env');
+      const userQwenEnvPath = path.normalize(
+        path.join('/mock/home/user', QWEN_DIR, '.env'),
+      );
+      const envPaths = new Set([projectEnvPath, userQwenEnvPath]);
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        envPaths.has(normalizeFsPath(p)),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          const filePath = normalizeFsPath(p);
+          if (filePath === projectEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_project_env';
+          if (filePath === userQwenEnvPath)
+            return 'OPENCODE_GO_API_KEY=from_user_qwen_env';
+          return '{}';
+        },
+      );
+
+      const result = reloadEnvironment({}, MOCK_WORKSPACE_DIR);
+
+      expect(process.env['OPENCODE_GO_API_KEY']).toEqual('from_project_env');
+      expect(result.updatedKeys).toEqual(['OPENCODE_GO_API_KEY']);
+      expect(result.removedKeys).toEqual([]);
+    });
+  });
+
   describe('needsMigration', () => {
     it('should return false for an empty object', () => {
       expect(needsMigration({})).toBe(false);
@@ -4358,21 +4662,30 @@ describe('Settings Loading and Merging', () => {
         expect(needsMigration(settingsWithVersion)).toBe(false);
       });
 
-      it('should return false when version field indicates a newer version', () => {
+      it('should return false when version field indicates a genuinely newer version', () => {
+        // SETTINGS_VERSION + 1 (v5) is handled by the v5->v4 downgrade migration
+        // (revert of #5089), so use +2 for a version with no applicable migration.
         const settingsWithNewerVersion = {
-          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 1,
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 2,
           theme: 'dark',
         };
         expect(needsMigration(settingsWithNewerVersion)).toBe(false);
+      });
+
+      it('should return true for a $version:5 file that needs downgrading (revert of #5089)', () => {
+        const v5Settings = {
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 1,
+          modelProviders: {
+            openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+          },
+        };
+        expect(needsMigration(v5Settings)).toBe(true);
       });
 
       it('should return true when version field indicates an older version', () => {
         const settingsWithOldVersion = {
           [SETTINGS_VERSION_KEY]: SETTINGS_VERSION - 1,
           theme: 'dark',
-          modelProviders: {
-            openai: [{ id: 'gpt-4o' }],
-          },
         };
         expect(needsMigration(settingsWithOldVersion)).toBe(true);
       });

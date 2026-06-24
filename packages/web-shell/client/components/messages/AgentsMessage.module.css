@@ -7,8 +7,19 @@
   font-size: 13px;
   color: var(--text-primary);
   background: var(--bg-primary);
-  max-width: min(920px, calc(100vw - 64px));
-  margin-left: 14px;
+  max-width: min(var(--chat-regular-content-width, 1000px), calc(100vw - 64px));
+}
+
+.embedded {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.embedded .footer {
+  display: none;
 }
 
 .titleLine {
@@ -35,13 +46,6 @@
   color: var(--text-secondary);
 }
 
-.stepHeader {
-  font-size: 13px;
-  font-weight: bold;
-  color: var(--accent-color);
-  margin-bottom: 8px;
-}
-
 .text {
   font-size: 13px;
   color: var(--text-primary);
@@ -57,10 +61,21 @@
 
 .option {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 1px 0;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 5px 8px;
   cursor: pointer;
+}
+
+.option:hover {
+  background: var(--bg-tertiary);
+}
+
+.optionActive {
+  background: var(--bg-tertiary);
 }
 
 .optionActive .optionLabel,
@@ -68,11 +83,33 @@
   color: var(--accent-color);
 }
 
-.pointer {
-  width: 2ch;
-  flex-shrink: 0;
-  color: var(--accent-color);
-  font-weight: bold;
+.optionIcon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.optionIcon::before,
+.optionIcon::after {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+}
+
+.optionIcon::before {
+  top: 4px;
+}
+
+.optionIcon::after {
+  top: 8px;
 }
 
 .optionNum {
@@ -104,27 +141,11 @@
   margin-left: 4px;
 }
 
-.colorDot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  margin-right: 6px;
-  vertical-align: middle;
-}
-
-.colorPreview {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-  color: var(--text-secondary);
-}
-
 .detail {
-  margin-top: 8px;
-  padding: 8px 12px;
+  margin: 8px;
+  padding: 8px;
   border-radius: 4px;
-  background: var(--bg-secondary, rgba(255, 255, 255, 0.03));
+  background: var(--bg-primary);
 }
 
 .detailTitle {
@@ -147,7 +168,7 @@
 }
 
 .toolDetail {
-  margin-top: 10px;
+  margin: 8px;
   color: var(--text-secondary);
 }
 
@@ -208,16 +229,16 @@
 }
 
 .summary {
-  margin-bottom: 12px;
-  padding: 8px 12px;
+  margin: 8px;
+  padding: 8px;
   border-radius: 4px;
-  background: var(--bg-secondary, rgba(255, 255, 255, 0.03));
+  background: var(--bg-primary);
 }
 
 .summaryRow {
   display: flex;
   gap: 8px;
-  padding: 3px 0;
+  padding: 4px 6px;
 }
 
 .summaryLabel {
@@ -245,18 +266,6 @@
   overflow: auto;
 }
 
-.hiddenAction {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
 .groupLabel {
   font-size: 13px;
   font-weight: bold;
@@ -281,6 +290,174 @@
 .agentCount {
   margin-top: 10px;
   color: var(--text-secondary);
+}
+
+.manageList {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.manageItem {
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+}
+
+.manageItemExpanded {
+  background: var(--bg-tertiary);
+  padding: 4px;
+}
+
+.manageRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.manageRow:hover,
+.manageRowActive {
+  background: var(--bg-tertiary);
+}
+
+.manageIcon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.manageIcon::before,
+.manageIcon::after {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+}
+
+.manageIcon::before {
+  top: 4px;
+}
+
+.manageIcon::after {
+  top: 8px;
+}
+
+.manageName {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.levelTag {
+  flex: 0 0 auto;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.manageChevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+}
+
+.manageChevron::before {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-top: 1.5px solid currentColor;
+  border-right: 1.5px solid currentColor;
+  content: '';
+  transform: translate(2px, 3px) rotate(45deg);
+  transition: transform 120ms ease;
+}
+
+.manageChevronExpanded::before {
+  transform: translate(2px, 1px) rotate(135deg);
+}
+
+.manageDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+}
+
+.manageDetailInner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  padding: 8px;
+}
+
+.manageDetailHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.manageActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.manageButton {
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.manageButton:hover:not(:disabled) {
+  border-color: var(--accent-color);
+}
+
+.manageButton:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.dangerButton {
+  color: var(--error-color);
+}
+
+.deleteText {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 24px;
 }
 
 .viewer {
@@ -312,23 +489,36 @@
   gap: 4px;
   align-items: baseline;
   min-width: 0;
+  border-radius: 5px;
+  padding: 4px 6px;
+}
+
+.viewerRow:hover {
+  background: var(--bg-secondary);
 }
 
 .viewerLabel {
   color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
   flex-shrink: 0;
+}
+
+.viewerField {
+  border-radius: 5px;
+  padding: 4px 6px;
 }
 
 .viewerSectionTitle {
   color: var(--text-primary);
-  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .viewerBlock {
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
-  padding-left: 12px;
 }
 
 .closed {
@@ -350,4 +540,68 @@
   color: var(--error-color, #ef4444);
   font-size: 12px;
   margin-bottom: 8px;
+}
+
+.createWizard {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.createSteps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.createStepPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.createStepPillActive {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.createStepPillDone {
+  color: var(--text-primary);
+}
+
+.createStepNumber {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg-secondary);
+  font-size: 11px;
+}
+
+.createStepLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.createBody {
+  min-height: 180px;
+}
+
+.createActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
 }

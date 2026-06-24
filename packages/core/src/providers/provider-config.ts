@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { Protocol } from '../core/contentGenerator.js';
+import { AuthType } from '../core/contentGenerator.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -297,15 +297,15 @@ export function computeModelListVersion(models: ProviderModelConfig[]): string {
  * (useProviderSetupFlow) and the VS Code flow (AuthMessageHandler) agree on
  * the same value — if Anthropic ships a new endpoint we only update it here.
  */
-const DEFAULT_BASE_URLS: Partial<Record<Protocol, string>> = {
-  [Protocol.OPENAI]: 'https://api.openai.com/v1',
-  [Protocol.ANTHROPIC]: 'https://api.anthropic.com/v1',
-  [Protocol.GEMINI]: 'https://generativelanguage.googleapis.com',
+const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
+  [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
+  [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
+  [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
 };
 
 /** Resolve the placeholder/default base URL for a chosen protocol. */
 export function getDefaultBaseUrlForProtocol(
-  protocol: Protocol | undefined,
+  protocol: AuthType | undefined,
 ): string {
   if (protocol === undefined) return '';
   return DEFAULT_BASE_URLS[protocol] ?? '';
@@ -353,6 +353,44 @@ function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
 
 export function getDefaultModelIds(config: ProviderConfig): string[] {
   return config.models?.map((s) => s.id) ?? [];
+}
+
+function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { id?: unknown }).id === 'string'
+  );
+}
+
+/**
+ * Find the model entries a user has already saved for `config` under the
+ * `modelProviders` map in settings. Returns the first protocol (in the
+ * provider's own preference order) that owns stored models, or `undefined`
+ * when none are saved. Used to pre-fill the auth wizard / connect form with
+ * existing model IDs instead of resetting to the provider's built-in defaults.
+ */
+export function findExistingProviderModels(
+  config: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+):
+  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
+  | undefined {
+  const ownsModel = resolveOwnsModel(config);
+  if (!ownsModel || !modelProviders) return undefined;
+  const protocols = config.protocolOptions?.length
+    ? config.protocolOptions
+    : [config.protocol];
+  for (const protocol of protocols) {
+    const raw = modelProviders[protocol];
+    if (!Array.isArray(raw)) continue;
+    const models = raw.filter(
+      (m): m is ProviderModelConfig =>
+        isProviderModelConfig(m) && ownsModel(m),
+    );
+    if (models.length > 0) return { protocol, models };
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -106,6 +106,7 @@ interface ServeArgs {
   'rate-limit-mutation'?: number;
   'rate-limit-read'?: number;
   'rate-limit-window-ms'?: number;
+  experimentalLsp?: boolean;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -178,6 +179,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+      })
+      .option('experimental-lsp', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Forward the experimental LSP opt-in to spawned agent sessions.',
       })
       .option('web', {
         type: 'boolean',
@@ -516,6 +523,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitMutation !== undefined ? { rateLimitMutation } : {}),
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
+        ...(argv.experimentalLsp === true ? { experimentalLsp: true } : {}),
       });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).

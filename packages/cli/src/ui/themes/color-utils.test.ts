@@ -7,8 +7,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   interpolateColor,
-  subtleBandColor,
-  supportsTrueColor,
   isValidColor,
   resolveColor,
   CSS_NAME_TO_HEX_MAP,
@@ -254,36 +252,6 @@ describe('Color Utils', () => {
     it('returns empty string for unparseable input', () => {
       expect(interpolateColor('notacolor', '#ffffff', 0.5)).toBe('');
       expect(interpolateColor('#ffffff', 'notacolor', 0.5)).toBe('');
-    });
-  });
-
-  describe('subtleBandColor', () => {
-    it('shifts dark background toward white', () => {
-      const result = subtleBandColor('#000000');
-      expect(result).toMatch(/^#[0-9a-f]{6}$/);
-      expect(result).not.toBe('#000000');
-      const r = parseInt(result.slice(1, 3), 16);
-      expect(r).toBeGreaterThan(0);
-      expect(r).toBeLessThan(30);
-    });
-
-    it('shifts light background toward black', () => {
-      const result = subtleBandColor('#ffffff');
-      expect(result).toMatch(/^#[0-9a-f]{6}$/);
-      expect(result).not.toBe('#ffffff');
-      const r = parseInt(result.slice(1, 3), 16);
-      expect(r).toBeGreaterThan(225);
-      expect(r).toBeLessThan(255);
-    });
-
-    it('returns empty string for unparseable input', () => {
-      expect(subtleBandColor('notacolor')).toBe('');
-    });
-  });
-
-  describe('supportsTrueColor', () => {
-    it('returns a boolean', () => {
-      expect(typeof supportsTrueColor()).toBe('boolean');
     });
   });
 });

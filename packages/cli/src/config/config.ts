@@ -1438,7 +1438,10 @@ export async function loadCliConfig(
     }
   }
 
-  const fileService = new FileDiscoveryService(cwd);
+  const fileService = new FileDiscoveryService(
+    cwd,
+    settings.context?.fileFiltering?.customIgnoreFiles,
+  );
 
   const includeDirectories = (
     bareMode ? [] : (settings.context?.includeDirectories ?? [])

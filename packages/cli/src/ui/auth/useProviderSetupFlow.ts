@@ -6,14 +6,13 @@
 
 import { useState, useCallback } from 'react';
 import {
-  Protocol,
+  AuthType,
   shouldShowStep,
   resolveBaseUrl,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
 } from '@qwen-code/qwen-code-core';
 import type {
-  AuthType,
   InputModalities,
   ProviderConfig,
   ProviderSetupInputs,
@@ -60,7 +59,7 @@ export interface ProviderSetupState {
   totalSteps: number;
 
   // Protocol (for custom provider)
-  protocol: Protocol;
+  protocol: AuthType;
 
   // BaseUrl
   baseUrl: string;
@@ -104,7 +103,7 @@ export function useProviderSetupFlow(
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
   const [stepIndex, setStepIndex] = useState(0);
 
-  const [protocol, setProtocol] = useState<Protocol>(Protocol.OPENAI);
+  const [protocol, setProtocol] = useState<AuthType>(AuthType.USE_OPENAI);
   const [baseUrl, setBaseUrl] = useState('');
   const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
   const [baseUrlOptionIndex, setBaseUrlOptionIndex] = useState(0);
@@ -129,8 +128,9 @@ export function useProviderSetupFlow(
   const start = useCallback(
     (
       config: ProviderConfig,
-      initialProtocol?: Protocol,
+      initialProtocol?: AuthType,
       existingEnv?: Record<string, string>,
+      existingModelIds?: string[],
     ) => {
       setProvider(config);
       const steps = getVisibleSteps(config);
@@ -161,7 +161,12 @@ export function useProviderSetupFlow(
       setApiKey(prefillKey);
 
       setApiKeyError(null);
-      setModelIds(getDefaultModelIds(config).join(', '));
+      // Built-in defaults go to the recommended list (checked), user-added
+      // custom IDs go to the input box. The ModelIdsStep component splits
+      // flow.state.modelIds automatically based on config.models.
+      const defaultIds = getDefaultModelIds(config);
+      const customIds = existingModelIds ?? [];
+      setModelIds([...defaultIds, ...customIds].join(', '));
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -198,12 +203,11 @@ export function useProviderSetupFlow(
 
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
-      const proto = selectedProtocol as Protocol;
-      setProtocol(proto);
+      setProtocol(selectedProtocol);
       // Clear baseUrl so the user types fresh; show the protocol's default
       // endpoint as a placeholder (used if they submit blank).
       setBaseUrl('');
-      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(proto));
+      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
       setApiKey('');
       setApiKeyError(null);
       goNext();

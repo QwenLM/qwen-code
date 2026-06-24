@@ -46,12 +46,12 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     {
       name: 'model',
       description: t('local.model'),
-      argumentHint: '[--fast] [<model>]',
+      argumentHint: '[--fast|--voice] [<model>]',
     },
     {
       name: 'mcp',
       description: t('local.mcp'),
-      argumentHint: 'desc|nodesc|schema|auth|noauth',
+      argumentHint: 'desc|nodesc|schema',
     },
     { name: 'skills', description: t('local.skills') },
     { name: 'status', description: t('local.status') },
@@ -83,6 +83,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     },
     { name: 'tasks', description: t('local.tasks') },
     { name: 'recap', description: t('local.recap') },
+    { name: 'rewind', description: t('local.rewind') },
     {
       name: 'branch',
       description: t('local.branch'),
