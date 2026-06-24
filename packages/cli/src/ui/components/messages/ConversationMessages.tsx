@@ -22,7 +22,8 @@ import { formatDuration } from '../../utils/displayUtils.js';
 
 export const THINKING_ICON = '∴ ';
 
-const toggleKeyHint = process.platform === 'darwin' ? 'option+t' : 'alt+t';
+export const toggleKeyHint =
+  process.platform === 'darwin' ? 'option+t' : 'alt+t';
 
 interface UserMessageProps {
   text: string;
