@@ -689,11 +689,8 @@ jobs:
             printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
           }
 
-          # Any exit before a decision is written (a gh/git transient failure, the
-          # head branch deleted mid-flight, or a network blip under `set -e`) would
-          # otherwise leave `decision` empty. Both the skipped- and result-report
-          # steps gate on a concrete value, so the maintainer would get only the
-          # 👀 reaction and a red run with no comment. Fail closed to "failed".
+          # Fail closed: if we exit before writing `decision`, the report steps
+          # (which gate on a concrete value) skip, leaving a red run with no comment.
           decision_written=0
           trap '[ "$decision_written" = 1 ] || {
             printf "decision=failed\n" >> "$GITHUB_OUTPUT"
@@ -803,13 +800,9 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          # NOTE: the coreTools specifiers below (e.g. `run_shell_command(git add)`)
-          # are advisory only. qwen-code's permission manager keys on the tool name
-          # and discards the parenthesised command, so this list does NOT confine the
-          # agent to these exact commands. The real containment is `sandbox: true`
-          # below, the same-repo author guard on this job, and the fact that the
-          # agent step carries no GitHub token — not this allowlist. Do not describe
-          # it as a security boundary.
+          # coreTools specifiers (e.g. `run_shell_command(git add)`) are advisory:
+          # the permission manager keys on the tool name and drops the parenthesised
+          # command. Real containment = sandbox + same-repo guard + no agent token.
           settings_json: |-
             {
               "maxSessionTurns": 400,
@@ -856,11 +849,8 @@ jobs:
 
       - name: 'Refresh dependencies'
         if: "steps.prepare.outputs.decision == 'run' && steps.resolve_conflicts.outcome == 'success'"
-        # `npm install`, not `npm ci`: resolving a package.json conflict can leave
-        # package-lock.json momentarily inconsistent, and the agent has no npm tool
-        # to regenerate it. `npm ci` hard-fails on any lockfile mismatch (and wipes
-        # node_modules first), which would cascade into spurious build/test
-        # failures; `npm install` reconciles the lockfile instead.
+        # `npm install`, not `npm ci`: a package.json conflict can leave the lockfile
+        # inconsistent and `npm ci` hard-fails on that; install reconciles it.
         # --ignore-scripts: the pull request controls lifecycle scripts.
         run: |-
           npm install --ignore-scripts --prefer-offline --no-audit --progress=false
@@ -1109,11 +1099,9 @@ jobs:
                 ;;
             esac
           } > "${WORKDIR}/report.md"
-          # Best-effort: the branch may already have been force-pushed above, so a
-          # failed comment POST (transient API error, secondary rate limit) must
-          # not abort the step and silently leave the contributor's branch
-          # rewritten with no explanation. The exit codes below still fail the run
-          # on a real push failure or unsuccessful outcome.
+          # Best-effort: the branch may already be force-pushed, so a failed comment
+          # POST must not abort and leave it rewritten unexplained. Exit codes below
+          # still fail the run on a real push failure or bad outcome.
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md" ||
             echo "::warning::Resolve finished, but posting the result comment failed."
 
