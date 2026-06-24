@@ -190,7 +190,7 @@ describe('StatusLineDialog', () => {
     await press(' ');
 
     expect(lastFrame()).toContain(
-      '\u279c  project git:(feature/pr-4087-statusline) · Qwen3 Code Plus high · Context 25% used',
+      '\u279c project · git:(feature/pr-4087-statusline) · Qwen3 Code Plus high · Context 25% used',
     );
 
     await press('\r');

@@ -369,7 +369,7 @@ function formatPresetItem(
       return undefined;
     case 'project-name':
       if (data.projectName) {
-        return `\u279c  ${data.projectName}`;
+        return `\u279c ${data.projectName}`;
       }
       return undefined;
     case 'pull-request-number': {
@@ -430,27 +430,6 @@ export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
-  const rendered: Array<{ item: StatusLinePresetItemId; text: string }> = [];
-  for (const item of orderStatusLinePresetItems(config.items)) {
-    const text = formatPresetItem(item, data);
-    if (text) {
-      rendered.push({ item, text });
-    }
-  }
-
-  if (rendered.length === 0) return [];
-
-  let line = rendered[0].text;
-  for (let i = 1; i < rendered.length; i++) {
-    const prev = rendered[i - 1].item;
-    const curr = rendered[i].item;
-    if (prev === 'project-name' && curr === 'git-branch') {
-      line += ' ';
-    } else {
-      line += ' \u00b7 ';
-    }
-    line += rendered[i].text;
-  }
-
-  return [line];
+  const line = buildStatusLinePresetParts(config, data).join(' \u00b7 ');
+  return line ? [line] : [];
 }
