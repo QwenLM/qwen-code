@@ -54,7 +54,7 @@ describe('package asset scripts', () => {
     createBundleArtifacts(rootDir);
     stubConsole();
 
-    preparePackage({ rootDir });
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
 
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
@@ -83,6 +83,20 @@ describe('package asset scripts', () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+          'prebuilds',
+          'darwin-arm64',
+          'debug.log',
+        ),
+      ),
+    ).toBe(false);
     expect(
       existsSync(
         path.join(
@@ -168,7 +182,37 @@ describe('package asset scripts', () => {
     createBundleArtifacts(rootDir);
     stubConsole();
 
-    preparePackage({ rootDir });
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.bundledDependencies).toBeUndefined();
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'node_modules',
+          '@qwen-code',
+          'audio-capture',
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('removes stale bundled audio-capture files when artifacts are missing', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+    rmSync(path.join(rootDir, 'packages', 'audio-capture', 'prebuilds'), {
+      recursive: true,
+      force: true,
+    });
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
 
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
@@ -246,7 +290,7 @@ describe('package asset scripts', () => {
     createBundleArtifacts(rootDir);
     stubConsole();
 
-    preparePackage({ rootDir });
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
 
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
@@ -290,7 +334,7 @@ describe('package asset scripts', () => {
     createBundleArtifacts(rootDir);
     stubConsole();
 
-    preparePackage({ rootDir });
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
 
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
@@ -391,6 +435,21 @@ describe('package asset scripts', () => {
       rootDir,
       'packages/audio-capture/prebuilds/darwin-arm64/@qwen-code+audio-capture.node',
       'fake native addon\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/audio-capture/prebuilds/darwin-arm64/debug.log',
+      'should not ship\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/audio-capture/node_modules/node-gyp-build/package.json',
+      '{"name":"node-gyp-build","version":"4.8.4"}\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/audio-capture/node_modules/node-gyp-build/index.js',
+      '',
     );
 
     for (const template of [

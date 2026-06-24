@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
-const nodeRequire = createRequire(import.meta.url);
+const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
 
 export function preparePackage({
   rootDir = defaultRootDir,
@@ -156,6 +156,8 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
     path.join(addonSrc, 'package.json'),
   ];
 
+  fs.rmSync(addonDest, { recursive: true, force: true });
+
   for (const requiredPath of requiredPaths) {
     if (!fs.existsSync(requiredPath)) {
       const message = `audio capture package artifact not found at ${requiredPath}`;
@@ -173,9 +175,7 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
     [
       path.join(addonSrc, 'dist'),
       'runtime JS',
-      (filePath) =>
-        /\.[cm]?js$/.test(filePath) &&
-        !/\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/.test(filePath),
+      (filePath) => /\.[cm]?js$/.test(filePath) && !TEST_FILE_RE.test(filePath),
     ],
     [
       path.join(addonSrc, 'prebuilds'),
@@ -216,11 +216,12 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
     return false;
   }
   const dependencySources = [];
+  const addonRequire = createRequire(path.join(addonSrc, 'package.json'));
   for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
     try {
       dependencySources.push([
         dependencyName,
-        path.dirname(nodeRequire.resolve(`${dependencyName}/package.json`)),
+        path.dirname(addonRequire.resolve(`${dependencyName}/package.json`)),
       ]);
     } catch {
       const message = `audio capture dependency not resolvable: ${dependencyName}`;
@@ -244,7 +245,6 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
     verbatimSymlinks: false,
   };
 
-  fs.rmSync(addonDest, { recursive: true, force: true });
   fs.mkdirSync(addonDest, { recursive: true });
 
   fs.writeFileSync(
@@ -253,12 +253,18 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
   );
   fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
     ...copyOpts,
-    filter: (src) => !/\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/.test(src),
+    filter: (src) => !TEST_FILE_RE.test(src),
   });
   fs.cpSync(
     path.join(addonSrc, 'prebuilds'),
     path.join(addonDest, 'prebuilds'),
-    copyOpts,
+    {
+      ...copyOpts,
+      filter: (src) => {
+        const stat = fs.statSync(src);
+        return stat.isDirectory() || src.endsWith('.node');
+      },
+    },
   );
 
   for (const [dependencyName, dependencySrc] of dependencySources) {
@@ -276,9 +282,10 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
 function hasFileMatching(dir, predicate) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const entryPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
+    const stat = fs.statSync(entryPath);
+    if (stat.isDirectory()) {
       if (hasFileMatching(entryPath, predicate)) return true;
-    } else if (entry.isFile() && predicate(entryPath)) {
+    } else if (stat.isFile() && predicate(entryPath)) {
       return true;
     }
   }
