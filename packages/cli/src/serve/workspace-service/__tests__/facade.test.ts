@@ -91,7 +91,13 @@ import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
+  SETTINGS_DIRECTORY_NAME,
 } from '../../../config/settings.js';
+import {
+  resetTrustedFoldersForTesting,
+  TRUSTED_FOLDERS_FILENAME,
+  TrustLevel,
+} from '../../../config/trustedFolders.js';
 import { WorkspaceVoiceError } from '../../../services/voice-service.js';
 import type {
   DaemonWorkspaceServiceDeps,
@@ -136,12 +142,34 @@ function makeCtx(
 }
 
 async function withIsolatedQwenHome<T>(fn: () => Promise<T>): Promise<T> {
-  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'facade-home-'));
+  return withIsolatedWorkspace(() => fn());
+}
+
+async function writeJson(file: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(value, null, 2), 'utf8');
+}
+
+async function withIsolatedWorkspace<T>(
+  fn: (paths: { home: string; workspace: string }) => Promise<T>,
+): Promise<T> {
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'facade-ws-'));
+  const home = path.join(scratch, 'home');
+  const workspace = path.join(scratch, 'workspace');
   const originalQwenHome = process.env['QWEN_HOME'];
-  process.env['QWEN_HOME'] = path.join(scratch, 'home');
+  const originalTrustedFoldersPath =
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+  await fs.mkdir(home, { recursive: true });
+  await fs.mkdir(workspace, { recursive: true });
+  process.env['QWEN_HOME'] = home;
+  process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
+    home,
+    TRUSTED_FOLDERS_FILENAME,
+  );
   resetHomeEnvBootstrapForTesting();
+  resetTrustedFoldersForTesting();
   try {
-    return await fn();
+    return await fn({ home, workspace });
   } finally {
     await fs.rm(scratch, { recursive: true, force: true });
     if (originalQwenHome === undefined) {
@@ -149,7 +177,14 @@ async function withIsolatedQwenHome<T>(fn: () => Promise<T>): Promise<T> {
     } else {
       process.env['QWEN_HOME'] = originalQwenHome;
     }
+    if (originalTrustedFoldersPath === undefined) {
+      delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    } else {
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+        originalTrustedFoldersPath;
+    }
     resetHomeEnvBootstrapForTesting();
+    resetTrustedFoldersForTesting();
   }
 }
 
@@ -378,6 +413,114 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('status methods', () => {
+    it('getWorkspaceTrustStatus reads current settings and trusted folders', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [workspace]: TrustLevel.TRUST_FOLDER,
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspaceTrustStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          workspaceCwd: workspace,
+          folderTrustEnabled: true,
+          effective: { state: 'trusted', source: 'file' },
+          explicitTrustLevel: TrustLevel.TRUST_FOLDER,
+        });
+      });
+    });
+
+    it('getWorkspacePermissionsStatus reads scoped and merged settings', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          permissions: {
+            allow: ['Shell(git *)'],
+            deny: ['Read(.env)'],
+          },
+        });
+        await writeJson(
+          path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+          {
+            permissions: {
+              allow: ['Read(src/**)'],
+              ask: ['Shell(npm *)'],
+            },
+          },
+        );
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspacePermissionsStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          user: {
+            path: path.join(home, 'settings.json'),
+            rules: {
+              allow: ['Shell(git *)'],
+              ask: [],
+              deny: ['Read(.env)'],
+            },
+          },
+          workspace: {
+            path: path.join(
+              workspace,
+              SETTINGS_DIRECTORY_NAME,
+              'settings.json',
+            ),
+            rules: {
+              allow: ['Read(src/**)'],
+              ask: ['Shell(npm *)'],
+              deny: [],
+            },
+          },
+          merged: {
+            allow: ['Shell(git *)', 'Read(src/**)'],
+            ask: ['Shell(npm *)'],
+            deny: ['Read(.env)'],
+          },
+        });
+      });
+    });
+
+    it('getWorkspaceVoiceStatus reads daemon-local voice settings', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          voiceModel: 'qwen3-asr-flash',
+          general: {
+            voice: {
+              enabled: true,
+              mode: 'tap',
+              language: 'english',
+            },
+          },
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspaceVoiceStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          workspaceCwd: workspace,
+          enabled: true,
+          mode: 'tap',
+          language: 'english',
+          voiceModel: 'qwen3-asr-flash',
+          availableVoiceModels: [],
+        });
+      });
+    });
+
     it('getWorkspaceMcpStatus delegates to queryWorkspaceStatus with correct method', async () => {
       const queryWorkspaceStatus = vi
         .fn()

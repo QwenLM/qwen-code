@@ -1388,7 +1388,7 @@ export class AcpDispatcher {
               id !== undefined
             ) {
               conn.sendConn(
-                error(id, RPC.INTERNAL_ERROR, err.message, {
+                error(id, RPC.INVALID_PARAMS, err.message, {
                   errorKind: 'permission_session_required',
                 }),
               );

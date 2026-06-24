@@ -746,7 +746,7 @@ describe('voice-transcriber', () => {
       text: vi
         .fn()
         .mockResolvedValue(
-          `Bearer sk-secret Invalid API key: sk-test ${'x'.repeat(500)}`,
+          `Authorization: ApiKey sk-route Bearer sk-secret api_key=sk-query secret=sk-secret-token Invalid API key: sk-test ${'x'.repeat(500)}`,
         ),
     });
 
@@ -777,7 +777,12 @@ describe('voice-transcriber', () => {
     expect(error).toBeInstanceOf(Error);
     const message = (error as Error).message;
     expect(message).toContain('Bearer [REDACTED]');
+    expect(message).toContain('Authorization: [REDACTED]');
+    expect(message).toContain('[REDACTED]');
+    expect(message).not.toContain('sk-route');
     expect(message).not.toContain('sk-secret');
+    expect(message).not.toContain('sk-query');
+    expect(message).not.toContain('sk-secret-token');
     expect(message).not.toContain('sk-test');
     expect(message).toMatch(/\.\.\.$/);
   });

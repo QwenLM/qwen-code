@@ -401,20 +401,33 @@ export function isKeytermEcho(
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV
 // is ~32 KB/s, so guard before encoding to give a clear error on overlong holds.
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function sanitizeResponseDetails(raw: string, apiKey?: string): string {
-  let redacted = raw.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+export function sanitizeVoiceErrorMessage(
+  raw: string,
+  apiKey?: string,
+): string {
+  let redacted = raw
+    .replace(
+      /Authorization:\s*(?:Bearer|ApiKey|Basic|Token)?\s*\S+/gi,
+      'Authorization: [REDACTED]',
+    )
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(?:api[-_ ]?key|token|secret)=\S+/gi, '[REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9._-]{4,}\b/g, '[REDACTED]');
   if (apiKey) {
     redacted = redacted.replace(
       new RegExp(escapeRegExp(apiKey), 'g'),
       '[REDACTED]',
     );
   }
-  return redacted.length > 200 ? `${redacted.slice(0, 200)}...` : redacted;
+  return redacted.length > MAX_TRANSCRIPTION_ERROR_LENGTH
+    ? `${redacted.slice(0, MAX_TRANSCRIPTION_ERROR_LENGTH)}...`
+    : redacted;
 }
 
 function inputAudioFormat(mimeType: string): string {
@@ -511,7 +524,7 @@ async function transcribeViaQwenAsr(
   if (!response.ok) {
     let details = '';
     try {
-      details = sanitizeResponseDetails(
+      details = sanitizeVoiceErrorMessage(
         await response.text(),
         voiceConfig.apiKey,
       );

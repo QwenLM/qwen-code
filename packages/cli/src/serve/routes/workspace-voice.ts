@@ -25,6 +25,7 @@ import {
   type WorkspaceVoiceTranscriptionInput,
   type WorkspaceVoiceTranscriptionResult,
 } from '../../services/voice-service.js';
+import { sanitizeVoiceErrorMessage } from '../../services/voice-transcriber.js';
 import {
   isVoiceEnabled,
   isVoiceMode,
@@ -33,8 +34,6 @@ import {
 } from '../../services/voice-settings.js';
 import { MAX_VOICE_LANGUAGE_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-
-const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
 type WorkspaceVoiceTranscriber = (
   input: WorkspaceVoiceTranscriptionInput,
@@ -84,20 +83,6 @@ function sendVoiceError(res: Response, err: unknown): boolean {
     return true;
   }
   return false;
-}
-
-function sanitizeErrorMessage(raw: string): string {
-  const redacted = raw
-    .replace(
-      /Authorization:\s*(?:Bearer|ApiKey|Basic|Token)?\s*\S+/gi,
-      'Authorization: [REDACTED]',
-    )
-    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(?:api[-_ ]?key|token|secret)=\S+/gi, '[REDACTED]')
-    .replace(/\bsk-[A-Za-z0-9._-]{4,}\b/g, '[REDACTED]');
-  return redacted.length > MAX_TRANSCRIPTION_ERROR_LENGTH
-    ? `${redacted.slice(0, MAX_TRANSCRIPTION_ERROR_LENGTH)}...`
-    : redacted;
 }
 
 function broadcastVoiceWrite(
@@ -413,8 +398,8 @@ export function registerWorkspaceVoiceRoutes(
         if (sendVoiceError(res, err)) return;
         const message =
           err instanceof Error
-            ? sanitizeErrorMessage(err.message)
-            : sanitizeErrorMessage(String(err));
+            ? sanitizeVoiceErrorMessage(err.message)
+            : sanitizeVoiceErrorMessage(String(err));
         writeStderrLine(
           `qwen serve: POST /workspace/voice/transcribe error (workspace=${deps.boundWorkspace}): ${
             message

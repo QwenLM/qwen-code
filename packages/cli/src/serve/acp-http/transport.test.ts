@@ -29,7 +29,10 @@ import {
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
-import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  type DaemonWorkspaceService,
+} from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
 const stdioMocks = vi.hoisted(() => ({
@@ -1799,7 +1802,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     setSpy.mockRestore();
   });
 
-  it('dispatches _qwen/workspace/voice', async () => {
+  it('maps _qwen/workspace/permissions/set missing live session to INVALID_PARAMS', async () => {
+    const setSpy = vi
+      .spyOn(fakeWorkspace, 'setWorkspacePermissionRules')
+      .mockRejectedValueOnce(
+        new WorkspacePermissionRulesSessionRequiredError(),
+      );
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
@@ -1807,12 +1815,41 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await post(connId, {
       jsonrpc: '2.0',
       id: 218,
+      method: '_qwen/workspace/permissions/set',
+      params: {
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['Read(.env)'],
+      },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; data?: { errorKind?: string } };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 218,
+      error: {
+        code: -32602,
+        data: { errorKind: 'permission_session_required' },
+      },
+    });
+    setSpy.mockRestore();
+  });
+
+  it('dispatches _qwen/workspace/voice', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 219,
       method: '_qwen/workspace/voice',
       params: {},
     });
     const frames = (await got) as Array<{ id: number; result?: unknown }>;
     expect(frames[0]).toMatchObject({
-      id: 218,
+      id: 219,
       result: {
         v: 1,
         workspaceCwd: '/ws',
