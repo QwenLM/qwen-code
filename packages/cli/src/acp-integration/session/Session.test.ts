@@ -272,10 +272,15 @@ describe('Session', () => {
         currentModel = modelId;
       });
 
+    const getHistoryMock = vi.fn().mockReturnValue([]);
     mockChat = {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
-      getHistory: vi.fn().mockReturnValue([]),
+      getHistory: getHistoryMock,
+      // continueLastTurn classifies from a bounded tail; delegate to getHistory
+      // so tests that set getHistory drive detection (fixtures are small).
+      getHistoryTail: vi.fn(() => getHistoryMock()),
+      getHistoryTailShallow: vi.fn(() => getHistoryMock()),
       getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set<string>()),
       getLastModelMessageText: vi.fn().mockReturnValue(''),
@@ -515,6 +520,28 @@ describe('Session', () => {
           ]),
         }),
       );
+    });
+
+    it('rejects (accepted:false) when a prompt is already in flight', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      // Simulate an active prompt so the re-entrancy guard trips: there is no
+      // settled turn to continue while one is running.
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = new AbortController();
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: false,
+        interruption: 'interrupted_prompt',
+      });
+      expect(promptSpy).not.toHaveBeenCalled();
     });
   });
 

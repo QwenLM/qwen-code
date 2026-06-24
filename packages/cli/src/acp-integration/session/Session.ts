@@ -68,6 +68,7 @@ import {
   detectTurnInterruption,
   buildSyntheticToolResponseParts,
   ORPHAN_TOOL_USE_REPAIR_REASON,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -1168,8 +1169,13 @@ export class Session implements SessionContext {
       return { accepted: false, interruption: 'none' };
     }
 
+    // Classify from a bounded, shallow tail — this accept/reject pre-check does
+    // not need to structuredClone the whole history. The authoritative
+    // re-detection inside the fired prompt() reads full history for the strip.
+    const chat = this.#getCurrentChat();
     const detection = detectTurnInterruption(
-      this.#getCurrentChat().getHistory(),
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
     );
     if (detection.kind === 'none') {
       return { accepted: false, interruption: 'none' };

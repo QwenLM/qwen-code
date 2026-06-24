@@ -1650,6 +1650,10 @@ export class GeminiClient {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     let strippedRetryEntries: Content[] = [];
     let historyLenAfterStrip = 0;
+    // O(1) length read: getHistory() structuredClones the whole history just to
+    // read .length, which is wasteful in long sessions (see truncateHistory).
+    const currentHistoryLength = () =>
+      this.getChat().getHistoryLength?.() ?? this.getChat().getHistory().length;
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -1663,7 +1667,7 @@ export class GeminiClient {
       // ponytail: length-snapshot guard; replaces a `retrySendStarted` flag
       // that only flipped on the first streamed event and so missed failures
       // landing after the push but before any event.
-      if (this.getChat().getHistory().length <= historyLenAfterStrip) {
+      if (currentHistoryLength() <= historyLenAfterStrip) {
         for (const entry of strippedRetryEntries) {
           this.getChat().addHistory(entry);
         }
@@ -1673,7 +1677,7 @@ export class GeminiClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
-      historyLenAfterStrip = this.getChat().getHistory().length;
+      historyLenAfterStrip = currentHistoryLength();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
