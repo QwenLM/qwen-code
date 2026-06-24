@@ -3443,7 +3443,7 @@ describe('AppContainer State Management', () => {
         );
       });
 
-      it('calls refreshStatic on Ctrl+O when history contains a tool_group', () => {
+      it('skips refreshStatic on Ctrl+O when history contains only tool_group (no visual effect)', () => {
         mockedUseHistory.mockReturnValue({
           history: [
             { type: 'user', id: 1, text: 'run ls' },
@@ -3483,7 +3483,7 @@ describe('AppContainer State Management', () => {
         expect(handler).toBeDefined();
         handler!(ctrlOKey);
 
-        expect(mockStdout.write).toHaveBeenCalledWith(
+        expect(mockStdout.write).not.toHaveBeenCalledWith(
           ansiEscapes.clearTerminal,
         );
       });
