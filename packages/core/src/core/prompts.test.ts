@@ -82,6 +82,18 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('instructs the model not to disclose secrets from credential files', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    // Pin the Secret Disclosure mandate with a targeted assertion so a reword or
+    // accidental drop names the regression instead of only diffing the snapshot.
+    expect(prompt).toContain('Secret Disclosure');
+    expect(prompt).toContain(
+      'Expose or move a secret-bearing file only if the task text names that file',
+    );
+  });
+
   it('should return the base prompt when userMemory is empty string', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt('');
