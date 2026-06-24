@@ -1627,9 +1627,9 @@ export function saveSettings(
       replacePath,
     );
     if (!written) {
-      debugLogger.error(
-        `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`,
-      );
+      const message = `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`;
+      debugLogger.error(message);
+      throw new Error(message);
     }
   } catch (error) {
     debugLogger.error('Error saving user settings file.');

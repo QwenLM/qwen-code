@@ -37,30 +37,6 @@ async function runGit(
   });
 }
 
-/**
- * Checks if a directory is within a git repository hosted on GitHub.
- * @returns true if the directory is in a git repository with a github.com remote, false otherwise
- */
-export const isGitHubRepository = (opts: GitCommandOptions = {}): boolean => {
-  try {
-    const remotes = (
-      childProcess.execSync('git remote -v', {
-        encoding: 'utf-8',
-        ...(opts.cwd ? { cwd: opts.cwd } : {}),
-      }) || ''
-    ).trim();
-
-    return remotes.split('\n').some((line) => {
-      const remoteUrl = line.trim().split(/\s+/)[1];
-      return remoteUrl ? isGitHubRemoteUrl(remoteUrl) : false;
-    });
-  } catch (_error) {
-    // If any filesystem error occurs, assume not a git repo
-    debugLogger.debug(`Failed to get git remote:`, _error);
-    return false;
-  }
-};
-
 export const isGitHubRepositoryAsync = async (
   opts: GitCommandOptions = {},
 ): Promise<boolean> => {
@@ -91,26 +67,6 @@ function isGitHubRemoteUrl(remoteUrl: string): boolean {
     return false;
   }
 }
-
-/**
- * getGitRepoRoot returns the root directory of the git repository.
- * @returns the path to the root of the git repo.
- * @throws error if the exec command fails.
- */
-export const getGitRepoRoot = (opts: GitCommandOptions = {}): string => {
-  const gitRepoRoot = (
-    childProcess.execSync('git rev-parse --show-toplevel', {
-      encoding: 'utf-8',
-      ...(opts.cwd ? { cwd: opts.cwd } : {}),
-    }) || ''
-  ).trim();
-
-  if (!gitRepoRoot) {
-    throw new Error(`Git repo returned empty value`);
-  }
-
-  return gitRepoRoot;
-};
 
 export const getGitRepoRootAsync = async (
   opts: GitCommandOptions = {},
@@ -168,25 +124,6 @@ export const getLatestGitHubRelease = async (
     );
   }
 };
-
-/**
- * getGitHubRepoInfo returns the owner and repository for a GitHub repo.
- * @returns the owner and repository of the github repo.
- * @throws error if the exec command fails.
- */
-export function getGitHubRepoInfo(opts: GitCommandOptions = {}): {
-  owner: string;
-  repo: string;
-} {
-  const remoteUrl = childProcess
-    .execSync('git remote get-url origin', {
-      encoding: 'utf-8',
-      ...(opts.cwd ? { cwd: opts.cwd } : {}),
-    })
-    .trim();
-
-  return parseGitHubRepoInfo(remoteUrl);
-}
 
 export async function getGitHubRepoInfoAsync(
   opts: GitCommandOptions = {},

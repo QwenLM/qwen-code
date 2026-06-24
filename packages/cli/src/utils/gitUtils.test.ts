@@ -7,12 +7,9 @@
 import { vi, describe, expect, it, afterEach, beforeEach } from 'vitest';
 import * as child_process from 'node:child_process';
 import {
-  isGitHubRepository,
   isGitHubRepositoryAsync,
-  getGitRepoRoot,
   getGitRepoRootAsync,
   getLatestGitHubRelease,
-  getGitHubRepoInfo,
   getGitHubRepoInfoAsync,
 } from './gitUtils.js';
 
@@ -34,86 +31,17 @@ function mockExecFileStdout(stdout: string): void {
   }) as typeof child_process.execFile);
 }
 
-describe('isGitHubRepository', async () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('returns false if the git command fails', async () => {
-    vi.mocked(child_process.execSync).mockImplementation((): string => {
-      throw new Error('oops');
-    });
-    expect(isGitHubRepository()).toBe(false);
-  });
-
-  it('returns false if the remote is not github.com', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  https://gitlab.com/owner/repo.git (fetch)
-      origin  https://gitlab.com/owner/repo.git (push)
-    `);
-    expect(isGitHubRepository()).toBe(false);
-  });
-
-  it('returns false for github.com lookalike hosts', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  https://github.com.evil/owner/repo.git (fetch)
-      origin  https://github.com.evil/owner/repo.git (push)
-    `);
-    expect(isGitHubRepository()).toBe(false);
-  });
-
-  it('returns false when github.com only appears in the path', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  https://gitlab.com/owner/github.com-mirror.git (fetch)
-      origin  https://gitlab.com/owner/github.com-mirror.git (push)
-    `);
-    expect(isGitHubRepository()).toBe(false);
-  });
-
-  it('returns true if the remote is github.com', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  https://github.com/sethvargo/gemini-cli (fetch)
-      origin  https://github.com/sethvargo/gemini-cli (push)
-    `);
-    expect(isGitHubRepository()).toBe(true);
-  });
-
-  it('returns true for GitHub SSH remotes', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  git@github.com:owner/repo.git (fetch)
-      origin  git@github.com:owner/repo.git (push)
-    `);
-    expect(isGitHubRepository()).toBe(true);
-  });
-
-  it('returns true for GitHub SSH URL remotes', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  ssh://git@github.com/owner/repo.git (fetch)
-      origin  ssh://git@github.com/owner/repo.git (push)
-    `);
-    expect(isGitHubRepository()).toBe(true);
-  });
-
-  it('returns true for GitHub SSH URL remotes with an explicit port', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  ssh://git@github.com:22/owner/repo.git (fetch)
-      origin  ssh://git@github.com:22/owner/repo.git (push)
-    `);
-    expect(isGitHubRepository()).toBe(true);
-  });
-
-  it('returns false for GitHub SSH lookalike hosts', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(`
-      origin  git@github.com.evil:owner/repo.git (fetch)
-      origin  git@github.com.evil:owner/repo.git (push)
-    `);
-    expect(isGitHubRepository()).toBe(false);
-  });
-});
+function mockExecFileError(error: Error): void {
+  vi.mocked(child_process.execFile).mockImplementation(((
+    _cmd,
+    _args,
+    _opts,
+    cb,
+  ) => {
+    (cb as (err: Error, stdout: string, stderr: string) => void)(error, '', '');
+    return {} as ReturnType<typeof child_process.execFile>;
+  }) as typeof child_process.execFile);
+}
 
 describe('isGitHubRepositoryAsync', async () => {
   beforeEach(() => {
@@ -124,150 +52,71 @@ describe('isGitHubRepositoryAsync', async () => {
     vi.restoreAllMocks();
   });
 
+  it('returns false if the git command fails', async () => {
+    mockExecFileError(new Error('oops'));
+
+    await expect(isGitHubRepositoryAsync()).resolves.toBe(false);
+  });
+
+  it.each([
+    [
+      'non-GitHub remote',
+      `origin  https://gitlab.com/owner/repo.git (fetch)
+origin  https://gitlab.com/owner/repo.git (push)`,
+    ],
+    [
+      'github.com lookalike host',
+      `origin  https://github.com.evil/owner/repo.git (fetch)
+origin  https://github.com.evil/owner/repo.git (push)`,
+    ],
+    [
+      'github.com only in path',
+      `origin  https://gitlab.com/owner/github.com-mirror.git (fetch)
+origin  https://gitlab.com/owner/github.com-mirror.git (push)`,
+    ],
+    [
+      'GitHub SSH lookalike host',
+      `origin  git@github.com.evil:owner/repo.git (fetch)
+origin  git@github.com.evil:owner/repo.git (push)`,
+    ],
+  ])('returns false for %s', async (_name, remotes) => {
+    mockExecFileStdout(remotes);
+
+    await expect(isGitHubRepositoryAsync()).resolves.toBe(false);
+  });
+
+  it.each([
+    [
+      'HTTPS GitHub remote',
+      `origin  https://github.com/sethvargo/gemini-cli (fetch)
+origin  https://github.com/sethvargo/gemini-cli (push)`,
+    ],
+    [
+      'GitHub SSH remote',
+      `origin  git@github.com:owner/repo.git (fetch)
+origin  git@github.com:owner/repo.git (push)`,
+    ],
+    [
+      'GitHub SSH URL remote',
+      `origin  ssh://git@github.com/owner/repo.git (fetch)
+origin  ssh://git@github.com/owner/repo.git (push)`,
+    ],
+    [
+      'GitHub SSH URL remote with explicit port',
+      `origin  ssh://git@github.com:22/owner/repo.git (fetch)
+origin  ssh://git@github.com:22/owner/repo.git (push)`,
+    ],
+  ])('returns true for %s', async (_name, remotes) => {
+    mockExecFileStdout(remotes);
+
+    await expect(isGitHubRepositoryAsync()).resolves.toBe(true);
+  });
+
   it('returns true for GitHub remotes without blocking execSync', async () => {
     mockExecFileStdout('origin  https://github.com/owner/repo.git (fetch)\n');
 
     await expect(isGitHubRepositoryAsync()).resolves.toBe(true);
     expect(child_process.execSync).not.toHaveBeenCalled();
-  });
-});
-
-describe('getGitHubRepoInfo', async () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('throws an error if github repo info cannot be determined', async () => {
-    vi.mocked(child_process.execSync).mockImplementation((): string => {
-      throw new Error('oops');
-    });
-    expect(() => {
-      getGitHubRepoInfo();
-    }).toThrowError(/oops/);
-  });
-
-  it('throws an error if owner/repo could not be determined', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce('');
-    expect(() => {
-      getGitHubRepoInfo();
-    }).toThrowError(/Owner & repo could not be extracted from remote URL/);
-  });
-
-  it('returns the owner and repo', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://github.com/owner/repo.git ',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  // Tests for credential formats
-
-  it('returns the owner and repo for URL with classic PAT token (ghp_)', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('returns the owner and repo for URL with fine-grained PAT token (github_pat_)', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://github_pat_xxxxxxxxxxxxxxxxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('returns the owner and repo for URL with username:password format', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://username:password@github.com/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('returns the owner and repo for URL with OAuth token (oauth2:token)', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://oauth2:gho_xxxxxxxxxxxx@github.com/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('returns the owner and repo for URL with GitHub Actions token (x-access-token)', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://x-access-token:ghs_xxxxxxxxxxxx@github.com/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  // Tests for case insensitivity
-
-  it('returns the owner and repo for URL with uppercase GITHUB.COM', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://GITHUB.COM/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('returns the owner and repo for URL with mixed case GitHub.Com', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://GitHub.Com/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  // Tests for SSH format
-
-  it('returns the owner and repo for SSH URL', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'git@github.com:owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('returns the owner and repo for SSH URL with an explicit port', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'ssh://git@github.com:22/owner/repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('throws for non-GitHub SSH URL', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'git@gitlab.com:owner/repo.git',
-    );
-    expect(() => {
-      getGitHubRepoInfo();
-    }).toThrowError(/Owner & repo could not be extracted from remote URL/);
-  });
-
-  // Tests for edge cases
-
-  it('returns the owner and repo for URL without .git suffix', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://github.com/owner/repo',
-    );
-    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
-  });
-
-  it('throws for non-GitHub HTTPS URL', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://gitlab.com/owner/repo.git',
-    );
-    expect(() => {
-      getGitHubRepoInfo();
-    }).toThrowError(/Owner & repo could not be extracted from remote URL/);
-  });
-
-  it('handles repo names containing .git substring', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce(
-      'https://github.com/owner/my.git.repo.git',
-    );
-    expect(getGitHubRepoInfo()).toEqual({
-      owner: 'owner',
-      repo: 'my.git.repo',
-    });
   });
 });
 
@@ -278,6 +127,69 @@ describe('getGitHubRepoInfoAsync', async () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('throws an error if github repo info cannot be determined', async () => {
+    mockExecFileError(new Error('oops'));
+
+    await expect(getGitHubRepoInfoAsync()).rejects.toThrowError(/oops/);
+  });
+
+  it.each([
+    ['empty remote', ''],
+    ['non-GitHub SSH URL', 'git@gitlab.com:owner/repo.git'],
+    ['non-GitHub HTTPS URL', 'https://gitlab.com/owner/repo.git'],
+  ])('throws if owner/repo cannot be determined for %s', async (_name, url) => {
+    mockExecFileStdout(url);
+
+    await expect(getGitHubRepoInfoAsync()).rejects.toThrowError(
+      /Owner & repo could not be extracted from remote URL/,
+    );
+  });
+
+  it.each([
+    ['plain HTTPS URL', 'https://github.com/owner/repo.git'],
+    [
+      'classic PAT token',
+      'https://ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/owner/repo.git',
+    ],
+    [
+      'fine-grained PAT token',
+      'https://github_pat_xxxxxxxxxxxxxxxxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/owner/repo.git',
+    ],
+    [
+      'username:password credentials',
+      'https://username:password@github.com/owner/repo.git',
+    ],
+    [
+      'OAuth token credentials',
+      'https://oauth2:gho_xxxxxxxxxxxx@github.com/owner/repo.git',
+    ],
+    [
+      'GitHub Actions token credentials',
+      'https://x-access-token:ghs_xxxxxxxxxxxx@github.com/owner/repo.git',
+    ],
+    ['uppercase host', 'https://GITHUB.COM/owner/repo.git'],
+    ['mixed case host', 'https://GitHub.Com/owner/repo.git'],
+    ['SCP-style SSH URL', 'git@github.com:owner/repo.git'],
+    ['SSH URL with explicit port', 'ssh://git@github.com:22/owner/repo.git'],
+    ['URL without .git suffix', 'https://github.com/owner/repo'],
+  ])('returns owner and repo for %s', async (_name, url) => {
+    mockExecFileStdout(url);
+
+    await expect(getGitHubRepoInfoAsync()).resolves.toEqual({
+      owner: 'owner',
+      repo: 'repo',
+    });
+  });
+
+  it('handles repo names containing .git substring', async () => {
+    mockExecFileStdout('https://github.com/owner/my.git.repo.git');
+
+    await expect(getGitHubRepoInfoAsync()).resolves.toEqual({
+      owner: 'owner',
+      repo: 'my.git.repo',
+    });
   });
 
   it('returns the owner and repo without blocking execSync', async () => {
@@ -291,7 +203,7 @@ describe('getGitHubRepoInfoAsync', async () => {
   });
 });
 
-describe('getGitRepoRoot', async () => {
+describe('getGitRepoRootAsync', async () => {
   beforeEach(() => {
     vi.resetAllMocks();
   });
@@ -301,34 +213,17 @@ describe('getGitRepoRoot', async () => {
   });
 
   it('throws an error if git root cannot be determined', async () => {
-    vi.mocked(child_process.execSync).mockImplementation((): string => {
-      throw new Error('oops');
-    });
-    expect(() => {
-      getGitRepoRoot();
-    }).toThrowError(/oops/);
+    mockExecFileError(new Error('oops'));
+
+    await expect(getGitRepoRootAsync()).rejects.toThrowError(/oops/);
   });
 
   it('throws an error if git root is empty', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce('');
-    expect(() => {
-      getGitRepoRoot();
-    }).toThrowError(/Git repo returned empty value/);
-  });
+    mockExecFileStdout('');
 
-  it('returns the root', async () => {
-    vi.mocked(child_process.execSync).mockReturnValueOnce('/path/to/git/repo');
-    expect(getGitRepoRoot()).toBe('/path/to/git/repo');
-  });
-});
-
-describe('getGitRepoRootAsync', async () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
+    await expect(getGitRepoRootAsync()).rejects.toThrowError(
+      /Git repo returned empty value/,
+    );
   });
 
   it('returns the root without blocking execSync', async () => {

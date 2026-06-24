@@ -21,12 +21,9 @@ const mockProxyAgent = vi.hoisted(() => vi.fn((proxy: string) => ({ proxy })));
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/gitUtils.js', () => ({
-  isGitHubRepository: vi.fn(),
   isGitHubRepositoryAsync: vi.fn(),
-  getGitRepoRoot: vi.fn(),
   getGitRepoRootAsync: vi.fn(),
   getLatestGitHubRelease: vi.fn(),
-  getGitHubRepoInfo: vi.fn(),
   getGitHubRepoInfoAsync: vi.fn(),
 }));
 
@@ -51,15 +48,9 @@ describe('setupGithub service', () => {
     scratchDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'setup-github-service-'),
     );
-    vi.mocked(gitUtils.isGitHubRepository).mockReturnValue(true);
     vi.mocked(gitUtils.isGitHubRepositoryAsync).mockResolvedValue(true);
-    vi.mocked(gitUtils.getGitRepoRoot).mockReturnValue(scratchDir);
     vi.mocked(gitUtils.getGitRepoRootAsync).mockResolvedValue(scratchDir);
     vi.mocked(gitUtils.getLatestGitHubRelease).mockResolvedValue('v1.2.3');
-    vi.mocked(gitUtils.getGitHubRepoInfo).mockReturnValue({
-      owner: 'owner',
-      repo: 'repo',
-    });
     vi.mocked(gitUtils.getGitHubRepoInfoAsync).mockResolvedValue({
       owner: 'owner',
       repo: 'repo',

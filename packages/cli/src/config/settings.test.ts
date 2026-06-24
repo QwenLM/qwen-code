@@ -3560,7 +3560,7 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
-    it('logs when setValue persistence is refused', () => {
+    it('throws and logs when setValue persistence is refused', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -3578,7 +3578,11 @@ describe('Settings Loading and Merging', () => {
         commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValueOnce(false);
 
-      settings.setValue(SettingScope.User, 'mcpServers', {});
+      expect(() =>
+        settings.setValue(SettingScope.User, 'mcpServers', {}),
+      ).toThrow(
+        /saveSettings: updateSettingsFilePreservingFormat returned false/,
+      );
 
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
         expect.stringContaining(
@@ -3614,12 +3618,9 @@ describe('Settings Loading and Merging', () => {
       );
       const updateSettingsFile =
         commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
-      updateSettingsFile.mockImplementation((file: string) => {
-        if (file === MOCK_WORKSPACE_SETTINGS_PATH) {
-          throw new Error('workspace save failed');
-        }
-        return true;
-      });
+      updateSettingsFile.mockImplementation(
+        (file: string) => file !== MOCK_WORKSPACE_SETTINGS_PATH,
+      );
       const committed: SettingScope[] = [];
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
@@ -3640,7 +3641,9 @@ describe('Settings Loading and Merging', () => {
           ],
           (scope) => committed.push(scope),
         ),
-      ).toThrow('workspace save failed');
+      ).toThrow(
+        /saveSettings: updateSettingsFilePreservingFormat returned false/,
+      );
 
       expect(committed).toEqual([SettingScope.User]);
       expect(settings.user.settings.general?.voice?.language).toBe('zh');

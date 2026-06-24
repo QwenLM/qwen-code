@@ -24,12 +24,9 @@ vi.mock('child_process');
 global.fetch = vi.fn();
 
 vi.mock('../../utils/gitUtils.js', () => ({
-  isGitHubRepository: vi.fn(),
   isGitHubRepositoryAsync: vi.fn(),
-  getGitRepoRoot: vi.fn(),
   getGitRepoRootAsync: vi.fn(),
   getLatestGitHubRelease: vi.fn(),
-  getGitHubRepoInfo: vi.fn(),
   getGitHubRepoInfoAsync: vi.fn(),
 }));
 
