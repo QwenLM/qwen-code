@@ -229,6 +229,38 @@ describe('Query', () => {
     await query.close();
   });
 
+  it('rejects pending MCP responses when the transport read loop ends', async () => {
+    const transport = new MockTransport();
+    const query = new Query(transport, {
+      timeout: { controlRequest: 1000 },
+    });
+
+    const initializeRequest = await transport.waitForWrite(0);
+    transport.pushMessage(controlSuccess(initializeRequest, null));
+    await query.initialized;
+
+    // ponytail: inject a pending MCP response directly instead of standing up a
+    // full SDK MCP server + tool-call handshake — finishTransportRead drains
+    // pendingMcpResponses the same way regardless of how the entry got there.
+    let rejectMcp!: (error: Error) => void;
+    const mcpPending = new Promise<never>((_resolve, reject) => {
+      rejectMcp = reject;
+    });
+    (
+      query as unknown as {
+        pendingMcpResponses: Map<string, { reject: (error: Error) => void }>;
+      }
+    ).pendingMcpResponses.set('server:1', { reject: rejectMcp });
+
+    // Transport EOF ends the read loop, which calls finishTransportRead().
+    await transport.close();
+
+    await expect(mcpPending).rejects.toThrow(
+      'Transport closed before control response',
+    );
+    await query.close();
+  });
+
   it('does not close the query when the transport output ends', async () => {
     const transport = new MockTransport();
     const query = new Query(transport, {
