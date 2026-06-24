@@ -1144,6 +1144,14 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     if (visibleColumnIndexes.length <= 1) return;
     setSelection(null);
     setOpenFilterMenu(null);
+    setFilters((current) => {
+      const next = { ...current };
+      delete next[columnIndex];
+      return next;
+    });
+    setSort((current) =>
+      current?.columnIndex === columnIndex ? null : current,
+    );
     setHiddenColumns((current) => {
       const next = new Set(current);
       next.add(columnIndex);

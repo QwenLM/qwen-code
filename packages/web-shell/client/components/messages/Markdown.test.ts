@@ -3,10 +3,15 @@
  */
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as EnhancedTableModule from './EnhancedMarkdownTable';
 import { isSafeHref, isSafeImageSrc, Markdown } from './Markdown';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('isSafeHref', () => {
   it('allows https URLs', () => {
@@ -96,6 +101,40 @@ describe('isSafeImageSrc', () => {
 
   it('allows relative paths', () => {
     expect(isSafeImageSrc('/images/logo.png')).toBe(true);
+  });
+});
+
+describe('Markdown enhanced table fallback', () => {
+  it('renders the plain table fallback when enhancement throws', () => {
+    vi.spyOn(EnhancedTableModule, 'EnhancedMarkdownTable').mockImplementation(
+      () => {
+        throw new Error('Enhanced table failed');
+      },
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: '| A |\n| --- |\n| 1 |',
+          enhanceTables: true,
+        }),
+      );
+    });
+
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(table?.textContent).toContain('A');
+    expect(table?.textContent).toContain('1');
+    expect(container.textContent).not.toContain('Quick copy');
+
+    act(() => root.unmount());
+    container.remove();
   });
 });
 

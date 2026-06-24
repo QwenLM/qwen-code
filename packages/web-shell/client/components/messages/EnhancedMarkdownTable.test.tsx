@@ -267,6 +267,27 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('clears hidden column filters and sort', () => {
+    const container = renderTable();
+
+    click(button(container, 'Sort by Team'));
+    click(button(container, 'Sort by Team'));
+    click(button(container, 'Filter Team'));
+    const beta = container.querySelector<HTMLInputElement>(
+      'input[name="markdown-table-filter-option-0-1"]',
+    );
+    expect(beta).not.toBeNull();
+    click(beta!);
+    click(textButton(container, 'Confirm'));
+    expect(rowTexts(container)).toEqual(['Gamma|30', 'Alpha|10']);
+
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Hide column'));
+
+    expect(rowTexts(container)).toEqual(['10', '2', '30']);
+    expect(container.textContent).toContain('3 rows');
+  });
+
   it('selection copy skips hidden columns between selected cells', () => {
     const writeText = mockClipboard();
     const container = renderWideTable();
