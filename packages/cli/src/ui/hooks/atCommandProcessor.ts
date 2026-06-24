@@ -16,6 +16,7 @@ import {
   unescapePath,
   readManyFiles,
   shouldRunVisionBridge,
+  emptyMcpResourceText,
   formatMcpResourceContents,
   summarizeMcpResource,
 } from '@qwen-code/qwen-code-core';
@@ -418,7 +419,14 @@ export async function resolveAtCommandQuery({
     // delimiters so the model gets a clear boundary around untrusted,
     // server-supplied content. Kept identical to the `read_mcp_resource` tool.
     const formatted = formatMcpResourceContents(outcome.value, label);
-    resourceParts.push(...formatted.parts);
+    if (formatted.parts.length > 0) {
+      resourceParts.push(...formatted.parts);
+    } else {
+      // Empty read: inject the same attributed diagnostic the `read_mcp_resource`
+      // tool surfaces, so the model never gets a dangling `@server:uri` with zero
+      // content and zero explanation (the two paths must not diverge).
+      resourceParts.push({ text: emptyMcpResourceText(formatted, label) });
+    }
     resourceLabels.push(label);
 
     // Reflect what was actually injected so a success card never hides an

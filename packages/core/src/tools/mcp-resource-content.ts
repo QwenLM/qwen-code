@@ -1,9 +1,10 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
@@ -27,8 +28,21 @@ export interface FormattedMcpResource {
   textChars: number;
   /** Number of blob attachments actually injected (after capping). */
   blobCount: number;
+  /** Total base64 blob chars actually injected (after capping). */
+  blobChars: number;
   /** True when any text/blob content was dropped or sliced by a cap. */
   truncated: boolean;
+}
+
+/** Options for {@link formatMcpResourceContents}. */
+export interface FormatMcpResourceOptions {
+  /**
+   * Max cumulative base64 blob chars this call may inject. Defaults to
+   * {@link MAX_MCP_RESOURCE_BLOB_CHARS}. The `read_mcp_resource` tool lowers
+   * this to the remaining per-turn budget so many parallel calls can't inject
+   * an unbounded total (see its per-turn blob budget).
+   */
+  maxBlobChars?: number;
 }
 
 /**
@@ -40,15 +54,19 @@ export interface FormattedMcpResource {
  * at {@link MAX_MCP_RESOURCE_BLOB_CHARS} (a server returning many sub-limit
  * blobs in one response could otherwise still inject unbounded data); blobs
  * become `inlineData` media parts rather than raw base64 text. The returned
- * `parts` are wrapped in `--- Content from MCP resource <label> --- ... --- End
- * of MCP resource <label> ---` delimiters, which both bound the model's view of
- * untrusted server content and give it a clear boundary between the user's
- * prompt and server-supplied content.
+ * `parts` are wrapped in `--- Content from MCP resource <label> [<nonce>] ---
+ * ... --- End of MCP resource <label> [<nonce>] ---` delimiters, which bound
+ * the model's view of untrusted server content. The per-call random `<nonce>`
+ * makes the closing marker unforgeable: a hostile server cannot embed a fake
+ * `--- End of MCP resource <label> ---` in its own content to smuggle text out
+ * of the frame, since it cannot predict the nonce.
  */
 export function formatMcpResourceContents(
   result: ReadResourceResult,
   label: string,
+  opts?: FormatMcpResourceOptions,
 ): FormattedMcpResource {
+  const maxBlobChars = opts?.maxBlobChars ?? MAX_MCP_RESOURCE_BLOB_CHARS;
   const contentParts: Part[] = [];
   let textChars = 0;
   let blobChars = 0;
@@ -74,7 +92,7 @@ export function formatMcpResourceContents(
         textChars += text.length;
       }
     } else if ('blob' in content && typeof content.blob === 'string') {
-      if (blobChars + content.blob.length > MAX_MCP_RESOURCE_BLOB_CHARS) {
+      if (blobChars + content.blob.length > maxBlobChars) {
         truncated = true;
         continue;
       }
@@ -92,22 +110,45 @@ export function formatMcpResourceContents(
     }
   }
 
+  // Per-call nonce so the closing delimiter can't be forged by server content.
+  const nonce = randomUUID().slice(0, 8);
+  const truncationNotice = truncated
+    ? `\n[Content truncated at ${MAX_MCP_RESOURCE_TEXT_CHARS} chars — the full resource may contain additional content.]`
+    : '';
   const parts: Part[] =
     contentParts.length > 0
       ? [
-          { text: `\n--- Content from MCP resource ${label} ---\n` },
+          { text: `\n--- Content from MCP resource ${label} [${nonce}] ---\n` },
           ...contentParts,
-          { text: `\n--- End of MCP resource ${label} ---\n` },
+          {
+            text: `${truncationNotice}\n--- End of MCP resource ${label} [${nonce}] ---\n`,
+          },
         ]
       : [];
 
-  return { parts, textChars, blobCount, truncated };
+  return { parts, textChars, blobCount, blobChars, truncated };
 }
 
 /**
- * One-line summary of what a formatted read actually injected, shared by the
- * `@` resource tool-card and the `read_mcp_resource` tool's `returnDisplay`, so
- * a success state never hides an empty/truncated read.
+ * Model-facing diagnostic injected when a read produced no content parts, so
+ * the `@` path and the `read_mcp_resource` tool surface the same attributed
+ * explanation instead of diverging (the `@` path would otherwise inject nothing
+ * and leave a dangling `@server:uri` reference with no content).
+ */
+export function emptyMcpResourceText(
+  formatted: FormattedMcpResource,
+  label: string,
+): string {
+  return `\n--- MCP resource ${label}: ${summarizeMcpResource(formatted)} ---\n`;
+}
+
+/**
+ * One-line summary of what a formatted read actually injected. Used as the `@`
+ * resource card's `resultDisplay`, the `read_mcp_resource` tool's
+ * `returnDisplay`, and — when no content parts were produced — as the seed of
+ * its `llmContent` fallback (see {@link emptyMcpResourceText}), so a success
+ * state never hides an empty/truncated read. Keep it display-and-model safe:
+ * no ANSI color or markup that would corrupt `llmContent`.
  */
 export function summarizeMcpResource(formatted: FormattedMcpResource): string {
   const { textChars, blobCount, truncated } = formatted;

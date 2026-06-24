@@ -1444,14 +1444,15 @@ describe('handleAtCommand', () => {
       });
 
       const serialized = JSON.stringify(result.processedQuery);
-      // The body is fenced so the model can tell server content from the
-      // user's own prompt.
+      // The body is fenced (with a per-call nonce after the label) so the model
+      // can tell server content from the user's own prompt and a hostile server
+      // can't forge the closing marker.
       expect(serialized).toContain(
-        '--- Content from MCP resource myserver:res://d ---',
+        '--- Content from MCP resource myserver:res://d [',
       );
       expect(serialized).toContain('HELLO');
       expect(serialized).toContain(
-        '--- End of MCP resource myserver:res://d ---',
+        '--- End of MCP resource myserver:res://d [',
       );
     });
 
