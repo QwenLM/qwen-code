@@ -164,6 +164,14 @@ export function useVoiceCapture(
     setStatus(next);
   }, []);
 
+  const clearTranscribeTimeout = useCallback(() => {
+    const res = resourcesRef.current;
+    if (res.transcribeTimeout) {
+      clearTimeout(res.transcribeTimeout);
+      res.transcribeTimeout = undefined;
+    }
+  }, []);
+
   const teardownAudio = useCallback(() => {
     const res = resourcesRef.current;
     if (res.processor) res.processor.onaudioprocess = null;
@@ -189,10 +197,7 @@ export function useVoiceCapture(
     captureGenerationRef.current++;
     teardownAudio();
     const res = resourcesRef.current;
-    if (res.transcribeTimeout) {
-      clearTimeout(res.transcribeTimeout);
-      res.transcribeTimeout = undefined;
-    }
+    clearTranscribeTimeout();
     if (res.ws) {
       try {
         res.ws.onmessage = null;
@@ -204,7 +209,7 @@ export function useVoiceCapture(
       }
       res.ws = undefined;
     }
-  }, [teardownAudio]);
+  }, [teardownAudio, clearTranscribeTimeout]);
 
   const fail = useCallback(
     (message: string, generation?: number) => {
@@ -353,10 +358,25 @@ export function useVoiceCapture(
           source.connect(processor);
           processor.connect(sink);
           sink.connect(context.destination);
+          clearTranscribeTimeout();
+          resourcesRef.current.transcribeTimeout = setTimeout(() => {
+            if (statusRef.current === 'recording') {
+              fail(
+                'No response from server. Check that the voice model is running.',
+                generation,
+              );
+            }
+          }, TRANSCRIPTION_TIMEOUT_MS);
           if (mountedRef.current) applyStatus('recording');
         };
 
         ws.onmessage = (event: MessageEvent) => {
+          if (
+            statusRef.current === 'connecting' ||
+            statusRef.current === 'recording'
+          ) {
+            clearTranscribeTimeout();
+          }
           let msg: { type?: string; text?: string; message?: string };
           try {
             msg = JSON.parse(String(event.data));
@@ -402,7 +422,7 @@ export function useVoiceCapture(
         );
       }
     })();
-  }, [baseUrl, token, fail, finishWith, applyStatus]);
+  }, [baseUrl, token, fail, finishWith, applyStatus, clearTranscribeTimeout]);
 
   const stop = useCallback(() => {
     const ws = resourcesRef.current.ws;
@@ -419,6 +439,7 @@ export function useVoiceCapture(
     const generation = captureGenerationRef.current;
     try {
       ws.send(JSON.stringify({ type: 'stop' }));
+      clearTranscribeTimeout();
       resourcesRef.current.transcribeTimeout = setTimeout(() => {
         if (statusRef.current === 'transcribing') {
           fail('Transcription timed out.', generation);
@@ -427,7 +448,7 @@ export function useVoiceCapture(
     } catch {
       fail('Failed to finalize voice transcription.', generation);
     }
-  }, [cleanup, teardownAudio, fail, applyStatus]);
+  }, [cleanup, teardownAudio, fail, applyStatus, clearTranscribeTimeout]);
 
   const abort = useCallback(() => {
     const ws = resourcesRef.current.ws;

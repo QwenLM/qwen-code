@@ -40,6 +40,7 @@ const MAX_CONNECTION_MS = 6 * 60_000;
 const MAX_CONCURRENT_VOICE_SESSIONS = 8;
 const GENERIC_TRANSCRIPTION_ERROR =
   'Voice transcription failed. Please try again.';
+const NO_VOICE_MODEL_ERROR = 'No voice model is configured for this workspace.';
 
 // Audio is 16 kHz mono signed-16-bit PCM. Browser capture sends raw frames; the
 // batch transcription path (non-streaming models) wants a WAV container.
@@ -113,6 +114,13 @@ function defaultTranscribe(
 
 function errMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function voiceConfigErrorMessage(error: unknown): string {
+  const message = errMessage(error);
+  return message === NO_VOICE_MODEL_ERROR
+    ? message
+    : GENERIC_TRANSCRIPTION_ERROR;
 }
 
 /** Normalize a `ws` frame (Buffer | ArrayBuffer | Buffer[]) to a Buffer. */
@@ -259,6 +267,7 @@ export function createVoiceWsConnectionHandler(
       writeStderrLine(`qwen serve: voice websocket failed: ${message}`);
       sendJson({ type: 'error', message });
       cleanup();
+      releaseSlotWhenIdle();
       try {
         ws.close(1011, 'voice error');
       } catch {
@@ -274,7 +283,8 @@ export function createVoiceWsConnectionHandler(
         debugLogger.debug(
           `[voice-ws] load context error: ${errMessage(error)}`,
         );
-        throw new Error(GENERIC_TRANSCRIPTION_ERROR);
+        fail(voiceConfigErrorMessage(error));
+        return;
       }
       sendJson({
         type: 'ready',

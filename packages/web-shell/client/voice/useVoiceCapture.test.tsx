@@ -137,6 +137,7 @@ afterEach(async () => {
   }
   container?.remove();
   container = null;
+  vi.useRealTimers();
 });
 
 describe('useVoiceCapture', () => {
@@ -252,6 +253,53 @@ describe('useVoiceCapture', () => {
 
     expect(onError).toHaveBeenCalledWith(
       'Voice connection closed (code=1006, reason=none).',
+    );
+    expect(capture?.status).toBe('error');
+  });
+
+  it('does not leak a transcription timer when stop is called twice', async () => {
+    vi.useFakeTimers();
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+
+    await act(async () => {
+      ws.onopen?.();
+      result.stop();
+    });
+    expect(vi.getTimerCount()).toBe(1);
+
+    await act(async () => {
+      result.stop();
+    });
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('fails when the server sends no response after recording starts', async () => {
+    vi.useFakeTimers();
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+
+    await act(async () => {
+      ws.onopen?.();
+    });
+    expect(capture?.status).toBe('recording');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      'No response from server. Check that the voice model is running.',
     );
     expect(capture?.status).toBe('error');
   });

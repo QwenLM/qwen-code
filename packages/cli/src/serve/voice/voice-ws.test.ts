@@ -19,6 +19,8 @@ class FakeWs {
   closeCode: number | undefined;
   private handlers: Record<string, Array<(...args: unknown[]) => void>> = {};
 
+  constructor(private readonly emitCloseOnClose = true) {}
+
   on(event: string, cb: (...args: unknown[]) => void): this {
     (this.handlers[event] ??= []).push(cb);
     return this;
@@ -29,7 +31,7 @@ class FakeWs {
   close(code?: number): void {
     this.closeCode = code;
     this.readyState = 3;
-    this.emit('close');
+    if (this.emitCloseOnClose) this.emit('close');
   }
   emit(event: string, ...args: unknown[]): void {
     (this.handlers[event] ?? []).forEach((cb) => cb(...args));
@@ -175,11 +177,29 @@ describe('createVoiceWsConnectionHandler', () => {
     });
   });
 
-  it('reports a generic error frame when voice config loading fails', async () => {
+  it('reports no-model voice config errors to the client', async () => {
     const ws = new FakeWs();
     const handler = createVoiceWsConnectionHandler('/ws', {
       loadContext: () => {
         throw new Error('No voice model is configured for this workspace.');
+      },
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await tick();
+    expect(ws.frames().at(-1)).toMatchObject({
+      type: 'error',
+      message: 'No voice model is configured for this workspace.',
+    });
+    expect(ws.closeCode).toBe(1011);
+  });
+
+  it('keeps unexpected voice config errors generic', async () => {
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => {
+        throw new Error('DASHSCOPE_API_KEY from /private/config is invalid');
       },
     });
     handler(ws as never, {} as never);
@@ -407,6 +427,26 @@ describe('createVoiceWsConnectionHandler', () => {
       message: 'Voice session exceeded the time limit.',
     });
     expect(ws.closeCode).toBe(1011);
+  });
+
+  it('frees a voice slot when a failed socket ignores close', async () => {
+    vi.useFakeTimers();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => streamingCtx(),
+      openStream: async () => ({
+        pushAudio: vi.fn(),
+        finish: vi.fn(async () => ''),
+        abort: vi.fn(),
+      }),
+    });
+    const open = Array.from({ length: 8 }, () => new FakeWs(false));
+    for (const ws of open) handler(ws as never, {} as never);
+
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+
+    const next = new FakeWs();
+    handler(next as never, {} as never);
+    expect(next.closeCode).not.toBe(1013);
   });
 
   it('rejects connections past the concurrency cap and frees slots on close', async () => {
