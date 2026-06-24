@@ -82,6 +82,24 @@ function parseModelSelectionKey(key: string): {
   return { authType, modelId: rest };
 }
 
+/**
+ * Encode a dialog selection key into the `authType:modelId` form persisted for
+ * the fast/vision auxiliary models (baseUrl discarded), so duplicate model ids
+ * across providers stay unambiguous. Handles the three selection-key shapes:
+ * `authType::modelId[\0baseUrl]`, `$runtime|authType|modelId`, and a bare id.
+ */
+function encodeAuxModelSelector(selected: string): string {
+  if (selected.includes('::')) {
+    const parsed = parseModelSelectionKey(selected);
+    return `${parsed.authType}:${parsed.modelId}`;
+  }
+  if (selected.startsWith('$runtime|')) {
+    const parts = selected.split('|');
+    return parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
+  }
+  return selected;
+}
+
 interface ModelDialogProps {
   onClose: () => void;
   isFastModelMode?: boolean;
@@ -544,17 +562,7 @@ export function ModelDialog({
       // Fast model mode: save authType:modelId so duplicate model ids across
       // providers remain unambiguous. baseUrl is intentionally discarded.
       if (isFastModelMode) {
-        let fastModel: string;
-        if (selected.includes('::')) {
-          const parsed = parseModelSelectionKey(selected);
-          fastModel = `${parsed.authType}:${parsed.modelId}`;
-        } else if (selected.startsWith('$runtime|')) {
-          const parts = selected.split('|');
-          fastModel =
-            parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
-        } else {
-          fastModel = selected;
-        }
+        const fastModel = encodeAuxModelSelector(selected);
         const scope = getPersistScopeForModelSelection(settings);
         settings.setValue(scope, 'fastModel', fastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
@@ -573,17 +581,7 @@ export function ModelDialog({
       // Vision model mode: same id encoding as fast mode (authType:modelId so
       // duplicate ids across providers stay unambiguous; baseUrl discarded).
       if (isVisionModelMode) {
-        let visionModel: string;
-        if (selected.includes('::')) {
-          const parsed = parseModelSelectionKey(selected);
-          visionModel = `${parsed.authType}:${parsed.modelId}`;
-        } else if (selected.startsWith('$runtime|')) {
-          const parts = selected.split('|');
-          visionModel =
-            parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
-        } else {
-          visionModel = selected;
-        }
+        const visionModel = encodeAuxModelSelector(selected);
         const scope = getPersistScopeForModelSelection(settings);
         settings.setValue(scope, 'visionModel', visionModel);
         // Sync runtime Config so the vision bridge picks it up without a restart.

@@ -731,6 +731,53 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should reject an authType-qualified vision model missing from that provider', async () => {
+    // Exercises the `selector.authType` branch: a qualified id absent from that
+    // provider's list reports the per-authType message, not the all-providers one.
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision openai:ghost-model',
+        name: 'model',
+        args: '--vision openai:ghost-model',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-vl-max',
+              label: 'qwen-vl-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision openai:ghost-model',
+    );
+
+    expect(setVisionModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Vision model 'ghost-model' is not available for auth type 'openai'.\n" +
+        "Available models for 'openai': qwen-vl-max.\n" +
+        'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.',
+    });
+  });
+
   it('should open the vision model dialog for /model --vision in interactive mode', async () => {
     const mockConfig = createMockConfig({
       model: 'qwen-plus',

@@ -473,6 +473,88 @@ describe('Server Config (config.ts)', () => {
         baseUrl: 'https://primary.example.com',
       });
     });
+
+    it('honors an authType-qualified visionModel against the matching provider only', () => {
+      // Same model id on two providers; the 'anthropic:' qualifier must bind to
+      // the anthropic row, not the same-provider openai one.
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'anthropic:vl-shared',
+      });
+      stubProvider(config, [
+        {
+          id: 'vl-shared',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+        {
+          id: 'vl-shared',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'anthropic:vl-shared',
+        baseUrl: 'https://api.anthropic.com',
+      });
+    });
+
+    it('falls back to auto-select on a malformed visionModel selector instead of throwing', () => {
+      // 'openai:' is a known authType with no model id — resolveModelId throws,
+      // and the guard must swallow it rather than take down every image request.
+      const config = new Config({ ...baseParams, visionModel: 'openai:' });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('setVisionModel("") clears the pin and reverts to same-provider auto-select', () => {
+      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+      stubProvider(config, [
+        {
+          id: 'vl-anthropic',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      // Pinned first.
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-anthropic',
+        baseUrl: 'https://api.anthropic.com',
+      });
+      // Cleared with '' — JSDoc promises a fall back to auto-select.
+      config.setVisionModel('');
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+      // undefined clears too.
+      config.setVisionModel('vl-anthropic');
+      config.setVisionModel(undefined);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
   });
 
   it('wires file history snapshot updates to chat recording', async () => {

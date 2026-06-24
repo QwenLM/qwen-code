@@ -106,9 +106,13 @@ function formatUnavailableModelMessage(
   );
 }
 
-function formatUnavailableFastModelMessage(
+// Fast and vision share the same "not configured for any auth type" message
+// shape, differing only in the label and the configuration hint.
+function formatUnavailableAuxModelMessage(
+  label: 'Fast model' | 'Vision model',
   modelName: string,
   availableModels: AvailableModel[],
+  hint: string,
 ): string {
   const availableModelIds = Array.from(
     new Set(availableModels.map((model) => model.id)),
@@ -119,9 +123,21 @@ function formatUnavailableFastModelMessage(
       : `Configured models: ${availableModelIds.join(', ')}.`;
 
   return (
-    `Fast model '${modelName}' is not configured for any auth type.\n` +
+    `${label} '${modelName}' is not configured for any auth type.\n` +
     `${availableModelsLine}\n` +
-    FAST_MODEL_CONFIGURATION_HINT
+    hint
+  );
+}
+
+function formatUnavailableFastModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  return formatUnavailableAuxModelMessage(
+    'Fast model',
+    modelName,
+    availableModels,
+    FAST_MODEL_CONFIGURATION_HINT,
   );
 }
 
@@ -129,18 +145,11 @@ function formatUnavailableVisionModelMessage(
   modelName: string,
   availableModels: AvailableModel[],
 ): string {
-  const availableModelIds = Array.from(
-    new Set(availableModels.map((model) => model.id)),
-  );
-  const availableModelsLine =
-    availableModelIds.length === 0
-      ? 'No models are configured.'
-      : `Configured models: ${availableModelIds.join(', ')}.`;
-
-  return (
-    `Vision model '${modelName}' is not configured for any auth type.\n` +
-    `${availableModelsLine}\n` +
-    VISION_MODEL_CONFIGURATION_HINT
+  return formatUnavailableAuxModelMessage(
+    'Vision model',
+    modelName,
+    availableModels,
+    VISION_MODEL_CONFIGURATION_HINT,
   );
 }
 

@@ -12,6 +12,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -93,10 +94,20 @@ const renderComponent = (
     ...(contextValue ?? {}),
   } as unknown as Config;
 
+  // ModelDialog only reads historyManager off the UI state; mock just that so
+  // selection notices (e.g. the non-image-capable vision warning) are assertable.
+  const mockHistoryManager = {
+    addItem: vi.fn(),
+  } as unknown as UIState['historyManager'];
+
   const renderResult = render(
     <SettingsContext.Provider value={mockSettings}>
       <ConfigContext.Provider value={mockConfig}>
-        <ModelDialog {...combinedProps} />
+        <UIStateContext.Provider
+          value={{ historyManager: mockHistoryManager } as unknown as UIState}
+        >
+          <ModelDialog {...combinedProps} />
+        </UIStateContext.Provider>
       </ConfigContext.Provider>
     </SettingsContext.Provider>,
   );
@@ -106,6 +117,7 @@ const renderComponent = (
     props: combinedProps,
     mockConfig,
     mockSettings,
+    mockHistoryManager,
   };
 };
 
@@ -610,6 +622,42 @@ describe('<ModelDialog />', () => {
       expect.any(String),
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns in the history when a pinned vision model is not image-capable', async () => {
+    // qwen-plus is text-only by name default, so the pin is honored but flagged.
+    const setVisionModel = vi.fn();
+    const { mockHistoryManager } = renderComponent(
+      { isVisionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen-plus'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-plus',
+            label: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen-plus',
+        })),
+        setVisionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen-plus`);
+
+    expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-plus');
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'success',
+        text: expect.stringContaining('not a known image-capable model'),
+      }),
+      expect.any(Number),
+    );
   });
 
   it('stores the plain model id in voice model mode without switching models', async () => {
