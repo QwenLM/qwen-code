@@ -586,14 +586,14 @@ describe('compactToggleHasVisualEffect', () => {
     expect(compactToggleHasVisualEffect(history)).toBe(false);
   });
 
-  it('returns true when any tool_group is present', () => {
+  it('returns false when only tool_group is present (no compact mode effect)', () => {
     const history: HistoryItem[] = [
       { type: 'user', id: 1, text: 'run' },
       createToolGroup(2, [
         createTool('c1', 'shell', ToolCallStatus.Success),
       ]) as HistoryItem,
     ];
-    expect(compactToggleHasVisualEffect(history)).toBe(true);
+    expect(compactToggleHasVisualEffect(history)).toBe(false);
   });
 
   it('returns true when any gemini_thought is present', () => {

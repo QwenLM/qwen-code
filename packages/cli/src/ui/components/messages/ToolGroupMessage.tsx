@@ -291,12 +291,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // generic CompactToolGroupDisplay path.
   const allMemOpsComplete =
     isMemoryOnlyGroup &&
-    toolCalls.every(
-      (t) =>
-        t.status === ToolCallStatus.Success ||
-        t.status === ToolCallStatus.Error ||
-        t.status === ToolCallStatus.Canceled,
-    );
+    !hasErrorTool &&
+    toolCalls.every((t) => t.status === ToolCallStatus.Success);
   if (allMemOpsComplete) {
     const readCount = memoryReadCount ?? 0;
     const writeCount = memoryWriteCount ?? 0;
@@ -345,18 +341,41 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     : inlineToolCalls.filter((t) => !isCollapsibleTool(t.name));
 
   // When all tools are collapsible (pure read/search/list batch),
-  // render only the summary line.
+  // render summary line + memory badge if applicable.
   if (collapsibleTools.length > 0 && nonCollapsibleTools.length === 0) {
+    const hasMemoryBadge =
+      !isMemoryOnlyGroup &&
+      ((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0);
     return (
-      <CompactToolGroupDisplay
-        toolCalls={collapsibleTools}
-        contentWidth={contentWidth}
-      />
+      <Box flexDirection="column" width={contentWidth}>
+        <CompactToolGroupDisplay
+          toolCalls={collapsibleTools}
+          contentWidth={contentWidth}
+        />
+        {hasMemoryBadge &&
+          (() => {
+            const parts: string[] = [];
+            if ((memoryReadCount ?? 0) > 0) {
+              const n = memoryReadCount!;
+              parts.push(`Recalled ${n} ${n === 1 ? 'memory' : 'memories'}`);
+            }
+            if ((memoryWriteCount ?? 0) > 0) {
+              const n = memoryWriteCount!;
+              parts.push(`Wrote ${n} ${n === 1 ? 'memory' : 'memories'}`);
+            }
+            return (
+              <Box paddingLeft={1}>
+                <Text dimColor>● {parts.join(', ')}</Text>
+              </Box>
+            );
+          })()}
+      </Box>
     );
   }
 
   // Full expanded view for non-collapsible tools
-  const staticHeight = /* marginBottom */ 1;
+  const collapsibleSummaryHeight = collapsibleTools.length > 0 ? 1 : 0;
+  const staticHeight = /* marginBottom */ 1 + collapsibleSummaryHeight;
   const innerWidth = contentWidth - 2;
 
   let countToolCallsWithResults = 0;
@@ -428,13 +447,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
-                forceShowResult={
-                  forceExpandAll ||
-                  tool.status === ToolCallStatus.Confirming ||
-                  tool.status === ToolCallStatus.Error ||
-                  isAgentWithPendingConfirmation(tool.resultDisplay) ||
-                  isTerminalSubagentTool(tool)
-                }
+                forceShowResult={forceExpandAll}
                 isFocused={isSubagentFocused}
                 isPending={isPending}
               />

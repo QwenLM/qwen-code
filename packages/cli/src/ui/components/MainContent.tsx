@@ -107,8 +107,7 @@ export const MainContent = () => {
     [uiState.history],
   );
 
-  // Single baseline view: history is rendered as-is (no cross-group merging).
-  const mergedHistory = visibleHistory;
+  // History is rendered as-is (no cross-group merging).
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay
@@ -120,7 +119,7 @@ export const MainContent = () => {
     useMemo(() => {
       let runningOffsets = createEmptySourceCopyOffsets();
 
-      const items = mergedHistory.map((item) => {
+      const items = visibleHistory.map((item) => {
         if (item.type === 'gemini') {
           runningOffsets = createEmptySourceCopyOffsets();
           const offsets = cloneSourceCopyOffsets(runningOffsets);
@@ -145,7 +144,7 @@ export const MainContent = () => {
         historyItemsWithSourceCopyOffsets: items,
         pendingStartSourceCopyOffsets: cloneSourceCopyOffsets(runningOffsets),
       };
-    }, [mergedHistory]);
+    }, [visibleHistory]);
 
   const pendingHistoryItemsWithSourceCopyOffsets = useMemo(() => {
     let runningOffsets = cloneSourceCopyOffsets(pendingStartSourceCopyOffsets);
@@ -174,18 +173,18 @@ export const MainContent = () => {
 
   // Progressive Static replay (issue #3899). `replayCount` is the number of
   // history items currently passed to <Static>. It catches up to
-  // mergedHistory.length either in one shot (small lag) or chunk-by-chunk
+  // visibleHistory.length either in one shot (small lag) or chunk-by-chunk
   // through setImmediate (large lag, e.g., post-Ctrl+O remount of a 500-item
   // session).
   //
-  // Note: source-copy offsets are computed across the FULL mergedHistory
+  // Note: source-copy offsets are computed across the FULL visibleHistory
   // above so each code block keeps its stable copy index even when only a
   // prefix is visible; we slice the post-offset array here.
   const [replayCount, setReplayCount] = useState(() =>
-    initialReplayCount(mergedHistory.length),
+    initialReplayCount(visibleHistory.length),
   );
-  const mergedLengthRef = useRef(mergedHistory.length);
-  mergedLengthRef.current = mergedHistory.length;
+  const mergedLengthRef = useRef(visibleHistory.length);
+  mergedLengthRef.current = visibleHistory.length;
 
   // The reset MUST happen during render (not in an effect): historyRemountKey
   // also drives the <Static> key below, and Ink remounts Static synchronously
@@ -203,7 +202,7 @@ export const MainContent = () => {
     // `replayCount` / `visibleHistoryItemsWithSourceCopyOffsets`. Skip the
     // chunked-replay reset for VP users so a Ctrl+O / model-change bump
     // doesn't trigger ~M/CHUNK_SIZE extra setImmediate-scheduled
-    // re-renders (M = mergedHistory.length) that the VP path discards.
+    // re-renders (M = visibleHistory.length) that the VP path discards.
     if (!useVirtualScroll) {
       setReplayCount(initialReplayCount(mergedLengthRef.current));
     }
@@ -211,10 +210,10 @@ export const MainContent = () => {
 
   useEffect(() => {
     if (useVirtualScroll) return;
-    if (replayCount >= mergedHistory.length) return;
-    const remaining = mergedHistory.length - replayCount;
+    if (replayCount >= visibleHistory.length) return;
+    const remaining = visibleHistory.length - replayCount;
     if (remaining <= PROGRESSIVE_REPLAY_CHUNK_SIZE) {
-      setReplayCount(mergedHistory.length);
+      setReplayCount(visibleHistory.length);
       return;
     }
     const handle = setImmediate(() => {
@@ -223,7 +222,7 @@ export const MainContent = () => {
       );
     });
     return () => clearImmediate(handle);
-  }, [useVirtualScroll, replayCount, mergedHistory.length]);
+  }, [useVirtualScroll, replayCount, visibleHistory.length]);
 
   // Render the full list when the tail gap is small (≤ CHUNK_SIZE). This
   // covers the normal append path: a pending item finalizes, replayCount is
@@ -242,10 +241,10 @@ export const MainContent = () => {
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
   const allVirtualItems = useMemo(
     (): HistoryItem[] => [
-      ...mergedHistory,
+      ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
     ],
-    [mergedHistory, pendingHistoryItems],
+    [visibleHistory, pendingHistoryItems],
   );
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
@@ -253,7 +252,7 @@ export const MainContent = () => {
   // diagram stay stable across continuation messages. Build lookup tables so
   // the VP renderItem can attach the same offsets without changing the
   // VirtualizedList API.
-  //   - Static items: look up by HistoryItem reference (mergedHistory items
+  //   - Static items: look up by HistoryItem reference (visibleHistory items
   //     are passed by ref, so identity-keyed lookup is stable).
   //   - Pending items: look up by pending-array index (the spread
   //     `{...item, id: -(i+1)}` creates a new object every render, so the
@@ -275,8 +274,8 @@ export const MainContent = () => {
   }, [historyItemsWithSourceCopyOffsets]);
 
   const thinkingFullTextByItem = useMemo(
-    () => buildThinkingFullTextMap(mergedHistory),
-    [mergedHistory],
+    () => buildThinkingFullTextMap(visibleHistory),
+    [visibleHistory],
   );
   const thinkingFullTextByItemRef = useRef(thinkingFullTextByItem);
   thinkingFullTextByItemRef.current = thinkingFullTextByItem;

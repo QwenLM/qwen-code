@@ -153,16 +153,26 @@ describe('<ToolMessage />', () => {
     config: mockConfig,
   };
 
-  it('collapses text/ANSI result for completed Success tool', () => {
+  it('collapses text/ANSI result for completed collapsible tool', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} name="ReadFile" description="config.yaml" />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame();
+    expect(output).toContain('✓');
+    expect(output).toContain('ReadFile');
+    expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+  });
+
+  it('shows result for non-collapsible completed tool', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
       StreamingState.Idle,
     );
     const output = lastFrame();
-    expect(output).toContain('✓'); // Success indicator
+    expect(output).toContain('✓');
     expect(output).toContain('test-tool');
-    expect(output).toContain('A tool for testing');
-    expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+    expect(output).toContain('MockMarkdown:Test result'); // not collapsed
   });
 
   it('renders tool results directly below the header row when forced', () => {
@@ -180,14 +190,14 @@ describe('<ToolMessage />', () => {
     expect(resultLine).toBe(headerLine + 1);
   });
 
-  it('hides text result output for completed tools', () => {
+  it('hides text result output for completed collapsible tools', () => {
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} />,
+      <ToolMessage {...baseProps} name="Grep" description="search pattern" />,
       StreamingState.Idle,
     );
     const output = lastFrame();
-    expect(output).toContain('✓'); // status indicator still visible
-    expect(output).toContain('test-tool'); // tool name still visible
+    expect(output).toContain('✓');
+    expect(output).toContain('Grep');
     expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 

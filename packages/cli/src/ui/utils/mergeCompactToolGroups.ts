@@ -149,7 +149,6 @@ export function compactToggleHasVisualEffect(
 ): boolean {
   for (const item of history) {
     if (
-      item.type === 'tool_group' ||
       item.type === 'gemini_thought' ||
       item.type === 'gemini_thought_content'
     ) {

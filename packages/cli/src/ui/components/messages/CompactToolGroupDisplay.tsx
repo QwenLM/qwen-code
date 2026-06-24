@@ -181,7 +181,7 @@ export function isCollapsibleTool(toolName: string): boolean {
 /**
  * Build a semantic summary line from a batch of tool calls.
  *
- * Single tool  → "Read package.json" / "Ran npm test"
+ * Single tool  → "Read 1 file" / "Ran 1 command"
  * Multi  same  → "Read 3 files"
  * Multi mixed  → "Read 3 files, edited 2 files, ran 1 command"
  *

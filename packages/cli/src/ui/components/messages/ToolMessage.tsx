@@ -28,6 +28,7 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
@@ -669,14 +670,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
 
-  // Collapse text/ANSI output for completed tools to reduce scrollback
-  // noise. Diff, plan, todo, and task results always render — they carry
-  // non-repeatable information the user needs to review inline.
-  const isCompleted =
-    status === ToolCallStatus.Success || status === ToolCallStatus.Canceled;
+  // Collapse text/ANSI output for completed collapsible tools (read/search/list)
+  // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)
+  // always show results — their output IS the answer. Canceled tools keep partial
+  // output visible. Diff, plan, todo, task results always render regardless.
   const shouldCollapseResult =
     !forceShowResult &&
-    isCompleted &&
+    status === ToolCallStatus.Success &&
+    isCollapsibleTool(name) &&
     (effectiveDisplayRenderer.type === 'string' ||
       effectiveDisplayRenderer.type === 'ansi');
 
