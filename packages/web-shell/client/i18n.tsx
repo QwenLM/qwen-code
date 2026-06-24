@@ -359,6 +359,8 @@ const EN: Messages = {
   'queue.delete': 'Delete',
   'queue.edit': 'Edit',
   'queue.insert': 'Insert',
+  'queue.insertCommandDisabled':
+    "Commands can't be inserted into the running turn; they run after it finishes.",
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
@@ -1450,6 +1452,7 @@ const ZH: Messages = {
   'queue.delete': '删除',
   'queue.edit': '编辑',
   'queue.insert': '插入',
+  'queue.insertCommandDisabled': '命令无法插入当前回合，会在回合结束后执行。',
   'queue.insertFailed': '插入排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,

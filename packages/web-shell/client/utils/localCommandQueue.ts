@@ -48,3 +48,19 @@ export function appendOrDeferLocalUserMessage(
   sink.append(text);
   return false;
 }
+
+/**
+ * Whether a queued prompt is a slash (`/…`) or shell (`!…`) command rather than
+ * model-facing prose.
+ *
+ * The queue's "insert" action injects the raw text into the running turn via
+ * `enqueueMidTurnMessage` — it is NOT re-dispatched as a command, so a command
+ * inserted this way reaches the model as the literal string "/context …" and
+ * never runs. Callers use this to disable "insert" for command entries; they
+ * still run correctly when the queue drains and re-dispatches them through
+ * `handleSubmit`.
+ */
+export function isCommandPrompt(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith('/') || trimmed.startsWith('!');
+}

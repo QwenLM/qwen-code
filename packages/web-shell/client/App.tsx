@@ -94,7 +94,10 @@ import {
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
-import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
+import {
+  appendOrDeferLocalUserMessage,
+  isCommandPrompt,
+} from './utils/localCommandQueue';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -758,6 +761,10 @@ function QueuedPromptDisplay({
             ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
             : normalizedPreview;
         const imageCount = prompt.images?.length ?? 0;
+        // A command (/… or !…) can't be inserted into the running turn — insert
+        // injects raw text the model would see literally, never running the
+        // command. Show the action disabled so it stays visible but inert.
+        const isCommand = isCommandPrompt(prompt.text);
         return (
           <div key={prompt.id} className={styles.queuedPrompt}>
             <span className={styles.queuedPromptText}>
@@ -788,6 +795,10 @@ function QueuedPromptDisplay({
                   type="button"
                   className={styles.queuedPromptAction}
                   onClick={() => onInsert(prompt.id)}
+                  disabled={isCommand}
+                  title={
+                    isCommand ? t('queue.insertCommandDisabled') : undefined
+                  }
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <path
@@ -1602,6 +1613,9 @@ export function App({
     async (id: number) => {
       const prompt = queuedPromptsRef.current.find((item) => item.id === id);
       if (!prompt || (prompt.images?.length ?? 0) > 0) return;
+      // Commands can't be inserted into the running turn (the model would see
+      // the raw text and never run them); they re-dispatch on drain instead.
+      if (isCommandPrompt(prompt.text)) return;
       let abort = midTurnEnqueueAbortRef.current;
       if (!abort) {
         abort = new AbortController();

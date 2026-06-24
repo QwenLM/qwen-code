@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { appendOrDeferLocalUserMessage } from './localCommandQueue';
+import {
+  appendOrDeferLocalUserMessage,
+  isCommandPrompt,
+} from './localCommandQueue';
 
 describe('appendOrDeferLocalUserMessage', () => {
   it('appends and returns false when no turn is streaming', () => {
@@ -48,5 +51,20 @@ describe('appendOrDeferLocalUserMessage', () => {
     appendOrDeferLocalUserMessage(true, '/stats', images, { append, enqueue });
 
     expect(enqueue).toHaveBeenCalledExactlyOnceWith('/stats', images);
+  });
+});
+
+describe('isCommandPrompt', () => {
+  it('treats slash and shell prefixes as commands', () => {
+    expect(isCommandPrompt('/context detail')).toBe(true);
+    expect(isCommandPrompt('/stats')).toBe(true);
+    expect(isCommandPrompt('!ls -la')).toBe(true);
+    expect(isCommandPrompt('  /context')).toBe(true); // leading whitespace
+  });
+
+  it('treats prose as not a command', () => {
+    expect(isCommandPrompt('summarize the project structure')).toBe(false);
+    expect(isCommandPrompt('what does this do?')).toBe(false);
+    expect(isCommandPrompt('')).toBe(false);
   });
 });
