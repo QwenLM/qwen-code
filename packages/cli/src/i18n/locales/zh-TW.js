@@ -203,6 +203,7 @@ export default {
   'toolDisplayName.EnterWorktree': '進入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流程',
+  'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
@@ -1272,8 +1273,10 @@ export default {
     '語音聽寫需要麥克風存取。macOS 會在你首次錄音時彈出授權請求——請同意後重新開始。彈窗開啟期間的首次錄音可能為空。',
   'Voice: recording': '語音：錄音中',
   'Voice: transcribing': '語音：轉寫中',
+  'Voice: refining': '語音：優化中',
   'listening…': '聆聽中…',
   'transcribing…': '轉寫中…',
+  'refining…': '優化中…',
   'Content generator configuration not available.': '內容生成器配置不可用',
   'Authentication type not available.': '認證類型不可用',
   'No models available for the current authentication type ({{authType}}).':

@@ -100,6 +100,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
 
+  // ReadMcpResource tool
+  read_mcp_resource: 'read_mcp_resource',
+  ReadMcpResource: 'read_mcp_resource',
+  ReadMcpResourceTool: 'read_mcp_resource',
+
   // Agent (subagent) tool
   agent: 'agent',
   Agent: 'agent',
@@ -338,6 +343,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
+  read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
   skill: 'Skill',

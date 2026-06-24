@@ -3,11 +3,13 @@ import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import styles from './ModelDialog.module.css';
 
-export type ModelDialogMode = 'main' | 'fast';
+export type ModelDialogMode = 'main' | 'fast' | 'voice';
 
 interface ModelDialogProps {
   mode?: ModelDialogMode;
   onSelect: (modelId: string) => void;
+  models?: ModelDialogModel[];
+  currentModelId?: string;
 }
 
 interface ModelDialogModel {
@@ -87,16 +89,22 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function ModelDialog({ mode = 'main', onSelect }: ModelDialogProps) {
+export function ModelDialog({
+  mode = 'main',
+  onSelect,
+  models,
+  currentModelId,
+}: ModelDialogProps) {
   const connection = useConnection();
-  const currentModel = connection.currentModel ?? '';
+  const currentModel = currentModelId ?? connection.currentModel ?? '';
   const availableModels = useMemo(
-    () => (connection.models ?? []) as ModelDialogModel[],
-    [connection.models],
+    () => models ?? ((connection.models ?? []) as ModelDialogModel[]),
+    [models, connection.models],
   );
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
   const isFastMode = mode === 'fast';
+  const isVoiceMode = mode === 'voice';
   const selectedIdx = availableModels.findIndex((m) => m.id === currentModel);
   const selectedModel =
     selectedIdx >= 0 ? availableModels[selectedIdx] : availableModels[0];
@@ -114,7 +122,13 @@ export function ModelDialog({ mode = 'main', onSelect }: ModelDialogProps) {
         className={styles.list}
         ref={listRef}
         role="listbox"
-        aria-label={isFastMode ? t('model.setFast') : t('model.select')}
+        aria-label={
+          isFastMode
+            ? t('model.setFast')
+            : isVoiceMode
+              ? t('model.setVoice')
+              : t('model.select')
+        }
       >
         {availableModels.length === 0 ? (
           <div className={styles.empty}>{t('model.none')}</div>

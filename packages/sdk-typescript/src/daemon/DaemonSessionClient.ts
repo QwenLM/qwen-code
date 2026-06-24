@@ -5,6 +5,7 @@
  */
 
 import type { DaemonClient } from './DaemonClient.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
 import {
   isNonBlockingAccepted,
   matchTurnEvent,
@@ -96,6 +97,8 @@ export class DaemonSessionClient {
   readonly replaySnapshot: DaemonReplaySnapshot;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
+  /** In-flight `reattach()` so concurrent prompts re-register only once. */
+  private reattaching?: Promise<void>;
   private readonly promptLimit: number;
   private readonly _pendingPrompts = new Map<
     string,
@@ -245,11 +248,8 @@ export class DaemonSessionClient {
   ): Promise<PromptResult> {
     signal?.throwIfAborted();
     if (!this.subscriptionActive) {
-      return await this.client.prompt(
-        this.sessionId,
-        req,
-        signal,
-        this.clientId,
+      return await this.withClientIdSelfHeal(() =>
+        this.client.prompt(this.sessionId, req, signal, this.clientId),
       );
     }
 
@@ -259,11 +259,13 @@ export class DaemonSessionClient {
     );
     let accepted: NonBlockingPromptAccepted | PromptResult;
     try {
-      accepted = await this.client.promptNonBlocking(
-        this.sessionId,
-        req,
-        signal,
-        this.clientId,
+      accepted = await this.withClientIdSelfHeal(() =>
+        this.client.promptNonBlocking(
+          this.sessionId,
+          req,
+          signal,
+          this.clientId,
+        ),
       );
       if (!isNonBlockingAccepted(accepted)) {
         releaseAdmission();
@@ -306,6 +308,51 @@ export class DaemonSessionClient {
         signal?.addEventListener('abort', onAbort, { once: true });
       }
     });
+  }
+
+  /**
+   * Run a prompt-admission call, recovering from a stale `clientId`.
+   *
+   * A daemon restart (or session reload) wipes the daemon's in-memory client
+   * registration, so a prompt sent with our now-unknown `clientId` is rejected
+   * at admission with `400 invalid_client_id` (see PR #5784). That rejection
+   * happens before the turn is registered, so the prompt never ran — retrying
+   * cannot double-execute. We re-register to obtain a fresh `clientId` and
+   * retry the admission exactly once. Any other error (and a second
+   * `invalid_client_id`) propagates.
+   */
+  private async withClientIdSelfHeal<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isInvalidClientId(err)) throw err;
+      await this.reattach();
+      return await fn();
+    }
+  }
+
+  /**
+   * Re-register this client against the (already-restored) session to obtain a
+   * fresh daemon-assigned `clientId`. Concurrent callers coalesce onto a single
+   * in-flight `resume` so we never orphan extra registrations.
+   */
+  private async reattach(): Promise<void> {
+    if (this.reattaching) return this.reattaching;
+    // Send no clientId so the bridge issues a fresh registration rather than
+    // validating the stale one. Pass workspaceCwd explicitly: the daemon's
+    // restore path resolves the workspace key before its existing-session fast
+    // path, and that resolution rejects a missing/relative path.
+    this.reattaching = this.client
+      .resumeSession(this.sessionId, { workspaceCwd: this.workspaceCwd })
+      .then((session) => {
+        // Refresh only the clientId; leave the SSE cursor and ACP state intact.
+        this.session.clientId = session.clientId;
+      });
+    try {
+      await this.reattaching;
+    } finally {
+      this.reattaching = undefined;
+    }
   }
 
   async cancel(): Promise<void> {
@@ -634,4 +681,18 @@ function validateLastEventId(
     throw new TypeError('invalid lastEventId');
   }
   return lastEventId;
+}
+
+/**
+ * True for the daemon's `400 invalid_client_id` prompt-admission rejection
+ * (the stale-clientId signal a daemon restart / session reload produces).
+ */
+function isInvalidClientId(err: unknown): boolean {
+  return (
+    err instanceof DaemonHttpError &&
+    err.status === 400 &&
+    typeof err.body === 'object' &&
+    err.body !== null &&
+    (err.body as { code?: unknown }).code === 'invalid_client_id'
+  );
 }
