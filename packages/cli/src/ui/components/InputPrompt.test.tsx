@@ -344,6 +344,7 @@ describe('InputPrompt', () => {
         getProjectRoot: () => path.join('test', 'project'),
         getTargetDir: () => path.join('test', 'project', 'src'),
         getVimMode: () => false,
+        getFastModel: () => undefined,
         getWorkspaceContext: () => ({
           getDirectories: () => ['/test/project/src'],
         }),
