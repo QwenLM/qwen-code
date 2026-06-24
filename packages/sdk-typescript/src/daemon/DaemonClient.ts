@@ -1904,6 +1904,14 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Replace one permission rule list.
+   *
+   * `capabilities.features` including `workspace_permissions` means the
+   * daemon exposes the permissions surface. A write still needs a live ACP
+   * session so the active child can receive the update; without one the
+   * daemon rejects the request with `permission_session_required`.
+   */
   async setWorkspacePermissionRules(
     scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,

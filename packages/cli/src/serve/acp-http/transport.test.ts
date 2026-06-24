@@ -31,6 +31,7 @@ import {
 } from '../fs/index.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
@@ -1924,6 +1925,54 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       error: {
         code: -32602,
         data: { errorKind: 'unknown_voice_model' },
+      },
+    });
+    setSpy.mockRestore();
+  });
+
+  it('maps _qwen/workspace/voice/set partial persist errors to structured internal errors', async () => {
+    const setSpy = vi
+      .spyOn(fakeWorkspace, 'setWorkspaceVoiceSettings')
+      .mockRejectedValueOnce(
+        new WorkspaceSettingsPartialPersistError(
+          'batch failed',
+          [
+            {
+              scope: 'workspace',
+              key: 'voiceModel',
+              value: 'qwen3-asr-flash',
+            },
+          ],
+          new Error('disk full'),
+        ),
+      );
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 223,
+      method: '_qwen/workspace/voice/set',
+      params: { voiceModel: 'qwen3-asr-flash' },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: {
+        code: number;
+        message?: string;
+        data?: { errorKind?: string; committedKeys?: string[] };
+      };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 223,
+      error: {
+        code: -32603,
+        message: 'batch failed',
+        data: {
+          errorKind: 'partial_persist_error',
+          committedKeys: ['voiceModel'],
+        },
       },
     });
     setSpy.mockRestore();

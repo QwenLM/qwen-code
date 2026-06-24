@@ -72,7 +72,10 @@ import type {
   WorkspaceRequestContext,
   WorkspaceVoiceSettingsUpdate,
 } from '../workspace-service/types.js';
-import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
+} from '../workspace-service/types.js';
 import type { AcpConnection } from './connection-registry.js';
 import {
   QWEN_META_KEY,
@@ -323,6 +326,16 @@ function toRpcError(err: unknown): {
           : RPC.INTERNAL_ERROR,
       message: err.message,
       data: { errorKind: err.code },
+    };
+  }
+  if (err instanceof WorkspaceSettingsPartialPersistError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: {
+        errorKind: 'partial_persist_error',
+        committedKeys: err.committedWrites.map((write) => write.key),
+      },
     };
   }
   if (err instanceof TooManyActiveDeviceFlowsError) {

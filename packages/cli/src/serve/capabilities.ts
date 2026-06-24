@@ -131,6 +131,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_settings: { since: 'v1' },
+  // `GET /workspace/permissions` is always available when this tag is
+  // advertised. `POST /workspace/permissions` updates the active ACP
+  // child and returns `permission_session_required` when no live ACP
+  // session exists; the tag means the route contract exists, not that
+  // the current daemon state can accept a write.
   workspace_permissions: { since: 'v1' },
   workspace_voice: { since: 'v1' },
   workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
