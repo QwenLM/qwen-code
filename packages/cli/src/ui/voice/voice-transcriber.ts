@@ -299,7 +299,9 @@ export function resolveVoiceStreamConfig(
   }
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext =
-    transport === 'qwen-asr-realtime' ? buildKeytermsContext() : undefined;
+    transport === 'qwen-asr-realtime'
+      ? buildKeytermsContext(args.settings)
+      : undefined;
   return {
     transport,
     baseUrl: base.baseUrl,
@@ -339,9 +341,9 @@ function resolveLanguageCode(language: string | undefined): string | undefined {
   return /^[a-z]{2,3}$/.test(lower) ? lower : undefined;
 }
 
-function buildKeytermsContext(): string | undefined {
+function buildKeytermsContext(settings: LoadedSettings): string | undefined {
   try {
-    const keyterms = buildVoiceKeyterms();
+    const keyterms = buildVoiceKeyterms(settings);
     return keyterms.length > 0 ? keyterms.join(' ') : undefined;
   } catch {
     return undefined;
@@ -535,7 +537,7 @@ export async function transcribeVoiceAudio(
   await assertVoiceBaseUrlNetworkAllowed(voiceConfig, args.lookupHost);
   const fetchFn = args.fetchFn ?? fetch;
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
-  const keytermsContext = buildKeytermsContext();
+  const keytermsContext = buildKeytermsContext(args.settings);
 
   const transport = resolveVoiceTransport(voiceConfig.model);
   switch (transport) {
