@@ -1266,3 +1266,253 @@ describe('DaemonSessionClient', () => {
     );
   });
 });
+
+describe('DaemonSessionClient clientId self-heal', () => {
+  function invalidClientIdResponse(): Response {
+    return jsonResponse(400, {
+      code: 'invalid_client_id',
+      error: 'unknown client',
+      sessionId: 's-1',
+      clientId: 'client-1',
+    });
+  }
+
+  function newSession(client: DaemonClient): DaemonSessionClient {
+    return new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+      maxPendingPromptsPerSession: 10,
+    });
+  }
+
+  it('re-registers and retries once when the blocking prompt is rejected with invalid_client_id', async () => {
+    let promptCalls = 0;
+    let resumeCalls = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        if (promptCalls === 1) return invalidClientIdResponse();
+        return jsonResponse(200, { stopReason: 'end_turn' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+
+    expect(resumeCalls).toBe(1);
+    expect(promptCalls).toBe(2);
+    // The retried prompt carries the freshly registered clientId.
+    const promptRequests = calls.filter((c) =>
+      c.url.endsWith('/session/s-1/prompt'),
+    );
+    expect(promptRequests[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(promptRequests[1]?.headers['x-qwen-client-id']).toBe('client-2');
+    expect(session.clientId).toBe('client-2');
+    // resume re-registers without sending the stale clientId.
+    const resumeReq = calls.find((c) => c.url.endsWith('/session/s-1/resume'));
+    expect(resumeReq?.headers['x-qwen-client-id']).toBeUndefined();
+    expect(resumeReq?.body).toBe(JSON.stringify({ cwd: '/work/a' }));
+  });
+
+  it('re-registers and retries once on the non-blocking prompt path', async () => {
+    let promptCalls = 0;
+    let resumeCalls = 0;
+    let eventsController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const encoder = new TextEncoder();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return pendingSseResponse(
+          () => {},
+          (controller) => {
+            eventsController = controller;
+          },
+        );
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        if (promptCalls === 1) return invalidClientIdResponse();
+        return jsonResponse(202, { promptId: 'p-2', lastEventId: 0 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+    // Activate the SSE subscription so prompt() takes the non-blocking path.
+    const eventsAbort = new AbortController();
+    const eventPump = (async () => {
+      for await (const _event of session.events({
+        signal: eventsAbort.signal,
+      })) {
+        /* keep subscription active */
+      }
+    })().catch(() => {});
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+    });
+
+    const promptPromise = session
+      .prompt({ prompt: [{ type: 'text', text: 'hi' }] })
+      .catch((err: unknown) => err);
+    // The retried prompt registers a pending entry under the new promptId.
+    await waitForPendingPrompt(session, 'p-2');
+    eventsController?.enqueue(encoder.encode(turnCompleteFrame('p-2')));
+
+    await expect(promptPromise).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(resumeCalls).toBe(1);
+    expect(promptCalls).toBe(2);
+    const promptRequests = calls.filter((c) =>
+      c.url.endsWith('/session/s-1/prompt'),
+    );
+    expect(promptRequests[1]?.headers['x-qwen-client-id']).toBe('client-2');
+
+    eventsController?.close();
+    eventsAbort.abort();
+    await eventPump;
+  });
+
+  it('propagates the error when the retried prompt is also invalid_client_id (no loop)', async () => {
+    let promptCalls = 0;
+    let resumeCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        return invalidClientIdResponse();
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { code: 'invalid_client_id' },
+    });
+    expect(resumeCalls).toBe(1);
+    expect(promptCalls).toBe(2);
+  });
+
+  it('does not re-register or retry on a non-invalid_client_id error', async () => {
+    let promptCalls = 0;
+    let resumeCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        return jsonResponse(200, { clientId: 'client-2' });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        return jsonResponse(500, { error: 'boom' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).rejects.toThrow('POST /session/:id/prompt: boom');
+    expect(promptCalls).toBe(1);
+    expect(resumeCalls).toBe(0);
+    expect(session.clientId).toBe('client-1');
+  });
+
+  it('propagates a reattach failure', async () => {
+    let resumeCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        return jsonResponse(404, { error: 'session gone' });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return invalidClientIdResponse();
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).rejects.toThrow('POST /session/:id/resume: session gone');
+    expect(resumeCalls).toBe(1);
+    expect(session.clientId).toBe('client-1');
+  });
+
+  it('coalesces concurrent reattach into a single re-registration', async () => {
+    let promptCalls = 0;
+    let resumeCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        // First two concurrent prompts are rejected; retries succeed.
+        if (promptCalls <= 2) return invalidClientIdResponse();
+        return jsonResponse(200, { stopReason: 'end_turn' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+
+    const [a, b] = await Promise.all([
+      session.prompt({ prompt: [{ type: 'text', text: 'a' }] }),
+      session.prompt({ prompt: [{ type: 'text', text: 'b' }] }),
+    ]);
+    expect(a).toEqual({ stopReason: 'end_turn' });
+    expect(b).toEqual({ stopReason: 'end_turn' });
+    expect(resumeCalls).toBe(1);
+    expect(session.clientId).toBe('client-2');
+  });
+});
