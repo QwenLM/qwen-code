@@ -16,12 +16,21 @@ function makeSettings(
   workspaceDir: string,
   opts: {
     keytermsFile?: string;
+    systemKeytermsFile?: string;
     workspaceKeytermsFile?: string;
     isTrusted?: boolean;
   } = {},
 ): LoadedSettings {
-  const { keytermsFile, workspaceKeytermsFile, isTrusted = true } = opts;
+  const {
+    keytermsFile,
+    systemKeytermsFile,
+    workspaceKeytermsFile,
+    isTrusted = true,
+  } = opts;
   const voiceSettings = keytermsFile ? { voice: { keytermsFile } } : undefined;
+  const systemVoiceSettings = systemKeytermsFile
+    ? { voice: { keytermsFile: systemKeytermsFile } }
+    : undefined;
   const workspaceVoiceSettings = workspaceKeytermsFile
     ? { voice: { keytermsFile: workspaceKeytermsFile } }
     : undefined;
@@ -31,7 +40,7 @@ function makeSettings(
       path: path.join(workspaceDir, '.qwen', 'settings.json'),
       settings: { general: workspaceVoiceSettings },
     },
-    system: { settings: {} },
+    system: { settings: { general: systemVoiceSettings } },
     user: { settings: { general: voiceSettings } },
     merged: {
       general: workspaceVoiceSettings ?? voiceSettings ?? {},
@@ -118,6 +127,30 @@ describe('buildVoiceKeyterms', () => {
       expect(terms).toContain('RelativeTerm');
     });
 
+    it('honors a system-scoped keytermsFile setting', () => {
+      const systemFile = path.join(workspaceDir, 'system-terms.txt');
+      fs.writeFileSync(systemFile, 'SystemTerm\n');
+      const terms = buildVoiceKeyterms(
+        makeSettings(workspaceDir, { systemKeytermsFile: systemFile }),
+      );
+      expect(terms).toContain('SystemTerm');
+    });
+
+    it('prefers system-scoped keytermsFile over user-scoped keytermsFile', () => {
+      const systemFile = path.join(workspaceDir, 'system-terms.txt');
+      const userFile = path.join(workspaceDir, 'user-terms.txt');
+      fs.writeFileSync(systemFile, 'SystemTerm\n');
+      fs.writeFileSync(userFile, 'UserTerm\n');
+      const terms = buildVoiceKeyterms(
+        makeSettings(workspaceDir, {
+          systemKeytermsFile: systemFile,
+          keytermsFile: userFile,
+        }),
+      );
+      expect(terms).toContain('SystemTerm');
+      expect(terms).not.toContain('UserTerm');
+    });
+
     it('dedupes case-insensitively and keeps the global casing', () => {
       fs.writeFileSync(
         path.join(qwenDir, 'voice-keyterms.txt'),
@@ -152,12 +185,16 @@ describe('buildVoiceKeyterms', () => {
     it('caps by total length for a file of few long terms', () => {
       // 40 × 80-char terms blow the 2000-char budget long before the 200-term
       // count cap, so the char budget must bind.
-      const long = Array.from({ length: 40 }, () => 'x'.repeat(80)).join('\n');
+      const long = Array.from(
+        { length: 40 },
+        (_, i) => `t${i}_${'x'.repeat(76)}`,
+      ).join('\n');
       fs.writeFileSync(path.join(qwenDir, 'voice-keyterms.txt'), long);
       const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+      const userTerms = terms.filter((term) => term.startsWith('t'));
       expect(terms.join(' ').length).toBeLessThanOrEqual(2000);
-      expect(terms.length).toBeLessThan(40); // not all long terms fit
-      expect(terms.length).toBeGreaterThan(31); // some user terms past the globals
+      expect(userTerms.length).toBeLessThan(40); // not all long terms fit
+      expect(userTerms.length).toBeGreaterThan(0); // some user terms past globals
     });
 
     it('does not read a keyterms file in an untrusted workspace', () => {
