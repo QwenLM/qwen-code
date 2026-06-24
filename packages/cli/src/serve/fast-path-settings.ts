@@ -17,48 +17,31 @@ import {
 } from '../config/shared-env-keys.js';
 import {
   getGlobalQwenDirLite,
+  getSystemDefaultsPath,
+  getSystemSettingsPath,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/storage-paths-lite.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 
+type ServeFastPathPolicy = Pick<
+  NonNullable<Settings['policy']>,
+  'consensusQuorum' | 'permissionStrategy'
+>;
+type ServeFastPathPolicyInput = {
+  [Key in keyof ServeFastPathPolicy]?: unknown;
+};
 export type ServeFastPathSettings = Pick<
   Settings,
   'advanced' | 'context' | 'env' | 'security' | 'tools'
 > & {
-  policy?: {
-    permissionStrategy?: unknown;
-    consensusQuorum?: unknown;
-  };
+  policy?: ServeFastPathPolicyInput;
 };
 const V2_SETTINGS_VERSION = 2;
 const TRUST_FOLDER = 'TRUST_FOLDER';
 const TRUST_PARENT = 'TRUST_PARENT';
 const DO_NOT_TRUST = 'DO_NOT_TRUST';
 let homeEnvBootstrapped = false;
-
-function getSystemSettingsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
-  }
-  if (os.platform() === 'darwin') {
-    return '/Library/Application Support/QwenCode/settings.json';
-  }
-  if (os.platform() === 'win32') {
-    return 'C:\\ProgramData\\qwen-code\\settings.json';
-  }
-  return '/etc/qwen-code/settings.json';
-}
-
-function getSystemDefaultsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
-  }
-  return path.join(
-    path.dirname(getSystemSettingsPath()),
-    'system-defaults.json',
-  );
-}
 
 export function getGlobalQwenDirFastPath(): string {
   return getGlobalQwenDirLite();
@@ -148,11 +131,11 @@ function getHomeEnvFallbackVarsFastPath(): Record<string, string> {
   return result;
 }
 
-function findEnvFileFastPath(
+function findEnvFilesFastPath(
   settings: ServeFastPathSettings,
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPathsFastPath(),
-): string | null {
+): string[] {
   const homeDir = os.homedir();
   let realStartDir = path.resolve(startDir);
   try {
@@ -167,22 +150,35 @@ function findEnvFileFastPath(
     path.join(homeDir, SETTINGS_DIRECTORY_NAME),
   );
   const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
+  const found: string[] = [];
+  const seen = new Set<string>();
 
   const canUseEnvFile = (filePath: string): boolean =>
     isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
 
-  const findHomeCandidate = (): string | null => {
+  const pushCandidate = (filePath: string): boolean => {
+    const normalized = path.normalize(filePath);
+    if (
+      !seen.has(normalized) &&
+      fs.existsSync(filePath) &&
+      canUseEnvFile(filePath)
+    ) {
+      seen.add(normalized);
+      found.push(filePath);
+      return true;
+    }
+    return false;
+  };
+
+  const pushHomeCandidates = (): void => {
     const candidates = [path.join(globalQwenDir, '.env')];
     if (hasCustomConfigDir) {
       candidates.push(path.join(legacyQwenDir, '.env'));
     }
     candidates.push(path.join(homeDir, '.env'));
     for (const candidate of candidates) {
-      if (fs.existsSync(candidate) && canUseEnvFile(candidate)) {
-        return candidate;
-      }
+      pushCandidate(candidate);
     }
-    return null;
   };
 
   let currentDir = realStartDir;
@@ -190,54 +186,67 @@ function findEnvFileFastPath(
   while (true) {
     if (currentDir === homeDir) {
       visitedHomeDir = true;
-      const found = findHomeCandidate();
-      if (found) return found;
+      pushHomeCandidates();
+      return found;
     } else {
       const qwenEnvPath = path.join(
         currentDir,
         SETTINGS_DIRECTORY_NAME,
         '.env',
       );
-      if (fs.existsSync(qwenEnvPath) && canUseEnvFile(qwenEnvPath)) {
-        return qwenEnvPath;
+      if (pushCandidate(qwenEnvPath)) {
+        pushHomeCandidates();
+        return found;
       }
       const envPath = path.join(currentDir, '.env');
-      if (fs.existsSync(envPath) && canUseEnvFile(envPath)) {
-        return envPath;
+      if (pushCandidate(envPath)) {
+        pushHomeCandidates();
+        return found;
       }
     }
 
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir || !parentDir) {
-      return visitedHomeDir ? null : findHomeCandidate();
+      if (!visitedHomeDir) {
+        pushHomeCandidates();
+      }
+      return found;
     }
     currentDir = parentDir;
   }
+}
+
+function setUpCloudShellEnvironmentFromFilesFastPath(
+  envFilePaths: readonly string[],
+): void {
+  for (const envFilePath of envFilePaths) {
+    if (!fs.existsSync(envFilePath)) continue;
+    const parsedEnv = dotenv.parse(fs.readFileSync(envFilePath));
+    if (parsedEnv['GOOGLE_CLOUD_PROJECT']) {
+      process.env['GOOGLE_CLOUD_PROJECT'] = parsedEnv['GOOGLE_CLOUD_PROJECT'];
+      return;
+    }
+  }
+  process.env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
 }
 
 export function loadServeFastPathEnvironment(
   settings: ServeFastPathSettings,
   startDir: string = process.cwd(),
 ): void {
-  const envFilePath = findEnvFileFastPath(settings, startDir);
+  const userLevelPaths = getUserLevelEnvPathsFastPath();
+  const envFilePaths = findEnvFilesFastPath(settings, startDir, userLevelPaths);
 
   if (process.env['CLOUD_SHELL'] === 'true') {
-    if (envFilePath && fs.existsSync(envFilePath)) {
-      const parsedEnv = dotenv.parse(fs.readFileSync(envFilePath));
-      process.env['GOOGLE_CLOUD_PROJECT'] =
-        parsedEnv['GOOGLE_CLOUD_PROJECT'] ?? 'cloudshell-gca';
-    } else {
-      process.env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
-    }
+    setUpCloudShellEnvironmentFromFilesFastPath(envFilePaths);
   }
 
-  if (envFilePath) {
+  for (const envFilePath of envFilePaths) {
     try {
       const parsedEnv = dotenv.parse(fs.readFileSync(envFilePath, 'utf8'));
       const excludedVars =
         settings.advanced?.excludedEnvVars ?? DEFAULT_EXCLUDED_ENV_VARS;
       const normalizedEnvFilePath = path.normalize(envFilePath);
-      const userLevelPaths = getUserLevelEnvPathsFastPath();
       const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
       const isQwenScopedEnvFile =
         isHomeScopedEnvFile ||

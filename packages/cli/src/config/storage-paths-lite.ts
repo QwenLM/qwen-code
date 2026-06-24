@@ -42,3 +42,26 @@ export function getGlobalQwenDirLite(): string {
   }
   return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
 }
+
+export function getSystemSettingsPath(): string {
+  if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
+    return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+  }
+  if (os.platform() === 'darwin') {
+    return '/Library/Application Support/QwenCode/settings.json';
+  }
+  if (os.platform() === 'win32') {
+    return 'C:\\ProgramData\\qwen-code\\settings.json';
+  }
+  return '/etc/qwen-code/settings.json';
+}
+
+export function getSystemDefaultsPath(): string {
+  if (process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']) {
+    return process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+  }
+  return path.join(
+    path.dirname(getSystemSettingsPath()),
+    'system-defaults.json',
+  );
+}

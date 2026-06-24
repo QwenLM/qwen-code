@@ -35,6 +35,8 @@ import {
   TrustLevel,
 } from '../config/trustedFolders.js';
 import * as runQwenServeModule from './run-qwen-serve.js';
+import type { ServeFastPathSettings } from './fast-path-settings.js';
+import type { Settings } from '../config/settingsSchema.js';
 
 let tempWorkspace: string | undefined;
 let tempLaunchCwd: string | undefined;
@@ -55,6 +57,8 @@ const originalTrustedFoldersPath =
 const originalReferencedToken = process.env['FAST_PATH_REFERENCED_TOKEN'];
 const originalRateLimit = process.env['QWEN_SERVE_RATE_LIMIT'];
 const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
+const originalCloudShell = process.env['CLOUD_SHELL'];
+const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
 const originalCwd = process.cwd();
 
 function useTempQwenHome(): string {
@@ -71,6 +75,66 @@ function useTempQwenHome(): string {
     'system-defaults.json',
   );
   return tempQwenHome;
+}
+
+function pickServeFastPathComparable(settings: Settings): ServeFastPathSettings {
+  const out: ServeFastPathSettings = {};
+  if (settings.env) {
+    out.env = settings.env;
+  }
+  if (settings.advanced?.excludedEnvVars !== undefined) {
+    out.advanced = {
+      ...(out.advanced ?? {}),
+      excludedEnvVars: settings.advanced.excludedEnvVars,
+    };
+  }
+  if (settings.advanced?.runtimeOutputDir !== undefined) {
+    out.advanced = {
+      ...(out.advanced ?? {}),
+      runtimeOutputDir: settings.advanced.runtimeOutputDir,
+    };
+  }
+  if (settings.security?.folderTrust?.enabled !== undefined) {
+    out.security = {
+      folderTrust: { enabled: settings.security.folderTrust.enabled },
+    };
+  }
+  if (settings.tools?.approvalMode !== undefined) {
+    out.tools = {
+      ...(out.tools ?? {}),
+      approvalMode: settings.tools.approvalMode,
+    };
+  }
+  if (settings.tools?.sandbox !== undefined) {
+    out.tools = { ...(out.tools ?? {}), sandbox: settings.tools.sandbox };
+  }
+  if (settings.context?.fileName !== undefined) {
+    out.context = {
+      ...(out.context ?? {}),
+      fileName: settings.context.fileName,
+    };
+  }
+  if (settings.context?.fileFiltering?.customIgnoreFiles !== undefined) {
+    out.context = {
+      ...(out.context ?? {}),
+      fileFiltering: {
+        customIgnoreFiles: settings.context.fileFiltering.customIgnoreFiles,
+      },
+    };
+  }
+  if (settings.policy?.permissionStrategy !== undefined) {
+    out.policy = {
+      ...(out.policy ?? {}),
+      permissionStrategy: settings.policy.permissionStrategy,
+    };
+  }
+  if (settings.policy?.consensusQuorum !== undefined) {
+    out.policy = {
+      ...(out.policy ?? {}),
+      consensusQuorum: settings.policy.consensusQuorum,
+    };
+  }
+  return out;
 }
 
 afterEach(() => {
@@ -125,6 +189,16 @@ afterEach(() => {
     delete process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
   } else {
     process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'] = originalRateLimitPrompt;
+  }
+  if (originalCloudShell === undefined) {
+    delete process.env['CLOUD_SHELL'];
+  } else {
+    process.env['CLOUD_SHELL'] = originalCloudShell;
+  }
+  if (originalGoogleCloudProject === undefined) {
+    delete process.env['GOOGLE_CLOUD_PROJECT'];
+  } else {
+    process.env['GOOGLE_CLOUD_PROJECT'] = originalGoogleCloudProject;
   }
   if (originalQwenRuntimeDir === undefined) {
     delete process.env['QWEN_RUNTIME_DIR'];
@@ -277,8 +351,38 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('keeps --experimental-lsp on the fast path', () => {
+    const parsed = parseServeFastPathArgs(['serve', '--experimental-lsp']);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { experimentalLsp: true },
+    });
+  });
+
   it('returns false to let the full CLI handle fallback cases', async () => {
     await expect(tryRunServeFastPath(['serve', '--help'])).resolves.toBe(false);
+  });
+
+  it('prints a breadcrumb when settings bootstrap falls back to the full CLI', async () => {
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-fallback-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(join(tempWorkspace, '.qwen', 'settings.json'), '{');
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+
+    await expect(
+      tryRunServeFastPath(['serve', '--workspace', tempWorkspace]),
+    ).resolves.toBe(false);
+
+    expect(stderrWrites.join('')).toContain(
+      'qwen serve: fast-path bootstrap failed, falling back to full startup:',
+    );
   });
 
   it.each([
@@ -568,6 +672,33 @@ describe('serve fast path environment bootstrap', () => {
     );
   });
 
+  it('loads home .env after workspace .env for daemon boot-time keys', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
+    delete process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-layered-env-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_SERVE_RATE_LIMIT_PROMPT=123\n',
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=from-home-env',
+        'QWEN_SERVE_RATE_LIMIT=1',
+      ].join('\n'),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['QWEN_SERVE_RATE_LIMIT_PROMPT']).toBe('123');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-home-env');
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('1');
+  });
+
   it('applies legacy excludedProjectEnvVars before loading workspace .env', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
@@ -699,6 +830,94 @@ describe('serve fast path environment bootstrap', () => {
     });
   });
 
+  it('matches the full settings loader for fields consumed before listen', async () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-parity-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    const { SETTINGS_VERSION, loadSettings } = await import(
+      '../config/settings.js'
+    );
+    const versioned = (settings: Record<string, unknown>) => ({
+      $version: SETTINGS_VERSION,
+      ...settings,
+    });
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify(
+        versioned({
+          env: {
+            FAST_PATH_DEFAULT_ONLY: 'default',
+            FAST_PATH_OVERLAP: 'default',
+          },
+          advanced: {
+            excludedEnvVars: ['FAST_PATH_DEFAULT_EXCLUDED'],
+            runtimeOutputDir: '.default-runtime',
+          },
+          context: {
+            fileName: 'DEFAULT.md',
+            fileFiltering: { customIgnoreFiles: ['.default-ignore'] },
+          },
+          security: { folderTrust: { enabled: false } },
+          tools: { approvalMode: 'default' },
+        }),
+      ),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify(
+        versioned({
+          env: {
+            FAST_PATH_USER_ONLY: 'user',
+            FAST_PATH_OVERLAP: 'user',
+          },
+          advanced: {
+            excludedEnvVars: ['FAST_PATH_USER_EXCLUDED'],
+          },
+          security: { folderTrust: { enabled: true } },
+          tools: { approvalMode: 'auto' },
+        }),
+      ),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify(
+        versioned({
+          env: {
+            FAST_PATH_WORKSPACE_ONLY: 'workspace',
+            FAST_PATH_OVERLAP: 'workspace',
+          },
+          advanced: { runtimeOutputDir: '.workspace-runtime' },
+          context: {
+            fileName: 'WORKSPACE.md',
+            fileFiltering: { customIgnoreFiles: ['.workspace-ignore'] },
+          },
+          policy: { permissionStrategy: 'consensus', consensusQuorum: 3 },
+          tools: { sandbox: true },
+        }),
+      ),
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify(
+        versioned({
+          env: {
+            FAST_PATH_SYSTEM_ONLY: 'system',
+            FAST_PATH_OVERLAP: 'system',
+          },
+          context: { fileName: 'SYSTEM.md' },
+          tools: { approvalMode: 'yolo' },
+        }),
+      ),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace)).toEqual(
+      pickServeFastPathComparable(
+        loadSettings(tempWorkspace, { skipLoadEnvironment: true }).merged,
+      ),
+    );
+  });
+
   it('loads runtimeOutputDir for daemon startup artifacts', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -802,6 +1021,20 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('matches Cloud Shell default project behavior for empty env values', async () => {
+    delete process.env['GOOGLE_CLOUD_PROJECT'];
+    process.env['CLOUD_SHELL'] = 'true';
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-cloud-shell-')),
+    );
+    writeFileSync(join(tempWorkspace, '.env'), 'GOOGLE_CLOUD_PROJECT=\n');
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['GOOGLE_CLOUD_PROJECT']).toBe('cloudshell-gca');
   });
 
   it('expands process environment placeholders in workspace settings.env', async () => {

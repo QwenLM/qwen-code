@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { homedir, platform } from 'node:os';
+import { homedir } from 'node:os';
 import process from 'node:process';
 import {
   FatalConfigError,
@@ -50,6 +50,10 @@ import {
   DEFAULT_DARK_THEME_NAME,
   DEFAULT_LIGHT_THEME_NAME,
 } from './default-theme-names.js';
+import {
+  getSystemDefaultsPath,
+  getSystemSettingsPath,
+} from './storage-paths-lite.js';
 
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -64,6 +68,7 @@ export {
   setUpCloudShellEnvironment,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
+export { getSystemDefaultsPath, getSystemSettingsPath };
 export type { EnvReloadResult } from './environment.js';
 
 const debugLogger = createDebugLogger('SETTINGS');
@@ -167,29 +172,6 @@ export function migrateLegacyPermissions(
   }
 
   return result;
-}
-
-export function getSystemSettingsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
-  }
-  if (platform() === 'darwin') {
-    return '/Library/Application Support/QwenCode/settings.json';
-  } else if (platform() === 'win32') {
-    return 'C:\\ProgramData\\qwen-code\\settings.json';
-  } else {
-    return '/etc/qwen-code/settings.json';
-  }
-}
-
-export function getSystemDefaultsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
-  }
-  return path.join(
-    path.dirname(getSystemSettingsPath()),
-    'system-defaults.json',
-  );
 }
 
 export type { DnsResolutionOrder } from './settingsSchema.js';

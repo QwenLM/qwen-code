@@ -67,6 +67,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['open', 'open'],
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
+  ['experimental-lsp', 'experimentalLsp'],
   ['rate-limit', 'rateLimit'],
 ]);
 
@@ -465,7 +466,12 @@ export async function tryRunServeFastPath(
     settings = await bootstrapServeFastPathEnvironment(
       parsed.options.workspace,
     );
-  } catch {
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: fast-path bootstrap failed, falling back to full startup: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
     return false;
   }
   applyRateLimitEnvDefaults(parsed.options, process.env);
