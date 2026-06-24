@@ -14,11 +14,16 @@ export const useLoadingIndicator = (
   customWittyPhrases?: string[],
   currentCandidatesTokens?: number,
   currentStreamingChars?: number,
+  isToolExecuting = false,
 ) => {
   const [timerResetKey, setTimerResetKey] = useState(0);
   const isTimerActive = streamingState === StreamingState.Responding;
 
-  const elapsedTimeFromTimer = useTimer(isTimerActive, timerResetKey);
+  const elapsedTimeFromTimer = useTimer(
+    isTimerActive,
+    timerResetKey,
+    isTimerActive && isToolExecuting,
+  );
 
   const isPhraseCyclingActive = streamingState === StreamingState.Responding;
   const isWaiting = streamingState === StreamingState.WaitingForConfirmation;

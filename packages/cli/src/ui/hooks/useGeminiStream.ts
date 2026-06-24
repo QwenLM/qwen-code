@@ -1221,6 +1221,7 @@ export const useGeminiStream = (
         return currentThoughtBuffer;
       }
 
+      streamingResponseLengthRef.current += thoughtText.length;
       let newThoughtBuffer = currentThoughtBuffer + thoughtText;
       if (newThoughtBuffer.trim().length === 0) {
         return newThoughtBuffer;

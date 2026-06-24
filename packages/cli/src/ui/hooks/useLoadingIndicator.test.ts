@@ -134,6 +134,43 @@ describe('useLoadingIndicator', () => {
     expect(result.current.elapsedTime).toBe(0);
   });
 
+  it('should pause elapsedTime while a tool is executing', async () => {
+    const { result, rerender } = renderHook(
+      ({ isToolExecuting }) =>
+        useLoadingIndicator(
+          StreamingState.Responding,
+          undefined,
+          0,
+          0,
+          isToolExecuting,
+        ),
+      { initialProps: { isToolExecuting: false } },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(result.current.elapsedTime).toBe(2);
+
+    act(() => {
+      rerender({ isToolExecuting: true });
+    });
+    expect(result.current.elapsedTime).toBe(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(result.current.elapsedTime).toBe(2);
+
+    act(() => {
+      rerender({ isToolExecuting: false });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(result.current.elapsedTime).toBe(3);
+  });
+
   describe('token tracking', () => {
     it('should capture token snapshot when task starts', () => {
       const { result, rerender } = renderHook(

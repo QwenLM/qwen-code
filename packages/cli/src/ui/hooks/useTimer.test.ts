@@ -42,6 +42,14 @@ describe('useTimer', () => {
     expect(result.current).toBe(3);
   });
 
+  it('should report sub-second wall-clock time while active', () => {
+    const { result } = renderHook(() => useTimer(true, 0));
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(result.current).toBe(0.5);
+  });
+
   it('should reset to 0 and start incrementing when isActive becomes true from false', () => {
     const { result, rerender } = renderHook(
       ({ isActive, resetKey }) => useTimer(isActive, resetKey),
@@ -116,5 +124,31 @@ describe('useTimer', () => {
       vi.advanceTimersByTime(1000);
     });
     expect(result.current).toBe(1);
+  });
+
+  it('should pause elapsedTime without resetting when isPaused is true', () => {
+    const { result, rerender } = renderHook(
+      ({ isPaused }) => useTimer(true, 0, isPaused),
+      { initialProps: { isPaused: false } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(result.current).toBe(2);
+
+    rerender({ isPaused: true });
+    expect(result.current).toBe(2);
+
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(result.current).toBe(2);
+
+    rerender({ isPaused: false });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(3);
   });
 });
