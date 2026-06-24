@@ -475,6 +475,12 @@
           "type": "boolean",
           "default": false
         },
+        "sensitiveSpanAttributeMaxLength": {
+          "description": "Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Set lower if your collector or backend rejects large span attributes.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 1048576
+        },
         "resourceAttributes": {
           "description": "Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.",
           "type": "object",

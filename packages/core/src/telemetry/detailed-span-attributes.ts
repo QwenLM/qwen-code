@@ -9,8 +9,8 @@ import type { Span } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
 
-const MAX_CONTENT_SIZE = 60 * 1024; // 60KB
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
 
 // Process-global; intentionally never cleared in production. Bounded by the
@@ -26,7 +26,7 @@ function isEnabled(config: Config): boolean {
 
 export function truncateContent(
   content: string,
-  maxSize: number = MAX_CONTENT_SIZE,
+  maxSize: number = DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
 ): { content: string; truncated: boolean } {
   if (content.length <= maxSize) {
     return { content, truncated: false };
@@ -34,9 +34,13 @@ export function truncateContent(
   return {
     content:
       content.slice(0, maxSize) +
-      '\n\n[TRUNCATED - Content exceeds 60KB limit]',
+      '\n\n[TRUNCATED - Content exceeds configured span attribute limit]',
     truncated: true,
   };
+}
+
+function getMaxContentSize(config: Config): number {
+  return config.getTelemetrySensitiveSpanAttributeMaxLength();
 }
 
 function shortHash(content: string): string {
@@ -57,7 +61,10 @@ export function addUserPromptAttributes(
 ): void {
   if (!isEnabled(config) || !promptText) return;
 
-  const { content, truncated } = truncateContent(promptText);
+  const { content, truncated } = truncateContent(
+    promptText,
+    getMaxContentSize(config),
+  );
   span.setAttributes({
     new_context: `[USER PROMPT]\n${content}`,
     ...(truncated && {
@@ -88,7 +95,10 @@ export function addSystemPromptAttributes(
 
   if (!seenHashes.has(hash)) {
     seenHashes.add(hash);
-    const { content, truncated } = truncateContent(text);
+    const { content, truncated } = truncateContent(
+      text,
+      getMaxContentSize(config),
+    );
     span.setAttribute('system_prompt', content);
     if (truncated) {
       span.setAttribute('system_prompt_truncated', true);
@@ -133,7 +143,10 @@ export function addToolSchemaAttributes(
     const hashKey = `tool_${hash}`;
     if (!seenHashes.has(hashKey)) {
       seenHashes.add(hashKey);
-      const { content, truncated } = truncateContent(declJson);
+      const { content, truncated } = truncateContent(
+        declJson,
+        getMaxContentSize(config),
+      );
       span.addEvent('tool_schema', {
         tool_name: name,
         tool_hash: hash,
@@ -158,7 +171,10 @@ export function addModelOutputAttributes(
 ): void {
   if (!isEnabled(config) || !responseText) return;
 
-  const { content, truncated } = truncateContent(responseText);
+  const { content, truncated } = truncateContent(
+    responseText,
+    getMaxContentSize(config),
+  );
   span.setAttributes({
     'response.model_output': content,
     ...(truncated && {
@@ -178,7 +194,10 @@ export function addToolInputAttributes(
 ): void {
   if (!isEnabled(config)) return;
 
-  const { content, truncated } = truncateContent(toolInput);
+  const { content, truncated } = truncateContent(
+    toolInput,
+    getMaxContentSize(config),
+  );
   span.setAttributes({
     tool_input: `[TOOL INPUT: ${toolName}]\n${content}`,
     ...(truncated && {
@@ -198,7 +217,10 @@ export function addToolResultAttributes(
 ): void {
   if (!isEnabled(config)) return;
 
-  const { content, truncated } = truncateContent(toolResult);
+  const { content, truncated } = truncateContent(
+    toolResult,
+    getMaxContentSize(config),
+  );
   span.setAttributes({
     tool_result: `[TOOL RESULT: ${toolName}]\n${content}`,
     ...(truncated && {

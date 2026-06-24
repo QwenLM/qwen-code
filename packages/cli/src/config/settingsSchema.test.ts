@@ -185,6 +185,19 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should define telemetry sensitiveSpanAttributeMaxLength as a positive integer', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(
+        telemetrySchema.properties?.sensitiveSpanAttributeMaxLength,
+      ).toEqual({
+        description:
+          'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Set lower if your collector or backend rejects large span attributes.',
+        type: 'integer',
+        minimum: 1,
+        default: 1024 * 1024,
+      });
+    });
+
     it('should have voice dictation settings under general', () => {
       const voice =
         getSettingsSchema().general.properties.voice.properties ?? {};

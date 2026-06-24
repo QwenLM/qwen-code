@@ -103,6 +103,7 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_TELEMETRY_TARGET,
   isTelemetrySdkInitialized,
   initializeTelemetry,
@@ -404,6 +405,7 @@ export interface TelemetrySettings {
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
+  sensitiveSpanAttributeMaxLength?: number;
   outfile?: string;
   /**
    * Static resource attributes attached to every span/log/metric the SDK
@@ -1443,6 +1445,9 @@ export class Config {
       logPrompts: params.telemetry?.logPrompts ?? true,
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
+      sensitiveSpanAttributeMaxLength:
+        params.telemetry?.sensitiveSpanAttributeMaxLength ??
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
@@ -3917,6 +3922,13 @@ export class Config {
 
   getTelemetryIncludeSensitiveSpanAttributes(): boolean {
     return this.telemetrySettings.includeSensitiveSpanAttributes ?? false;
+  }
+
+  getTelemetrySensitiveSpanAttributeMaxLength(): number {
+    return (
+      this.telemetrySettings.sensitiveSpanAttributeMaxLength ??
+      DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH
+    );
   }
 
   getTelemetryOtlpEndpoint(): string | undefined {

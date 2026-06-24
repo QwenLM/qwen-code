@@ -1566,6 +1566,26 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
   });
 
+  it('should use sensitiveSpanAttributeMaxLength from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+  });
+
+  it('should default sensitiveSpanAttributeMaxLength to 1MiB', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(
+      1024 * 1024,
+    );
+  });
+
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -3364,6 +3384,17 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should prioritize QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH', '131072');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(131_072);
   });
 
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {

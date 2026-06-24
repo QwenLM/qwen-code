@@ -62,6 +62,7 @@ describe('telemetry/config helpers', () => {
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
         includeSensitiveSpanAttributes: true,
+        sensitiveSpanAttributeMaxLength: 1234,
         outfile: 'settings.log',
       };
       const resolved = await resolveTelemetrySettings({ settings });
@@ -72,6 +73,7 @@ describe('telemetry/config helpers', () => {
         otlpMetricsEndpoint: undefined,
         resourceAttributes: undefined,
         metrics: { includeSessionId: false },
+        resourceAttributeWarnings: undefined,
       });
     });
 
@@ -83,6 +85,7 @@ describe('telemetry/config helpers', () => {
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
         includeSensitiveSpanAttributes: false,
+        sensitiveSpanAttributeMaxLength: 1234,
         outfile: 'settings.log',
       };
       const env = {
@@ -92,6 +95,7 @@ describe('telemetry/config helpers', () => {
         QWEN_TELEMETRY_OTLP_PROTOCOL: 'http',
         QWEN_TELEMETRY_LOG_PROMPTS: 'true',
         QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'true',
+        QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '2048',
         QWEN_TELEMETRY_OUTFILE: 'env.log',
       } as Record<string, string>;
       const argv = {
@@ -114,9 +118,11 @@ describe('telemetry/config helpers', () => {
         otlpMetricsEndpoint: undefined,
         logPrompts: true,
         includeSensitiveSpanAttributes: true,
+        sensitiveSpanAttributeMaxLength: 2048,
         outfile: 'env.log',
         resourceAttributes: undefined,
         metrics: { includeSessionId: false },
+        resourceAttributeWarnings: undefined,
       });
 
       const resolvedArgv = await resolveTelemetrySettings({
@@ -134,9 +140,11 @@ describe('telemetry/config helpers', () => {
         otlpMetricsEndpoint: undefined,
         logPrompts: false,
         includeSensitiveSpanAttributes: true,
+        sensitiveSpanAttributeMaxLength: 2048,
         outfile: 'argv.log',
         resourceAttributes: undefined,
         metrics: { includeSessionId: false },
+        resourceAttributeWarnings: undefined,
       });
     });
 
@@ -144,6 +152,12 @@ describe('telemetry/config helpers', () => {
       const resolved = await resolveTelemetrySettings({});
 
       expect(resolved.includeSensitiveSpanAttributes).toBe(false);
+    });
+
+    it('defaults sensitiveSpanAttributeMaxLength to 1MiB', async () => {
+      const resolved = await resolveTelemetrySettings({});
+
+      expect(resolved.sensitiveSpanAttributeMaxLength).toBe(1024 * 1024);
     });
 
     it('parses includeSensitiveSpanAttributes from settings and env', async () => {
@@ -167,6 +181,55 @@ describe('telemetry/config helpers', () => {
         settings: { includeSensitiveSpanAttributes: true },
       });
       expect(resolvedEnvFalse.includeSensitiveSpanAttributes).toBe(false);
+    });
+
+    it('parses sensitiveSpanAttributeMaxLength from settings and env', async () => {
+      const resolvedFromSettings = await resolveTelemetrySettings({
+        settings: { sensitiveSpanAttributeMaxLength: 65_536 },
+      });
+      expect(resolvedFromSettings.sensitiveSpanAttributeMaxLength).toBe(65_536);
+
+      const resolvedFromEnv = await resolveTelemetrySettings({
+        env: {
+          QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '131072',
+        },
+        settings: { sensitiveSpanAttributeMaxLength: 65_536 },
+      });
+      expect(resolvedFromEnv.sensitiveSpanAttributeMaxLength).toBe(131_072);
+    });
+
+    it('rejects invalid sensitiveSpanAttributeMaxLength settings', async () => {
+      await expect(
+        resolveTelemetrySettings({
+          settings: { sensitiveSpanAttributeMaxLength: 0 },
+        }),
+      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength/i);
+
+      await expect(
+        resolveTelemetrySettings({
+          settings: {
+            sensitiveSpanAttributeMaxLength: 1.5,
+          },
+        }),
+      ).rejects.toThrow(/sensitiveSpanAttributeMaxLength/i);
+    });
+
+    it('rejects invalid sensitive span max length env values', async () => {
+      await expect(
+        resolveTelemetrySettings({
+          env: {
+            QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '',
+          },
+        }),
+      ).rejects.toThrow(/QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH/);
+
+      await expect(
+        resolveTelemetrySettings({
+          env: {
+            QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 'abc',
+          },
+        }),
+      ).rejects.toThrow(/QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH/);
     });
 
     it('falls back to OTEL_EXPORTER_OTLP_ENDPOINT when GEMINI var is missing', async () => {

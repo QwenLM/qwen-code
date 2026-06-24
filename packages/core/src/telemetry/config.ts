@@ -6,7 +6,10 @@
 
 import type { TelemetrySettings } from '../config/config.js';
 import { FatalConfigError } from '../utils/errors.js';
-import { TelemetryTarget } from './index.js';
+import {
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  TelemetryTarget,
+} from './index.js';
 import type { ResourceAttributeWarnings } from './resource-attributes.js';
 import {
   coerceStringResourceAttributes,
@@ -38,6 +41,33 @@ export function parseTelemetryTargetValue(
     return TelemetryTarget.GCP;
   }
   return undefined;
+}
+
+function parsePositiveIntegerEnvValue(
+  envName: string,
+  value: string | undefined,
+): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value.trim());
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new FatalConfigError(
+      `Invalid ${envName}: must be a positive integer`,
+    );
+  }
+  return parsed;
+}
+
+function parsePositiveIntegerSetting(
+  settingName: string,
+  value: unknown,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new FatalConfigError(
+      `Invalid ${settingName}: must be a positive integer`,
+    );
+  }
+  return value;
 }
 
 export interface TelemetryArgOverrides {
@@ -112,6 +142,17 @@ export async function resolveTelemetrySettings(options: {
     settings.includeSensitiveSpanAttributes ??
     false;
 
+  const sensitiveSpanAttributeMaxLength =
+    parsePositiveIntegerEnvValue(
+      'QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH',
+      env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'],
+    ) ??
+    parsePositiveIntegerSetting(
+      'telemetry.sensitiveSpanAttributeMaxLength',
+      settings.sensitiveSpanAttributeMaxLength,
+    ) ??
+    DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
+
   const outfile =
     argv.telemetryOutfile ?? env['QWEN_TELEMETRY_OUTFILE'] ?? settings.outfile;
 
@@ -185,6 +226,7 @@ export async function resolveTelemetrySettings(options: {
     otlpMetricsEndpoint,
     logPrompts,
     includeSensitiveSpanAttributes,
+    sensitiveSpanAttributeMaxLength,
     outfile,
     resourceAttributes,
     metrics: { includeSessionId: metricsIncludeSessionId },
