@@ -684,7 +684,7 @@ export function mountWorkspaceAgentsRoutes(
  * `JSON.stringify` escapes control characters (`\n`, `\r`, etc.) and
  * wraps the result in quotes so any injection attempt surfaces as
  * visible-as-quoted-noise rather than a forged log line. Mirrors
- * `safeLogValue` in `server.ts` (kept private there); we copy the
+ * `safeLogValue` in `server/request-helpers.ts`; we copy the
  * 82-byte truncation budget so attacker-controlled long names can't
  * blow up the operator's log shipper. Defense-in-depth — the
  * route's `validateAgentType` regex already rejects names with
