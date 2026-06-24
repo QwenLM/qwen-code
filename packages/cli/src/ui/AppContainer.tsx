@@ -986,6 +986,28 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
+  // Repaint the normal buffer once when the transcript (alt-screen) closes.
+  // In the legacy <Static> path the normal buffer still holds the pre-transcript
+  // frame; remounting the main tree would append the committed history a second
+  // time (the transcript's full-detail rows leaking into scrollback). Force one
+  // clear + Static remount AFTER the AlternateScreen's exit escape (?1049l) has
+  // flushed — deferred a tick so the buffer switch lands first, and run outside
+  // the during-transcript guard above (which has already cleared by now). VP
+  // mode keeps its own scrollback via the React tree, so this is non-VP only.
+  const prevTranscriptOpenRef = useRef(isTranscriptOpen);
+  useEffect(() => {
+    const wasOpen = prevTranscriptOpenRef.current;
+    prevTranscriptOpenRef.current = isTranscriptOpen;
+    if (!wasOpen || isTranscriptOpen || useTerminalBuffer) {
+      return undefined;
+    }
+    const id = setTimeout(() => {
+      stdout.write(ansiEscapes.clearTerminal);
+      remountStaticHistory();
+    }, 0);
+    return () => clearTimeout(id);
+  }, [isTranscriptOpen, useTerminalBuffer, stdout, remountStaticHistory]);
+
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
