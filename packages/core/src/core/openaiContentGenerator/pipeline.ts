@@ -36,16 +36,17 @@ export class StreamContentError extends Error {
 }
 
 /**
- * Synthesizes the read-timeout the transport layer failed to emit when a
- * streaming response returns 200 then goes silent. `code: 'ETIMEDOUT'` makes
- * `classifyRetryError` treat it as a retryable transport error — identical to a
- * real socket timeout — so the existing stream-transport retry handles it.
+ * Thrown when a streaming response goes silent past the inactivity timeout.
+ * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
+ * transport error, identical to a real socket read timeout.
  */
-function makeStreamInactivityTimeoutError(idleMs: number): Error {
-  return Object.assign(
-    new Error(`No stream activity for ${idleMs}ms (inactivity timeout)`),
-    { code: 'ETIMEDOUT' as const },
-  );
+export class StreamInactivityTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(idleMs: number) {
+    super(`No stream activity for ${idleMs}ms (inactivity timeout)`);
+    this.name = 'StreamInactivityTimeoutError';
+  }
 }
 
 /**
@@ -76,7 +77,7 @@ async function* withStreamInactivityTimeout(
           reject(abortErr);
         } else {
           onTimeout();
-          reject(makeStreamInactivityTimeoutError(idleMs));
+          reject(new StreamInactivityTimeoutError(idleMs));
         }
       }, idleMs);
       timer.unref?.();
@@ -156,21 +157,20 @@ export class ContentGenerationPipeline {
       userPromptId,
       true,
       async (openaiRequest, context) => {
-        // Per-request child — same rationale as the non-streaming path.
+        // Always use a per-request controller so the inactivity watchdog can
+        // abort the SDK request even when the caller did not provide a signal.
         const parentSignal = request.config?.abortSignal;
-        const perRequestAc = parentSignal
-          ? createChildAbortController(parentSignal)
-          : undefined;
+        const perRequestAc = createChildAbortController(parentSignal);
         let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
         try {
           // Stage 1: Create OpenAI stream. Wrapped in try so a network /
           // DNS / proxy error during the SDK call still cleans up the
           // per-request child (same pattern as the non-streaming path).
           stream = (await this.client.chat.completions.create(openaiRequest, {
-            signal: perRequestAc?.signal,
+            signal: perRequestAc.signal,
           })) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
         } catch (e) {
-          perRequestAc?.abort();
+          perRequestAc.abort();
           throw e;
         }
 
@@ -186,22 +186,15 @@ export class ContentGenerationPipeline {
             ? withStreamInactivityTimeout(
                 stream,
                 idleMs,
-                () => perRequestAc?.abort(),
+                () => perRequestAc.abort(),
                 parentSignal,
               )
             : stream;
 
         // Stage 2: Process stream with conversion and logging.
-        // When a per-request controller exists, wrap in an async generator
-        // that aborts it once the stream is fully consumed or abandoned, so
-        // the child signal's reverse-cleanup fires and the parent listener
-        // is released.
-        if (!perRequestAc) {
-          return this.processStreamWithLogging(guarded, context, request);
-        }
-        // Capture the narrowed controller so the closure below sees a non-
-        // nullable type (TS does not propagate narrowing into nested funcs).
-        const ac = perRequestAc;
+        // Wrap in an async generator that aborts the per-request controller
+        // once the stream is fully consumed or abandoned, releasing the SDK
+        // request and any parent listener.
         const innerStream = this.processStreamWithLogging(
           guarded,
           context,
@@ -211,7 +204,7 @@ export class ContentGenerationPipeline {
           try {
             yield* innerStream;
           } finally {
-            ac.abort();
+            perRequestAc.abort();
           }
         }
         return drainThenCleanup();
@@ -327,6 +320,10 @@ export class ContentGenerationPipeline {
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
         throw redactProxyError(error);
+      }
+
+      if (error instanceof StreamInactivityTimeoutError) {
+        throw error;
       }
 
       // Use shared error handling logic

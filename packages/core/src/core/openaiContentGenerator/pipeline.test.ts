@@ -10,7 +10,11 @@ import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
-import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
+import {
+  ContentGenerationPipeline,
+  StreamContentError,
+  StreamInactivityTimeoutError,
+} from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -1443,7 +1447,7 @@ describe('ContentGenerationPipeline', () => {
           stream_options: { include_usage: true },
         }),
         expect.objectContaining({
-          signal: undefined,
+          signal: expect.any(AbortSignal),
         }),
       );
     });
@@ -3060,11 +3064,38 @@ describe('ContentGenerationPipeline', () => {
           /* drain */
         }
       })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect(err).toMatchObject({ code: 'ETIMEDOUT' });
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('aborts the SDK signal on idle timeout without a parent abort signal', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      let sdkSignal: AbortSignal | undefined;
+      (mockClient.chat.completions.create as Mock).mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          sdkSignal = opts.signal;
+          return Promise.resolve(gated.stream);
+        },
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
       const expectation = await expect(consume).rejects.toMatchObject({
         code: 'ETIMEDOUT',
       });
+      expect(sdkSignal).toBeInstanceOf(AbortSignal);
+      expect(sdkSignal?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1000);
       await expectation;
+      expect(sdkSignal?.aborted).toBe(true);
     });
 
     it('delivers chunks then throws ETIMEDOUT when the stream stalls after some output', async () => {
@@ -3187,6 +3218,41 @@ describe('ContentGenerationPipeline', () => {
       await vi.advanceTimersByTimeAsync(1000);
       await consume;
       expect(settled).toBe(true);
+    });
+
+    it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
+      // Faithfully replicate EnhancedErrorHandler.handle's relevant behavior:
+      // it detects code 'ETIMEDOUT' as a timeout and re-throws a generic Error
+      // WITHOUT the code. If the inactivity timeout were routed through it, the
+      // retryable-transport classification (which reads err.code) would be lost.
+      (mockErrorHandler.handle as unknown as Mock).mockImplementation(
+        (error: unknown) => {
+          if ((error as { code?: string })?.code === 'ETIMEDOUT') {
+            throw new Error('stripped'); // the production failure mode
+          }
+          throw error;
+        },
+      );
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const captured = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect((err as { code?: string }).code).toBe('ETIMEDOUT');
+      // Proves the bypass: the handler (which would strip the code) is skipped.
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
   });
 });
