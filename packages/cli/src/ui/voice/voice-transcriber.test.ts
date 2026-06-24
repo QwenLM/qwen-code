@@ -589,6 +589,41 @@ describe('voice-transcriber', () => {
     expect(userMsg.content[0].input_audio.format).toBe('wav');
   });
 
+  it('passes the caller abort signal to the ASR fetch', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi
+        .fn()
+        .mockResolvedValue({ choices: [{ message: { content: 'hello' } }] }),
+    });
+    const controller = new AbortController();
+
+    await transcribeVoiceAudio(
+      { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+      {
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Qwen ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1/',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ]),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen3-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+        abortSignal: controller.signal,
+      },
+    );
+
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    controller.abort();
+    expect(init.signal?.aborted).toBe(true);
+  });
+
   it('derives input_audio format from the recorder mime type', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,

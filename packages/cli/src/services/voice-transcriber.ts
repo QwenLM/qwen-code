@@ -67,6 +67,7 @@ interface ResolveVoiceTranscriptionConfigArgs {
 interface TranscribeVoiceAudioArgs extends ResolveVoiceTranscriptionConfigArgs {
   fetchFn?: typeof fetch;
   lookupHost?: VoiceHostLookup;
+  abortSignal?: AbortSignal;
 }
 
 type VoiceHostLookup = (
@@ -420,6 +421,13 @@ function inputAudioFormat(mimeType: string): string {
   return mimeType.split(';', 1)[0]?.replace(/^audio\//, '') || 'wav';
 }
 
+function transcriptionAbortSignal(abortSignal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(INFERENCE_TIMEOUT_MS);
+  return abortSignal
+    ? AbortSignal.any([abortSignal, timeoutSignal])
+    : timeoutSignal;
+}
+
 /**
  * Transcribe via the DashScope/Qwen-ASR OpenAI-compatible protocol: the audio
  * is sent as an `input_audio` chat message and the transcript comes back as the
@@ -430,7 +438,11 @@ function inputAudioFormat(mimeType: string): string {
 async function transcribeViaQwenAsr(
   audio: RecordedVoiceAudio,
   voiceConfig: VoiceTranscriptionConfig,
-  options: { language?: string; keytermsContext?: string },
+  options: {
+    language?: string;
+    keytermsContext?: string;
+    abortSignal?: AbortSignal;
+  },
   fetchFn: typeof fetch,
 ): Promise<string> {
   if (audio.data.byteLength > MAX_AUDIO_BYTES) {
@@ -484,7 +496,7 @@ async function transcribeViaQwenAsr(
           messages,
           asr_options: asrOptions,
         }),
-        signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
+        signal: transcriptionAbortSignal(options.abortSignal),
       },
     );
   } catch (error) {
@@ -547,7 +559,7 @@ export async function transcribeVoiceAudio(
       return transcribeViaQwenAsr(
         audio,
         voiceConfig,
-        { language, keytermsContext },
+        { language, keytermsContext, abortSignal: args.abortSignal },
         fetchFn,
       );
     case 'qwen-asr-realtime':

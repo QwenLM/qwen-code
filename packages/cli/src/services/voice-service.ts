@@ -56,6 +56,7 @@ export interface WorkspaceVoiceTranscriptionInput extends RecordedVoiceAudio {
   voiceModel: string;
   settings: LoadedSettings;
   workspaceCwd: string;
+  abortSignal?: AbortSignal;
 }
 
 export interface WorkspaceVoiceTranscriptionResult {
@@ -327,6 +328,7 @@ export async function transcribeWorkspaceVoiceAudio(
       config: createVoiceModelSource(input.settings),
       settings: input.settings,
       voiceModel: input.voiceModel,
+      abortSignal: input.abortSignal,
     },
   );
   return {

@@ -26,6 +26,7 @@ import {
   type WorkspaceVoiceTranscriptionResult,
 } from '../../services/voice-service.js';
 import {
+  isVoiceEnabled,
   isVoiceMode,
   readVoiceModel,
   type VoiceMode,
@@ -220,6 +221,15 @@ function normalizeContentType(req: Request): string | undefined {
   return req.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
 }
 
+function requestAbortSignal(req: Request, res: Response): AbortSignal {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  req.on('aborted', abort);
+  req.on('close', abort);
+  res.on('close', abort);
+  return controller.signal;
+}
+
 function isSupportedAudioContentType(
   contentType: string | undefined,
 ): contentType is string {
@@ -360,6 +370,13 @@ export function registerWorkspaceVoiceRoutes(
       }
 
       const settings = loadSettings(deps.boundWorkspace);
+      if (!isVoiceEnabled(settings)) {
+        res.status(403).json({
+          error: 'Voice transcription is disabled for this workspace',
+          code: 'voice_disabled',
+        });
+        return;
+      }
       const queryVoiceModel = req.query['voiceModel'];
       if (
         queryVoiceModel !== undefined &&
@@ -389,6 +406,7 @@ export function registerWorkspaceVoiceRoutes(
           voiceModel,
           settings,
           workspaceCwd: deps.boundWorkspace,
+          abortSignal: requestAbortSignal(req, res),
         });
         res.status(200).json({ v: 1, ...result });
       } catch (err) {

@@ -15,22 +15,14 @@ import {
 } from '../../config/permission-settings.js';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { SessionNotFoundError } from '../acp-session-bridge.js';
+import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
 
 export interface WorkspacePermissionsRouteDeps {
   boundWorkspace: string;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
-  invokeWorkspaceCommand: (
-    method: string,
-    params: Record<string, unknown>,
-  ) => Promise<unknown>;
-  broadcastSettingsChanged: (
-    key: string,
-    value: unknown,
-    scope: string,
-    clientId: string | undefined,
-  ) => void;
+  workspace: DaemonWorkspaceService;
   parseAndValidateClientId: (
     req: Request,
     res: Response,
@@ -45,8 +37,7 @@ export function registerWorkspacePermissionsRoutes(
     boundWorkspace,
     mutate,
     safeBody,
-    invokeWorkspaceCommand,
-    broadcastSettingsChanged,
+    workspace,
     parseAndValidateClientId,
   } = deps;
 
@@ -111,18 +102,18 @@ export function registerWorkspacePermissionsRoutes(
       if (clientId === null) return;
 
       const key = `permissions.${ruleType}`;
-      let liveResponse: unknown;
+      let liveResponse: QwenPermissionSettings;
       try {
-        liveResponse = await invokeWorkspaceCommand(
-          'qwen/permissions/setRules',
+        liveResponse = await workspace.setWorkspacePermissionRules(
           {
-            scope: permissionScope,
-            ruleType,
-            rules,
+            route: 'POST /workspace/permissions',
+            workspaceCwd: boundWorkspace,
+            ...(clientId ? { originatorClientId: clientId } : {}),
           },
+          { scope: permissionScope, ruleType, rules },
         );
       } catch (err) {
-        if (err instanceof SessionNotFoundError) {
+        if (err instanceof WorkspacePermissionRulesSessionRequiredError) {
           res.status(409).json({
             error:
               'A live ACP session is required to update active permission rules.',
@@ -143,16 +134,7 @@ export function registerWorkspacePermissionsRoutes(
         return;
       }
 
-      try {
-        broadcastSettingsChanged(key, rules, permissionScope, clientId);
-      } catch (err) {
-        writeStderrLine(
-          `qwen serve: POST /workspace/permissions broadcast error (key=${key}, scope=${permissionScope}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-      res.status(200).json(liveResponse as QwenPermissionSettings);
+      res.status(200).json(liveResponse);
     },
   );
 }

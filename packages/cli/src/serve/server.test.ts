@@ -105,6 +105,10 @@ import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
+import {
+  resetTrustedFoldersForTesting,
+  TRUSTED_FOLDERS_FILENAME,
+} from '../config/trustedFolders.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -2795,6 +2799,68 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_client_id');
+    });
+
+    it('does not treat unknown workspace trust as trusted for extension install', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const previousTrustedFoldersPath =
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-extension-trust-'),
+      );
+      let managerTrustedFlag: boolean | undefined;
+      const restore = mockExtensionManagerMethods({
+        async installExtension() {
+          managerTrustedFlag = (
+            this as unknown as { isWorkspaceTrusted?: boolean }
+          ).isWorkspaceTrusted;
+          return testExtension('installed-ext');
+        },
+      });
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
+          tempHome,
+          TRUSTED_FOLDERS_FILENAME,
+        );
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+        resetTrustedFoldersForTesting();
+
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: 'https://example.com/installed-ext', consent: true });
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(managerTrustedFlag).toBe(false);
+        });
+      } finally {
+        restore();
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        restoreEnv(
+          'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+          previousTrustedFoldersPath,
+        );
+        resetHomeEnvBootstrapForTesting();
+        resetTrustedFoldersForTesting();
+      }
     });
 
     it('queues extension install and refreshes active sessions', async () => {

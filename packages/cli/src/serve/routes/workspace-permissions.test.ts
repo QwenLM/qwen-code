@@ -12,7 +12,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
   resetHomeEnvBootstrapForTesting,
   SETTINGS_DIRECTORY_NAME,
@@ -23,19 +22,15 @@ import {
   TrustLevel,
 } from '../../config/trustedFolders.js';
 import { registerWorkspacePermissionsRoutes } from './workspace-permissions.js';
+import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
 
 interface Harness {
   app: express.Application;
   scratch: string;
   workspace: string;
   home: string;
-  events: Array<{
-    key: string;
-    value: unknown;
-    scope: string;
-    clientId?: string;
-  }>;
-  invokeWorkspaceCommand: ReturnType<typeof vi.fn>;
+  setWorkspacePermissionRules: ReturnType<typeof vi.fn>;
   persistSetting: ReturnType<typeof vi.fn>;
 }
 
@@ -55,7 +50,7 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 }
 
 async function makeHarness(opts?: {
-  invokeWorkspaceCommand?: ReturnType<typeof vi.fn>;
+  setWorkspacePermissionRules?: ReturnType<typeof vi.fn>;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -77,27 +72,21 @@ async function makeHarness(opts?: {
 
   const app = express();
   app.use(express.json());
-  const events: Harness['events'] = [];
-  const invokeWorkspaceCommand =
-    opts?.invokeWorkspaceCommand ??
+  const setWorkspacePermissionRules =
+    opts?.setWorkspacePermissionRules ??
     vi.fn(async () => {
-      throw new SessionNotFoundError('workspace-command:qwen/permissions');
+      throw new WorkspacePermissionRulesSessionRequiredError();
     });
   const persistSetting = vi.fn();
+  const workspaceService = {
+    setWorkspacePermissionRules,
+  } as unknown as DaemonWorkspaceService;
 
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: workspace,
     mutate: () => (_req, _res, next) => next(),
     safeBody,
-    invokeWorkspaceCommand,
-    broadcastSettingsChanged: (key, value, scope, clientId) => {
-      events.push({
-        key,
-        value,
-        scope,
-        ...(clientId !== undefined ? { clientId } : {}),
-      });
-    },
+    workspace: workspaceService,
     parseAndValidateClientId: (req: Request, res: Response) => {
       const clientId = req.get('X-Qwen-Client-Id');
       if (clientId === 'unknown-client') {
@@ -116,8 +105,7 @@ async function makeHarness(opts?: {
     scratch,
     workspace,
     home,
-    events,
-    invokeWorkspaceCommand,
+    setWorkspacePermissionRules,
     persistSetting,
   };
 }
@@ -227,7 +215,7 @@ describe('workspace permissions routes', () => {
     };
     const live = vi.fn(async () => acpResponse);
     await teardown(h);
-    h = await makeHarness({ invokeWorkspaceCommand: live });
+    h = await makeHarness({ setWorkspacePermissionRules: live });
 
     const res = await request(h.app)
       .post('/workspace/permissions')
@@ -240,20 +228,19 @@ describe('workspace permissions routes', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(acpResponse);
-    expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
-      scope: 'user',
-      ruleType: 'allow',
-      rules: ['Bash(git status)'],
-    });
-    expect(h.persistSetting).not.toHaveBeenCalled();
-    expect(h.events).toEqual([
+    expect(live).toHaveBeenCalledWith(
       {
-        key: 'permissions.allow',
-        scope: 'user',
-        value: ['Bash(git status)'],
-        clientId: 'client-1',
+        route: 'POST /workspace/permissions',
+        workspaceCwd: h.workspace,
+        originatorClientId: 'client-1',
       },
-    ]);
+      {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['Bash(git status)'],
+      },
+    );
+    expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
   it('POST rejects invalid scope ruleType rules and malformed rule syntax', async () => {
@@ -299,7 +286,7 @@ describe('workspace permissions routes', () => {
     };
     const live = vi.fn(async () => acpResponse);
     await teardown(h);
-    h = await makeHarness({ invokeWorkspaceCommand: live });
+    h = await makeHarness({ setWorkspacePermissionRules: live });
 
     const res = await request(h.app)
       .post('/workspace/permissions')
@@ -312,20 +299,19 @@ describe('workspace permissions routes', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(acpResponse);
-    expect(live).toHaveBeenCalledWith('qwen/permissions/setRules', {
-      scope: 'user',
-      ruleType: 'allow',
-      rules: ['Bash(git status)'],
-    });
-    expect(h.persistSetting).not.toHaveBeenCalled();
-    expect(h.events).toEqual([
+    expect(live).toHaveBeenCalledWith(
       {
-        key: 'permissions.allow',
-        scope: 'user',
-        value: ['Bash(git status)'],
-        clientId: 'client-1',
+        route: 'POST /workspace/permissions',
+        workspaceCwd: h.workspace,
+        originatorClientId: 'client-1',
       },
-    ]);
+      {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: ['Bash(git status)'],
+      },
+    );
+    expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
   it('POST returns 409 when no ACP child is running', async () => {
@@ -339,9 +325,8 @@ describe('workspace permissions routes', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('permission_session_required');
-    expect(h.invokeWorkspaceCommand).toHaveBeenCalled();
+    expect(h.setWorkspacePermissionRules).toHaveBeenCalled();
     expect(h.persistSetting).not.toHaveBeenCalled();
-    expect(h.events).toEqual([]);
   });
 
   it('POST does not persist untrusted workspace rules without a live ACP child', async () => {

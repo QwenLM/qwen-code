@@ -231,6 +231,15 @@ export interface WorkspacePermissionRulesUpdate {
   rules: string[];
 }
 
+export class WorkspacePermissionRulesSessionRequiredError extends Error {
+  constructor() {
+    super(
+      'setWorkspacePermissionRules requires a live ACP session to update active permission rules',
+    );
+    this.name = 'WorkspacePermissionRulesSessionRequiredError';
+  }
+}
+
 export interface WorkspaceVoiceSettingsUpdate {
   enabled?: boolean;
   mode?: VoiceMode;

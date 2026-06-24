@@ -20,6 +20,10 @@ import {
 import { SessionService } from '@qwen-code/qwen-code-core';
 import { WorkspaceVoiceError } from '../../services/voice-service.js';
 import {
+  SetupGithubError,
+  type SetupGithubResult,
+} from '../../services/setup-github.js';
+import {
   MAX_READ_BYTES,
   type ResolvedPath,
   type WorkspaceFileSystem,
@@ -1951,6 +1955,63 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         data: expect.objectContaining({ releaseTag: 'v1.2.3' }),
       }),
     );
+  });
+
+  it('includes partial setup-github results in ACP errors', async () => {
+    await restartServer({ fsFactory: makeFileFsFactory({}) });
+    const partial: SetupGithubResult = {
+      kind: 'github_setup',
+      workspaceCwd: '/ws',
+      gitRepoRoot: '/ws',
+      releaseTag: 'v1.2.3',
+      readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+      workflows: [
+        {
+          sourcePath: 'qwen-invoke.yml',
+          path: '.github/workflows/qwen-invoke.yml',
+          status: 'failed',
+          error: 'disk full',
+        },
+      ],
+      gitignore: { path: '.gitignore', status: 'created' },
+      warnings: [],
+      partial: true,
+    };
+    setupGithubMocks.setupGithub.mockRejectedValueOnce(
+      new SetupGithubError(
+        'github_workflow_write_failed',
+        'Unable to write .github/workflows/qwen-invoke.yml.',
+        500,
+        partial,
+      ),
+    );
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 222,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; data?: unknown };
+    }>;
+
+    expect(frames[0]).toMatchObject({
+      id: 222,
+      error: {
+        code: -32603,
+        data: {
+          errorKind: 'github_workflow_write_failed',
+          partial: true,
+          result: partial,
+        },
+      },
+    });
   });
 
   it('translateEvent: stream_error + client_evicted → _qwen/notify with kind', async () => {

@@ -56,6 +56,7 @@ import {
 } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
+import { WorkspacePermissionRulesSessionRequiredError } from './types.js';
 import type {
   DaemonWorkspaceService,
   DaemonWorkspaceServiceDeps,
@@ -80,6 +81,8 @@ export type {
   EnvReloadResult,
   ReloadResponse,
 } from './types.js';
+
+export { WorkspacePermissionRulesSessionRequiredError } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -359,9 +362,7 @@ export function createDaemonWorkspaceService(
         if (!(err instanceof SessionNotFoundError)) {
           throw err;
         }
-        throw new Error(
-          'setWorkspacePermissionRules requires a live ACP session to update active permission rules',
-        );
+        throw new WorkspacePermissionRulesSessionRequiredError();
       }
     },
 

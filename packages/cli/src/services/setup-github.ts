@@ -224,6 +224,11 @@ export async function setupGithub(
     warnings: [],
   };
 
+  result.gitignore = await updateGitignore(gitRepoRoot, fileOps);
+  if (result.gitignore.status === 'failed') {
+    result.warnings.push('Failed to update .gitignore.');
+  }
+
   try {
     await fileOps.ensureWorkflowDirectory(gitRepoRoot);
     for (const workflow of downloads) {
@@ -270,10 +275,6 @@ export async function setupGithub(
     );
   }
 
-  result.gitignore = await updateGitignore(gitRepoRoot, fileOps);
-  if (result.gitignore.status === 'failed') {
-    result.warnings.push('Failed to update .gitignore.');
-  }
   return result;
 }
 

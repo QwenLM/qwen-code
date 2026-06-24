@@ -71,6 +71,7 @@ import type {
   WorkspaceRequestContext,
   WorkspaceVoiceSettingsUpdate,
 } from '../workspace-service/types.js';
+import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
 import type { AcpConnection } from './connection-registry.js';
 import {
   QWEN_META_KEY,
@@ -1375,10 +1376,26 @@ export class AcpDispatcher {
             throw err;
           }
 
-          const result = await this.workspace.setWorkspacePermissionRules(
-            this.wsCtx(conn, method),
-            { scope, ruleType, rules },
-          );
+          let result: unknown;
+          try {
+            result = await this.workspace.setWorkspacePermissionRules(
+              this.wsCtx(conn, method),
+              { scope, ruleType, rules },
+            );
+          } catch (err) {
+            if (
+              err instanceof WorkspacePermissionRulesSessionRequiredError &&
+              id !== undefined
+            ) {
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, err.message, {
+                  errorKind: 'permission_session_required',
+                }),
+              );
+              return;
+            }
+            throw err;
+          }
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -1532,7 +1549,12 @@ export class AcpDispatcher {
                   id,
                   err.status >= 500 ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
                   sanitizeSetupGithubMessage(err.message, this.boundWorkspace),
-                  { errorKind: err.code },
+                  {
+                    errorKind: err.code,
+                    ...(err.partial
+                      ? { partial: true, result: err.partialResult }
+                      : {}),
+                  },
                 ),
               );
               return;

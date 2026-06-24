@@ -592,13 +592,48 @@ describe('workspace voice routes', () => {
       transport: 'qwen-asr-chat',
     });
     const call = h.transcribe.mock.calls[0]?.[0] as
-      | { data: Uint8Array; mimeType: string; voiceModel: string }
+      | {
+          data: Uint8Array;
+          mimeType: string;
+          voiceModel: string;
+          abortSignal?: AbortSignal;
+        }
       | undefined;
     expect(call).toMatchObject({
       mimeType: 'audio/wav',
       voiceModel: 'qwen3-asr-flash',
+      abortSignal: expect.any(AbortSignal),
     });
     expect(Array.from(call?.data ?? [])).toEqual([1, 2, 3, 4]);
+  });
+
+  it('POST /workspace/voice/transcribe rejects when voice is disabled', async () => {
+    await writeJson(path.join(h.home, 'settings.json'), {
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Qwen ASR',
+            baseUrl: 'https://dashscope.example/compatible-mode/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ],
+      },
+      env: { DASHSCOPE_API_KEY: 'sk-secret' },
+      voiceModel: 'qwen3-asr-flash',
+      general: { voice: { enabled: false } },
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/voice/transcribe?voiceModel=qwen3-asr-flash')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3, 4]));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('voice_disabled');
+    expect(h.transcribe).not.toHaveBeenCalled();
   });
 
   it('POST /workspace/voice/transcribe works without settings persistence', async () => {

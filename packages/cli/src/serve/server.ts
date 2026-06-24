@@ -1371,7 +1371,7 @@ export function createServeApp(
     ).effective.state;
     return new ExtensionManager({
       workspaceDir: boundWorkspace,
-      isWorkspaceTrusted: trustState === 'trusted' || trustState === 'unknown',
+      isWorkspaceTrusted: trustState === 'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -2784,9 +2784,7 @@ export function createServeApp(
     boundWorkspace,
     mutate,
     safeBody,
-    invokeWorkspaceCommand: (method, params) =>
-      bridge.invokeWorkspaceCommand(method, params),
-    broadcastSettingsChanged,
+    workspace,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, bridge),
   });

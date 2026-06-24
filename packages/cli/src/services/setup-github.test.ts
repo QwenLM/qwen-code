@@ -184,7 +184,7 @@ describe('setupGithub service', () => {
     expect(abortedEndpoints.length).toBeGreaterThan(0);
   });
 
-  it('reports partial workflow write failure without updating gitignore', async () => {
+  it('reports partial workflow write failure after updating gitignore', async () => {
     const fetchImpl = vi.fn(async () =>
       okResponse('workflow'),
     ) as unknown as typeof fetch;
@@ -211,8 +211,14 @@ describe('setupGithub service', () => {
       code: 'github_workflow_write_failed',
       status: 500,
       partial: true,
+      partialResult: expect.objectContaining({
+        gitignore: expect.objectContaining({
+          path: '.gitignore',
+          status: 'created',
+        }),
+      }),
     });
-    expect(readGitignore).not.toHaveBeenCalled();
+    expect(readGitignore).toHaveBeenCalled();
   });
 
   it('updates gitignore idempotently', async () => {
