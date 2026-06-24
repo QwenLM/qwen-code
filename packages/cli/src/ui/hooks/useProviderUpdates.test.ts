@@ -23,6 +23,15 @@ vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
   restoreSettingsFromBackup: vi.fn(),
   cleanupSettingsBackup: vi.fn(),
+  getNestedProperty: vi.fn((obj, key) => {
+    if (!obj || !key) return undefined;
+    return String(key)
+      .split('.')
+      .reduce((acc, part) => {
+        if (acc === null || acc === undefined) return undefined;
+        return acc[part];
+      }, obj);
+  }),
 }));
 
 const chinaTemplate = buildProviderTemplate(
@@ -46,7 +55,6 @@ describe('useProviderUpdates', () => {
       modelProviders: {} as Record<string, unknown>,
       [PROVIDER_METADATA_NS]: {} as Record<string, unknown>,
     } as Record<string, unknown>,
-    getValue: vi.fn().mockReturnValue(undefined),
     setValue: vi.fn(),
     forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
     isTrusted: true,

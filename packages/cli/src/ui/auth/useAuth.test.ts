@@ -34,6 +34,15 @@ vi.mock('../../utils/settingsUtils.js', () => ({
   backupSettingsFile: vi.fn(),
   restoreSettingsFromBackup: vi.fn(),
   cleanupSettingsBackup: vi.fn(),
+  getNestedProperty: vi.fn((obj, key) => {
+    if (!obj || !key) return undefined;
+    return String(key)
+      .split('.')
+      .reduce((acc, part) => {
+        if (acc === null || acc === undefined) return undefined;
+        return acc[part];
+      }, obj);
+  }),
 }));
 
 vi.mock('../../config/modelProvidersScope.js', () => ({
@@ -41,8 +50,9 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
 }));
 
 const createSettings = () => ({
-  merged: { modelProviders: {} },
-  getValue: vi.fn().mockReturnValue(undefined),
+  merged: {
+    modelProviders: {},
+  },
   setValue: vi.fn(),
   recomputeMerged: vi.fn(),
   forScope: vi.fn(() => ({
