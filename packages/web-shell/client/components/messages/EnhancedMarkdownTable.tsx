@@ -2,6 +2,7 @@ import {
   Children,
   Fragment,
   isValidElement,
+  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -13,6 +14,7 @@ import {
   type ReactElement,
   type ReactNode,
   type RefObject,
+  type TouchEvent as ReactTouchEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
 import styles from './EnhancedMarkdownTable.module.css';
@@ -201,7 +203,7 @@ function parseTable(
   topLevel.forEach((child, index) => {
     if (isTagElement(child, 'thead')) {
       headerRows.push(...parseRows(child, `head-${index}`));
-    } else if (isTagElement(child, 'tbody') || isTagElement(child, 'tfoot')) {
+    } else if (isTagElement(child, 'tbody')) {
       bodyRows.push(...parseRows(child, `body-${index}`));
     } else if (isTagElement(child, 'tr')) {
       directRows.push(parseRow(child, `row-${index}`));
@@ -241,9 +243,13 @@ function parseTable(
 }
 
 function parseNumber(value: string): number | null {
-  const normalized = value.replace(/[,%\s]/g, '');
+  const trimmed = value.trim();
+  const isPercent = trimmed.endsWith('%');
+  const numericText = isPercent ? trimmed.slice(0, -1) : trimmed;
+  const normalized = numericText.replace(/[$€£¥₹,\s]/g, '');
   if (!/^-?(\d+(\.\d+)?|\.\d+)$/.test(normalized)) return null;
-  return Number(normalized);
+  const parsed = Number(normalized);
+  return isPercent ? parsed / 100 : parsed;
 }
 
 function compareCellText(a: string, b: string): number {
@@ -267,6 +273,10 @@ function getSelectionBounds(range: SelectionRange) {
   };
 }
 
+function sanitizeForClipboard(value: string): string {
+  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+}
+
 function getSelectionText(
   range: SelectionRange | null,
   rows: RowData[],
@@ -285,7 +295,9 @@ function getSelectionText(
     if (!row) continue;
     lines.push(
       selectedColumns
-        .map((columnIndex) => row.cells[columnIndex]?.text ?? '')
+        .map((columnIndex) =>
+          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+        )
         .join('\t'),
     );
   }
@@ -300,11 +312,15 @@ function getVisibleTableText(
   if (visibleColumnIndexes.length === 0) return '';
   const lines = [
     visibleColumnIndexes
-      .map((columnIndex) => headers[columnIndex]?.text ?? '')
+      .map((columnIndex) =>
+        sanitizeForClipboard(headers[columnIndex]?.text ?? ''),
+      )
       .join('\t'),
     ...rows.map((row) =>
       visibleColumnIndexes
-        .map((columnIndex) => row.cells[columnIndex]?.text ?? '')
+        .map((columnIndex) =>
+          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+        )
         .join('\t'),
     ),
   ];
@@ -807,6 +823,7 @@ function ColumnFilterMenu({
   options,
   sort,
   style,
+  menuRef,
   canHideColumn,
   onApply,
   onClose,
@@ -821,6 +838,7 @@ function ColumnFilterMenu({
   options: FilterOption[];
   sort: SortState | null;
   style?: CSSProperties;
+  menuRef: RefObject<HTMLDivElement | null>;
   canHideColumn: boolean;
   onApply: (columnIndex: number, filter: ColumnFilter | undefined) => void;
   onClose: () => void;
@@ -924,6 +942,7 @@ function ColumnFilterMenu({
 
   return (
     <div
+      ref={menuRef}
       id={id}
       className={styles.filterMenu}
       style={style}
@@ -996,7 +1015,8 @@ export function EnhancedMarkdownTable({
     [children, t],
   );
 
-  if (table.columnCount === 0) return null;
+  if (table.columnCount === 0)
+    return <>{fallback ?? <table>{children}</table>}</>;
   if (
     table.rows.length > MAX_ENHANCED_TABLE_ROWS ||
     table.columnCount > MAX_ENHANCED_TABLE_COLUMNS
@@ -1024,6 +1044,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   const draggingRef = useRef(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const filterMenuRef = useRef<HTMLDivElement | null>(null);
   const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
   const focusReturnFrameRef = useRef(0);
   const pendingSelectionRef = useRef<{
@@ -1031,8 +1052,14 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     columnIndex: number;
   } | null>(null);
   const selectionFrameRef = useRef(0);
+  const tableStructureKey = useMemo(
+    () =>
+      `${table.columnCount}\0${table.headers.map((header) => header.text).join('\0')}`,
+    [table.columnCount, table.headers],
+  );
+  const tableStructureKeyRef = useRef(tableStructureKey);
 
-  const focusFilterTrigger = () => {
+  const focusFilterTrigger = useCallback(() => {
     if (focusReturnFrameRef.current) {
       cancelAnimationFrame(focusReturnFrameRef.current);
     }
@@ -1041,14 +1068,14 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       const trigger = filterTriggerRef.current;
       if (trigger?.isConnected) trigger.focus();
     });
-  };
+  }, []);
 
-  const closeFilterMenu = () => {
+  const closeFilterMenu = useCallback(() => {
     setOpenFilterMenu(null);
     focusFilterTrigger();
-  };
+  }, [focusFilterTrigger]);
 
-  const flushPendingSelection = () => {
+  const flushPendingSelection = useCallback(() => {
     if (selectionFrameRef.current) {
       cancelAnimationFrame(selectionFrameRef.current);
       selectionFrameRef.current = 0;
@@ -1065,17 +1092,25 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           }
         : current,
     );
-  };
+  }, []);
+
+  const stopDragging = useCallback(() => {
+    flushPendingSelection();
+    draggingRef.current = false;
+    setIsDragging(false);
+  }, [flushPendingSelection]);
 
   useEffect(() => {
-    const stopDragging = () => {
-      flushPendingSelection();
-      draggingRef.current = false;
-      setIsDragging(false);
+    const stopDraggingWhenHidden = () => {
+      if (document.hidden) stopDragging();
     };
     window.addEventListener('mouseup', stopDragging);
+    window.addEventListener('blur', stopDragging);
+    document.addEventListener('visibilitychange', stopDraggingWhenHidden);
     return () => {
       window.removeEventListener('mouseup', stopDragging);
+      window.removeEventListener('blur', stopDragging);
+      document.removeEventListener('visibilitychange', stopDraggingWhenHidden);
       if (selectionFrameRef.current) {
         cancelAnimationFrame(selectionFrameRef.current);
       }
@@ -1083,27 +1118,55 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
         cancelAnimationFrame(focusReturnFrameRef.current);
       }
     };
-  }, []);
+  }, [stopDragging]);
+
+  useEffect(() => {
+    if (tableStructureKeyRef.current === tableStructureKey) return;
+    tableStructureKeyRef.current = tableStructureKey;
+    setSort(null);
+    setFilters({});
+    setSelection(null);
+    setOpenFilterMenu(null);
+    setHiddenColumns(new Set());
+    setDetailRowKey(null);
+    draggingRef.current = false;
+    setIsDragging(false);
+  }, [tableStructureKey]);
 
   useEffect(() => {
     if (!openFilterMenu) return;
     const closeMenu = (event: MouseEvent) => {
-      if (!shellRef.current?.contains(event.target as Node)) {
-        closeFilterMenu();
+      const target = event.target as Node;
+      if (
+        !filterMenuRef.current?.contains(target) &&
+        !filterTriggerRef.current?.contains(target)
+      ) {
+        setOpenFilterMenu(null);
       }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      event.stopPropagation();
       closeFilterMenu();
     };
+    const closeOnScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && filterMenuRef.current?.contains(target)) {
+        return;
+      }
+      setOpenFilterMenu(null);
+    };
+    const closeOnResize = () => setOpenFilterMenu(null);
     document.addEventListener('mousedown', closeMenu);
     document.addEventListener('keydown', closeOnEscape);
+    document.addEventListener('scroll', closeOnScroll, true);
+    window.addEventListener('resize', closeOnResize);
     return () => {
       document.removeEventListener('mousedown', closeMenu);
       document.removeEventListener('keydown', closeOnEscape);
+      document.removeEventListener('scroll', closeOnScroll, true);
+      window.removeEventListener('resize', closeOnResize);
     };
-  }, [openFilterMenu]);
+  }, [closeFilterMenu, openFilterMenu]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
@@ -1257,13 +1320,8 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     );
   };
 
-  const startSelection = (
-    event: ReactMouseEvent<HTMLTableCellElement>,
-    rowIndex: number,
-    columnIndex: number,
-  ) => {
-    if (event.button !== 0 || isInteractiveSelectionTarget(event.target))
-      return;
+  const startSelectionAtCell = (rowIndex: number, columnIndex: number) => {
+    setOpenFilterMenu(null);
     draggingRef.current = true;
     setSelection({
       anchorRow: rowIndex,
@@ -1271,6 +1329,16 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       focusRow: rowIndex,
       focusCol: columnIndex,
     });
+  };
+
+  const startSelection = (
+    event: ReactMouseEvent<HTMLTableCellElement>,
+    rowIndex: number,
+    columnIndex: number,
+  ) => {
+    if (event.button !== 0 || isInteractiveSelectionTarget(event.target))
+      return;
+    startSelectionAtCell(rowIndex, columnIndex);
   };
 
   const extendSelection = (rowIndex: number, columnIndex: number) => {
@@ -1293,6 +1361,48 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           : current,
       );
     });
+  };
+
+  const getTouchCell = (
+    touch: ReactTouchEvent<HTMLTableCellElement>['touches'][number],
+  ) => {
+    const element = document.elementFromPoint(touch.clientX, touch.clientY);
+    const cell = element?.closest<HTMLTableCellElement>(
+      '[data-row-index][data-column-index]',
+    );
+    if (!cell || !shellRef.current?.contains(cell)) return null;
+    const rowIndex = Number(cell.dataset.rowIndex);
+    const columnIndex = Number(cell.dataset.columnIndex);
+    if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)) {
+      return null;
+    }
+    return { rowIndex, columnIndex };
+  };
+
+  const startTouchSelection = (
+    event: ReactTouchEvent<HTMLTableCellElement>,
+    rowIndex: number,
+    columnIndex: number,
+  ) => {
+    if (
+      event.touches.length !== 1 ||
+      isInteractiveSelectionTarget(event.target)
+    ) {
+      return;
+    }
+    startSelectionAtCell(rowIndex, columnIndex);
+  };
+
+  const extendTouchSelection = (
+    event: ReactTouchEvent<HTMLTableCellElement>,
+  ) => {
+    if (!draggingRef.current || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const cell = getTouchCell(touch);
+    if (!cell) return;
+    event.preventDefault();
+    extendSelection(cell.rowIndex, cell.columnIndex);
   };
 
   const copySelection = () => {
@@ -1427,21 +1537,31 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                       { column: columnName },
                     )
                   : t('markdownTable.sortByColumn', { column: columnName });
+                const ariaSort = isSorted
+                  ? sort.direction === 'asc'
+                    ? 'ascending'
+                    : 'descending'
+                  : 'none';
                 const filterMenuId = `${tableId}-filter-${columnIndex}`;
                 return (
-                  <th key={header.key} className={styles.headerCell}>
+                  <th
+                    key={header.key}
+                    className={styles.headerCell}
+                    aria-sort={ariaSort}
+                  >
                     <div className={styles.headerControls}>
                       <button
                         className={styles.headerButton}
                         type="button"
                         onClick={() => toggleSort(columnIndex)}
                         aria-label={sortAriaLabel}
-                        aria-pressed={isSorted}
                       >
                         <span className={styles.headerText}>
                           {header.content}
                         </span>
-                        <span className={styles.sortIcon}>{sortLabel}</span>
+                        <span className={styles.sortIcon} aria-hidden="true">
+                          {sortLabel}
+                        </span>
                       </button>
                       <button
                         ref={isMenuOpen ? filterTriggerRef : undefined}
@@ -1472,7 +1592,9 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
               const detailId = `${tableId}-detail-${row.key}`;
               return (
                 <Fragment key={row.key}>
-                  <tr>
+                  <tr
+                    className={rowIndex % 2 === 1 ? styles.evenRow : undefined}
+                  >
                     <td className={`${styles.cell} ${styles.actionCell}`}>
                       <button
                         className={styles.rowDetailButton}
@@ -1501,12 +1623,20 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                               ? styles.selectedCell
                               : ''
                           }`}
+                          data-row-index={rowIndex}
+                          data-column-index={columnIndex}
                           onMouseDown={(event) =>
                             startSelection(event, rowIndex, columnIndex)
                           }
                           onMouseEnter={() =>
                             extendSelection(rowIndex, columnIndex)
                           }
+                          onTouchStart={(event) =>
+                            startTouchSelection(event, rowIndex, columnIndex)
+                          }
+                          onTouchMove={extendTouchSelection}
+                          onTouchEnd={stopDragging}
+                          onTouchCancel={stopDragging}
                         >
                           {cell.content}
                         </td>
@@ -1552,7 +1682,9 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
         </table>
         {visibleRows.length === 0 && (
           <div className={styles.emptyState}>
-            {t('markdownTable.emptyFiltered')}
+            {table.rows.length === 0
+              ? t('markdownTable.empty')
+              : t('markdownTable.emptyFiltered')}
           </div>
         )}
       </div>
@@ -1567,6 +1699,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           options={columnOptions[openFilterMenu.columnIndex] ?? []}
           sort={sort}
           style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
+          menuRef={filterMenuRef}
           canHideColumn={visibleColumnIndexes.length > 1}
           onApply={setColumnFilter}
           onClose={closeFilterMenu}

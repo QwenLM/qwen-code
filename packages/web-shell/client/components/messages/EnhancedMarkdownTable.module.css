@@ -321,7 +321,7 @@
   user-select: none;
 }
 
-tr:nth-child(even) .cell {
+.evenRow .cell {
   background: color-mix(in srgb, var(--subtle-bg) 55%, transparent);
 }
 
@@ -330,7 +330,7 @@ tr:hover .cell {
 }
 
 .selectedCell,
-tr:nth-child(even) .selectedCell,
+.evenRow .selectedCell,
 tr:hover .selectedCell {
   background: color-mix(in srgb, var(--accent-color) 20%, transparent);
   box-shadow: inset 0 0 0 1px var(--accent-color);

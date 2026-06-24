@@ -10,6 +10,7 @@ import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+const originalElementFromPoint = document.elementFromPoint;
 
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
@@ -17,6 +18,14 @@ afterEach(() => {
     container.remove();
   }
   vi.restoreAllMocks();
+  if (originalElementFromPoint) {
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: originalElementFromPoint,
+    });
+  } else {
+    Reflect.deleteProperty(document, 'elementFromPoint');
+  }
 });
 
 function renderTableContent(
@@ -191,6 +200,16 @@ function dragCells(from: Element, to: Element): void {
   });
 }
 
+function touchEvent(
+  type: string,
+  touches: Array<Pick<Touch, 'clientX' | 'clientY'>>,
+): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'touches', { value: touches });
+  Object.defineProperty(event, 'changedTouches', { value: touches });
+  return event;
+}
+
 describe('EnhancedMarkdownTable', () => {
   it('sorts numeric columns from header clicks', () => {
     const container = renderTable();
@@ -198,10 +217,20 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, 'Sort by Score'));
     expect(rowTexts(container)).toEqual(['Beta|2', 'Alpha|10', 'Gamma|30']);
     expect(button(container, 'Sort by Score, ascending')).toBeDefined();
+    expect(
+      button(container, 'Sort by Score, ascending')
+        .closest('th')
+        ?.getAttribute('aria-sort'),
+    ).toBe('ascending');
 
     click(button(container, 'Sort by Score, ascending'));
     expect(rowTexts(container)).toEqual(['Gamma|30', 'Alpha|10', 'Beta|2']);
     expect(button(container, 'Sort by Score, descending')).toBeDefined();
+    expect(
+      button(container, 'Sort by Score, descending')
+        .closest('th')
+        ?.getAttribute('aria-sort'),
+    ).toBe('descending');
 
     click(button(container, 'Sort by Score, descending'));
     expect(rowTexts(container)).toEqual(['Alpha|10', 'Beta|2', 'Gamma|30']);
@@ -380,6 +409,62 @@ describe('EnhancedMarkdownTable', () => {
     expect(rowTexts(container)).toEqual(['-.75', '.123', '.5']);
   });
 
+  it('sorts currency values numerically', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>$100</td>
+        </tr>
+        <tr>
+          <td>$20</td>
+        </tr>
+        <tr>
+          <td>$3</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    click(button(container, 'Sort by Amount'));
+    expect(rowTexts(container)).toEqual(['$3', '$20', '$100']);
+  });
+
+  it('filters percentage values as fractions', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Ratio</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>40%</td>
+        </tr>
+        <tr>
+          <td>0.5</td>
+        </tr>
+        <tr>
+          <td>75%</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    click(button(container, 'Filter Ratio'));
+    inputValue(
+      container.querySelector<HTMLInputElement>(
+        'input[name="markdown-table-number-filter-0"]',
+      )!,
+      '.45',
+    );
+    click(textButton(container, 'Confirm'));
+
+    expect(rowTexts(container)).toEqual(['0.5', '75%']);
+  });
+
   it('quick copies the visible sorted table', () => {
     const writeText = mockClipboard();
     const container = renderTable();
@@ -390,6 +475,37 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(
       ['Team\tScore', 'Beta\t2', 'Alpha\t10', 'Gamma\t30'].join('\n'),
     );
+  });
+
+  it('sanitizes spreadsheet formulas when copying TSV', () => {
+    const writeText = mockClipboard();
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Name</th>
+          <th>Formula</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>=1+1</td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+          <td>-10</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    click(textButton(container, 'Quick copy'));
+    expect(writeText).toHaveBeenCalledWith(
+      ['Name\tFormula', "Alpha\t'=1+1", "Beta\t'-10"].join('\n'),
+    );
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 0, 1));
+    click(textButton(container, 'Copy TSV'));
+    expect(writeText).toHaveBeenLastCalledWith("'=1+1");
   });
 
   it('hides columns and restores them from the toolbar', () => {
@@ -417,6 +533,57 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(
       ['Score', '10', '2', '30'].join('\n'),
     );
+  });
+
+  it('resets interactive state when table columns change', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (children: ReactNode) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
+          </I18nProvider>,
+        );
+      });
+    };
+
+    render([
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Score</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>10</td>
+        </tr>
+      </tbody>,
+    ]);
+    click(button(container, 'Filter Team'));
+    click(textButton(container, 'Hide column'));
+    expect(rowTexts(container)).toEqual(['10']);
+
+    render([
+      <thead key="head">
+        <tr>
+          <th>Name</th>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Beta</td>
+          <td>20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    expect(rowTexts(container)).toEqual(['Beta|20']);
+    mounted.push({ root, container });
   });
 
   it('clears hidden column filters and sort', () => {
@@ -452,6 +619,48 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
   });
 
+  it('stops extending a selection after window blur', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+    const from = dataCell(container, 0, 0);
+    const to = dataCell(container, 1, 1);
+
+    act(() => {
+      from.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      window.dispatchEvent(new Event('blur'));
+      to.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, relatedTarget: from }),
+      );
+    });
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith('Alpha');
+  });
+
+  it('selects cells with touch drag', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+    const from = dataCell(container, 0, 0);
+    const to = dataCell(container, 1, 1);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => to),
+    });
+
+    act(() => {
+      from.dispatchEvent(
+        touchEvent('touchstart', [{ clientX: 1, clientY: 1 }]),
+      );
+      from.dispatchEvent(touchEvent('touchmove', [{ clientX: 2, clientY: 2 }]));
+      from.dispatchEvent(touchEvent('touchend', []));
+    });
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
+  });
+
   it('resets filter menu draft state when switching columns', () => {
     const container = renderWideTable();
 
@@ -467,6 +676,32 @@ describe('EnhancedMarkdownTable', () => {
       'input[name="markdown-table-option-search-2"]',
     );
     expect(scoreSearch?.value).toBe('');
+  });
+
+  it('closes the filter menu when clicking outside it', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    expect(container.textContent).toContain('Custom filter');
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    expect(container.textContent).not.toContain('Custom filter');
+  });
+
+  it('closes the filter menu on scroll', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    expect(container.textContent).toContain('Custom filter');
+    act(() => {
+      document.dispatchEvent(new Event('scroll'));
+    });
+
+    expect(container.textContent).not.toContain('Custom filter');
   });
 
   it('does not offer hiding the last visible column', () => {
@@ -548,6 +783,60 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(container.textContent).toContain('plain fallback');
     expect(container.textContent).not.toContain('Quick copy');
+  });
+
+  it('falls back when a table has no parsed columns', () => {
+    const container = renderTableContent(
+      <tbody>
+        <tr />
+      </tbody>,
+      'en',
+      <table>
+        <tbody>
+          <tr>
+            <td>plain fallback</td>
+          </tr>
+        </tbody>
+      </table>,
+    );
+
+    expect(container.textContent).toContain('plain fallback');
+    expect(container.textContent).not.toContain('Quick copy');
+  });
+
+  it('shows a distinct message for empty tables', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+    ]);
+
+    expect(container.textContent).toContain('This table has no data.');
+    expect(container.textContent).not.toContain('No rows match the filters.');
+  });
+
+  it('does not treat footer rows as body data', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Item</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+        </tr>
+      </tbody>,
+      <tfoot key="foot">
+        <tr>
+          <td>Total</td>
+        </tr>
+      </tfoot>,
+    ]);
+
+    expect(rowTexts(container)).toEqual(['Alpha']);
   });
 
   it('parses direct table row children', () => {

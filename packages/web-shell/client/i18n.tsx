@@ -256,6 +256,7 @@ const EN: Messages = {
   'markdownTable.sortByColumnDesc': (v) =>
     `Sort by ${v?.column ?? ''}, descending`,
   'markdownTable.filterColumn': (v) => `Filter ${v?.column ?? ''}`,
+  'markdownTable.empty': 'This table has no data.',
   'markdownTable.emptyFiltered': 'No rows match the filters.',
   'markdownTable.sort.asc': 'Sort ascending',
   'markdownTable.sort.desc': 'Sort descending',
@@ -1408,6 +1409,7 @@ const ZH: Messages = {
   'markdownTable.sortByColumnAsc': (v) => `${v?.column ?? ''} 已升序排序`,
   'markdownTable.sortByColumnDesc': (v) => `${v?.column ?? ''} 已降序排序`,
   'markdownTable.filterColumn': (v) => `筛选 ${v?.column ?? ''}`,
+  'markdownTable.empty': '此表格没有数据。',
   'markdownTable.emptyFiltered': '没有符合筛选条件的行。',
   'markdownTable.sort.asc': '升序排序',
   'markdownTable.sort.desc': '降序排序',
