@@ -211,11 +211,28 @@ export async function applyProviderInstallPlan(
     }
 
     // Model selection
+    // Re-applying a plan (manual /auth, ACP reconnect, token refresh, or an
+    // upgrade that reordered the model list) must not silently move the user
+    // off a model they chose. If the plan still offers the current model, keep
+    // it; a genuine first-time setup still adopts the provider default. (#5819)
     currentStep = 'modelSelection';
-    if (plan.modelSelection?.modelId) {
-      settings.setValue('model.name', plan.modelSelection.modelId);
-      if (plan.modelSelection.baseUrl) {
-        settings.setValue('model.baseUrl', plan.modelSelection.baseUrl);
+    let effectiveModelSelection = plan.modelSelection;
+    if (effectiveModelSelection?.modelId) {
+      const currentModelId = settings.getValue('model.name');
+      const planOffersCurrentModel =
+        typeof currentModelId === 'string' &&
+        currentModelId.length > 0 &&
+        (plan.modelProviders ?? []).some((patch) =>
+          patch.models.some((model) => model.id === currentModelId),
+        );
+      if (planOffersCurrentModel) {
+        effectiveModelSelection = undefined;
+      }
+    }
+    if (effectiveModelSelection?.modelId) {
+      settings.setValue('model.name', effectiveModelSelection.modelId);
+      if (effectiveModelSelection.baseUrl) {
+        settings.setValue('model.baseUrl', effectiveModelSelection.baseUrl);
       } else {
         // The plan selects by model id only, so clear any baseUrl disambiguator
         // left by a previous model-picker selection — otherwise the next launch
@@ -241,12 +258,12 @@ export async function applyProviderInstallPlan(
     // Reload runtime config
     currentStep = 'reloadModelProviders';
     reloadModelProviders?.(updatedModelProviders);
-    if (plan.modelSelection?.modelId) {
+    if (effectiveModelSelection?.modelId) {
       currentStep = 'syncAuthState';
       syncAuthState?.(
         plan.authType,
-        plan.modelSelection.modelId,
-        plan.modelSelection.baseUrl,
+        effectiveModelSelection.modelId,
+        effectiveModelSelection.baseUrl,
       );
     }
     if (doRefreshAuth && refreshAuth) {
