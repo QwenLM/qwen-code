@@ -1,9 +1,10 @@
 import {
   Component,
-  isValidElement,
   memo,
   useEffect,
+  useMemo,
   useState,
+  type ErrorInfo,
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
@@ -339,22 +340,6 @@ function PlainMarkdownTable({ children }: { children?: ReactNode }) {
   );
 }
 
-function getMarkdownNodeText(node: ReactNode): string {
-  if (node === null || node === undefined || typeof node === 'boolean') {
-    return '';
-  }
-  if (typeof node === 'string' || typeof node === 'number') {
-    return String(node);
-  }
-  if (Array.isArray(node)) {
-    return node.map(getMarkdownNodeText).join('');
-  }
-  if (isValidElement<{ children?: ReactNode }>(node)) {
-    return getMarkdownNodeText(node.props.children);
-  }
-  return '';
-}
-
 class EnhancedMarkdownTableBoundary extends Component<
   { children: ReactNode; fallback: ReactNode; resetKey: string },
   { hasError: boolean; resetKey: string }
@@ -375,8 +360,12 @@ class EnhancedMarkdownTableBoundary extends Component<
     return null;
   }
 
-  componentDidCatch(error: Error) {
-    console.warn('[web-shell] enhanced markdown table failed:', error);
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error(
+      '[web-shell] enhanced markdown table failed:',
+      error,
+      errorInfo.componentStack,
+    );
   }
 
   render() {
@@ -387,6 +376,7 @@ class EnhancedMarkdownTableBoundary extends Component<
 function createComponents(
   deferMermaid?: boolean,
   enhanceTables?: boolean,
+  tableResetKey = '',
 ): Components {
   return {
     code({
@@ -431,7 +421,7 @@ function createComponents(
         return (
           <EnhancedMarkdownTableBoundary
             fallback={fallback}
-            resetKey={getMarkdownNodeText(children)}
+            resetKey={tableResetKey}
           >
             <EnhancedMarkdownTable fallback={fallback}>
               {children}
@@ -450,8 +440,6 @@ function createComponents(
 
 const COMPONENTS_DEFAULT = createComponents();
 const COMPONENTS_DEFER_MERMAID = createComponents(true);
-const COMPONENTS_ENHANCED_TABLES = createComponents(false, true);
-const COMPONENTS_ENHANCED_TABLES_DEFER_MERMAID = createComponents(true, true);
 
 export const Markdown = memo(function Markdown({
   content,
@@ -460,23 +448,25 @@ export const Markdown = memo(function Markdown({
   enhanceTables,
 }: MarkdownProps) {
   const { markdown } = useWebShellCustomization();
-
-  if (!content) return null;
-
   const sourceMarkdown = source ? markdown : undefined;
   const renderedContent =
-    source && sourceMarkdown?.transformMarkdown
+    content && source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
-  const components = enhanceTables
-    ? deferMermaid
-      ? COMPONENTS_ENHANCED_TABLES_DEFER_MERMAID
-      : COMPONENTS_ENHANCED_TABLES
-    : deferMermaid
-      ? COMPONENTS_DEFER_MERMAID
-      : COMPONENTS_DEFAULT;
+  const components = useMemo(() => {
+    if (enhanceTables) {
+      return createComponents(deferMermaid, true, renderedContent);
+    }
+    return deferMermaid ? COMPONENTS_DEFER_MERMAID : COMPONENTS_DEFAULT;
+  }, [deferMermaid, enhanceTables, renderedContent]);
+
+  if (!content) return null;
   const renderedComponents = sourceMarkdown?.components
-    ? { ...components, ...sourceMarkdown.components }
+    ? {
+        ...components,
+        ...sourceMarkdown.components,
+        ...(enhanceTables ? { table: components.table } : {}),
+      }
     : components;
   const remarkPlugins = sourceMarkdown?.remarkPlugins
     ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]

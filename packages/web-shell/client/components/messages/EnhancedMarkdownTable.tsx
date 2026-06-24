@@ -101,6 +101,14 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
 
 const MAX_ENHANCED_TABLE_ROWS = 500;
 const MAX_ENHANCED_TABLE_COLUMNS = 50;
+const FOCUSABLE_FILTER_MENU_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function getFocusableFilterMenuElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_FILTER_MENU_SELECTOR),
+  ).filter((element) => !element.hasAttribute('hidden'));
+}
 
 function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
   return (
@@ -1144,9 +1152,29 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
         setOpenFilterMenu(null);
       }
     };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      closeFilterMenu();
+    const handleMenuKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeFilterMenu();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const menu = filterMenuRef.current;
+      if (!menu) return;
+      const focusableElements = getFocusableFilterMenuElements(menu);
+      if (focusableElements.length === 0) return;
+      const currentIndex =
+        document.activeElement instanceof HTMLElement
+          ? focusableElements.indexOf(document.activeElement)
+          : -1;
+      const nextIndex = event.shiftKey
+        ? currentIndex <= 0
+          ? focusableElements.length - 1
+          : currentIndex - 1
+        : currentIndex === -1 || currentIndex === focusableElements.length - 1
+          ? 0
+          : currentIndex + 1;
+      event.preventDefault();
+      focusableElements[nextIndex]?.focus();
     };
     const closeOnScroll = (event: Event) => {
       const target = event.target;
@@ -1157,12 +1185,12 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     };
     const closeOnResize = () => setOpenFilterMenu(null);
     document.addEventListener('mousedown', closeMenu);
-    document.addEventListener('keydown', closeOnEscape);
+    document.addEventListener('keydown', handleMenuKeyDown);
     document.addEventListener('scroll', closeOnScroll, true);
     window.addEventListener('resize', closeOnResize);
     return () => {
       document.removeEventListener('mousedown', closeMenu);
-      document.removeEventListener('keydown', closeOnEscape);
+      document.removeEventListener('keydown', handleMenuKeyDown);
       document.removeEventListener('scroll', closeOnScroll, true);
       window.removeEventListener('resize', closeOnResize);
     };
@@ -1176,17 +1204,15 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     () => sortRows(filteredRows, sort),
     [filteredRows, sort],
   );
-  const columnOptions = useMemo(
-    () =>
-      table.headers.map((_, columnIndex) =>
-        getColumnOptions(
-          applyFilters(table.rows, filters, columnIndex),
-          columnIndex,
-          t('markdownTable.blank'),
-        ),
-      ),
-    [filters, t, table.headers, table.rows],
-  );
+  const openFilterOptions = useMemo(() => {
+    if (!openFilterMenu) return [];
+    const columnIndex = openFilterMenu.columnIndex;
+    return getColumnOptions(
+      applyFilters(table.rows, filters, columnIndex),
+      columnIndex,
+      t('markdownTable.blank'),
+    );
+  }, [filters, openFilterMenu, t, table.rows]);
   const numericColumns = useMemo(
     () =>
       table.headers.map((_, columnIndex) =>
@@ -1338,6 +1364,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   ) => {
     if (event.button !== 0 || isInteractiveSelectionTarget(event.target))
       return;
+    event.preventDefault();
     startSelectionAtCell(rowIndex, columnIndex);
   };
 
@@ -1695,7 +1722,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           columnIndex={openFilterMenu.columnIndex}
           filter={filters[openFilterMenu.columnIndex]}
           isNumeric={numericColumns[openFilterMenu.columnIndex] ?? false}
-          options={columnOptions[openFilterMenu.columnIndex] ?? []}
+          options={openFilterOptions}
           sort={sort}
           style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
           menuRef={filterMenuRef}

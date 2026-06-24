@@ -619,6 +619,21 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
   });
 
+  it('prevents native text selection when selecting cells with the mouse', () => {
+    const container = renderTable();
+    const event = new MouseEvent('mousedown', {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+    });
+
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+  });
+
   it('stops extending a selection after window blur', () => {
     const writeText = mockClipboard();
     const container = renderTable();
@@ -717,6 +732,34 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(container.textContent).not.toContain('Custom filter');
     expect(document.activeElement).toBe(filterButton);
+  });
+
+  it('keeps Tab focus within the filter dialog', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    const menu = container.querySelector<HTMLElement>('[role="dialog"]');
+    expect(menu).not.toBeNull();
+    const focusableElements = Array.from(
+      menu!.querySelectorAll<HTMLElement>('button, input, select'),
+    ).filter((element) => !element.hasAttribute('disabled'));
+    expect(focusableElements.length).toBeGreaterThan(1);
+    focusableElements[0]!.focus();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Tab',
+          shiftKey: true,
+        }),
+      );
+    });
+
+    expect(document.activeElement).toBe(
+      focusableElements[focusableElements.length - 1],
+    );
   });
 
   it('closes the filter menu on scroll', () => {
