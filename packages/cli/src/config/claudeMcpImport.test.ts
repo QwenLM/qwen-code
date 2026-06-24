@@ -141,13 +141,60 @@ describe('claude MCP import', () => {
       homeDir,
     });
 
+    // Claude's `type` discriminator is dropped on every transport (qwen reserves
+    // `type` for 'sdk'): http→httpUrl, sse→url, stdio keeps command only.
     expect(settings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'mcpServers',
       {
         httpServer: { httpUrl: 'https://example.com/mcp' },
         sseServer: { url: 'https://example.com/sse' },
-        stdioServer: { type: 'stdio', command: 'node', args: ['s.js'] },
+        stdioServer: { command: 'node', args: ['s.js'] },
+      },
+    );
+  });
+
+  it('preserves non-transport fields through normalization', () => {
+    writeJson(path.join(homeDir, '.claude.json'), {
+      mcpServers: {
+        httpServer: {
+          type: 'http',
+          url: 'https://example.com/mcp',
+          headers: { Authorization: 'Bearer x' },
+          timeout: 5000,
+        },
+        stdioServer: {
+          type: 'stdio',
+          command: 'node',
+          args: ['s.js'],
+          env: { API_KEY: 'secret' },
+        },
+      },
+    });
+
+    const settings = createSettings();
+    importClaudeMcpServers({
+      source: 'claude-code',
+      scope: 'user',
+      settings,
+      cwd: projectDir,
+      homeDir,
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'mcpServers',
+      {
+        httpServer: {
+          httpUrl: 'https://example.com/mcp',
+          headers: { Authorization: 'Bearer x' },
+          timeout: 5000,
+        },
+        stdioServer: {
+          command: 'node',
+          args: ['s.js'],
+          env: { API_KEY: 'secret' },
+        },
       },
     );
   });

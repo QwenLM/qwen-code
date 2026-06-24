@@ -334,21 +334,31 @@ ${systemPrompt}
  * Maps a single Claude `.mcp.json` server entry to Qwen's MCPServerConfig shape.
  * Claude discriminates transport with a `type` field (`http`/`sse`/`stdio`),
  * whereas Qwen keys off which field is set: `httpUrl` (streamable HTTP),
- * `url` (SSE) or `command` (stdio). A Claude `type: 'http'` entry therefore
- * has to move its `url` to `httpUrl`, and the now-meaningless `type` is dropped.
+ * `url` (SSE) or `command` (stdio). A Claude `type: 'http'` entry therefore has
+ * to move its `url` to `httpUrl`. Qwen reserves `type` for `'sdk'`, so any other
+ * `type` value (Claude's transport discriminator) is dropped while `'sdk'` —
+ * which `isSdkMcpServerConfig` depends on — is always preserved.
  */
 export function normalizeClaudeMcpServer(
   raw: MCPServerConfig,
 ): MCPServerConfig {
   const server = raw as unknown as Record<string, unknown>;
-  // stdio / already-Qwen-shaped configs pass through unchanged.
+  // stdio / already-Qwen-shaped configs pass through; only a non-sdk `type`
+  // (Claude's transport discriminator) is stripped.
   if (server['command'] || server['httpUrl'] || server['tcp']) {
-    return raw;
+    if (server['type'] === undefined || server['type'] === 'sdk') {
+      return raw;
+    }
+    const rest = { ...server };
+    delete rest['type'];
+    return rest as unknown as MCPServerConfig;
   }
   if (typeof server['url'] === 'string') {
     const rest = { ...server };
-    delete rest['type'];
     delete rest['url'];
+    if (rest['type'] !== 'sdk') {
+      delete rest['type'];
+    }
     return {
       ...rest,
       ...(server['type'] === 'http'
