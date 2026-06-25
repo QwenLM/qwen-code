@@ -3489,18 +3489,23 @@ describe('ContentGenerationPipeline', () => {
           /* drain */
         }
       })().catch(() => (settled = true));
-      // A malformed value must NOT become 0/NaN (which would trip immediately);
-      // the default (120000ms) is far beyond this advance.
-      await vi.advanceTimersByTimeAsync(3000);
+      // The effective timeout must be the default: not tripped just before it
+      // (so a malformed value did not become 0/NaN and fire immediately), and
+      // tripped exactly at it (so the default — not some other value — is used).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
       expect(settled).toBe(false);
-      gated.end(); // unblock so the test doesn't leak a pending stream
+      await vi.advanceTimersByTimeAsync(1);
       await consume;
+      expect(settled).toBe(true);
     });
 
     it('ignores an oversized QWEN_STREAM_IDLE_TIMEOUT_MS (beyond the timer ceiling)', async () => {
-      // Above the JS timer ceiling, setTimeout compresses to 1ms — which would
-      // make the watchdog trip almost immediately. Such a value must be
-      // rejected (fall back to the default), not used verbatim.
+      // A value above the JS timer ceiling must be rejected (fall back to the
+      // default), not used verbatim. If it were used, the watchdog would be
+      // scheduled ~24.8 days out, so advancing only to the default would never
+      // trip it — asserting it trips AT the default proves the value was
+      // rejected. (In real Node such a delay is silently compressed to 1ms,
+      // which would make the watchdog fire almost immediately.)
       vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '9999999999');
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
@@ -3517,11 +3522,11 @@ describe('ContentGenerationPipeline', () => {
           /* drain */
         }
       })().catch(() => (settled = true));
-      // Must NOT trip near-immediately (would mean the oversized value was used).
-      await vi.advanceTimersByTimeAsync(3000);
-      expect(settled).toBe(false);
-      gated.end(); // unblock so the test doesn't leak a pending stream
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // not before the default → not used verbatim
+      await vi.advanceTimersByTimeAsync(1);
       await consume;
+      expect(settled).toBe(true); // trips at the default
     });
   });
 });
