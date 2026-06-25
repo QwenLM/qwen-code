@@ -8,8 +8,8 @@ import type { CommandModule } from 'yargs';
 import { loadSettings } from '../config/settings.js';
 import { checkForUpdates } from '../ui/utils/updateCheck.js';
 import {
+  formatUpdateInstructions,
   getInstallationInfo,
-  resolveUpdateCommand,
 } from '../utils/installationInfo.js';
 import { performStandaloneUpdate } from '../utils/standalone-update.js';
 import { getPackageJson } from '../utils/package.js';
@@ -37,10 +37,6 @@ export const updateCommand: CommandModule = {
     const isAutoUpdateEnabled =
       settings.merged.general?.enableAutoUpdate !== false;
     const installationInfo = getInstallationInfo(cwd, isAutoUpdateEnabled);
-
-    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
-      writeStdoutLine(installationInfo.updateMessage);
-    }
 
     if (
       installationInfo.isStandalone &&
@@ -76,28 +72,11 @@ export const updateCommand: CommandModule = {
       return;
     }
 
-    if (installationInfo.updateCommand) {
-      const updateCmd = resolveUpdateCommand(
-        installationInfo.updateCommand,
-        info.update.latest,
-      );
-      writeStdoutLine(t('Run the following to update:'));
-      writeStdoutLine(`  ${updateCmd}`);
-    } else if (!installationInfo.updateMessage) {
-      if (installationInfo.isStandalone) {
-        writeStdoutLine(
-          t(
-            'Unable to auto-update this standalone installation. Please reinstall from:',
-          ),
-        );
-        writeStdoutLine(
-          '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/',
-        );
-      } else {
-        writeStdoutLine(
-          t('Manual update required. Please reinstall Qwen Code.'),
-        );
-      }
+    for (const line of formatUpdateInstructions(
+      installationInfo,
+      info.update.latest,
+    )) {
+      writeStdoutLine(t(line));
     }
   },
 };

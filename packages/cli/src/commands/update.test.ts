@@ -14,6 +14,33 @@ const resolveUpdateCommand = vi.fn(
   (updateCommand: string, latestVersion: string) =>
     updateCommand.replace('@latest', `@${latestVersion}`),
 );
+const formatUpdateInstructions = vi.fn(
+  (
+    installationInfo: {
+      updateMessage?: string;
+      updateCommand?: string;
+      isStandalone?: boolean;
+    },
+    latestVersion: string,
+  ) => {
+    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+      return [installationInfo.updateMessage];
+    }
+    if (installationInfo.updateCommand) {
+      return [
+        'Run the following to update:',
+        `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
+      ];
+    }
+    if (installationInfo.isStandalone) {
+      return [
+        'Unable to auto-update this standalone installation. Please reinstall from:',
+        '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh',
+      ];
+    }
+    return ['Manual update required. Please reinstall Qwen Code.'];
+  },
+);
 const performStandaloneUpdate = vi.fn();
 const getPackageJson = vi.fn();
 const writeStdoutLine = vi.fn();
@@ -22,6 +49,7 @@ const writeStderrLine = vi.fn();
 vi.mock('../config/settings.js', () => ({ loadSettings }));
 vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdates }));
 vi.mock('../utils/installationInfo.js', () => ({
+  formatUpdateInstructions,
   getInstallationInfo,
   resolveUpdateCommand,
 }));

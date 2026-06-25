@@ -9,8 +9,8 @@ import { CommandKind } from './types.js';
 import { checkForUpdates } from '../utils/updateCheck.js';
 import { handleAutoUpdate } from '../../utils/handleAutoUpdate.js';
 import {
+  formatUpdateInstructions,
   getInstallationInfo,
-  resolveUpdateCommand,
 } from '../../utils/installationInfo.js';
 import { getPackageJson } from '../../utils/package.js';
 import { t } from '../../i18n/index.js';
@@ -57,28 +57,12 @@ export const updateCommand: SlashCommand = {
       projectRoot || process.cwd(),
       isAutoUpdateEnabled,
     );
-    const lines = [info.message];
-    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
-      lines.push(installationInfo.updateMessage);
-    }
-    if (installationInfo.updateCommand) {
-      const updateCmd = resolveUpdateCommand(
-        installationInfo.updateCommand,
-        info.update.latest,
-      );
-      lines.push(t('Run the following to update:'), `  ${updateCmd}`);
-    } else if (!installationInfo.updateMessage) {
-      if (installationInfo.isStandalone) {
-        lines.push(
-          t(
-            'Unable to auto-update this standalone installation. Please reinstall from:',
-          ),
-          '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/',
-        );
-      } else {
-        lines.push(t('Manual update required. Please reinstall Qwen Code.'));
-      }
-    }
+    const lines = [
+      info.message,
+      ...formatUpdateInstructions(installationInfo, info.update.latest).map(
+        (line) => t(line),
+      ),
+    ];
 
     // Non-interactive / ACP mode: report the available update and manual command.
     const msg = lines.join('\n');

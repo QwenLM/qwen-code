@@ -311,7 +311,7 @@ async function extractArchive(
       ps.on('error', reject);
     });
     const resolvedDest = fs.realpathSync(destDir);
-    validateExtractedPaths(resolvedDest);
+    validateExtractedPaths(resolvedDest, { symlinksOnly: true });
   } else {
     const resolvedDest = fs.realpathSync(destDir);
     await tar.extract({
@@ -678,6 +678,7 @@ export function ensurePathInShellRc(binDir: string): void {
       : `export PATH=${quotedBinDir}:$PATH`;
 
     const block = `\n${beginMarker}\n${exportLine}\n${endMarker}\n`;
+    fs.mkdirSync(path.dirname(rcFile), { recursive: true });
     fs.appendFileSync(rcFile, block);
     debugLogger.info(`Added ${binDir} to ${rcFile}`);
   } catch (err) {

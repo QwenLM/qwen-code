@@ -587,6 +587,25 @@ describe('standalone-update', () => {
       }
     });
 
+    it('creates fish config parent directories before appending PATH', () => {
+      const binDir = path.join(tempDir, 'bin');
+      const fishConfig = path.join(tempDir, '.config', 'fish', 'config.fish');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/usr/bin/fish';
+      process.env['HOME'] = tempDir;
+      try {
+        expect(fs.existsSync(path.dirname(fishConfig))).toBe(false);
+        ensurePathInShellRc(binDir);
+        const content = fs.readFileSync(fishConfig, 'utf-8');
+        expect(content).toContain('set -gx PATH');
+        expect(content).toContain(binDir);
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
     it('allows shell metacharacters in single-quoted PATH entries', () => {
       const binDir = path.join(tempDir, 'bin$(evil)');
       const zshrc = path.join(tempDir, '.zshrc');
@@ -608,6 +627,38 @@ describe('standalone-update', () => {
 
     it('rejects binDir with newlines', () => {
       const binDir = path.join(tempDir, 'bin\nevil');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+      try {
+        expect(() => ensurePathInShellRc(binDir)).toThrow(
+          'unsafe for shell embedding',
+        );
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('rejects binDir with null bytes', () => {
+      const binDir = path.join(tempDir, 'bin\0evil');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/bin/zsh';
+      process.env['HOME'] = tempDir;
+      try {
+        expect(() => ensurePathInShellRc(binDir)).toThrow(
+          'unsafe for shell embedding',
+        );
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
+    it('rejects binDir with carriage returns', () => {
+      const binDir = path.join(tempDir, 'bin\revil');
       const origShell = process.env['SHELL'];
       const origHome = process.env['HOME'];
       process.env['SHELL'] = '/bin/zsh';

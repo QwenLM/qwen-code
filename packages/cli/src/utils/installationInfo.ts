@@ -28,6 +28,12 @@ const STANDALONE_UNIX_INSTALLER =
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
 
+function getStandaloneInstallerUrl(): string {
+  return process.platform === 'win32'
+    ? STANDALONE_WINDOWS_INSTALLER
+    : STANDALONE_UNIX_INSTALLER;
+}
+
 export function resolveUpdateCommand(
   updateCommand: string,
   latestVersion: string,
@@ -37,6 +43,36 @@ export function resolveUpdateCommand(
     '@latest',
     isNightly ? '@nightly' : `@${latestVersion}`,
   );
+}
+
+export function formatUpdateInstructions(
+  installationInfo: InstallationInfo,
+  latestVersion: string,
+): string[] {
+  const lines: string[] = [];
+
+  if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+    lines.push(installationInfo.updateMessage);
+  }
+
+  if (installationInfo.updateCommand) {
+    const updateCmd = resolveUpdateCommand(
+      installationInfo.updateCommand,
+      latestVersion,
+    );
+    lines.push('Run the following to update:', `  ${updateCmd}`);
+  } else if (!installationInfo.updateMessage) {
+    if (installationInfo.isStandalone) {
+      lines.push(
+        'Unable to auto-update this standalone installation. Please reinstall from:',
+        `  ${getStandaloneInstallerUrl()}`,
+      );
+    } else {
+      lines.push('Manual update required. Please reinstall Qwen Code.');
+    }
+  }
+
+  return lines;
 }
 
 export interface InstallationInfo {
@@ -253,10 +289,11 @@ function getStandaloneInstallInfo(
     return null;
   }
 
+  const installerUrl = getStandaloneInstallerUrl();
   const updateCommand =
     process.platform === 'win32'
-      ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
-      : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
+      ? `powershell -ExecutionPolicy Bypass -c "irm ${installerUrl} | iex"`
+      : `curl -fsSL ${installerUrl} | bash`;
 
   return {
     packageManager: PackageManager.STANDALONE,

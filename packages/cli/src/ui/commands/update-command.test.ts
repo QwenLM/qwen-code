@@ -14,11 +14,39 @@ const resolveUpdateCommand = vi.fn(
   (updateCommand: string, latestVersion: string) =>
     updateCommand.replace('@latest', `@${latestVersion}`),
 );
+const formatUpdateInstructions = vi.fn(
+  (
+    installationInfo: {
+      updateMessage?: string;
+      updateCommand?: string;
+      isStandalone?: boolean;
+    },
+    latestVersion: string,
+  ) => {
+    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+      return [installationInfo.updateMessage];
+    }
+    if (installationInfo.updateCommand) {
+      return [
+        'Run the following to update:',
+        `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
+      ];
+    }
+    if (installationInfo.isStandalone) {
+      return [
+        'Unable to auto-update this standalone installation. Please reinstall from:',
+        '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh',
+      ];
+    }
+    return ['Manual update required. Please reinstall Qwen Code.'];
+  },
+);
 const getPackageJson = vi.fn();
 
 vi.mock('../utils/updateCheck.js', () => ({ checkForUpdates }));
 vi.mock('../../utils/handleAutoUpdate.js', () => ({ handleAutoUpdate }));
 vi.mock('../../utils/installationInfo.js', () => ({
+  formatUpdateInstructions,
   getInstallationInfo,
   resolveUpdateCommand,
 }));
@@ -134,7 +162,7 @@ describe('updateCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Update available: 1.2.3\nUnable to auto-update this standalone installation. Please reinstall from:\n  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/',
+        'Update available: 1.2.3\nUnable to auto-update this standalone installation. Please reinstall from:\n  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh',
     });
   });
 
