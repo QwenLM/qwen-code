@@ -70,4 +70,52 @@ describe('createVoiceConnectionHandler', () => {
       text: 'hello desktop',
     })
   })
+
+  it('streams realtime audio through the injected session', async () => {
+    const pushed: Uint8Array[] = []
+    let aborted = false
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+      openStream: async (_config, callbacks) => {
+        callbacks.onInterim?.('partial transcript')
+        return {
+          pushAudio: (pcm) => pushed.push(pcm),
+          finish: async () => 'final transcript',
+          abort: () => {
+            aborted = true
+          },
+        }
+      },
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+    ws.emitMessage(Buffer.from([5, 6]), true)
+    await flush()
+    ws.emitMessage(JSON.stringify({ type: 'stop' }))
+    await flush()
+
+    expect(pushed.map((pcm) => Buffer.from(pcm))).toEqual([
+      Buffer.from([5, 6]),
+    ])
+    expect(ws.sentJson()).toContainEqual({
+      type: 'ready',
+      streaming: true,
+      model: 'qwen3-asr-flash-realtime',
+    })
+    expect(ws.sentJson()).toContainEqual({
+      type: 'interim',
+      text: 'partial transcript',
+    })
+    expect(ws.sentJson()).toContainEqual({
+      type: 'final',
+      text: 'final transcript',
+    })
+    expect(aborted).toBe(false)
+  })
 })
