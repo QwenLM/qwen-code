@@ -62,8 +62,11 @@ describe('bundled loop skill', () => {
     expect(body).toContain('If a monitor auto-stopped');
     expect(body).toContain('restart it once');
     expect(body).toContain('report the repeated auto-stop to the user');
+    expect(body).toContain('report the restart count');
     expect(body).toContain('If the signal is ambiguous');
     expect(body).toContain('Do not omit it just because something is watching');
+    expect(body).toContain('the work may hang');
+    expect(body).toContain('one owned by another agent never notifies you');
     expect(body).toContain('not a bare `/loop` wakeup prompt');
   });
 
