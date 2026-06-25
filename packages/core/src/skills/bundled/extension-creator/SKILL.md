@@ -51,10 +51,11 @@ scaffold command and bundled templates.
    directory after the trust review is complete.
 9. Run the Before Handoff checklist below. If any check fails, fix the issue
    and re-check before proceeding.
-10. Link the extension locally with `qwen extensions link "$extension_path"`.
-   The trust prompt does not show `hooks`, `channels`, or `lspServers`, so
-   summarize those entries to the user before linking. Present the trust prompt
-   output to the user and wait for their explicit approval. Do not auto-approve.
+10. Before linking, summarize default context files, `settings`, `hooks`,
+   `channels`, and `lspServers` because the trust prompt does not show all of
+   that detail. Then run `qwen extensions link "$extension_path"`, stop at the
+   trust prompt, present the prompt output to the user, and wait for their
+   explicit approval before answering it. Do not auto-approve.
 
 ## Template Selection
 
@@ -85,7 +86,9 @@ Code extension fields include:
 - `description` - plain string or locale object.
 - `contextFileName` - string or string array of context file names relative to
   the extension root. Defaults to `QWEN.md` when omitted. Referenced files that
-  do not exist are silently ignored.
+  do not exist are silently ignored. Because the default `QWEN.md` can inject
+  context even when the manifest omits `contextFileName`, inspect it when it
+  exists.
 - `mcpServers` - MCP server startup config. Extension-provided entries cannot
   use `trust` to skip manual approval; Qwen Code ignores that field for
   extension MCP servers.
@@ -96,8 +99,11 @@ Code extension fields include:
 - `hooks` - lifecycle hooks as inline hook config, `hooks/hooks.json`, or a
   JSON file path using event keys. When `hooks` is an inline object, it takes
   priority; file-based hooks are only loaded when no inline config is present.
-  In file-based hooks, use `${CLAUDE_PLUGIN_ROOT}` for the extension root;
-  other path variables are not substituted there.
+  Inline hooks in `qwen-extension.json` receive manifest path hydration, but
+  file-based hooks only substitute `${CLAUDE_PLUGIN_ROOT}` inside command
+  strings. Use `${CLAUDE_PLUGIN_ROOT}` for the extension root in file-based
+  hooks; `${extensionPath}`, `${workspacePath}`, `${/}`, and `${pathSeparator}`
+  are not substituted there.
 - `channels` - map of channel adapters. Each value uses `entry` for the
   compiled JavaScript entry point and optional `displayName`.
   `channels.<type>.entry` must import a module exporting `plugin` with a
@@ -135,17 +141,19 @@ folders, so prefer the folder structure for those resources.
 
 ## Local Test Flow
 
-Whether the path is pre-existing or freshly scaffolded, review `package.json`
-scripts when present and review `qwen-extension.json` before running any npm
-command or linking the extension. Pay special attention to `install`,
-`preinstall`, `postinstall`, `build`, `hooks`, `mcpServers`, `channels`, and
-`lspServers`. These fields can execute arbitrary code. Flag suspicious command
-values such as network downloads, piped shells, or encoded payloads. In
-`mcpServers`, `hooks`, `channels`, and `lspServers`, also inspect `env` or
-equivalent environment configuration for variables that modify runtime behavior,
-such as `NODE_OPTIONS`, `LD_PRELOAD`, `PATH`, or `DYLD_INSERT_LIBRARIES`, and
-inspect `cwd` for paths outside the extension root. Describe the concern to the
-user and ask whether to proceed.
+Whether the path is pre-existing or freshly scaffolded, review `package.json`,
+lockfiles when present, and `qwen-extension.json` before running any npm command
+or linking the extension. Pay special attention to npm lifecycle scripts such as
+`preinstall`, `install`, `postinstall`, `prepare`, and `prepublishOnly`, the
+requested `build` script, dependency specs that use `file:`, git URLs, tarballs,
+or direct HTTP URLs, and extension execution fields such as `hooks`,
+`mcpServers`, `channels`, and `lspServers`. These fields can execute arbitrary
+code. Flag suspicious command values such as network downloads, piped shells, or
+encoded payloads. In `mcpServers`, `hooks`, `channels`, and `lspServers`, also
+inspect `env` or equivalent environment configuration for variables that modify
+runtime behavior, such as `NODE_OPTIONS`, `LD_PRELOAD`, `PATH`, or
+`DYLD_INSERT_LIBRARIES`, and inspect `cwd` for paths outside the extension root.
+Describe the concern to the user and ask whether to proceed.
 
 If `hooks` is a file path, if `hooks/hooks.json` exists, or if `lspServers` is a
 JSON file path, resolve the file path inside the extension root, read the JSON
@@ -162,12 +170,15 @@ review above is complete.
 
 ```bash
 cd -- "$extension_path" && \
-  npm install && \
+  npm install --ignore-scripts && \
   npm run build
 ```
 
-If any step exits non-zero, stop and report the error to the user. Do not run
-the Before Handoff checklist or link an extension that failed to build.
+Use `--ignore-scripts` so dependency install scripts cannot run before review.
+If the build requires install scripts, stop and ask the user whether to run the
+specific script after explaining what it does. If any step exits non-zero, stop
+and report the error to the user. Do not run the Before Handoff checklist or
+link an extension that failed to build.
 
 For context, commands, skills, or agent-only extensions:
 
@@ -200,10 +211,12 @@ visible in the current session.
    current session.
 6. If the update is still not picked up after restart, run
    `qwen extensions uninstall <name>`, where `<name>` is the `name` field from
-   `qwen-extension.json` and not the directory path, then run
-   `qwen extensions link "$extension_path"`.
-7. Before re-linking, summarize `hooks`, `channels`, and `lspServers`, present
-   the trust prompt output to the user, and wait for explicit approval.
+   `qwen-extension.json` and not the directory path.
+7. Before re-linking, summarize default context files, `settings`, `hooks`,
+   `channels`, and `lspServers`.
+8. Run `qwen extensions link "$extension_path"`, stop at the trust prompt,
+   present the prompt output to the user, and wait for explicit approval before
+   answering it.
 
 ## Before Handoff
 
@@ -220,11 +233,14 @@ visible in the current session.
 - Confirm referenced folders or files exist when `contextFileName`, `commands`,
   `skills`, `agents`, `mcpServers`, `hooks`, `channels`, or `lspServers` are
   configured.
-- For manifest fields that reference local paths, resolve both the extension
-  root and the candidate path with `realpath`, then confirm the resolved
-  candidate remains inside the resolved root. Reject absolute paths, `..`
-  traversal, and symlink escapes unless the user explicitly approves the
-  external target.
+- Confirm default-discovered resources are intended before linking: `QWEN.md`
+  when `contextFileName` is omitted or empty, `commands/`, `skills/`, `agents/`,
+  and `hooks/hooks.json`.
+- For manifest fields and default-discovered resources that reference local
+  paths, resolve both the extension root and the candidate path with `realpath`,
+  then confirm the resolved candidate remains inside the resolved root. Reject
+  absolute paths, `..` traversal, and symlink escapes unless the user explicitly
+  approves the external target.
 - For `channels` in compiled templates, after trust review and build, verify
   the `entry` file exists, then read it and confirm it statically exports a
   `plugin` object with the expected `channelType` and a `createChannel`
