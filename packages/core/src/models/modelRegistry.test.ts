@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   ModelRegistry,
   QWEN_OAUTH_MODELS,
@@ -13,6 +13,27 @@ import {
 } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig, ProviderProtocolConfig } from './types.js';
+
+const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: debugLoggerWarnSpy,
+      error: vi.fn(),
+      isEnabled: () => false,
+    }),
+  };
+});
+
+beforeEach(() => {
+  debugLoggerWarnSpy.mockClear();
+});
 
 describe('ModelRegistry', () => {
   describe('initialization', () => {
@@ -1092,6 +1113,25 @@ describe('providerProtocol mapping (custom provider ids)', () => {
     expect(
       registry.getModel(AuthType.USE_OPENAI, 'qwen3.7-max'),
     ).toBeUndefined();
+  });
+
+  it('warns clearly when providerProtocol maps to an unknown protocol', () => {
+    const registry = new ModelRegistry(
+      {
+        idealab: [{ id: 'qwen3.7-max' }],
+      } as unknown as ModelProvidersConfig,
+      { idealab: 'opneai' } as unknown as ProviderProtocolConfig,
+    );
+
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Provider "idealab" maps to "opneai" via providerProtocol',
+      ),
+    );
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      expect.not.stringContaining('has no providerProtocol mapping'),
+    );
   });
 
   it('routes a custom provider to a non-openai protocol when mapped', () => {

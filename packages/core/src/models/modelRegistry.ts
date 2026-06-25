@@ -132,11 +132,18 @@ export class ModelRegistry {
       );
 
       if (!protocol) {
-        debugLogger.warn(
-          `Provider "${providerId}" in modelProviders is not a built-in protocol ` +
-            `(${Object.values(AuthType).join(', ')}) and has no providerProtocol mapping; skipping. ` +
-            `Add providerProtocol["${providerId}"] to route it to an SDK protocol.`,
-        );
+        const knownProtocols = Object.values(AuthType).join(', ');
+        const mapped = Object.hasOwn(this.providerProtocolConfig, providerId)
+          ? this.providerProtocolConfig[providerId]
+          : undefined;
+        const message =
+          mapped !== undefined
+            ? `Provider "${providerId}" maps to "${mapped}" via providerProtocol, ` +
+              `which is not a known protocol (${knownProtocols}); skipping.`
+            : `Provider "${providerId}" in modelProviders is not a built-in protocol ` +
+              `(${knownProtocols}) and has no providerProtocol mapping; skipping. ` +
+              `Add providerProtocol["${providerId}"] to route it to an SDK protocol.`;
+        debugLogger.warn(message);
         continue;
       }
 
