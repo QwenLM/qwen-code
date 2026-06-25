@@ -726,6 +726,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       attached: false,
       clientId: req.clientId ?? 'client-load',
       state: {},
+      hasActivePrompt: false,
     }));
   const resumeImpl =
     opts.resumeImpl ??
@@ -735,6 +736,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       attached: false,
       clientId: req.clientId ?? 'client-resume',
       state: {},
+      hasActivePrompt: false,
     }));
   const promptImpl =
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
@@ -5354,6 +5356,7 @@ describe('createServeApp', () => {
           attached: false,
           clientId: action === 'load' ? 'client-load' : 'client-resume',
           state: {},
+          hasActivePrompt: false,
         });
         const calls = action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
         expect(calls).toEqual([

@@ -691,14 +691,26 @@
 
 .toolBtnIcon svg {
   display: block;
+  width: 16px;
+  height: 16px;
 }
 
 .widthModeBtn {
   flex-shrink: 0;
 }
 
+.widthModeBtn .toolBtnIcon svg {
+  width: 18px;
+  height: 18px;
+}
+
 .quickActionsBtn {
   display: none;
+}
+
+.quickActionsBtn .toolBtnIcon svg {
+  width: 18px;
+  height: 18px;
 }
 
 .toolBtnModeIcon,
@@ -923,6 +935,7 @@
   display: inline-block;
   width: 16px;
   height: 16px;
+  transform: translateX(1px);
 }
 
 .stopIcon {

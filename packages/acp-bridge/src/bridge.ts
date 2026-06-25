@@ -2203,6 +2203,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        hasActivePrompt: existing.promptActive,
         ...replayFieldsFor(existing, action),
       };
     }
@@ -2257,6 +2258,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: true,
         clientId: registerClient(entry, req.clientId),
         createdAt: entry.createdAt,
+        hasActivePrompt: entry.promptActive,
       };
     }
 
@@ -2383,6 +2385,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clientId,
           createdAt: racedEntry.createdAt,
           state: racedEntry.restoreState ?? {},
+          hasActivePrompt: racedEntry.promptActive,
           ...replayFieldsFor(racedEntry, action),
         };
       }
@@ -2418,6 +2421,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         clientId,
         createdAt: entry.createdAt,
         state,
+        hasActivePrompt: entry.promptActive,
         ...replayFieldsFor(entry, action),
       };
     })().finally(() => {
@@ -2718,6 +2722,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             attached: true,
             clientId,
             createdAt: existing.createdAt,
+            hasActivePrompt: existing.promptActive,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -2766,7 +2771,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
-          return { ...session, attached: true, clientId };
+          return {
+            ...session,
+            attached: true,
+            clientId,
+            hasActivePrompt: attachedEntry.promptActive,
+          };
         }
       }
 
