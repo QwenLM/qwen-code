@@ -4886,15 +4886,16 @@ class QwenAgent implements Agent {
         const effectiveModelId =
           (adapter.getValue('model.name') as string | undefined) ??
           plan.modelSelection?.modelId;
+        const effectiveBaseUrl = 
+          (adapter.getValue('model.baseUrl') as string | undefined) ??
+          plan.modelSelection?.baseUrl;
         return {
           success: true,
           providerId: providerConfig.id,
           providerLabel: providerConfig.label,
           authType: plan.authType,
           ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
-          ...(plan.modelSelection?.baseUrl
-            ? { baseUrl: plan.modelSelection.baseUrl }
-            : {}),
+          ...(effectiveBaseUrl ? { baseUrl: effectiveBaseUrl } : {}),
         };
       }
       case 'qwen/skills/install': {
