@@ -126,6 +126,10 @@ jobs:
       BUG_LABEL: 'type/bug'
       READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
+      # Tier-2 age window (days): skip bugs newer than MIN (give triage/dedup
+      # time to settle) and older than MAX (stale, likely already fixed).
+      MIN_ISSUE_AGE_DAYS: '1'
+      MAX_ISSUE_AGE_DAYS: '15'
       # Comments from these accounts (triage/followup bots and the autofix bot's
       # own qwen-code-dev-bot identity) do not count as human engagement when
       # judging whether an issue is unattended — otherwise the bot's own
@@ -179,34 +183,50 @@ jobs:
               jq -c '[.]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"
             fi
           else
-            MIN_CREATED="$(date -u -d '2 days ago' +%Y-%m-%d)"
+            MIN_CREATED="$(date -u -d "${MIN_ISSUE_AGE_DAYS} days ago" +%Y-%m-%d)"
+            MAX_CREATED="$(date -u -d "${MAX_ISSUE_AGE_DAYS} days ago" +%Y-%m-%d)"
+
             filter_unattended_candidates() {
-              # Triage bots comment on most new issues, so "unattended" means:
-              # no comments at all, or every commenter is a known bot account.
-              jq -c --argjson bots "${KNOWN_BOTS}" \
-                '[ .[] | select(([(.comments // [])[].author.login] | map(select(. != null))) - $bots == []) ] | .[0:10] | map(del(.comments))' \
-                "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
+              # A bug stays "unattended" until a real maintainer engages: a comment
+              # whose author is OWNER/MEMBER/COLLABORATOR and is not one of our own
+              # bots. Plain community comments ("+1", "me too") do not disqualify it
+              # — on a busy repo nearly every bug attracts those within hours, which
+              # would otherwise starve the agent of candidates.
+              jq -c --argjson trust "${TRUSTED_ASSOC}" --argjson bots "${KNOWN_BOTS}" \
+                '[ .[] | select(
+                     [ (.comments // [])[]
+                       | select(((.authorAssociation // "") | IN($trust[]))
+                                and (((.author.login // "") | IN($bots[])) | not)) ]
+                     | length == 0
+                   ) ]' \
+                "${WORKDIR}/scan.json" > "$1"
             }
 
-            echo "🔍 Scanning for ready-for-agent bugs (newest first)..."
-            # ready-for-agent is an explicit triage signal, so tier-1 takes
-            # candidates directly and skips the unattended filter — no need to
-            # fetch comments here (tier-2 below still fetches them for its filter).
+            # Tier 1: explicitly triaged bugs (status/ready-for-agent). Highest
+            # signal, so they bypass the unattended filter. Gathered as priority.
+            echo "🔍 Tier 1 — ready-for-agent bugs (newest first)..."
             gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url \
               > "${WORKDIR}/scan.json"
-            jq -c '.[0:10]' \
-              "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
+            jq -c '.[0:10]' "${WORKDIR}/scan.json" > "${WORKDIR}/tier1.json"
 
-            if [[ "$(jq length "${WORKDIR}/candidates.json")" == "0" ]]; then
-              echo "🔍 Scanning for recent, unattended bugs created before ${MIN_CREATED} (newest first)..."
-              gh issue list --repo "${REPO}" \
-                --search "is:open is:issue label:${BUG_LABEL} created:<${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
-                --limit 30 --json number,title,body,labels,createdAt,url,comments \
-                > "${WORKDIR}/scan.json"
-              filter_unattended_candidates
-            fi
+            # Tier 2: recent, unattended bugs. Always gathered (not only when tier 1
+            # is empty) so a single weak tier-1 issue can't starve the run.
+            echo "🔍 Tier 2 — unattended bugs created ${MAX_CREATED}..${MIN_CREATED} (newest first)..."
+            gh issue list --repo "${REPO}" \
+              --search "is:open is:issue label:${BUG_LABEL} created:${MAX_CREATED}..${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
+              --limit 30 --json number,title,body,labels,createdAt,url,comments \
+              > "${WORKDIR}/scan.json"
+            filter_unattended_candidates "${WORKDIR}/tier2.json"
+
+            # Tier 1 first (priority), then tier 2; de-dupe by number preserving
+            # that order, drop comments, keep the top 10.
+            jq -c -s \
+              '(.[0] + .[1])
+               | reduce .[] as $x ([]; if any(.[]; .number == $x.number) then . else . + [$x] end)
+               | .[0:10] | map(del(.comments))' \
+              "${WORKDIR}/tier1.json" "${WORKDIR}/tier2.json" > "${WORKDIR}/candidates.json"
           fi
 
           COUNT="$(jq length "${WORKDIR}/candidates.json")"
