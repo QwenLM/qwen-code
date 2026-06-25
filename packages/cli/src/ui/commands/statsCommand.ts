@@ -23,6 +23,7 @@ import {
   formatTokenUsageSummaryAsJson,
   isSubpath,
   queryTokenUsage,
+  type SkillMetrics,
   type TokenUsageExportFormat,
   type TokenUsageGroupSummary,
   type TokenUsagePeriod,
@@ -30,6 +31,13 @@ import {
 } from '@qwen-code/qwen-code-core';
 
 const VALID_EXPORT_FORMATS = new Set<TokenUsageExportFormat>(['csv', 'json']);
+
+const EMPTY_SKILL_METRICS: SkillMetrics = {
+  totalCalls: 0,
+  totalSuccess: 0,
+  totalFail: 0,
+  byName: {},
+};
 
 type ParsedStatsExportArgs = {
   period: TokenUsagePeriod;
@@ -63,6 +71,34 @@ function formatGroupLines(
       })}`;
     }),
   ];
+}
+
+function formatSkillStats(skills: SkillMetrics): string {
+  const skillNames = Object.keys(skills.byName).sort((a, b) => {
+    const countDelta = skills.byName[b]!.count - skills.byName[a]!.count;
+    return countDelta !== 0 ? countDelta : a.localeCompare(b);
+  });
+
+  if (skillNames.length === 0) {
+    return t('No skill usage data yet.');
+  }
+
+  return [
+    t('Skill calls: {{total}} ({{success}} ok, {{fail}} fail)', {
+      total: String(skills.totalCalls),
+      success: String(skills.totalSuccess),
+      fail: String(skills.totalFail),
+    }),
+    ...skillNames.map((name) => {
+      const stats = skills.byName[name]!;
+      return t('  {{name}}: {{count}} ({{success}} ok, {{fail}} fail)', {
+        name,
+        count: String(stats.count),
+        success: String(stats.success),
+        fail: String(stats.fail),
+      });
+    }),
+  ].join('\n');
 }
 
 function formatTokenUsageSummary(summary: TokenUsageSummary): string {
@@ -636,7 +672,7 @@ export const statsCommand: SlashCommand = {
   get description() {
     return t('Show usage statistics dashboard.');
   },
-  argumentHint: '[model|tools|daily|monthly|export]',
+  argumentHint: '[model|tools|skills|daily|monthly|export]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: (
@@ -760,6 +796,31 @@ export const statsCommand: SlashCommand = {
         context.ui.addItem(
           {
             type: MessageType.TOOL_STATS,
+          },
+          Date.now(),
+        );
+      },
+    },
+    {
+      name: 'skills',
+      get description() {
+        return t('Show skill-specific usage statistics.');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: (context: CommandContext): MessageActionReturn | void => {
+        if (context.executionMode !== 'interactive') {
+          const skills =
+            context.session.stats.metrics.skills ?? EMPTY_SKILL_METRICS;
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: formatSkillStats(skills),
+          };
+        }
+        context.ui.addItem(
+          {
+            type: MessageType.SKILL_STATS,
           },
           Date.now(),
         );

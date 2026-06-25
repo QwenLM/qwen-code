@@ -49,6 +49,7 @@ export {
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
+  recordSkillInvocation,
   logUserFeedback,
   logArenaSessionStarted,
   logArenaAgentCompleted,

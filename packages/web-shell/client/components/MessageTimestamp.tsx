@@ -26,10 +26,13 @@ export function MessageTimestamp({
   const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(() => {
     if (!copyText) return;
-    void navigator.clipboard?.writeText(copyText).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    void navigator.clipboard
+      ?.writeText(copyText)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {});
   }, [copyText]);
   if (timestamp === undefined && !copyText) {
     return <>{children}</>;
