@@ -1828,6 +1828,7 @@ export async function loadCliConfig(
   }
 
   const modelProvidersConfig = settings.modelProviders;
+  const providerProtocolConfig = settings.providerProtocol;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -1911,9 +1912,15 @@ export async function loadCliConfig(
     mcpServerCommand:
       bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
     mcpServers,
+    topTierMcpServers,
     pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
+      : undefined,
+    // The flag ONLY (not the settings-derived list) — the hot-reload upper
+    // bound. Undefined when `--allowed-mcp-server-names` was not passed.
+    cliAllowedMcpServerNames: argv.allowedMcpServerNames
+      ? argv.allowedMcpServerNames.filter(Boolean)
       : undefined,
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)
@@ -1983,6 +1990,7 @@ export async function loadCliConfig(
     outputFormat,
     includePartialMessages,
     modelProvidersConfig,
+    providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
@@ -2024,6 +2032,10 @@ export async function loadCliConfig(
         : (settings.memory?.enableManagedAutoDream ?? true),
     enableAutoSkill:
       bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
+    autoSkillConfirm:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks:

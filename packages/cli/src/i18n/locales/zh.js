@@ -204,6 +204,7 @@ export default {
   'toolDisplayName.EnterWorktree': '进入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
+  'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -695,6 +696,7 @@ export default {
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
+  'Show skill-specific usage statistics.': '显示技能相关的使用统计信息',
   'Show daily token usage statistics.': '显示每日 token 使用统计信息',
   'Show monthly token usage statistics.': '显示每月 token 使用统计信息',
   'Export token usage statistics to CSV or JSON.':
@@ -1386,8 +1388,10 @@ export default {
     '语音听写需要麦克风访问。macOS 会在你首次录音时弹出授权请求——请同意后重新开始。弹窗打开期间的首次录音可能为空。',
   'Voice: recording': '语音：录音中',
   'Voice: transcribing': '语音：转写中',
+  'Voice: refining': '语音：优化中',
   'listening…': '聆听中…',
   'transcribing…': '转写中…',
+  'refining…': '优化中…',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -2158,6 +2162,7 @@ export default {
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
   'needs approval': '待审批',
+  'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
   Running: '运行中',

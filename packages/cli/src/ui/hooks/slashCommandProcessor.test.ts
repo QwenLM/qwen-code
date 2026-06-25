@@ -30,17 +30,20 @@ import {
   makeFakeConfig,
   MCPServerStatus,
   updateMCPServerStatus,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 
-const { logSlashCommand, debugLoggerMock } = vi.hoisted(() => ({
-  logSlashCommand: vi.fn(),
-  debugLoggerMock: {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
+const { logSlashCommand, recordSkillInvocationMock, debugLoggerMock } =
+  vi.hoisted(() => ({
+    logSlashCommand: vi.fn(),
+    recordSkillInvocationMock: vi.fn(),
+    debugLoggerMock: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
+  }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -48,6 +51,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     logSlashCommand,
+    recordSkillInvocation: recordSkillInvocationMock,
     createDebugLogger: () => debugLoggerMock,
     getIdeInstaller: vi.fn().mockReturnValue(null),
   };
@@ -1978,6 +1982,7 @@ describe('useSlashCommandProcessor', () => {
     beforeEach(() => {
       mockCommandAction.mockClear();
       vi.mocked(logSlashCommand).mockClear();
+      vi.mocked(recordSkillInvocation).mockClear();
     });
 
     it('should log a simple slash command', async () => {
@@ -2062,6 +2067,156 @@ describe('useSlashCommandProcessor', () => {
           command: 'logalias',
         }),
       );
+    });
+
+    it('records successful skill slash commands when they submit a prompt', async () => {
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'skill body' }],
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/review-skill');
+      });
+
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: true,
+      });
+    });
+
+    it('records failed skill slash commands when the action throws', async () => {
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action: vi.fn().mockRejectedValue(new Error('skill failed')),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/review-skill');
+      });
+
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: false,
+      });
+    });
+
+    it('records blocked skill slash commands as failures', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked by policy',
+        }),
+        shouldStopExecution: () => false,
+      });
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'skill body' }],
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/review-skill');
+      });
+
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: false,
+      });
+    });
+
+    it('records confirmed skill slash commands only once', async () => {
+      const action = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'confirm_action',
+          prompt: 'Run skill?',
+          originalInvocation: { raw: '/review-skill' },
+        } as ConfirmActionReturn)
+        .mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'skill body' }],
+        });
+      const skillCmd = createTestCommand(
+        {
+          name: 'review-skill',
+          action,
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      act(() => {
+        void result.current.handleSlashCommand('/review-skill');
+      });
+      await waitFor(() => {
+        expect(result.current.confirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.confirmationRequest?.onConfirm(true);
+      });
+
+      await waitFor(() => {
+        expect(action).toHaveBeenCalledTimes(2);
+      });
+      expect(recordSkillInvocation).toHaveBeenCalledTimes(1);
+      expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
+        skillName: 'review-skill',
+        success: true,
+      });
+    });
+
+    it('does not record non-skill submit-prompt slash commands as skills', async () => {
+      const fileCmd = createTestCommand(
+        {
+          name: 'filecmd',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'custom prompt' }],
+          }),
+        },
+        CommandKind.FILE,
+      );
+      const result = setupProcessorHook([], [fileCmd]);
+      await waitFor(() =>
+        expect(result.current.slashCommands.length).toBeGreaterThan(0),
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/filecmd');
+      });
+
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('should not log for unknown commands', async () => {

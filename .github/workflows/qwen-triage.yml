@@ -153,7 +153,16 @@ jobs:
              startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
            needs.authorize.outputs.should_run == 'true')
         }}
-    runs-on: 'ubuntu-latest'
+    # Triage is the read-only analysis agent (same security profile as
+    # review-pr in qwen-code-pr-review.yml): it checks out the trusted base
+    # repo, never executes PR code, and reaches the PR/issue only via the API.
+    # Run it on the self-hosted ECS pool like review-pr — not GitHub-hosted —
+    # so it stops queueing behind the hosted CI/e2e/macOS/Windows concurrency
+    # cap while the ECS pool sits idle. Falls back to ubuntu-latest when ECS is
+    # disabled. The upstream `authorize` job deliberately stays on hosted: it is
+    # secret-bearing and runs before the permission gate, so it must stay
+    # ephemeral.
+    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -185,6 +194,23 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
             -f content='eyes' > /dev/null ||
             echo "Failed to add triage acknowledgement reaction; continuing." >&2
+
+      # Self-hosted ECS runners reuse the workspace between runs, so an
+      # interrupted triage (its agent has enter_worktree/exit_worktree) can
+      # leave a stale `.qwen/tmp/*` worktree that trips the checkout below.
+      # Prune defensively; never fail the job. No-op on a fresh hosted runner.
+      - name: 'Clean stale triage worktrees'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in a
+          # worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to clean"
+            exit 0
+          fi
+          rm -rf .qwen/tmp/* 2>/dev/null || true
+          git worktree prune -v || true
+          echo "stale triage worktrees cleaned"
 
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2

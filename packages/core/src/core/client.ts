@@ -1423,6 +1423,7 @@ export class GeminiClient {
           threshold: AUTO_SKILL_THRESHOLD,
           maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
           timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+          confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
           // Reset tool-call counter when a review is dispatched so the next
@@ -1772,7 +1773,7 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (this.config.getManagedAutoMemoryEnabled()) {
+        if (this.config.isManagedMemoryAvailable()) {
           // A previous recall may still be pending (slow side-query, new user
           // turn arrived before it settled). Abort it before installing the
           // new handle so the orphan doesn't keep running indefinitely.

@@ -25,13 +25,8 @@ import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
-import { ToolApproval } from './messages/ToolApproval';
-import { AskUserQuestion } from './messages/AskUserQuestion';
 import { useSharedNow } from '../hooks/useSharedNow';
-import {
-  isAskUserQuestionToolName,
-  toolContainsCallId,
-} from './messages/toolFormatting';
+import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import styles from './MessageList.module.css';
 
@@ -68,31 +63,6 @@ interface MessageListProps {
   onRetryClick?: () => void;
   onBranchSession?: () => void;
   onFollowStateChange?: (isFollowing: boolean) => void;
-}
-
-function isAskUserQuestion(request: PermissionRequest): boolean {
-  if (
-    !request.rawInput?.questions ||
-    !Array.isArray(request.rawInput.questions)
-  ) {
-    return false;
-  }
-  if (!request.toolName) return true;
-  return isAskUserQuestionToolName(request.toolName);
-}
-
-function approvalMatchesToolGroup(
-  messages: Message[],
-  approval: PermissionRequest | null,
-): boolean {
-  if (!approval?.toolCallId) return false;
-  for (const msg of messages) {
-    if (msg.role === 'tool_group') {
-      if (msg.tools.some((t) => toolContainsCallId(t, approval.toolCallId!)))
-        return true;
-    }
-  }
-  return false;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -791,7 +761,6 @@ const HEADER_INDEX = 0;
 const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_TURN_COLLAPSE = 32;
-const ESTIMATE_APPROVAL = 200;
 const ESTIMATE_TAIL = 240;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
 
@@ -865,7 +834,7 @@ function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
 
 interface TurnCollapseRowProps {
   turnCollapse: TurnCollapseHead;
-  onToggleCollapse: (turnId: string) => void;
+  onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
 const TurnCollapseRow = memo(function TurnCollapseRow({
@@ -909,7 +878,8 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   if (!showMetadataRow) return null;
   const toggleExpanded = () => {
     if (!hasToggle) return;
-    onToggleCollapse(turnCollapse.turnId);
+    const nextExpanded = turnCollapse.collapsed;
+    onToggleCollapse(turnCollapse.turnId, nextExpanded);
   };
 
   return (
@@ -1112,20 +1082,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       },
       [onFollowStateChange],
     );
-    const handleToggleCollapse = useCallback(
-      (turnId: string) => {
-        // (Un)folding a turn is the user reading history, not following the tail.
-        // Pause follow so the height change does not yank the viewport to the
-        // bottom — the toggled prompt row stays where it is on screen.
-        setShouldFollow(false);
-        setCollapseOverrides((prev) => {
-          const next = new Map(prev);
-          next.set(turnId, prev.has(turnId) ? !prev.get(turnId) : true);
-          return next;
-        });
-      },
-      [setShouldFollow],
-    );
     const visibleItems = useMemo(
       () =>
         applyTurnCollapse(displayItems, {
@@ -1192,17 +1148,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // appearance — flows through this one effect.
     // ─────────────────────────────────────────────────────────────────────
 
-    const hasTailApproval = useMemo(() => {
-      if (!pendingApproval) return false;
-      if (isAskUserQuestion(pendingApproval)) return true;
-      return !approvalMatchesToolGroup(messages, pendingApproval);
-    }, [pendingApproval, messages]);
-
     const hasTailContent = tailContent !== undefined && tailContent !== null;
     const hasHeader = !!welcomeHeader;
     const headerOffset = hasHeader ? 1 : 0;
-    const tailApprovalIndex = headerOffset + visibleItems.length;
-    const tailContentIndex = tailApprovalIndex + (hasTailApproval ? 1 : 0);
+    const tailContentIndex = headerOffset + visibleItems.length;
     const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
     const useVirtualScroll = shouldUseVirtualScroll(
       totalCount,
@@ -1212,14 +1161,31 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       return containerRef.current;
     }, []);
 
+    const handleToggleCollapse = useCallback(
+      (turnId: string, nextExpanded: boolean) => {
+        const el = getScrollElement();
+        const distanceFromBottom = el
+          ? el.scrollHeight - el.scrollTop - el.clientHeight
+          : 0;
+        const isScrolledAwayFromBottom =
+          !!el && el.scrollHeight > el.clientHeight && distanceFromBottom >= 30;
+
+        // Only pause follow when the user is actually reading away from the
+        // tail. Short, non-overflowing chats should not surface the
+        // scroll-to-bottom affordance just because a turn was expanded.
+        setShouldFollow(!isScrolledAwayFromBottom);
+        setCollapseOverrides((prev) => {
+          const next = new Map(prev);
+          next.set(turnId, nextExpanded);
+          return next;
+        });
+      },
+      [getScrollElement, setShouldFollow],
+    );
+
     const getItemKey = useCallback(
       (index: number) => {
         if (hasHeader && index === HEADER_INDEX) return 'slot:header';
-        if (hasTailApproval && index === tailApprovalIndex) {
-          return pendingApproval
-            ? `slot:approval:${pendingApproval.id}`
-            : 'slot:approval';
-        }
         if (hasTailContent && index === tailContentIndex) {
           return `slot:tail:${tailKey}`;
         }
@@ -1228,9 +1194,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       },
       [
         hasHeader,
-        hasTailApproval,
-        tailApprovalIndex,
-        pendingApproval,
         hasTailContent,
         tailContentIndex,
         tailKey,
@@ -1283,9 +1246,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       getItemKey,
       estimateSize: (index) => {
         if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
-        if (hasTailApproval && index === tailApprovalIndex) {
-          return ESTIMATE_APPROVAL;
-        }
         if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
         const item = visibleItems[index - headerOffset];
         if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
@@ -1606,23 +1566,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           return welcomeHeader;
         }
 
-        if (hasTailApproval && index === tailApprovalIndex) {
-          if (pendingApproval && isAskUserQuestion(pendingApproval)) {
-            return (
-              <AskUserQuestion
-                request={pendingApproval}
-                onConfirm={onConfirm}
-              />
-            );
-          }
-          if (pendingApproval) {
-            return (
-              <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
-            );
-          }
-          return null;
-        }
-
         if (hasTailContent && index === tailContentIndex) {
           return tailContent;
         }
@@ -1639,8 +1582,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         hasTailContent,
         tailContent,
         tailContentIndex,
-        hasTailApproval,
-        tailApprovalIndex,
         pendingApproval,
         onConfirm,
         onShowContextDetail,
