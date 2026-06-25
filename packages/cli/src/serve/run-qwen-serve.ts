@@ -1798,7 +1798,7 @@ export async function runQwenServe(
               ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
               message: `Successfully configured ${provider.label}. Use /model to switch models.`,
             };
-            },
+          },
         ),
     });
     return { app, bridge };
