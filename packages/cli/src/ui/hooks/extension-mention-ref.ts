@@ -104,34 +104,39 @@ export function getExtensionSuggestions(
  * knows about the extension's capabilities.
  */
 export function buildExtensionContextText(extension: Extension): string {
-  const displayName = extension.displayName || extension.name;
+  const displayName = stripTerminalControlSequences(
+    extension.displayName || extension.name,
+  );
   const lines: string[] = [];
 
   lines.push(
     `--- Extension: ${displayName} (untrusted third-party content) ---`,
   );
   if (extension.config.description) {
-    lines.push(extension.config.description);
+    lines.push(stripTerminalControlSequences(extension.config.description));
     lines.push('');
   }
 
   const capabilities: string[] = [];
 
-  // Skills
   if (extension.skills && extension.skills.length > 0) {
-    const skillNames = extension.skills.map((s) => s.name).join(', ');
+    const skillNames = extension.skills
+      .map((s) => stripTerminalControlSequences(s.name))
+      .join(', ');
     capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
   }
 
-  // MCP Servers
   if (extension.mcpServers && Object.keys(extension.mcpServers).length > 0) {
-    const serverNames = Object.keys(extension.mcpServers).join(', ');
+    const serverNames = Object.keys(extension.mcpServers)
+      .map((n) => stripTerminalControlSequences(n))
+      .join(', ');
     capabilities.push(`- MCP Servers: ${serverNames}`);
   }
 
-  // Agents
   if (extension.agents && extension.agents.length > 0) {
-    const agentNames = extension.agents.map((a) => a.name).join(', ');
+    const agentNames = extension.agents
+      .map((a) => stripTerminalControlSequences(a.name))
+      .join(', ');
     capabilities.push(`- Agents: ${agentNames}`);
   }
 

@@ -13,6 +13,7 @@ import {
   buildExtensionContextText,
   EXTENSION_REF_PREFIX,
 } from './extension-mention-ref.js';
+import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import type {
   Config,
   Extension,
@@ -186,6 +187,58 @@ describe('getExtensionSuggestions', () => {
     expect(suggestions[0]!.sourceBadge).toBe('Extension');
     expect(suggestions[0]!.description).toBe('Test description');
     expect(suggestions[0]!.isDirectory).toBe(false);
+  });
+
+  it('returns empty when folder is not trusted', () => {
+    const config = {
+      isTrustedFolder: () => false,
+      getActiveExtensions: () => [makeExtension({ name: 'browser' })],
+    } as unknown as Config;
+    expect(getExtensionSuggestions(config, '')).toEqual([]);
+  });
+
+  it('caps results at MAX_SUGGESTIONS_TO_SHOW', () => {
+    const many = Array.from({ length: 12 }, (_, i) =>
+      makeExtension({ name: `ext-${String(i).padStart(2, '0')}` }),
+    );
+    const config = {
+      getActiveExtensions: () => many,
+    } as unknown as Config;
+    const suggestions = getExtensionSuggestions(config, '');
+    expect(suggestions).toHaveLength(MAX_SUGGESTIONS_TO_SHOW);
+  });
+
+  it('filters by displayName when name does not match', () => {
+    const config = {
+      getActiveExtensions: () => [
+        makeExtension({
+          name: 'code-ast',
+          displayName: 'Code Assistant',
+        }),
+      ],
+    } as unknown as Config;
+    const suggestions = getExtensionSuggestions(config, 'assist');
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]!.value).toBe('ext:code-ast');
+  });
+
+  it('strips terminal control sequences from label and description', () => {
+    const config = {
+      getActiveExtensions: () => [
+        makeExtension({
+          name: 'evil',
+          displayName: '\x1b[31mEvil\x1b[0m',
+          config: {
+            name: 'evil',
+            version: '1.0.0',
+            description: '\x1b[1mBad desc\x1b[0m',
+          },
+        }),
+      ],
+    } as unknown as Config;
+    const suggestions = getExtensionSuggestions(config, '');
+    expect(suggestions[0]!.label).not.toContain('\x1b');
+    expect(suggestions[0]!.description).not.toContain('\x1b');
   });
 });
 
