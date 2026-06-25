@@ -82,6 +82,14 @@ export interface ProviderConfig {
   /** API key input placeholder. */
   apiKeyPlaceholder?: string;
 
+  /**
+   * Custom HTTP headers to send with every request to this provider.
+   * Used for attribution headers (e.g. `HTTP-Referer`, `X-Title`) that
+   * gateways like OpenRouter and Requesty expect. Merged into each model's
+   * `generationConfig.customHeaders` at install time.
+   */
+  customHeaders?: Record<string, string>;
+
   /** Documentation URL for the provider. */
   documentationUrl?: string | ((baseUrl: string) => string);
 

@@ -18,6 +18,13 @@ import type {
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
+  ExtensionMutationResponse,
+  ExtensionOperationStatus,
+  ExtensionRefreshResponse,
+  ExtensionScopeRequest,
+  ExtensionInstallRequest,
+  ExtensionInstallResponse,
+  ExtensionUpdateCheckResponse,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
@@ -26,6 +33,7 @@ import type {
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
+  DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
@@ -153,6 +161,9 @@ export interface DaemonWorkspaceActions {
   // Skills (read-only)
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
 
+  // Extensions
+  loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
+
   // Tools
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
@@ -211,6 +222,37 @@ export interface DaemonWorkspaceActions {
     req: DaemonUpdateAgentRequest,
     scope?: 'workspace' | 'global',
   ): Promise<DaemonAgentMutationResult>;
+
+  // Extensions
+  installExtension(
+    params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse>;
+  extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus>;
+  checkExtensionUpdates(
+    clientId?: string,
+  ): Promise<ExtensionUpdateCheckResponse>;
+  refreshExtensions(clientId?: string): Promise<ExtensionRefreshResponse>;
+  enableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse>;
+  disableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse>;
+  updateExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse>;
+  uninstallExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse>;
 
   // Auth device-flow
   startDeviceFlow(

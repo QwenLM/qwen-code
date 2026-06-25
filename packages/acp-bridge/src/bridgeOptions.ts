@@ -40,7 +40,7 @@ export type DiagnosticLineSink = (
  *
  * The bridge is intentionally agnostic about how its host computes
  * these cells; production `qwen serve` provides
- * `cli/src/serve/daemonStatusProvider.ts` which wraps
+ * `cli/src/serve/daemon-status-provider.ts` which wraps
  * `buildEnvStatusFromProcess` + `buildDaemonPreflightCells`. Future
  * Mode A / in-process consumers may omit the provider entirely; the
  * bridge falls back to idle placeholders so `getWorkspaceEnvStatus`
@@ -254,7 +254,7 @@ export interface BridgeOptions {
    * status cells (env snapshot, daemon preflight). Production
    * `qwen serve` provides
    * `createDaemonStatusProvider()` from
-   * `cli/src/serve/daemonStatusProvider.ts`.
+   * `cli/src/serve/daemon-status-provider.ts`.
    *
    * **When omitted**: the bridge returns idle placeholders for
    * `getWorkspaceEnvStatus` (full envelope with empty `cells: []`
@@ -326,7 +326,7 @@ export interface BridgeOptions {
    * the bridge unit-test suite) can run the mediator without an
    * audit consumer.
    *
-   * **In production** (`qwen serve`), `runQwenServe.ts` allocates a
+   * **In production** (`qwen serve`), `run-qwen-serve.ts` allocates a
    * `PermissionAuditRing` (default capacity 512), wraps it with
    * `createPermissionAuditPublisher`, and passes the result here.
    * The ring stays alive for the lifetime of the daemon so a future

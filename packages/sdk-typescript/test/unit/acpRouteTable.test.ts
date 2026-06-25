@@ -275,6 +275,12 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/session/tasks');
   });
 
+  it('GET /session/:id/lsp maps to _qwen/session/lsp', () => {
+    const result = matchRoute('/session/s18/lsp', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/lsp');
+  });
+
   // ---- Granular workspace routes ----------------------------------------
 
   it('GET /workspace/mcp maps to _qwen/workspace/mcp', () => {

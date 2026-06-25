@@ -10,6 +10,7 @@ import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
+import { MCPServerStatus } from '@qwen-code/qwen-code-core';
 import type { ServerDetailStepProps } from '../types.js';
 import {
   getStatusColor,
@@ -22,6 +23,7 @@ const LABEL_WIDTH = 15;
 
 type ServerAction =
   | 'view-tools'
+  | 'view-resources'
   | 'reconnect'
   | 'toggle-disable'
   | 'authenticate'
@@ -30,14 +32,23 @@ type ServerAction =
 export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   server,
   onViewTools,
+  onViewResources,
   onReconnect,
   onDisable,
   onAuthenticate,
   onClearAuth,
   onBack,
+  isActive = true,
 }) => {
+  // 未连接且需要认证时，状态以"需要认证"展示，避免误导用户去排查连接问题。
+  // requiresAuth 是加载时的快照，状态被实时推到 connected 后不再适用。
+  const needsAuth =
+    !!server &&
+    !server.isDisabled &&
+    !!server.requiresAuth &&
+    server.status !== MCPServerStatus.CONNECTED;
   const statusColor = server
-    ? server.isDisabled
+    ? server.isDisabled || needsAuth
       ? 'yellow'
       : getStatusColor(server.status)
     : 'gray';
@@ -63,6 +74,22 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       });
     }
 
+    // 只在调用方接入了 onViewResources 回调、且服务器未禁用并有资源时显示
+    // "查看资源"。onViewResources 是可选 prop：像扩展管理器（McpServerActionsView）
+    // 这类同样复用 ServerDetailStep 的调用方，若未接入资源子视图就不应出现一个
+    // 点了没反应的死操作。
+    if (
+      onViewResources &&
+      !server.isDisabled &&
+      (server.resourceCount ?? 0) > 0
+    ) {
+      result.push({
+        key: 'view-resources',
+        label: t('View resources'),
+        value: 'view-resources',
+      });
+    }
+
     // 只在服务器未禁用且已断开连接时显示"重新连接"选项
     if (!server.isDisabled && server.status === 'disconnected') {
       result.push({
@@ -72,10 +99,10 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       });
     }
 
-    // 始终显示启用/禁用选项
+    // 始终显示启用/禁用选项（扩展提供的服务器走扩展级禁用记录）
     result.push({
       key: 'toggle-disable',
-      label: server?.isDisabled ? t('Enable') : t('Disable'),
+      label: server.isDisabled ? t('Enable') : t('Disable'),
       value: 'toggle-disable',
     });
 
@@ -98,7 +125,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
     }
 
     return result;
-  }, [server]);
+  }, [server, onViewResources]);
 
   useKeypress(
     (key) => {
@@ -106,7 +133,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
         onBack();
       }
     },
-    { isActive: true },
+    { isActive },
   );
 
   if (!server) {
@@ -136,7 +163,11 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
               }
             >
               {getStatusIcon(server.status)}{' '}
-              {server.isDisabled ? t('disabled') : t(server.status)}
+              {server.isDisabled
+                ? t('disabled')
+                : needsAuth
+                  ? t('needs authentication')
+                  : t(server.status)}
             </Text>
           </Box>
         </Box>
@@ -204,6 +235,28 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
           </Box>
         )}
 
+        {!server.isDisabled && server.promptCount > 0 && (
+          <Box>
+            <Box width={LABEL_WIDTH}>
+              <Text color={theme.text.primary}>{t('Prompts:')}</Text>
+            </Box>
+            <Box>
+              <Text>{server.promptCount}</Text>
+            </Box>
+          </Box>
+        )}
+
+        {!server.isDisabled && server.resourceCount > 0 && (
+          <Box>
+            <Box width={LABEL_WIDTH}>
+              <Text color={theme.text.primary}>{t('Resources:')}</Text>
+            </Box>
+            <Box>
+              <Text>{server.resourceCount}</Text>
+            </Box>
+          </Box>
+        )}
+
         {server.errorMessage && (
           <Box>
             <Box width={LABEL_WIDTH}>
@@ -222,11 +275,15 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       <Box>
         <RadioButtonSelect<ServerAction>
           items={actions}
+          isFocused={isActive}
           showNumbers={false}
           onSelect={(value: ServerAction) => {
             switch (value) {
               case 'view-tools':
                 onViewTools();
+                break;
+              case 'view-resources':
+                onViewResources?.();
                 break;
               case 'reconnect':
                 onReconnect?.();

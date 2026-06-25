@@ -9,7 +9,6 @@ import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { localizeToolDisplayName, t } from '../../../i18n/index.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
@@ -129,19 +128,6 @@ export const CompactToolGroupDisplay: React.FC<
   const overallStatus = getOverallStatus(toolCalls);
   const activeTool = getActiveTool(toolCalls);
 
-  const isShellCommand = toolCalls.some(
-    (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
-  );
-  const hasPending = !toolCalls.every(
-    (t) => t.status === ToolCallStatus.Success,
-  );
-
-  const borderColor = isShellCommand
-    ? theme.ui.symbol
-    : hasPending
-      ? theme.status.warning
-      : theme.border.default;
-
   // Take only the first line of description to prevent multi-line shell scripts
   // from expanding the compact view (wrap="truncate-end" only handles width overflow,
   // not literal \n characters in the content)
@@ -150,14 +136,7 @@ export const CompactToolGroupDisplay: React.FC<
     : '';
 
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      width={contentWidth}
-      borderDimColor={hasPending}
-      borderColor={borderColor}
-      gap={0}
-    >
+    <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
       {/* Status line: icon + (summary | tool name + description) + count + elapsed */}
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />

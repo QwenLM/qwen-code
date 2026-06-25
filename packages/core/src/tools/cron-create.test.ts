@@ -99,6 +99,30 @@ describe('CronCreateTool', () => {
     expect(tasks).toHaveLength(0);
   });
 
+  it.each(['', '   '])('rejects blank prompt %j', (prompt) => {
+    expect(() =>
+      tool.build({
+        cron: '*/5 * * * *',
+        prompt,
+      }),
+    ).toThrow('Parameter "prompt" must be a non-empty string.');
+    expect(config._scheduler.list()).toHaveLength(0);
+  });
+
+  it('trims the prompt before scheduling the job', async () => {
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: '  check status  ',
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    const jobs = config._scheduler.list();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.prompt).toBe('check status');
+  });
+
   it('returns error for invalid cron expression', async () => {
     const invocation = tool.build({
       cron: 'bad cron',

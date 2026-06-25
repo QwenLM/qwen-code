@@ -10,6 +10,7 @@ import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
+import { MCPServerStatus } from '@qwen-code/qwen-code-core';
 import type { ServerListStepProps, MCPServerDisplayInfo } from '../types.js';
 import {
   groupServersBySource,
@@ -108,9 +109,16 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
               const isSelected =
                 groupIndex === currentPosition.groupIndex &&
                 itemIndex === currentPosition.itemIndex;
-              const statusColor = server.isDisabled
-                ? 'yellow'
-                : getStatusColor(server.status);
+              // 未连接且需要认证时，状态以"需要认证"展示（requiresAuth 是
+              // 加载时的快照，状态被实时推到 connected 后不再适用）
+              const needsAuth =
+                !server.isDisabled &&
+                !!server.requiresAuth &&
+                server.status !== MCPServerStatus.CONNECTED;
+              const statusColor =
+                server.isDisabled || needsAuth
+                  ? 'yellow'
+                  : getStatusColor(server.status);
 
               return (
                 <Box key={server.name}>
@@ -146,7 +154,11 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
                     }
                   >
                     {getStatusIcon(server.status)}{' '}
-                    {server.isDisabled ? t('disabled') : t(server.status)}
+                    {server.isDisabled
+                      ? t('disabled')
+                      : needsAuth
+                        ? t('needs authentication')
+                        : t(server.status)}
                   </Text>
                   {/* 显示无效工具警告 */}
                   {!!server.invalidToolCount && server.invalidToolCount > 0 && (

@@ -64,12 +64,16 @@ export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,
 } from './utils/commandDisplay';
+export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
   MarkdownContentSource,
   MarkdownRenderContext,
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  ComposerToolbarStartRenderer,
+  WebShellComposerToolbarStartRenderInfo,
+  WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
   WebShellMarkdownCustomization,
 } from './customization';

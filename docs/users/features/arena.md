@@ -7,7 +7,7 @@
 
 Agent Arena lets you pit multiple AI models against each other on the same task. Each model runs as a fully independent agent in its own isolated Git worktree, so file operations never interfere. When all agents finish, you compare results and select a winner to merge back into your main workspace.
 
-Unlike [subagents](/users/features/sub-agents), which delegate focused subtasks within a single session, Arena agents are complete, top-level agent instances — each with its own model, context window, and full tool access.
+Unlike [subagents](./sub-agents.md), which delegate focused subtasks within a single session, Arena agents are complete, top-level agent instances — each with its own model, context window, and full tool access.
 
 This page covers:
 
@@ -104,7 +104,7 @@ If you want to inspect the complete reasoning path before deciding, each agent's
 
 ## Configuration
 
-Arena behavior can be customized in [settings.json](/users/configuration/settings):
+Arena behavior can be customized in [settings.json](../configuration/settings.md):
 
 ```json
 {
@@ -215,5 +215,5 @@ Agent Arena is one of several planned multi-agent modes in Qwen Code. **Agent Te
 
 Explore related approaches for parallel and delegated work:
 
-- **Lightweight delegation**: [Subagents](/users/features/sub-agents) handle focused subtasks within your session — better when you don't need model comparison
+- **Lightweight delegation**: [Subagents](./sub-agents.md) handle focused subtasks within your session — better when you don't need model comparison
 - **Manual parallel sessions**: Run multiple Qwen Code sessions yourself in separate terminals with [Git worktrees](https://git-scm.com/docs/git-worktree) for full manual control

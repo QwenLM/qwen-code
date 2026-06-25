@@ -729,7 +729,6 @@ export interface PostToolUseOutput extends HookOutput {
     hookEventName: 'PostToolUse';
     additionalContext?: string;
   };
-  updatedMCPToolOutput?: Record<string, unknown>;
 }
 
 /**

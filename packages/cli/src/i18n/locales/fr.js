@@ -1417,6 +1417,7 @@ export default {
   'Tools:': 'Outils :',
   'Parameters:': 'Paramètres :',
   'Prompts:': 'Invites :',
+  'Resources:': 'Ressources :',
   Blocked: 'Bloqué',
   '💡 Tips:': '💡 Conseils :',
   Use: 'Utilisez',
@@ -2034,6 +2035,26 @@ export default {
   '% context used': '% de contexte utilisé',
   'Context exceeds limit! Use /compress or /clear to reduce.':
     'Le contexte dépasse la limite ! Utilisez /compress ou /clear pour le réduire.',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Historique réduit : {{n}} messages masqués. Utilisez /history expand-now pour afficher.',
+
   // === Same-as-English optimization ===
   Auth: 'Authentification',
   Auto: 'Automatique',

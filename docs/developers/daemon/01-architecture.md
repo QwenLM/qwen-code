@@ -64,12 +64,12 @@ The daemon process and the ACP child are connected by an `AcpChannel` (default: 
 ```mermaid
 flowchart TB
     subgraph serve["packages/cli/src/serve"]
-        RQS["runQwenServe.ts<br/>(bootstrap)"]
+        RQS["run-qwen-serve.ts<br/>(bootstrap)"]
         SRV["server.ts (Express)"]
         CAP["capabilities.ts"]
         AUTH["auth.ts"]
         FSM["fs/ (sandbox)"]
-        DSP["daemonStatusProvider.ts"]
+        DSP["daemon-status-provider.ts"]
     end
 
     subgraph br["packages/acp-bridge"]
@@ -99,7 +99,7 @@ flowchart TB
 
     subgraph adapters["Adapters"]
         WUIP["webui/src/daemon/<br/>DaemonSessionProvider.tsx"]
-        TUIA["cli/src/ui/daemon/<br/>DaemonTuiAdapter.ts"]
+        TUIA["cli/src/ui/daemon/<br/>daemon-tui-adapter.ts"]
         CHB["channels/base/<br/>DaemonChannelBridge.ts"]
         DT["channels/dingtalk"]
         WX["channels/weixin"]
@@ -327,7 +327,7 @@ The two-phase shutdown matters because in-flight HTTP requests, in-flight SSE su
 
 | Concern              | File                                                        |
 | -------------------- | ----------------------------------------------------------- |
-| Bootstrap            | `packages/cli/src/serve/runQwenServe.ts`                    |
+| Bootstrap            | `packages/cli/src/serve/run-qwen-serve.ts`                    |
 | Express app          | `packages/cli/src/serve/server.ts`                          |
 | Capability registry  | `packages/cli/src/serve/capabilities.ts`                    |
 | Auth middleware      | `packages/cli/src/serve/auth.ts`                            |

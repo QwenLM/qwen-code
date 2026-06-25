@@ -70,7 +70,7 @@ jobs:
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
-    runs-on: 'ubuntu-latest'
+    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       pull-requests: 'write'
@@ -112,7 +112,7 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested'
-    runs-on: 'ubuntu-latest'
+    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     permissions: {}
     outputs:
       bot_login: '${{ steps.values.outputs.bot_login }}'
@@ -131,6 +131,7 @@ jobs:
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
       needs.authorize.outputs.should_review == 'true'
+    # Stays on hosted: the 30-minute environment wait timer would otherwise idle a self-hosted ECS slot for the whole wait (GitHub allocates the runner before evaluating the environment timer).
     runs-on: 'ubuntu-latest'
     # Configured in repo settings with a 30-minute wait timer.
     environment:
@@ -183,7 +184,8 @@ jobs:
         startsWith(github.event.comment.body, '@qwen-code /review')) ||
        (github.event_name == 'pull_request_review' &&
         startsWith(github.event.review.body, '@qwen-code /review')))
-    runs-on: 'ubuntu-latest'
+    # Same-repo guard: this job loads CI_BOT_PAT, so fork-triggered runs stay on hosted (ephemeral); only in-repo PR events use the persistent ECS runner.
+    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       contents: 'read'

@@ -85,6 +85,26 @@ function statusClassName(status: TaskStatus): string {
   }
 }
 
+function statusLabel(
+  status: TaskStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  switch (status) {
+    case 'running':
+      return t('tasks.running');
+    case 'completed':
+      return t('tasks.completed');
+    case 'failed':
+      return t('tasks.failed');
+    case 'cancelled':
+      return t('tasks.cancelled');
+    case 'paused':
+      return t('tasks.paused');
+    default:
+      return status;
+  }
+}
+
 function terminalStatusIcon(status: TaskStatus): string | null {
   switch (status) {
     case 'paused':
@@ -99,6 +119,24 @@ function terminalStatusIcon(status: TaskStatus): string | null {
     default:
       return null;
   }
+}
+
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      className={`${styles.chevron} ${expanded ? styles.chevronExpanded : ''}`}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+    >
+      <path
+        d="M6 4.5 9.5 8 6 11.5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function rowLabel(task: DaemonSessionTaskStatus): string {
@@ -163,10 +201,12 @@ function formatActivityLabel(
 
 export function TasksStatusMessage({
   message,
+  embedded = false,
   manageActiveEvent = true,
   onClose,
 }: {
   message: SerializedTasksMessage;
+  embedded?: boolean;
   manageActiveEvent?: boolean;
   onClose?: () => void;
 }) {
@@ -426,21 +466,29 @@ export function TasksStatusMessage({
 
   if (tasks.length === 0) {
     return (
-      <div className={styles.panel} data-keyboard-scope>
-        <div className={styles.header}>
-          <div className={styles.title}>{t('tasks.title')}</div>
-          {refreshError && (
-            <div className={styles.warning}>{t('tasks.refreshStale')}</div>
-          )}
-          {actionError && <div className={styles.error}>{actionError}</div>}
-        </div>
-        <div>
-          <div className={styles.sectionTitle}>
-            {t('tasks.title')} <span className={styles.secondary}>(0)</span>
+      <div
+        className={
+          embedded ? `${styles.panel} ${styles.embeddedPanel}` : styles.panel
+        }
+        data-keyboard-scope
+      >
+        {(refreshError || actionError || !embedded) && (
+          <div className={styles.header}>
+            {!embedded && (
+              <div className={styles.title}>{t('tasks.title')}</div>
+            )}
+            {refreshError && (
+              <div className={styles.warning}>{t('tasks.refreshStale')}</div>
+            )}
+            {actionError && <div className={styles.error}>{actionError}</div>}
           </div>
+        )}
+        <div>
           <div className={styles.secondary}>{t('tasks.empty')}</div>
         </div>
-        <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
+        {!embedded && (
+          <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
+        )}
       </div>
     );
   }
@@ -449,60 +497,101 @@ export function TasksStatusMessage({
     tasks,
     clampedSelectedIndex,
   );
+  const listTasks = embedded ? tasks : visible;
+  const listOffset = embedded ? 0 : windowStart;
 
   return (
-    <div className={styles.panel} data-keyboard-scope>
-      {step === 'list' && (
-        <div className={styles.header}>
-          <div className={styles.title}>{t('tasks.title')}</div>
-          {refreshError && (
-            <div className={styles.warning}>{t('tasks.refreshStale')}</div>
-          )}
-          {actionError && <div className={styles.error}>{actionError}</div>}
-        </div>
-      )}
-
-      {step === 'list' && (
-        <div className={styles.list}>
-          <div className={styles.sectionTitle}>
-            {t('tasks.title')}{' '}
-            <span className={styles.secondary}>({tasks.length})</span>
+    <div
+      className={
+        embedded ? `${styles.panel} ${styles.embeddedPanel}` : styles.panel
+      }
+      data-keyboard-scope
+    >
+      {(embedded || step === 'list') &&
+        (refreshError || actionError || !embedded) && (
+          <div className={styles.header}>
+            {!embedded && (
+              <div className={styles.title}>{t('tasks.title')}</div>
+            )}
+            {refreshError && (
+              <div className={styles.warning}>{t('tasks.refreshStale')}</div>
+            )}
+            {actionError && <div className={styles.error}>{actionError}</div>}
           </div>
-          {hiddenAbove > 0 && (
+        )}
+
+      {(embedded || step === 'list') && (
+        <div className={styles.list}>
+          {!embedded && (
+            <div className={styles.sectionTitle}>
+              {t('tasks.title')}{' '}
+              <span className={styles.secondary}>({tasks.length})</span>
+            </div>
+          )}
+          {!embedded && hiddenAbove > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreAbove', { count: hiddenAbove })}
             </div>
           )}
-          {visible.map((task, visibleIndex) => {
-            const index = windowStart + visibleIndex;
+          {listTasks.map((task, visibleIndex) => {
+            const index = listOffset + visibleIndex;
             const selected = index === clampedSelectedIndex;
             const stClass = statusClassName(task.status);
+            const taskStatusLabel = statusLabel(task.status, t);
+            const expanded = embedded && selected && step === 'detail';
+            const showSelected = embedded ? expanded : selected;
             return (
               <div
                 key={task.id}
-                className={
-                  selected ? `${styles.row} ${styles.selected}` : styles.row
-                }
-                onClick={() => {
-                  setSelectedIndex(index);
-                  setStep('detail');
-                }}
-                onMouseEnter={() => setSelectedIndex(index)}
+                className={`${styles.task} ${
+                  expanded ? styles.taskExpanded : ''
+                }`}
               >
-                <span className={styles.pointer}>{selected ? '❯' : ''}</span>
-                <span
+                <div
                   className={
-                    task.status === 'running'
-                      ? styles.nameCell
-                      : `${styles.nameCell} ${stClass}`
+                    showSelected
+                      ? `${styles.row} ${styles.selected}`
+                      : styles.row
                   }
+                  onClick={() => {
+                    setSelectedIndex(index);
+                    setStep(embedded && expanded ? 'list' : 'detail');
+                  }}
+                  onMouseEnter={() => {
+                    if (!embedded) setSelectedIndex(index);
+                  }}
                 >
-                  {rowLabel(task)}
-                </span>
+                  <span className={styles.pointer}>
+                    {showSelected ? '❯' : ''}
+                  </span>
+                  {embedded && (
+                    <span className={styles.taskIcon} aria-hidden="true" />
+                  )}
+                  <span className={styles.nameCell}>{rowLabel(task)}</span>
+                  <span className={`${styles.status} ${stClass}`}>
+                    {taskStatusLabel}
+                  </span>
+                  <span className={styles.chevronCell}>
+                    <ChevronIcon expanded={expanded} />
+                  </span>
+                </div>
+                {expanded && (
+                  <div className={styles.inlineDetail}>
+                    <TaskDetail
+                      task={task}
+                      t={t}
+                      hideHeader
+                      busy={busy}
+                      showCancelConfirm={pendingCancelId === task.id}
+                      onCancel={() => void handleCancel(task)}
+                      onCancelConfirmDismiss={() => setPendingCancelId(null)}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}
-          {hiddenBelow > 0 && (
+          {!embedded && hiddenBelow > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreBelow', { count: hiddenBelow })}
             </div>
@@ -510,22 +599,31 @@ export function TasksStatusMessage({
         </div>
       )}
 
-      {step === 'detail' && selectedTask && (
+      {!embedded && step === 'detail' && selectedTask && (
         <>
           {actionError && <div className={styles.error}>{actionError}</div>}
-          <TaskDetail task={selectedTask} t={t} />
+          <TaskDetail
+            task={selectedTask}
+            t={t}
+            busy={busy}
+            showCancelConfirm={pendingCancelId === selectedTask.id}
+            onCancel={() => void handleCancel(selectedTask)}
+            onCancelConfirmDismiss={() => setPendingCancelId(null)}
+          />
         </>
       )}
 
-      <div
-        className={
-          showCancelConfirm
-            ? `${styles.shortcuts} ${styles.confirmHint}`
-            : styles.shortcuts
-        }
-      >
-        {(step === 'list' ? listHints : detailHints).join(' · ')}
-      </div>
+      {!embedded && (
+        <div
+          className={
+            showCancelConfirm
+              ? `${styles.shortcuts} ${styles.confirmHint}`
+              : styles.shortcuts
+          }
+        >
+          {(step === 'list' ? listHints : detailHints).join(' · ')}
+        </div>
+      )}
     </div>
   );
 }
@@ -547,13 +645,37 @@ function detailTitle(
 function TaskDetail({
   task,
   t,
+  hideHeader = false,
+  busy = false,
+  showCancelConfirm = false,
+  onCancel,
+  onCancelConfirmDismiss,
 }: {
   task: DaemonSessionTaskStatus;
   t: ReturnType<typeof useI18n>['t'];
+  hideHeader?: boolean;
+  busy?: boolean;
+  showCancelConfirm?: boolean;
+  onCancel?: () => void;
+  onCancelConfirmDismiss?: () => void;
 }) {
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
+  const isAbandonable = task.kind === 'agent' && task.status === 'paused';
+  const canCancel = task.status === 'running' || isAbandonable;
+  const cancelLabel = isAbandonable
+    ? t('tasks.action.abandon')
+    : t('tasks.action.stop');
+  const confirmLabel = isAbandonable
+    ? t('tasks.action.confirmAbandon')
+    : t('tasks.action.confirmStop');
   const subtitleParts = [formatRuntime(task.runtimeMs)];
+  const compactFields = [
+    {
+      label: t('tasks.detail.runtime'),
+      value: formatRuntime(task.runtimeMs),
+    },
+  ];
 
   if (task.kind === 'agent' && task.stats?.totalTokens) {
     subtitleParts.push(
@@ -561,6 +683,10 @@ function TaskDetail({
         count: formatTokenCount(task.stats.totalTokens),
       }),
     );
+    compactFields.push({
+      label: t('tasks.detail.tokenCount'),
+      value: formatTokenCount(task.stats.totalTokens),
+    });
   }
 
   if (task.kind === 'agent' && task.stats?.toolUses !== undefined) {
@@ -569,6 +695,10 @@ function TaskDetail({
         count: task.stats.toolUses,
       }),
     );
+    compactFields.push({
+      label: t('tasks.detail.toolCallCount'),
+      value: String(task.stats.toolUses),
+    });
   }
 
   if (task.kind !== 'agent' && task.pid !== undefined) {
@@ -593,9 +723,44 @@ function TaskDetail({
 
   const promptLines =
     task.kind === 'agent' && task.prompt ? task.prompt.split('\n') : [];
-
-  return (
-    <div className={styles.detail}>
+  const actionControls =
+    canCancel && onCancel ? (
+      <div className={styles.actionBar}>
+        {showCancelConfirm ? (
+          <>
+            <span className={styles.actionHint}>
+              {t('tasks.action.confirmHint')}
+            </span>
+            <button
+              type="button"
+              className={`${styles.actionButton} ${styles.dangerButton}`}
+              disabled={busy}
+              onClick={onCancel}
+            >
+              {confirmLabel}
+            </button>
+            <button
+              type="button"
+              className={styles.actionButton}
+              onClick={onCancelConfirmDismiss}
+            >
+              {t('common.cancel')}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className={`${styles.actionButton} ${styles.dangerButton}`}
+            disabled={busy}
+            onClick={onCancel}
+          >
+            {cancelLabel}
+          </button>
+        )}
+      </div>
+    ) : null;
+  const headerContent = !hideHeader ? (
+    <>
       <div className={styles.title}>{detailTitle(task, t)}</div>
       <div className={styles.statusBadge}>
         {terminalIcon && (
@@ -608,6 +773,25 @@ function TaskDetail({
         )}
         <span className={styles.secondary}>{subtitleParts.join(' · ')}</span>
       </div>
+    </>
+  ) : compactFields.length > 0 ? (
+    <div className={styles.compactSummary}>
+      {compactFields
+        .map((field) => `${field.label} ${field.value}`)
+        .join(' · ')}
+    </div>
+  ) : null;
+
+  return (
+    <div className={styles.detail}>
+      {(headerContent || actionControls) && (
+        <div className={styles.detailTop}>
+          {headerContent && (
+            <div className={styles.detailTopMain}>{headerContent}</div>
+          )}
+          {actionControls}
+        </div>
+      )}
 
       {task.kind === 'shell' && (
         <>
@@ -632,36 +816,38 @@ function TaskDetail({
       {task.kind === 'agent' &&
         task.recentActivities &&
         task.recentActivities.length > 0 && (
-          <div>
+          <div className={styles.detailField}>
             <div className={styles.detailFieldLabel}>
               {t('tasks.detail.progress')}
             </div>
-            {task.recentActivities.slice(-5).map((a, i, arr) => {
-              const isLast = i === arr.length - 1;
-              const desc = formatActivityLabel(a.name, a.description, t);
-              return (
-                <div
-                  key={`${a.at}-${i}`}
-                  className={
-                    isLast ? styles.activityCurrent : styles.activityPast
-                  }
-                >
-                  {isLast ? '> ' : '  '}
-                  {desc}
-                </div>
-              );
-            })}
+            <div className={styles.detailContent}>
+              {task.recentActivities.slice(-5).map((a, i, arr) => {
+                const isLast = i === arr.length - 1;
+                const desc = formatActivityLabel(a.name, a.description, t);
+                return (
+                  <div
+                    key={`${a.at}-${i}`}
+                    className={
+                      isLast ? styles.activityCurrent : styles.activityPast
+                    }
+                  >
+                    {isLast ? '> ' : '  '}
+                    {desc}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
       {task.kind === 'agent' && task.prompt && (
-        <div>
+        <div className={styles.detailField}>
           <div className={styles.detailFieldLabel}>
             {t('tasks.detail.prompt')}
           </div>
           <div className={styles.promptContent}>
             {promptLines.slice(0, 5).map((line, i, arr) => (
-              <div key={i} className={styles.truncate}>
+              <div key={i}>
                 {i === arr.length - 1 && promptLines.length > 5
                   ? `${line}…`
                   : line || ' '}
@@ -681,7 +867,7 @@ function TaskDetail({
       {task.kind === 'agent' &&
         task.status === 'paused' &&
         task.resumeBlockedReason && (
-          <div>
+          <div className={styles.detailField}>
             <div className={`${styles.detailFieldLabel} ${styles.error}`}>
               {t('tasks.detail.resumeBlocked')}
             </div>
@@ -690,7 +876,7 @@ function TaskDetail({
         )}
 
       {task.error && (
-        <div>
+        <div className={styles.detailField}>
           <div
             className={`${styles.detailFieldLabel} ${
               task.kind === 'monitor' && task.status !== 'failed'
@@ -720,8 +906,8 @@ function TaskDetail({
 function DetailField({ label, value }: { label: string; value: string }) {
   return (
     <div className={styles.detailField}>
-      <span className={styles.detailFieldLabel}>{label}</span>
-      <span className={styles.truncate}>{value}</span>
+      <div className={styles.detailFieldLabel}>{label}</div>
+      <div className={styles.detailContent}>{value}</div>
     </div>
   );
 }

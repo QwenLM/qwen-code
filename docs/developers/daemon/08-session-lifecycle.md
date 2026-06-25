@@ -224,6 +224,14 @@ latencies, and file edit counts.
 `GET /session/:id/tasks` returns a background-task snapshot for agent tasks,
 shell tasks, monitor tasks, and their lifecycle states.
 
+### Session LSP Status (`session_lsp` capability tag)
+
+`GET /session/:id/lsp` returns sanitized per-session LSP status for daemon
+clients: enablement, aggregate server counts, unavailable/initialization state,
+and per-server `name`, `status`, `languages`, `transport`, `command`, and
+`error`. Disabled or unavailable LSP is represented as HTTP 200 status data,
+not as a transport error.
+
 ### Compacted Replay
 
 `POST /session/:id/load` now returns a `BridgeRestoredSession` that can include
@@ -248,7 +256,7 @@ new session arrives.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
 - `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
-- Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `session_lsp`, `non_blocking_prompt`.
 
 ## Caveats & Known Limits
 

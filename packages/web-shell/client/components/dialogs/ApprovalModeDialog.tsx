@@ -1,31 +1,33 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { dp } from './dialogStyles';
+import { useEffect, useRef } from 'react';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
+import { ModeIcon } from '../ModeIcon';
+import styles from './ApprovalModeDialog.module.css';
 
 interface ApprovalModeDialogProps {
   currentMode: string;
   onSelect: (modeId: string) => void;
-  onClose: () => void;
+}
+
+interface ModeItem {
+  id: string;
+  name: string;
+  description: string;
 }
 
 export function ApprovalModeDialog({
   currentMode,
   onSelect,
-  onClose,
 }: ApprovalModeDialogProps) {
   const { t } = useI18n();
-  const approvalModes = DAEMON_APPROVAL_MODES.map((id) => ({
-    id,
-    label: t(`mode.${id}`),
-    description: t(`mode.${id}.desc`),
-  }));
-  const [selectedIdx, setSelectedIdx] = useState(() => {
-    const idx = approvalModes.findIndex((m) => m.id === currentMode);
-    return idx >= 0 ? idx : 0;
-  });
   const listRef = useRef<HTMLDivElement>(null);
+  const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.map((id) => ({
+    id,
+    name: t(`mode.label.${id}`),
+    description: t(`mode.desc.${id}`),
+  }));
+
+  const selectedIdx = approvalModes.findIndex((m) => m.id === currentMode);
 
   useEffect(() => {
     const el = listRef.current?.children[selectedIdx] as
@@ -34,95 +36,34 @@ export function ApprovalModeDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  const handleSelect = useCallback(() => {
-    const mode = approvalModes[selectedIdx];
-    if (mode) {
-      onSelect(mode.id);
-      onClose();
-    }
-  }, [approvalModes, selectedIdx, onSelect, onClose]);
-
-  useDelayedGlobalKeyDown(
-    (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, approvalModes.length - 1));
-        return;
-      }
-      if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        setSelectedIdx((i) => Math.max(i - 1, 0));
-        return;
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleSelect();
-        return;
-      }
-    },
-    [approvalModes.length, selectedIdx, onClose, handleSelect],
-  );
-
   return (
-    <div className={dp('resume-picker')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>
-          {t('local.approvalMode')}
-        </span>
-        <span className={dp('resume-picker-count')}>
-          {t('common.current')}:{' '}
-          {approvalModes.find((m) => m.id === currentMode)?.label ||
-            currentMode}
-        </span>
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-list')} ref={listRef}>
-        {approvalModes.map((m, i) => (
-          <div
-            key={m.id}
-            className={dp(
-              'resume-picker-item',
-              i === selectedIdx ? 'selected' : undefined,
-            )}
-            onClick={() => {
-              onSelect(m.id);
-              onClose();
-            }}
-            onMouseEnter={() => setSelectedIdx(i)}
+    <div
+      className={styles.list}
+      ref={listRef}
+      role="listbox"
+      aria-label={t('mode.select')}
+    >
+      {approvalModes.map((mode) => {
+        const selected = mode.id === currentMode;
+        return (
+          <button
+            key={mode.id}
+            type="button"
+            role="option"
+            aria-selected={selected}
+            className={`${styles.row} ${selected ? styles.selected : ''}`}
+            onClick={() => onSelect(mode.id)}
           >
-            <div className={dp('resume-picker-item-row')}>
-              <span className={dp('resume-picker-item-prefix')}>
-                {i === selectedIdx ? '›' : ' '}
-              </span>
-              <span className={dp('resume-picker-item-title')}>{m.label}</span>
-              {m.id === currentMode && (
-                <span className={dp('resume-picker-item-check')}> ✓</span>
-              )}
-            </div>
-            <div className={dp('resume-picker-item-meta')}>{m.description}</div>
-          </div>
-        ))}
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-footer')}>
-        {t('dialog.footer.navSelectCancel')}
-      </div>
+            <span className={styles.modeIcon}>
+              <ModeIcon mode={mode.id} />
+            </span>
+            <span className={styles.modeText}>
+              <span className={styles.modeName}>{mode.name}</span>
+              <span className={styles.modeDesc}>{mode.description}</span>
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }

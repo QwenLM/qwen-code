@@ -263,6 +263,38 @@ describe('ShellTool', () => {
       expect(error).toBeNull();
     });
 
+    it('should reject broad kill commands that can terminate qwen-code', async () => {
+      for (const command of [
+        'taskkill /F /IM node.exe',
+        'killall node',
+        'pkill -f qwen-code',
+      ]) {
+        expect(() =>
+          shellTool.build({
+            command,
+            is_background: false,
+          }),
+        ).toThrow(
+          'Blocked: this command may terminate the running qwen-code process',
+        );
+      }
+    });
+
+    it('should allow targeted process kills', async () => {
+      expect(
+        shellTool.validateToolParams({
+          command: 'taskkill /PID 1234 /F',
+          is_background: false,
+        }),
+      ).toBeNull();
+      expect(
+        shellTool.validateToolParams({
+          command: 'kill 1234',
+          is_background: false,
+        }),
+      ).toBeNull();
+    });
+
     it('should guide model to split and use intentional-sleep for sleep chains', async () => {
       const error = shellTool.validateToolParams({
         command: 'sleep 5 && echo ok',
@@ -296,6 +328,29 @@ describe('ShellTool', () => {
         }),
       ).toThrow(
         "Directory '/not/in/workspace' is not within any of the registered workspace directories.",
+      );
+    });
+
+    it('should reject sibling-prefix directories outside the workspace', async () => {
+      const workspaceContext = createMockWorkspaceContext('/test/dir', [
+        '/tmp/project',
+      ]);
+      vi.mocked(workspaceContext.isPathWithinWorkspace).mockReturnValue(false);
+      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+        workspaceContext,
+      );
+
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/tmp/project-other',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/tmp/project-other' is not within any of the registered workspace directories.",
+      );
+      expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+        '/tmp/project-other',
       );
     });
 

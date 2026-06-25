@@ -4318,10 +4318,7 @@ hello
       const alwaysOnSpy = vi
         .spyOn(loopDetector, 'checkAlwaysOnSafeties')
         .mockReturnValue(true);
-      const deterministicSpy = vi.spyOn(
-        loopDetector,
-        'addAndCheckDeterministicToolCallLoop',
-      );
+      const heuristicSpy = vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops');
       vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
         LoopType.TURN_TOOL_CALL_CAP,
       );
@@ -4358,7 +4355,7 @@ hello
 
       // Always-on cap fires and short-circuits before the gated detectors run.
       expect(alwaysOnSpy).toHaveBeenCalled();
-      expect(deterministicSpy).not.toHaveBeenCalled();
+      expect(heuristicSpy).not.toHaveBeenCalled();
       const loopEvent = events.find(
         (e) => e.type === GeminiEventType.LoopDetected,
       );
@@ -4370,6 +4367,75 @@ hello
       // The mid-stream memory prefetch is cancelled.
       expect(abortHandlerInvoked).toBe(true);
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
+      // skipLoopDetection defaults true, so this also confirms the consecutive
+      // guard halts via the always-on path on a mixed batch (distinct calls
+      // followed by an identical run). The halt drops the whole pending queue,
+      // matching the turn-cap path — turn.pendingToolCalls is not read after the
+      // early return; consumers schedule from the yielded events and stop on
+      // LoopDetected.
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
+
+      const distinctA = {
+        callId: 'd1',
+        name: 'read_file',
+        args: { path: 'a.ts' },
+      };
+      const distinctB = {
+        callId: 'd2',
+        name: 'read_file',
+        args: { path: 'b.ts' },
+      };
+
+      mockTurnRunFn.mockImplementation(async function* (this: {
+        pendingToolCalls: unknown[];
+      }) {
+        for (const call of [distinctA, distinctB]) {
+          this.pendingToolCalls.push(call);
+          yield { type: GeminiEventType.ToolCallRequest, value: call };
+        }
+        // TOOL_CALL_LOOP_THRESHOLD (5) identical calls trip the guard on the 5th.
+        for (let i = 0; i < 5; i++) {
+          const call = {
+            callId: `r${i}`,
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+          };
+          this.pendingToolCalls.push(call);
+          yield { type: GeminiEventType.ToolCallRequest, value: call };
+        }
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'mix distinct then repeat' }],
+        new AbortController().signal,
+        'prompt-id-splice-mixed',
+      );
+      const events = [];
+      let result = await stream.next();
+      while (!result.done) {
+        events.push(result.value);
+        result = await stream.next();
+      }
+      const returnedTurn = result.value as
+        | { pendingToolCalls: Array<{ callId: string }> }
+        | undefined;
+
+      // Halts on the 5th identical call via the always-on consecutive guard.
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
+      // The pending queue is fully cleared on halt, same as the turn cap.
+      expect(returnedTurn?.pendingToolCalls).toHaveLength(0);
     });
 
     it('should PRESERVE the pending prefetch when next-speaker continueTurn returns', async () => {
@@ -6269,7 +6335,6 @@ Other open files:
       // Replace loop detector with spies
       const ldMock = {
         checkAlwaysOnSafeties: vi.fn().mockReturnValue(false),
-        addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
         addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
@@ -6298,15 +6363,12 @@ Other open files:
         // consume stream
       }
 
-      // Assert - always-on safeties still run, but opt-in detectors don't
+      // Assert - always-on safeties still run, but opt-in heuristics don't
       expect(ldMock.checkAlwaysOnSafeties).toHaveBeenCalled();
-      expect(
-        ldMock.addAndCheckDeterministicToolCallLoop,
-      ).not.toHaveBeenCalled();
       expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
     });
 
-    it('does not hard-stop identical tool calls when skipLoopDetection is true', async () => {
+    it('hard-stops identical tool calls even when skipLoopDetection is true (always-on guard)', async () => {
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       mockTurnRunFn.mockReturnValue(
@@ -6338,11 +6400,13 @@ Other open files:
         ),
       );
 
-      // skipLoopDetection defaults to true, so even repeated identical calls
-      // must not be halted — the documented escape hatch stays effective.
-      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
-        false,
-      );
+      // The consecutive-identical guard is always-on: it halts the repetition
+      // regardless of skipLoopDetection so the DashScope server never sees
+      // enough repeats to reject the conversation (issue #5019).
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
     });
 
     it('hard-stops identical tool calls when loop detection is enabled', async () => {

@@ -99,6 +99,7 @@ import {
   sessionIdContext,
   dedupeToolCallsById,
   getProviderToolCallId,
+  parsePositiveIntegerEnv,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -135,7 +136,11 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
-import { MessageType, type HistoryItemGoalStatus } from '../../ui/types.js';
+import {
+  isTerminalGoalStatusKind,
+  MessageType,
+  type HistoryItemGoalStatus,
+} from '../../ui/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
@@ -531,8 +536,14 @@ export interface AvailableCommandsSnapshot {
 export async function buildAvailableCommandsSnapshot(
   config: Config,
   abortSignal: AbortSignal = AbortSignal.timeout(10_000),
+  settings?: LoadedSettings,
 ): Promise<AvailableCommandsSnapshot> {
-  const slashCommands = await getAvailableCommands(config, abortSignal, 'acp');
+  const slashCommands = await getAvailableCommands(
+    config,
+    abortSignal,
+    'acp',
+    settings,
+  );
 
   const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
     const acceptsInput =
@@ -846,7 +857,10 @@ export class Session implements SessionContext {
     await this.historyReplayer.replay(records);
   }
 
-  rewindToTurn(targetTurnIndex: number): {
+  rewindToTurn(
+    targetTurnIndex: number,
+    opts?: { rewindFiles?: boolean },
+  ): {
     targetTurnIndex: number;
     apiTruncateIndex: number;
   } {
@@ -887,12 +901,15 @@ export class Session implements SessionContext {
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
 
+    const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
-    const survivingSnapshots = fileHistoryService
-      .getSnapshots()
-      .slice(0, targetTurnIndex + 1);
+    const survivingSnapshots = rewindFiles
+      ? fileHistoryService.getSnapshots().slice(0, targetTurnIndex + 1)
+      : undefined;
 
-    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
+    if (survivingSnapshots) {
+      fileHistoryService.restoreFromSnapshots(survivingSnapshots);
+    }
 
     this.config
       .getChatRecordingService()
@@ -907,6 +924,20 @@ export class Session implements SessionContext {
 
   captureHistorySnapshot(): Content[] {
     return this.config.getGeminiClient()!.getChat().getHistoryShallow();
+  }
+
+  getRewindableUserTurnCount(): number {
+    const apiHistory = this.captureHistorySnapshot();
+    const startIndex = getStartupContextLength(apiHistory);
+    let count = 0;
+
+    for (let i = startIndex; i < apiHistory.length; i++) {
+      if (this.#isUserTextContent(apiHistory[i]!)) {
+        count += 1;
+      }
+    }
+
+    return count;
   }
 
   restoreHistory(history: Content[]): void {
@@ -2960,7 +2991,11 @@ export class Session implements SessionContext {
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
       const { availableCommands, availableSkills, availableSkillDetails } =
-        await buildAvailableCommandsSnapshot(this.config);
+        await buildAvailableCommandsSnapshot(
+          this.config,
+          undefined,
+          this.settings,
+        );
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
@@ -3344,12 +3379,10 @@ export class Session implements SessionContext {
       onStopAfterPermissionCancel?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const parsed = parseInt(
-        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+      const maxConcurrency = parsePositiveIntegerEnv(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
-      const maxConcurrency =
-        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
       for (let i = 0; i < calls.length; i++) {
@@ -4409,6 +4442,7 @@ export class Session implements SessionContext {
     if (!('outputHistoryItems' in result)) {
       return;
     }
+    let hasActiveGoalStatus = false;
     for (const item of result.outputHistoryItems ?? []) {
       if (item.type === MessageType.GOAL_STATUS) {
         this.emitGoalStatus({
@@ -4425,7 +4459,13 @@ export class Session implements SessionContext {
             ? { lastReason: item.lastReason }
             : {}),
         });
+        if (!isTerminalGoalStatusKind(item.kind)) {
+          hasActiveGoalStatus = true;
+        }
       }
+    }
+    if (hasActiveGoalStatus) {
+      this.#installGoalTerminalObserver();
     }
   }
 

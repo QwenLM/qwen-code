@@ -193,6 +193,7 @@ if (result.signal) {
     config: rootPackageJson.config,
     dependencies: {},
     optionalDependencies: {
+      '@qwen-code/audio-capture': rootPackageJson.version,
       '@lydell/node-pty': '1.2.0-beta.10',
       '@lydell/node-pty-darwin-arm64': '1.2.0-beta.10',
       '@lydell/node-pty-darwin-x64': '1.2.0-beta.10',

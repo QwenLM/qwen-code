@@ -178,8 +178,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     let messages = request.messages;
     let tools = request.tools;
 
-    // Apply DashScope cache control if enabled (default is enabled).
-    if (this.shouldEnableCacheControl()) {
+    // glm-* models served via DashScope only parse structured "content parts"
+    // arrays when the request is in function-calling mode. A tool-less request
+    // (e.g. web_fetch's side-query: system + user, no tools, no tool messages)
+    // with array content has its prompt silently dropped server-side —
+    // prompt_tokens collapses and the model answers from an empty prompt. This
+    // is glm-specific; other DashScope models read array content fine. Caching
+    // is also moot for these one-shot side-queries, so for glm tool-less
+    // requests we skip cache control and collapse content to plain strings (the
+    // only form glm reliably reads here). Every other case keeps the existing
+    // cache-control path unchanged.
+    const flattenPlainTextForGlm =
+      this.isGlmModel(request.model) &&
+      !this.hasFunctionCallingContext(request);
+
+    if (flattenPlainTextForGlm) {
+      messages = this.flattenTextContent(messages);
+    } else if (this.shouldEnableCacheControl()) {
+      // Apply DashScope cache control if enabled (default is enabled).
       const { messages: updatedMessages, tools: updatedTools } =
         this.addDashScopeCacheControl(
           request,
@@ -204,6 +220,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...(this.buildMetadata(userPromptId) || {}),
         /* @ts-expect-error dashscope exclusive */
         vl_high_resolution_images: true,
+        // Default-on for supported reasoning models; user extra_body wins.
+        // Several vision models (e.g. qwen3.6-plus, qwen3.7-plus) are reasoning
+        // models that need this flag for multi-turn reasoning continuity.
+        // (No @ts-expect-error needed: TS flags only the first excess property
+        // in this cast, already suppressed on vl_high_resolution_images above.)
+        preserve_thinking: true,
         ...(extraBody ? extraBody : {}),
       } as OpenAI.Chat.ChatCompletionCreateParams;
     }
@@ -213,6 +235,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
+      // Default-on for supported reasoning models; user extra_body wins.
+      /* @ts-expect-error dashscope exclusive */
+      preserve_thinking: true,
       ...(extraBody ? extraBody : {}),
     } as OpenAI.Chat.ChatCompletionCreateParams;
   }
@@ -348,6 +373,70 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     } as ChatCompletionContentPartTextWithCache;
 
     return contentArray;
+  }
+
+  /**
+   * True for glm-* models (e.g. glm-4.5, glm-5.2). Uses the same `^glm-` prefix
+   * convention as the GLM matchers in tokenLimits.ts, keeping model detection
+   * consistent across the codebase.
+   */
+  private isGlmModel(model: string | undefined): boolean {
+    return !!model && model.toLowerCase().startsWith('glm-');
+  }
+
+  /**
+   * Whether the request is in "function-calling mode" — it declares `tools`, or
+   * its history already contains a tool result / assistant tool_call. glm needs
+   * one of these present to parse structured content-part arrays.
+   */
+  private hasFunctionCallingContext(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+  ): boolean {
+    if (request.tools && request.tools.length > 0) {
+      return true;
+    }
+    return request.messages.some((message) => {
+      if (message.role === 'tool') {
+        return true;
+      }
+      if (message.role === 'assistant') {
+        const toolCalls = (message as { tool_calls?: unknown[] }).tool_calls;
+        return Array.isArray(toolCalls) && toolCalls.length > 0;
+      }
+      return false;
+    });
+  }
+
+  /**
+   * Collapse text-only content arrays back to a plain string, leaving
+   * media-bearing parts (image/audio/...) as arrays. Used for glm tool-less
+   * requests, where the array form would otherwise be dropped server-side.
+   * Multiple text parts are joined with a blank line, matching the DeepSeek
+   * provider's flattening (separate parts read as separate blocks).
+   * Only called on the flatten branch, which skips cache control, so no part
+   * here carries a `cache_control` marker.
+   */
+  private flattenTextContent(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
+    return messages.map((message) => {
+      if (!('content' in message) || !Array.isArray(message.content)) {
+        return message;
+      }
+      const parts = message.content as Array<{ type?: string; text?: string }>;
+      if (parts.length === 0) {
+        return message;
+      }
+      const isTextOnly = parts.every((part) => part && part.type === 'text');
+      if (!isTextOnly) {
+        return message;
+      }
+      const text = parts.map((part) => part.text ?? '').join('\n\n');
+      return {
+        ...message,
+        content: text,
+      } as OpenAI.Chat.ChatCompletionMessageParam;
+    });
   }
 
   /**

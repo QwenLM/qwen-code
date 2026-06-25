@@ -136,6 +136,13 @@ export type {
 
 export { createNodeFileSystem } from './context.ts';
 
+// Path security
+export {
+  isPathInsideOrEqual,
+  isPathWithinDirectory,
+  isPathWithinDirectoryForCreation,
+} from './runtime/path-security.ts';
+
 // Handlers
 export {
   // SubmitPlan

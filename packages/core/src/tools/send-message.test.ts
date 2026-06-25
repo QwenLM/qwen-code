@@ -159,14 +159,17 @@ describe('SendMessageTool — background-task mode', () => {
   let config: Config;
   let tool: SendMessageTool;
   let resumeBackgroundAgent: ReturnType<typeof vi.fn>;
+  let reviveCompletedBackgroundAgent: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     registry = new BackgroundTaskRegistry();
     resumeBackgroundAgent = vi.fn();
+    reviveCompletedBackgroundAgent = vi.fn();
     config = {
       getBackgroundTaskRegistry: () => registry,
       getTeamManager: () => null,
       resumeBackgroundAgent,
+      reviveCompletedBackgroundAgent,
     } as unknown as Config;
     tool = new SendMessageTool(config);
   });
@@ -228,7 +231,7 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.llmContent).toContain('No background task found');
   });
 
-  it('returns error for non-running task', async () => {
+  it('returns error for a failed (non-running, non-revivable) task', async () => {
     registry.register({
       agentId: 'agent-1',
       description: 'test agent',
@@ -238,7 +241,7 @@ describe('SendMessageTool — background-task mode', () => {
       isBackgrounded: true,
       outputFile: '/tmp/test.jsonl',
     });
-    registry.complete('agent-1', 'done');
+    registry.fail('agent-1', 'boom');
 
     const result = await tool.validateBuildAndExecute(
       { task_id: 'agent-1', message: 'hello' },
@@ -247,6 +250,7 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(result.llmContent).toContain('not running');
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
   });
 
   it('rejects messages for a cancelled task', async () => {
@@ -297,6 +301,56 @@ describe('SendMessageTool — background-task mode', () => {
     );
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('resumed');
+  });
+
+  it('revives a completed task with the message as the next instruction', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'completed',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+      metaPath: '/tmp/test.meta.json',
+    });
+    reviveCompletedBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'now refactor the helper' },
+      new AbortController().signal,
+    );
+
+    expect(reviveCompletedBackgroundAgent).toHaveBeenCalledWith(
+      'agent-1',
+      'now refactor the helper',
+    );
+    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('revived');
+    expect(result.returnDisplay).toContain('Revived');
+  });
+
+  it('returns error when a completed task cannot be revived', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'completed',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+      metaPath: '/tmp/test.meta.json',
+    });
+    reviveCompletedBackgroundAgent.mockResolvedValue(undefined);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'try again' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('could not be revived');
   });
 
   it('includes task description in success display', async () => {

@@ -321,7 +321,12 @@ export class ModelsConfig {
    */
   getModelDisplayName(modelId: string): string {
     if (!this.currentAuthType) return modelId;
-    const resolved = this.modelRegistry.getModel(this.currentAuthType, modelId);
+    const resolved =
+      this.modelRegistry.getModel(
+        this.currentAuthType,
+        modelId,
+        this._generationConfig.baseUrl || undefined,
+      ) ?? this.modelRegistry.getModel(this.currentAuthType, modelId);
     return resolved?.name ?? modelId;
   }
 

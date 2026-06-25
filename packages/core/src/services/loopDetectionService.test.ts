@@ -146,20 +146,20 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
     });
 
-    it('should reset the deterministic tool-call counter on retry', () => {
+    it('resets the consecutive tool-call counter on retry', () => {
       const event = createToolCallRequestEvent('testTool', { param: 'value' });
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
-        expect(service.addAndCheckDeterministicToolCallLoop(event)).toBe(false);
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
       }
 
       expect(
-        service.addAndCheckDeterministicToolCallLoop({
+        service.checkAlwaysOnSafeties({
           type: GeminiEventType.Retry,
         } as ServerGeminiStreamEvent),
       ).toBe(false);
 
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
-        expect(service.addAndCheckDeterministicToolCallLoop(event)).toBe(false);
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
       }
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
@@ -167,16 +167,47 @@ describe('LoopDetectionService', () => {
     it('should expose the current consecutive tool-call count', () => {
       const event = createToolCallRequestEvent('testTool', { param: 'value' });
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
-        service.addAndCheckDeterministicToolCallLoop(event);
+        service.checkAlwaysOnSafeties(event);
       }
 
       expect(service.getConsecutiveToolCallCount()).toBe(
         TOOL_CALL_LOOP_THRESHOLD - 1,
       );
-      expect(service.addAndCheckDeterministicToolCallLoop(event)).toBe(true);
+      expect(service.checkAlwaysOnSafeties(event)).toBe(true);
       expect(service.getConsecutiveToolCallCount()).toBe(
         TOOL_CALL_LOOP_THRESHOLD,
       );
+    });
+
+    it('halts consecutive identical calls via the always-on guard', () => {
+      // The consecutive guard lives in checkAlwaysOnSafeties, so it fires
+      // independently of the skipLoopDetection gate (which only gates the
+      // heuristic path at the client layer).
+      const event = createToolCallRequestEvent('stuck_tool', { p: 'same' });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
+      }
+      expect(service.checkAlwaysOnSafeties(event)).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'consecutive_identical_tool_calls',
+        }),
+      );
+    });
+
+    it('always-on consecutive guard honors an in-session disable', () => {
+      service.disableForSession();
+      const event = createToolCallRequestEvent('stuck_tool', { p: 'same' });
+      // Well past the threshold, but an explicit in-session disable suppresses
+      // the consecutive guard (unlike the per-turn cap, which is unconditional).
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD + 2; i++) {
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
     it('should not detect a loop when disabled for session', () => {
@@ -1221,12 +1252,11 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
-    it('should fire for consecutive identical calls via both detectors', () => {
-      // The heuristic path also runs checkGlobalDuplicate on every
-      // ToolCallRequest, so a consecutive run of 5 identical calls trips
-      // the consecutive detector first (threshold 5 < global 6). This test
-      // verifies the global path would also fire if the consecutive
-      // detector were disabled.
+    it('global-duplicate also fires for a consecutive identical run', () => {
+      // checkGlobalDuplicate runs on every ToolCallRequest independently of the
+      // always-on consecutive guard (which lives in checkAlwaysOnSafeties, not
+      // this heuristic path). Exercised directly, the heuristic path fires
+      // global-duplicate once a consecutive identical run reaches its threshold.
       service.reset('');
       const event = createToolCallRequestEvent('stuck_tool', {
         param: 'same',

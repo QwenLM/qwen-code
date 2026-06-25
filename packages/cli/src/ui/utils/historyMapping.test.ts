@@ -424,5 +424,14 @@ describe('isRealUserTurn', () => {
 
   it('returns false for non-user items', () => {
     expect(isRealUserTurn(geminiItem(1))).toBe(false);
+    expect(
+      isRealUserTurn({ type: 'info', id: 1, text: 'info' } as HistoryItem),
+    ).toBe(false);
+  });
+
+  it('returns true for user items with suppressOnRestore', () => {
+    const item = userItem(1, 'hello world');
+    item.display = { suppressOnRestore: true };
+    expect(isRealUserTurn(item)).toBe(true);
   });
 });

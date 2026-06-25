@@ -56,7 +56,11 @@ function parseMcpStatusMessage(
   return parsed;
 }
 
-export { serializeMcpStatusMessage, parseMcpStatusMessage };
+export {
+  serializeMcpStatusMessage,
+  parseMcpStatusMessage,
+  type SerializedMcpStatusMessage,
+};
 
 function statusDisplay(
   server: DaemonWorkspaceMcpServerStatus,

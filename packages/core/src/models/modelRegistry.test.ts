@@ -932,3 +932,64 @@ describe('modelRegistryKey', () => {
     expect(key1).toBe(key2);
   });
 });
+
+describe('fastOnly and voiceOnly flags', () => {
+  it('should propagate fastOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'gpt-4o-mini', name: 'GPT-4o Mini', fastOnly: true },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.fastOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'gpt-4o-mini')?.fastOnly).toBe(true);
+  });
+
+  it('should propagate voiceOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'whisper-1', name: 'Whisper', voiceOnly: true },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.voiceOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
+  });
+
+  it('should warn when both fastOnly and voiceOnly are set', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'unreachable-model',
+          fastOnly: true,
+          voiceOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models).toHaveLength(1);
+    expect(models[0].fastOnly).toBe(true);
+    expect(models[0].voiceOnly).toBe(true);
+  });
+});
+
+describe('malformed modelProviders tolerance', () => {
+  it('skips a non-array provider value instead of throwing (legacy V5 { protocol, models })', () => {
+    // A settings file still in the reverted #5089 V5 shape can deliver a
+    // { protocol, models } object here instead of a ModelConfig[].
+    const registry = new ModelRegistry({
+      openai: {
+        protocol: 'openai',
+        models: [{ id: 'gpt-4o' }],
+      },
+    } as unknown as ModelProvidersConfig);
+
+    // Must not throw "models is not iterable"; the malformed entry is skipped.
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+});

@@ -48,6 +48,10 @@ export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
 export const EVENT_PROMPT_SUGGESTION = 'qwen-code.prompt_suggestion';
 export const EVENT_SPECULATION = 'qwen-code.speculation';
 
+// Workflow Events (#4721)
+export const EVENT_WORKFLOW_KEYWORD = 'qwen-code.workflow_keyword';
+export const EVENT_WORKFLOW_RUN = 'qwen-code.workflow_run';
+
 // Arena Events
 export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';
 export const EVENT_ARENA_AGENT_COMPLETED = 'qwen-code.arena_agent_completed';

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -33,9 +34,16 @@ export const FORK_AGENT = {
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
-  approvalMode: 'default',
+  // `bubble` surfaces this fork's permission prompts to the parent's Background-
+  // tasks UI; a detached fork has no inline UI, so 'default' would auto-deny them.
+  approvalMode: BUBBLE_APPROVAL_MODE,
   level: 'session' as const,
 } satisfies SubagentConfig;
+
+// Turn cap for a detached fork — fire-and-forget background work nobody awaits,
+// so an unbounded reasoning loop burns tokens silently. Matches claude-code's
+// fork cap of 200.
+export const FORK_DEFAULT_MAX_TURNS = 200;
 
 // Recursive-fork guard. A fork child keeps the `agent` tool in its declarations
 // for byte-identical cache parity with the parent, so tool-availability

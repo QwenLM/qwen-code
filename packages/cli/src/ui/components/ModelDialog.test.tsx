@@ -565,6 +565,84 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('stores the plain model id in voice model mode without switching models', async () => {
+    const switchModel = vi.fn();
+    const setFastModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVoiceModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'qwen3-asr-flash',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+          },
+          {
+            id: 'qwen3.7-max',
+            label: 'qwen3.7-max',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const selectProps = mockedSelect.mock.calls[0][0];
+    await selectProps.onSelect(selectProps.items[0].value);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'voiceModel',
+      'qwen3-asr-flash',
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      expect.any(String),
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not store a voice model without a transcription baseUrl', async () => {
+    const switchModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVoiceModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3-coder',
+            label: 'qwen3-coder',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen3-coder`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it('highlights the cross-auth row for a bare fast-model setting', () => {
     // `/model --fast deepseek-v4-flash` validates across all providers and
     // persists the bare model id. When the dialog re-opens, it must locate

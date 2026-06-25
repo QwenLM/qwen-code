@@ -2,7 +2,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 12px;
+  padding: 2px 2px;
+  margin-bottom: 10px;
   font-size: 13px;
   color: var(--text-dimmed);
   flex-shrink: 0;
@@ -137,10 +138,6 @@
 .model {
   color: var(--text-dimmed);
   font-size: 12px;
-}
-
-.disconnected {
-  color: var(--error-color);
 }
 
 .contextButton {

@@ -40,6 +40,7 @@ import {
   tokenLimit,
   CAPPED_DEFAULT_MAX_TOKENS,
   hasExplicitOutputLimit,
+  parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
@@ -594,9 +595,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
         : userMaxTokens;
     } else {
       // No explicit user config — check env var, then use capped default.
-      const envVal = process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
-      const envMaxTokens = envVal ? parseInt(envVal, 10) : NaN;
-      if (!isNaN(envMaxTokens) && envMaxTokens > 0) {
+      const envMaxTokens = parsePositiveIntegerEnvValue(
+        process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+      );
+      if (envMaxTokens !== undefined) {
         maxTokens = isKnownModel
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;

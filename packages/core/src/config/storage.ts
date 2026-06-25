@@ -23,6 +23,16 @@ const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
 
+function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
+  const relativePath = path.relative(parentPath, childPath);
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith(`..${path.sep}`) &&
+      relativePath !== '..' &&
+      !path.isAbsolute(relativePath))
+  );
+}
+
 export class Storage {
   private readonly targetDir: string;
 
@@ -233,11 +243,7 @@ export class Storage {
     const realParent = Storage.resolvePathThroughExistingAncestor(parentPath);
     const realChild = Storage.resolvePathThroughExistingAncestor(childPath);
 
-    const relativePath = path.relative(realParent, realChild);
-    return (
-      relativePath === '' ||
-      (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
-    );
+    return isResolvedPathWithinDirectory(realChild, realParent);
   }
 
   static assertPathWithinDirectory(
@@ -342,6 +348,47 @@ export class Storage {
 
   getProjectCommandsDir(): string {
     return path.join(this.getQwenDir(), 'commands');
+  }
+
+  /**
+   * Project-level saved-workflow scripts directory: `<targetDir>/.qwen/workflows`.
+   * Saved workflow scripts (`<name>.js`) here are surfaced as slash commands
+   * and resolvable by `workflow('<name>')` from inside a running workflow.
+   */
+  getProjectWorkflowsDir(): string {
+    return path.join(this.getQwenDir(), 'workflows');
+  }
+
+  /**
+   * User-level saved-workflow scripts directory: `~/.qwen/workflows`. User
+   * scope is lower-precedence than project scope when the same `<name>.js`
+   * exists in both.
+   */
+  static getUserWorkflowsDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'workflows');
+  }
+
+  /**
+   * Per-run workflow artifact directory: `<projectDir>/workflows`. Holds
+   * completed-run snapshot JSON files (`<runId>.json`) for the `/workflows`
+   * recent list, and per-run resume journals (`<runId>/journal.jsonl`).
+   */
+  getWorkflowRunsDir(): string {
+    return path.join(this.getProjectDir(), 'workflows');
+  }
+
+  /**
+   * Path to the persisted snapshot of a completed workflow run.
+   */
+  getWorkflowRunSnapshotPath(runId: string): string {
+    return path.join(this.getWorkflowRunsDir(), `${runId}.json`);
+  }
+
+  /**
+   * Path to the resume journal for an in-progress / resumable workflow run.
+   */
+  getWorkflowRunJournalPath(runId: string): string {
+    return path.join(this.getWorkflowRunsDir(), runId, 'journal.jsonl');
   }
 
   /**

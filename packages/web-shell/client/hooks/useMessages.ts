@@ -10,7 +10,11 @@ export function useMessages(
   return useMemo(
     () =>
       transcriptBlocksToDaemonMessages(blocks, {
-        labels: { promptCancelled: t('request.cancelled') },
+        labels: {
+          promptCancelled: t('request.cancelled'),
+          branchSuccess: (name) => t('branch.success', { name }),
+          midTurnInserted: (message) => t('midTurn.inserted', { message }),
+        },
       }),
     [blocks, t],
   );

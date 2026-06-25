@@ -9,7 +9,11 @@ import { useStreamingLoadingMetrics } from '../hooks/useStreamingLoadingMetrics'
 import { formatTokenCount } from '../utils/formatTokenCount';
 import styles from './StreamingStatus.module.css';
 
-export function StreamingStatus() {
+interface StreamingStatusProps {
+  startedAt?: number;
+}
+
+export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
     useStreamingLoadingMetrics();
@@ -30,13 +34,13 @@ export function StreamingStatus() {
       return;
     }
 
-    startTime.current = Date.now();
-    setElapsed(0);
+    startTime.current = startedAt ?? Date.now();
+    setElapsed(elapsedSeconds(startTime.current));
     const interval = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
+      setElapsed(elapsedSeconds(startTime.current));
     }, 1000);
     return () => clearInterval(interval);
-  }, [isActive]);
+  }, [isActive, startedAt]);
 
   useEffect(() => {
     const phrases = getLoadingPhrases(language);
@@ -102,4 +106,8 @@ function formatDuration(milliseconds: number): string {
   if (seconds > 0) parts.push(`${seconds}s`);
 
   return parts.length > 0 ? parts.join(' ') : '0s';
+}
+
+function elapsedSeconds(startedAt: number): number {
+  return Math.max(0, Math.ceil((Date.now() - startedAt) / 1000));
 }

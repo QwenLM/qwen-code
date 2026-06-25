@@ -5,71 +5,51 @@
  */
 
 import { useState, useEffect } from 'react';
-import { isCommandAvailable, execCommand } from '@qwen-code/qwen-code-core';
-import fs from 'node:fs';
-import fsPromises from 'node:fs/promises';
-import path from 'node:path';
+import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
 
+/**
+ * Tracks the current git branch (or a short commit hash when detached) for
+ * `cwd`, read directly from `.git` via core's gitDirect helpers — no `git`
+ * subprocess. Re-reads automatically when the repository's reflog moves
+ * (branch switch, commit, reset).
+ */
 export function useGitBranchName(cwd: string): string | undefined {
   const [branchName, setBranchName] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
+    let dispose: (() => void) | undefined;
 
-    const fetchWithGuard = async () => {
-      try {
-        if (!isCommandAvailable('git').available) {
-          return;
-        }
+    const refresh = async () => {
+      const name = await resolveBranchName(cwd);
+      if (!cancelled) setBranchName(name);
+    };
 
-        const { stdout } = await execCommand(
-          'git',
-          ['rev-parse', '--abbrev-ref', 'HEAD'],
-          { cwd },
-        );
-        if (cancelled) return;
-        const branch = stdout.toString().trim();
-        if (branch && branch !== 'HEAD') {
-          setBranchName(branch);
-        } else {
-          const { stdout: hashStdout } = await execCommand(
-            'git',
-            ['rev-parse', '--short', 'HEAD'],
-            { cwd },
-          );
-          if (!cancelled) {
-            setBranchName(hashStdout.toString().trim());
-          }
-        }
-      } catch {
-        if (!cancelled) setBranchName(undefined);
+    const init = async () => {
+      await refresh();
+      if (cancelled) return;
+      const disposer = await watchRepoBranch(cwd, () => {
+        // Guard the watcher-triggered refresh too: the synchronous try/catch
+        // inside watchRepoBranch can't observe an async rejection.
+        void refresh().catch(() => {});
+      });
+      // The component may have unmounted while we were resolving the watcher;
+      // if so, dispose immediately rather than leaking the subscription.
+      if (cancelled) {
+        disposer();
+      } else {
+        dispose = disposer;
       }
     };
 
-    fetchWithGuard();
-
-    const gitLogsHeadPath = path.join(cwd, '.git', 'logs', 'HEAD');
-    let watcher: fs.FSWatcher | undefined;
-
-    const setupWatcher = async () => {
-      try {
-        await fsPromises.access(gitLogsHeadPath, fs.constants.F_OK);
-        if (cancelled) return;
-        watcher = fs.watch(gitLogsHeadPath, (eventType: string) => {
-          if (eventType === 'change' || eventType === 'rename') {
-            if (!cancelled) fetchWithGuard();
-          }
-        });
-      } catch (_watchError) {
-        // Silently ignore watcher errors
-      }
-    };
-
-    setupWatcher();
+    // Defensive: init() shouldn't reject (resolveBranchName / watchRepoBranch
+    // swallow their own errors), but guard so a future change can't surface an
+    // unhandled rejection on the render path.
+    void init().catch(() => {});
 
     return () => {
       cancelled = true;
-      watcher?.close();
+      dispose?.();
     };
   }, [cwd]);
 

@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-import { EventBus } from '../../packages/cli/src/serve/eventBus.js';
+import { EventBus } from '../../packages/cli/src/serve/event-bus.js';
 import {
   spawnDaemon,
   startRssPolling,
@@ -528,7 +528,7 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
       // doesn't take a sessionId in publish/subscribe — the bus instance
       // itself is per-session, owned upstream. We use it directly here for
       // deterministic backpressure invariants without needing a live HTTP
-      // round-trip; pattern matches `packages/cli/src/serve/eventBus.test.ts`.
+      // round-trip; pattern matches `packages/acp-bridge/src/eventBus.test.ts`.
       it('overflow at maxQueued boundary fires client_evicted', async () => {
         const bus = new EventBus();
         const ac = new AbortController();

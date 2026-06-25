@@ -203,6 +203,8 @@ export interface ServeOptions {
   rateLimitRead?: number;
   /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
   rateLimitWindowMs?: number;
+  /** Forward the experimental LSP opt-in to spawned ACP children. */
+  experimentalLsp?: boolean;
 }
 
 /**

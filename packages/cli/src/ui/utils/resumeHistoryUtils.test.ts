@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { buildResumedHistoryItems } from './resumeHistoryUtils.js';
+import {
+  buildResumedHistoryItems,
+  stripSuppressOnRestore,
+  expandCollapsedHistory,
+} from './resumeHistoryUtils.js';
 import { ToolCallStatus } from '../types.js';
 import type {
   AnyDeclarativeTool,
@@ -14,6 +18,7 @@ import type {
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import type { HistoryItem } from '../types.js';
 
 const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
   ({
@@ -458,5 +463,124 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
     expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+});
+
+describe('stripSuppressOnRestore', () => {
+  it('returns item unchanged when display is undefined', () => {
+    const item = { id: 1, type: 'user', text: 'hello' } as HistoryItem;
+    expect(stripSuppressOnRestore(item)).toBe(item);
+  });
+
+  it('returns item unchanged when suppressOnRestore is absent', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: {},
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: {},
+    });
+  });
+
+  it('strips suppressOnRestore while preserving other display properties', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true, kind: 'collapse-summary' },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { kind: 'collapse-summary' },
+    });
+  });
+
+  it('sets display to undefined when suppressOnRestore was the only property', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: undefined,
+    });
+  });
+});
+
+describe('expandCollapsedHistory', () => {
+  it('returns empty array for empty input', () => {
+    expect(expandCollapsedHistory([])).toEqual([]);
+  });
+
+  it('filters out collapse-summary items and strips suppressOnRestore', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 3,
+        type: 'info',
+        text: 'Summary',
+        display: { kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello', display: undefined },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('preserves items without suppressOnRestore', () => {
+    const items = [
+      { id: 1, type: 'user', text: 'hello' },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello' },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('handles items with both suppressOnRestore and kind', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true, kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([]);
   });
 });

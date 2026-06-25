@@ -36,15 +36,41 @@ import {
   WorkflowBudgetImpl,
   MAX_TOKENS_PER_WORKFLOW_ENV,
 } from '../../agents/runtime/workflow-budget.js';
+import { resolveSavedWorkflowScript } from '../../agents/runtime/workflow-saved.js';
+import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
+import type { JournalReplay } from '../../agents/runtime/workflow-journal.js';
+import { writeWorkflowSnapshot } from '../../agents/workflow-snapshot.js';
+import { logWorkflowRun } from '../../telemetry/loggers.js';
+import { WorkflowRunEvent } from '../../telemetry/types.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { randomBytes } from 'node:crypto';
+import * as path from 'node:path';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
 
 export interface WorkflowParams {
-  /** Inline JavaScript source for the workflow. Required in P1. */
-  script: string;
+  /**
+   * Inline JavaScript source for the workflow. Provide exactly one of
+   * `script` or `scriptPath`.
+   */
+  script?: string;
+  /**
+   * P7b: absolute path to a saved workflow `.js` file to load and run
+   * instead of inline `script`. Set by the `/<name>` saved-workflow slash
+   * command (`SavedWorkflowLoader`). Read at execution time so edits to the
+   * saved file take effect on the next run; the resolved path is recorded on
+   * the registry entry as run provenance.
+   */
+  scriptPath?: string;
   /** Optional structured value bound to the `args` global inside the script. */
   args?: unknown;
+  /**
+   * P6: resume a prior run by id. When set, the run reuses `<runId>` and
+   * loads `<projectDir>/workflows/<runId>/journal.jsonl`; `agent()` calls
+   * whose rolling prefix-hash matches a journaled result are served from
+   * cache (no re-dispatch) for the longest unchanged prefix. The first miss
+   * runs live and the run goes live for the remainder.
+   */
+  resumeFromRunId?: string;
 }
 
 export interface WorkflowToolOptions {
@@ -106,12 +132,34 @@ const WORKFLOW_PARAM_SCHEMA = {
         'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',
     },
+    scriptPath: {
+      type: 'string',
+      description:
+        'Optional. Absolute path to a saved workflow `.js` file to load and ' +
+        'run instead of inline `script`. Primarily set by the `/<name>` ' +
+        'saved-workflow slash command. Provide exactly ONE of `script` or ' +
+        '`scriptPath`. The file is read at execution time, so edits to a ' +
+        'saved workflow take effect on the next run.',
+    },
     args: {
       description:
         'Optional structured value bound to the `args` global. Pass actual JSON, not a stringified value.',
     },
+    resumeFromRunId: {
+      type: 'string',
+      description:
+        'Optional. Resume a prior workflow run by id (e.g. wf_abc123…). ' +
+        'Re-runs the SAME script; agent() calls whose rolling prefix-hash ' +
+        '(prompt + opts, chained in call order) matches a journaled result ' +
+        'are served from cache for the longest unchanged prefix, and the ' +
+        'first changed/missing call onward runs live. Pass the same script ' +
+        'and args as the original run for the cache to apply.',
+    },
   },
-  required: ['script'],
+  // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
+  // expressed as a plain `required` list, so it's enforced in
+  // `validateToolParamValues`. Inline authoring (the LLM path) should always
+  // pass `script`; the `scriptPath` property description states the XOR.
 } as const;
 
 class WorkflowToolInvocation extends BaseToolInvocation<
@@ -127,7 +175,10 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `Run a workflow script (${this.params.script.length} chars)`;
+    if (this.params.scriptPath && this.params.script === undefined) {
+      return `Run saved workflow (${path.basename(this.params.scriptPath)})`;
+    }
+    return `Run a workflow script (${this.params.script?.length ?? 0} chars)`;
   }
 
   override toolLocations(): ToolLocation[] {
@@ -164,10 +215,44 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       );
     const orchestrator = new WorkflowOrchestrator(dispatch);
 
+    // P7b: resolve the script source. A `/<name>` saved-workflow slash
+    // command dispatches `{scriptPath}` instead of inline `script`; read the
+    // file here (fresh, so edits to a saved workflow take effect on the next
+    // run). The resolved absolute path is recorded on the registry entry as
+    // run provenance — it is never re-read mid-run. `validateToolParamValues`
+    // has already guaranteed exactly one of `script` / `scriptPath` is set.
+    let resolvedScript = this.params.script ?? '';
+    let resolvedScriptPath = this.params.scriptPath;
+    if (this.params.scriptPath && this.params.script === undefined) {
+      const loaded = await resolveSavedWorkflowScript(
+        { scriptPath: this.params.scriptPath },
+        this.config,
+      );
+      resolvedScript = loaded.script;
+      resolvedScriptPath = loaded.scriptPath;
+    }
+
     // P4b: pre-generate the runId so the registry record exists before
     // the first sandbox event fires. Without this, `agentDispatched` /
     // `phaseStarted` callbacks would have no entry to update.
-    const runId = `wf_${randomBytes(8).toString('hex')}`;
+    // P6: a resume reuses the prior run's id so it appends to the same
+    // journal; a fresh run gets a new id.
+    const runId =
+      this.params.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
+    // P6: per-run resume journal. Always created (any run is resumable);
+    // the replay maps are loaded only when resuming. Production storage
+    // path is `<projectDir>/workflows/<runId>/journal.jsonl`; the tool's
+    // test-injected dispatch path leaves `config.storage` undefined, so
+    // guard and skip journaling there.
+    let journal: WorkflowJournal | undefined;
+    let resumeReplay: JournalReplay | undefined;
+    const storage = this.config.storage;
+    if (storage) {
+      journal = new WorkflowJournal(storage.getWorkflowRunJournalPath(runId));
+      if (this.params.resumeFromRunId) {
+        resumeReplay = await journal.load();
+      }
+    }
     const registry = this.config.getWorkflowRunRegistry?.();
     const registryEntry = registry?.register({
       runId,
@@ -180,6 +265,12 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // immediately, before the first `budgetUpdated` fires. Stays
       // `null` when no env override.
       tokenBudgetTotal: budget.total,
+      // P7b: carry the script source so a completed run can be snapshotted
+      // to disk and saved to `.qwen/workflows/<name>.js` from the dialog.
+      // `scriptPath` is set when the run was launched from a saved file (run
+      // provenance for the snapshot).
+      script: resolvedScript,
+      scriptPath: resolvedScriptPath,
     });
     // The emitter forwards sandbox + dispatch events into the registry
     // AND fires `updateOutput` so the tool's renderDisplay block (a
@@ -223,12 +314,19 @@ class WorkflowToolInvocation extends BaseToolInvocation<
 
     try {
       const outcome = await orchestrator.run({
-        script: this.params.script,
+        script: resolvedScript,
         args: this.params.args,
         abortOnTimeout: dispatchController,
         runId,
         emitter,
         budget,
+        // P-nested: resolve `workflow('<name>')` / `workflow({scriptPath})`
+        // against the saved-workflow scripts in `.qwen/workflows/`.
+        resolveSavedWorkflow: (ref) =>
+          resolveSavedWorkflowScript(ref, this.config),
+        // P6: resume journal (always wired) + replay maps (resume only).
+        journal,
+        resumeReplay,
       });
 
       // P4b: snapshot meta + logs onto the registry record so the dialog
@@ -355,6 +453,34 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     } finally {
       // T40: cancel any straggler subagent on natural completion.
       dispatchController.abort();
+      // P7b: persist a snapshot of the terminal run so `/workflows` can show
+      // it after a CLI restart. Runs on every terminal path (success / fail /
+      // cancel) because the registry entry has already transitioned by here.
+      // Best-effort: the writer swallows its own errors. Skipped when there's
+      // no registry entry (test-injected configs) or the entry is somehow
+      // still running (defensive).
+      if (registryEntry && registryEntry.status !== 'running') {
+        await writeWorkflowSnapshot(this.config, registryEntry);
+        // P-telemetry: emit the terminal run event (no-op when telemetry is
+        // off). Best-effort: never let a logging failure mask the result.
+        try {
+          logWorkflowRun(
+            this.config,
+            new WorkflowRunEvent({
+              status: registryEntry.status,
+              agents_dispatched: registryEntry.agentsDispatched,
+              agents_completed: registryEntry.agentsCompleted,
+              phase_count: registryEntry.phases.length,
+              tokens_spent: registryEntry.tokensSpent,
+              duration_ms:
+                (registryEntry.endTime ?? registryEntry.startTime) -
+                registryEntry.startTime,
+            }),
+          );
+        } catch {
+          // swallow — telemetry must not affect tool output
+        }
+      }
     }
   }
 }
@@ -560,10 +686,13 @@ export class WorkflowTool extends BaseDeclarativeTool<
         'agents total; both env-overridable), per-call `agent({ schema, ' +
         "agentType, model, isolation: 'worktree' })` for structured-output " +
         'contracts, declarative-agent selection, model override, and git-' +
-        'worktree-isolated subagents. No resume and no background execution ' +
-        'yet (scheduled for later phases). Scripts run in a node:vm sandbox ' +
-        'without access to the filesystem or shell; all I/O happens through ' +
-        'the spawned agents.',
+        'worktree-isolated subagents. Pass `resumeFromRunId` to resume a prior ' +
+        'run — agent() calls whose rolling prefix-hash matches the journal are ' +
+        'served from cache for the longest unchanged prefix. Runs are tracked ' +
+        'in the background-tasks view and the `/workflows` dialog (live phase ' +
+        'tree, token usage, cancel). Scripts run in a node:vm sandbox without ' +
+        'access to the filesystem or shell; all I/O happens through the ' +
+        'spawned agents.',
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,
@@ -574,8 +703,28 @@ export class WorkflowTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: WorkflowParams,
   ): string | null {
-    if (typeof params.script !== 'string' || params.script.length === 0) {
-      return 'WorkflowTool: `script` parameter is required and must be a non-empty string.';
+    const hasScript =
+      typeof params.script === 'string' && params.script.length > 0;
+    const hasPath =
+      typeof params.scriptPath === 'string' && params.scriptPath.length > 0;
+    // XOR: inline `script` (LLM authoring) or `scriptPath` (a saved-workflow
+    // slash command), never both, never neither.
+    if (!hasScript && !hasPath) {
+      return 'WorkflowTool: provide `script` (inline source) or `scriptPath` (a saved workflow file).';
+    }
+    if (hasScript && hasPath) {
+      return 'WorkflowTool: provide exactly one of `script` or `scriptPath`, not both.';
+    }
+    // Security: `resumeFromRunId` becomes the `runId` and flows verbatim into
+    // `getWorkflowRunJournalPath` / `getWorkflowRunSnapshotPath` (both
+    // `path.join`-based), so a value containing `..` or path separators could
+    // move journal/snapshot reads and writes outside `<projectDir>/workflows`.
+    // Accept only the generated id shape.
+    if (
+      params.resumeFromRunId !== undefined &&
+      !/^wf_[0-9a-f]+$/.test(params.resumeFromRunId)
+    ) {
+      return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }
     return null;
   }

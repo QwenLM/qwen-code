@@ -825,6 +825,7 @@ export class QQChannel extends ChannelBase {
     }
 
     const maxGwRetries = 5;
+    let gatewayAttempted = false;
     for (let attempt = 0; attempt < maxGwRetries; attempt++) {
       try {
         // Refresh token before reconnect attempt
@@ -837,6 +838,7 @@ export class QQChannel extends ChannelBase {
           await this.sleep(2000);
           continue;
         }
+        gatewayAttempted = true;
         await this.connectGateway();
         return; // success
       } catch (e: unknown) {
@@ -849,8 +851,9 @@ export class QQChannel extends ChannelBase {
       }
     }
     process.stderr.write(
-      `[QQ:${this.name}] RC: exhausted ${maxGwRetries} gateway retries, will retry in 60s\n`,
+      `[QQ:${this.name}] RC: exhausted ${maxGwRetries} reconnect retries, will retry in 60s\n`,
     );
+    if (gatewayAttempted) this.reconnectAttempts++;
     this.tryResume = false; // fall back to full IDENTIFY next time
     this.isReconnecting = false; // release guard for future retries
     // Schedule another attempt with longer delay

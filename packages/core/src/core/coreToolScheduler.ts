@@ -66,6 +66,7 @@ import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   isAlreadyTruncated,
   persistAndTruncateToolResult,
@@ -159,7 +160,15 @@ function dedupeRequestsByCallId(
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
-const GATE_EXEMPT_TOOLS = new Set(['read_file']);
+// Tools that bound their own output and must bypass the persistence gate.
+// read_file pages/truncates itself; read_mcp_resource caps text in
+// formatMcpResourceContents and sets maxOutputChars=Infinity — but this gate
+// runs first, so without the exemption a 28k–100k resource is spilled to a
+// stub before that self-cap takes effect and the model never sees the body.
+const GATE_EXEMPT_TOOLS = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.READ_MCP_RESOURCE,
+]);
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -2879,11 +2888,10 @@ export class CoreToolScheduler {
     calls: ScheduledToolCall[],
     signal: AbortSignal,
   ): Promise<void> {
-    const parsed = parseInt(
-      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+    const maxConcurrency = parsePositiveIntegerEnv(
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
       10,
     );
-    const maxConcurrency = Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
     const executing = new Set<Promise<void>>();
 
     for (const call of calls) {

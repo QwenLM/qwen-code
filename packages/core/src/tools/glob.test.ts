@@ -533,6 +533,80 @@ describe('GlobTool', () => {
       expect(result.llmContent).not.toContain('a.qwenignored.txt');
     });
 
+    it('should respect .agentignore and .aiignore files by default', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        '*.agentignored.txt',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, '.aiignore'),
+        '*.aiignored.txt',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'a.agentignored.txt'),
+        'ignored content',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'b.aiignored.txt'),
+        'ignored content',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'c.notignored.txt'),
+        'not ignored content',
+      );
+
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('c.notignored.txt');
+      expect(result.llmContent).not.toContain('a.agentignored.txt');
+      expect(result.llmContent).not.toContain('b.aiignored.txt');
+    });
+
+    it('should respect configured custom qwen ignore files', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.cursorignore'),
+        '*.cursorignored.txt',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        '*.agentignored.txt',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'a.cursorignored.txt'),
+        'ignored content',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'b.agentignored.txt'),
+        'not ignored by this config',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'c.notignored.txt'),
+        'not ignored content',
+      );
+
+      const customConfig = {
+        ...mockConfig,
+        getFileService: () =>
+          new FileDiscoveryService(tempRootDir, ['.cursorignore']),
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        }),
+      } as unknown as Config;
+      const customGlobTool = new GlobTool(customConfig);
+
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = customGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('b.agentignored.txt');
+      expect(result.llmContent).toContain('c.notignored.txt');
+      expect(result.llmContent).not.toContain('a.cursorignored.txt');
+    });
+
     it('should respect .gitignore when searching a subdirectory (path option)', async () => {
       // This tests the regression fix: relativePaths must be computed relative
       // to projectRoot, not to searchDir, so that gitignore rules rooted at

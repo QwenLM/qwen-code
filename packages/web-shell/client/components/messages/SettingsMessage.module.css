@@ -1,16 +1,26 @@
 .panel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin: 0 0 12px 14px;
+  gap: 10px;
+  margin: 0 0 12px;
   padding: 10px 14px;
+  max-width: min(var(--chat-regular-content-width, 1000px), calc(100vw - 64px));
   border: 1px solid var(--border-color);
   border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 13px;
-  color: var(--text-primary);
-  background: var(--bg-primary);
-  max-width: min(920px, calc(100vw - 64px));
+}
+
+.embeddedPanel {
+  margin: 0;
+  padding: 0;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 12px;
 }
 
 .header {
@@ -23,151 +33,263 @@
   font-weight: 700;
 }
 
-.secondary {
+.secondary,
+.hint,
+.empty,
+.busy {
   color: var(--text-secondary);
 }
 
 .hint {
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.scopeTabs {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+
+.scopeTab {
+  min-height: 26px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-secondary);
-}
-
-.list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: min(360px, calc(100vh - 260px));
-  overflow-y: auto;
-  padding-right: 14px;
-  scrollbar-gutter: stable;
-}
-
-.category {
-  color: var(--text-secondary);
-  font-weight: 700;
-  padding-left: calc(1ch + 6px);
-}
-
-.category:not(:first-child) {
-  margin-top: 6px;
-}
-
-.item {
-  display: flex;
-  flex-direction: column;
   cursor: pointer;
+  font: inherit;
+  font-size: 12px;
 }
 
-.item:hover {
+.scopeTab:hover,
+.scopeTabActive {
   background: var(--bg-tertiary);
-  border-radius: 3px;
-}
-
-.row {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  min-height: 18px;
-}
-
-.pointer {
-  display: inline-block;
-  width: 1ch;
-  flex-shrink: 0;
-  color: var(--accent-color);
-  font-weight: 700;
-}
-
-.label {
-  flex: 1 1 auto;
-  min-width: 0;
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.selected .label {
-  color: var(--accent-color);
-  font-weight: 700;
+.settingsPage {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 420px;
 }
 
-/* Stays secondary and unbolded even on the selected row, like the native
-   CLI's scope message. */
-.scopeHint {
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding-right: 8px;
+  border-right: 1px solid var(--border-color);
+}
+
+.categoryButton {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.categoryButton:hover,
+.categoryButtonActive {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.categoryCount {
+  flex: 0 0 auto;
+  color: var(--text-dimmed);
+  font-size: 11px;
+}
+
+.content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, max-content);
+  gap: 16px;
+  align-items: center;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+
+.card:hover {
+  background: var(--bg-tertiary);
+}
+
+.cardBody {
+  min-width: 0;
+}
+
+.cardTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.cardDescription,
+.scopeHint {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.scopeBadge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 11px;
   font-weight: 400;
 }
 
-.value {
-  flex-shrink: 0;
-  color: var(--accent-color);
-  opacity: 0.85;
+.cardControl {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.select,
+.actionButton,
+.editInput {
+  min-height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
   font-size: 12px;
+}
+
+.select {
+  max-width: 260px;
+  padding: 4px 28px 4px 8px;
+}
+
+.actionButton {
+  max-width: 260px;
+  padding: 4px 9px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.editWrap {
-  padding: 4px 8px 4px calc(1ch + 6px);
+.actionButton:hover {
+  background: var(--bg-tertiary);
+}
+
+.actionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.actionButton:disabled:hover {
+  background: var(--bg-primary);
+}
+
+.editor {
+  display: flex;
+  gap: 6px;
+  max-width: 320px;
 }
 
 .editInput {
-  width: 100%;
-  box-sizing: border-box;
+  min-width: 120px;
   padding: 4px 8px;
-  font-size: 12px;
-  font-family: inherit;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
   outline: none;
 }
 
-/* Single line (like the native CLI's wrap="truncate-end") at a fixed height
-   so the panel does not grow/shrink as the cursor moves. Short descriptions
-   sit still with an ellipsis fallback; overflowing ones glide horizontally
-   (music-player marquee) so the full text stays readable on one line. */
-.detail {
-  border-top: 1px solid var(--border-color);
-  padding-top: 8px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-style: italic;
-  white-space: nowrap;
-  overflow: hidden;
+.switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  cursor: pointer;
 }
 
-.detailEllipsis {
-  text-overflow: ellipsis;
+.switchOn {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
 }
 
-.detailText {
-  display: inline-block;
+.switchKnob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg-primary);
+  transition: transform 120ms ease;
 }
 
-.detailTextScrolling {
-  animation: settings-detail-marquee var(--marquee-duration, 6s) linear infinite
-    alternate;
-}
-
-@keyframes settings-detail-marquee {
-  0%,
-  15% {
-    transform: translateX(0);
-  }
-
-  85%,
-  100% {
-    transform: translateX(calc(-1 * var(--marquee-distance, 0px)));
-  }
+.switchOn .switchKnob {
+  transform: translateX(16px);
 }
 
 .footer {
-  color: var(--text-secondary);
-  border-top: 1px solid var(--border-color);
   padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
 }
 
-.empty {
-  color: var(--text-secondary);
+@media (max-width: 720px) {
+  .settingsPage {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .sidebar {
+    flex-direction: row;
+    overflow-x: auto;
+    padding-right: 0;
+    padding-bottom: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .categoryButton {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .card {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .cardControl {
+    justify-content: flex-start;
+  }
 }

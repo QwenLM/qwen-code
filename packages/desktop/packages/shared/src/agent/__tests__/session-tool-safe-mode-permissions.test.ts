@@ -4,10 +4,23 @@
 import { describe, it, expect } from 'bun:test';
 import { shouldAllowToolInMode } from '../../agent/mode-manager.ts';
 
+function withDeveloperFeedbackEnabled(run: () => void) {
+  const previousFlag = process.env.CRAFT_FEATURE_DEVELOPER_FEEDBACK;
+  process.env.CRAFT_FEATURE_DEVELOPER_FEEDBACK = '1';
+  try {
+    run();
+  } finally {
+    if (previousFlag === undefined) {
+      delete process.env.CRAFT_FEATURE_DEVELOPER_FEEDBACK;
+    } else {
+      process.env.CRAFT_FEATURE_DEVELOPER_FEEDBACK = previousFlag;
+    }
+  }
+}
+
 describe('session tool safe-mode classification', () => {
   it('allows read-only session tools in safe mode', () => {
     const allowedTools = [
-      'mcp__session__send_developer_feedback',
       'mcp__session__call_llm',
       'mcp__session__browser_tool',
       'mcp__session__script_sandbox',
@@ -17,6 +30,18 @@ describe('session tool safe-mode classification', () => {
       const result = shouldAllowToolInMode(toolName, {}, 'safe');
       expect(result.allowed).toBe(true);
     }
+  });
+
+  it('allows developer feedback in safe mode when the feature is enabled', () => {
+    withDeveloperFeedbackEnabled(() => {
+      const result = shouldAllowToolInMode(
+        'mcp__session__send_developer_feedback',
+        {},
+        'safe'
+      );
+
+      expect(result.allowed).toBe(true);
+    });
   });
 
   it('blocks mutating/auth session tools in safe mode', () => {

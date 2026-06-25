@@ -34,6 +34,7 @@ import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
+import { historyCommand } from '../ui/commands/historyCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
 import { importConfigCommand } from '../ui/commands/importConfigCommand.js';
@@ -63,6 +64,7 @@ import { terminalSetupCommand } from '../ui/commands/terminalSetupCommand.js';
 import { themeCommand } from '../ui/commands/themeCommand.js';
 import { toolsCommand } from '../ui/commands/toolsCommand.js';
 import { vimCommand } from '../ui/commands/vimCommand.js';
+import { voiceCommand } from '../ui/commands/voice-command.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
@@ -130,6 +132,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       exportCommand,
       extensionsCommand,
       helpCommand,
+      historyCommand,
       hooksCommand,
       resolvedIdeCommand,
       importConfigCommand,
@@ -159,6 +162,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       toolsCommand,
       settingsCommand,
       vimCommand,
+      voiceCommand,
       setupGithubCommand,
       terminalSetupCommand,
       insightCommand,

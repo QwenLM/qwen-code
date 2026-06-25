@@ -4,6 +4,7 @@ import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
 const {
   mockSendQQMessage,
   mockFetchAccessToken,
+  mockFetchGatewayUrl,
   MockWebSocket,
   mockWebSockets,
 } = vi.hoisted(() => {
@@ -40,6 +41,7 @@ const {
   return {
     mockSendQQMessage: vi.fn(),
     mockFetchAccessToken: vi.fn(),
+    mockFetchGatewayUrl: vi.fn(),
     MockWebSocket,
     mockWebSockets,
   };
@@ -56,7 +58,7 @@ vi.mock('./api.js', () => ({
   sendQQMessage: mockSendQQMessage,
   getApiBase: () => 'https://api.sgroup.qq.com',
   fetchAccessToken: mockFetchAccessToken,
-  fetchGatewayUrl: vi.fn(),
+  fetchGatewayUrl: mockFetchGatewayUrl,
 }));
 
 vi.mock('ws', () => ({
@@ -359,6 +361,7 @@ describe('sendMessage', () => {
       accessToken: 'refreshed-token',
       expiresIn: 7200,
     });
+    mockFetchGatewayUrl.mockResolvedValue('wss://gateway.qq.test/ws');
   });
 
   it('sends plain text to C2C chat with msg_type=0', async () => {
@@ -504,6 +507,56 @@ describe('sendMessage', () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(mockFetchAccessToken).toHaveBeenCalledTimes(3);
+
+    ch.disconnect();
+  });
+
+  it('counts gateway retry fallback toward the reconnect attempt budget', async () => {
+    vi.useFakeTimers();
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['reconnectAttempts'] = 19;
+    mockFetchGatewayUrl.mockRejectedValue(new Error('gateway down'));
+
+    const reconnect = (chp['reconnectWithRetry'] as () => Promise<void>).call(
+      ch,
+    );
+
+    for (const delay of [2000, 4000, 8000, 16000]) {
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    await reconnect;
+
+    expect(mockFetchGatewayUrl).toHaveBeenCalledTimes(5);
+    expect(chp['reconnectAttempts']).toBe(20);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockFetchGatewayUrl).toHaveBeenCalledTimes(5);
+
+    ch.disconnect();
+  });
+
+  it('does not count token refresh failures as gateway reconnect attempts', async () => {
+    vi.useFakeTimers();
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['reconnectAttempts'] = 19;
+    mockFetchAccessToken.mockRejectedValue(new Error('token endpoint down'));
+
+    const reconnect = (chp['reconnectWithRetry'] as () => Promise<void>).call(
+      ch,
+    );
+
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(2000);
+    }
+    await reconnect;
+
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(5);
+    expect(mockFetchGatewayUrl).not.toHaveBeenCalled();
+    expect(chp['reconnectAttempts']).toBe(19);
 
     ch.disconnect();
   });

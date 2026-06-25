@@ -49,6 +49,7 @@ export const createMockCommandContext = (
       } as any, // Cast because Logger is a class.
     },
     ui: {
+      history: [],
       addItem: vi.fn(),
       clear: vi.fn(),
       setDebugMessage: vi.fn(),
@@ -60,6 +61,7 @@ export const createMockCommandContext = (
       btwAbortControllerRef: { current: null },
       isIdleRef: { current: true },
       loadHistory: vi.fn(),
+      refreshStatic: vi.fn(),
       toggleVimEnabled: vi.fn(),
       extensionsUpdateState: new Map(),
       setExtensionsUpdateState: vi.fn(),

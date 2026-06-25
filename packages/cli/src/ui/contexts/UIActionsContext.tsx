@@ -44,7 +44,10 @@ export interface UIActions {
   notifyStatusLineSettingsChanged: (config: StatusLinePresetConfig) => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
-  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openModelDialog: (options?: {
+    fastModelMode?: boolean;
+    voiceModelMode?: boolean;
+  }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -100,7 +103,7 @@ export interface UIActions {
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
-  handleResume: (sessionId: string) => void;
+  handleResume: (sessionId: string) => Promise<void>;
   // Branch (fork) session
   handleBranch: (name?: string) => Promise<void>;
   // Delete session dialog

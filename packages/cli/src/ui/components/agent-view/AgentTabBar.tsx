@@ -15,7 +15,9 @@
  *   - Left/Right switch tabs only when the tab bar is focused
  *   - Up arrow: on Main with bg sub-agents → live agent panel; otherwise
  *     (agent tab, or no roster) → input. Typing also returns focus to input.
- *   - Down arrow is a no-op — the tab bar is the bottom of the focus chain
+ *   - Down arrow: descends into the background-tasks pill when one is shown
+ *     (a bg task / workflow is active); otherwise a no-op — the tab bar is
+ *     then the bottom of the focus chain
  *
  * Tab indicators:  running,  idle/completed,  failed,  cancelled
  */
@@ -69,7 +71,8 @@ export const AgentTabBar: React.FC = () => {
   const { switchToNext, switchToPrevious, setAgentTabBarFocused } =
     useAgentViewActions();
   const { entries: bgEntries } = useBackgroundTaskViewState();
-  const { setLivePanelFocused } = useBackgroundTaskViewActions();
+  const { setLivePanelFocused, setPillFocused } =
+    useBackgroundTaskViewActions();
   const { embeddedShellFocused } = useUIState();
   const hasVisibleBgAgentRoster = () =>
     bgEntries.some((e) => isLiveAgentPanelVisibleEntry(e, Date.now()));
@@ -92,8 +95,17 @@ export const AgentTabBar: React.FC = () => {
           setLivePanelFocused(true);
         }
       } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-        // No-op: the tab bar is the bottom of the chain
-        // (input → panel → tab bar); the panel is reached via ↑.
+        // The tab bar is normally the bottom of the chain (input → panel →
+        // tab bar; the panel is reached via ↑). But when the background-tasks
+        // pill is also shown (a bg task / workflow is active), ↓ descends one
+        // more step into the pill so it stays keyboard-reachable even with an
+        // Arena roster present — completing the chain BackgroundTasksPill.tsx
+        // documents (Composer ↓ → AgentTabBar ↓ → Pill ↓ → Dialog). Match
+        // InputPrompt's descendFromComposer pill branch: shown ⇔ bgEntries > 0.
+        if (bgEntries.length > 0) {
+          setAgentTabBarFocused(false);
+          setPillFocused(true);
+        }
       } else if (
         key.sequence &&
         key.sequence.length === 1 &&

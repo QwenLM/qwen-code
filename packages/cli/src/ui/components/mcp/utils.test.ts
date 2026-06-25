@@ -28,6 +28,7 @@ describe('MCP utils', () => {
           config: { command: 'cmd1' },
           toolCount: 1,
           promptCount: 0,
+          resourceCount: 0,
           isDisabled: false,
         },
         {
@@ -37,6 +38,7 @@ describe('MCP utils', () => {
           config: { command: 'cmd2' },
           toolCount: 2,
           promptCount: 0,
+          resourceCount: 0,
           isDisabled: false,
         },
         {
@@ -46,6 +48,7 @@ describe('MCP utils', () => {
           config: { command: 'cmd3' },
           toolCount: 3,
           promptCount: 0,
+          resourceCount: 0,
           isDisabled: false,
         },
         {
@@ -55,6 +58,7 @@ describe('MCP utils', () => {
           config: { command: 'cmd4' },
           toolCount: 4,
           promptCount: 0,
+          resourceCount: 0,
           isDisabled: false,
         },
         {
@@ -64,6 +68,7 @@ describe('MCP utils', () => {
           config: { command: 'cmd5' },
           toolCount: 5,
           promptCount: 0,
+          resourceCount: 0,
           isDisabled: false,
         },
       ];
