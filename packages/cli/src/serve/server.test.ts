@@ -6407,6 +6407,29 @@ describe('createServeApp', () => {
       expect(bridge.summaryCalls).toEqual(['s-1']);
     });
 
+    it('200 omits displayName when the live session has none', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-2',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 0,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-2/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect('displayName' in res.body).toBe(false);
+    });
+
     it('404 when the session id is unknown to the daemon', async () => {
       // fakeBridge's default getSessionSummary throws SessionNotFoundError.
       const bridge = fakeBridge();
