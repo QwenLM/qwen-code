@@ -167,6 +167,21 @@ describe('<HistoryItemDisplay />', () => {
     );
   });
 
+  it('renders SkillStatsDisplay for "skill_stats" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'skill_stats',
+    };
+    const { lastFrame } = renderWithProviders(
+      <SessionStatsProvider>
+        <HistoryItemDisplay {...baseItem} item={item} />
+      </SessionStatsProvider>,
+    );
+    expect(lastFrame()).toContain(
+      'No skill calls have been made in this session.',
+    );
+  });
+
   it('renders SessionSummaryDisplay for "quit" type', () => {
     const item: HistoryItem = {
       ...baseItem,

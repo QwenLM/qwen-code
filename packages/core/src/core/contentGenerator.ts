@@ -81,6 +81,11 @@ export type ContentGeneratorConfig = {
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
+  // Inactivity timeout for streaming responses: if no chunk arrives for this
+  // many ms, the request is aborted and surfaced as a retryable ETIMEDOUT.
+  // The SDK `timeout` only covers connect + first response, so a stream that
+  // returns 200 then goes silent is otherwise unbounded. `<= 0` disables it.
+  streamIdleTimeoutMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable cache control for DashScope providers

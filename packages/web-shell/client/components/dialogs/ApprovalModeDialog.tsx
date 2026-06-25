@@ -23,7 +23,7 @@ export function ApprovalModeDialog({
   const listRef = useRef<HTMLDivElement>(null);
   const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.map((id) => ({
     id,
-    name: t(`mode.label.${id}`),
+    name: t(`mode.listLabel.${id}`),
     description: t(`mode.desc.${id}`),
   }));
 

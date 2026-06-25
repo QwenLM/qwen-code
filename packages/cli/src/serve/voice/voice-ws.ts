@@ -15,7 +15,7 @@ import {
   assertVoiceBaseUrlNetworkAllowed,
   resolveVoiceStreamConfig,
   transcribeVoiceAudio,
-} from '../../ui/voice/voice-transcriber.js';
+} from '../../services/voice-transcriber.js';
 import { openVoiceStream } from '../../ui/voice/voice-stream-session.js';
 import { openQwenAsrRealtimeStream } from '../../ui/voice/qwen-asr-realtime-session.js';
 import { openVoiceStreamWithRetry } from '../../ui/voice/voice-stream-retry.js';

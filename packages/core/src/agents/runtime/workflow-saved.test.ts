@@ -166,10 +166,7 @@ describe('workflow-saved', () => {
 
     it('rejects an empty scriptPath', async () => {
       await expect(
-        resolveSavedWorkflowScript(
-          { scriptPath: '' },
-          fakeConfig(projectDir),
-        ),
+        resolveSavedWorkflowScript({ scriptPath: '' }, fakeConfig(projectDir)),
       ).rejects.toThrow(/workflow name \(string\) or \{scriptPath/);
     });
 
@@ -208,11 +205,7 @@ describe('workflow-saved', () => {
         'shared',
         `return 'P';`,
       );
-      await writeWorkflow(
-        Storage.getUserWorkflowsDir(),
-        'alpha',
-        `return 1;`,
-      );
+      await writeWorkflow(Storage.getUserWorkflowsDir(), 'alpha', `return 1;`);
       await writeWorkflow(
         Storage.getUserWorkflowsDir(),
         'shared',
