@@ -686,10 +686,7 @@ describe('SkillTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Skill "non-existent" not found');
-      expect(recordSkillInvocation).toHaveBeenCalledWith(config, {
-        skillName: 'non-existent',
-        success: false,
-      });
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('should handle execution errors gracefully', async () => {
@@ -1284,10 +1281,7 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toMatch(/is disabled/);
       expect(llmText).toMatch(/skills manage|skills\.disabled/);
-      expect(recordSkillInvocation).toHaveBeenCalledWith(config, {
-        skillName: 'testing',
-        success: false,
-      });
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('returns the disabled-specific error when the executor returns null', async () => {

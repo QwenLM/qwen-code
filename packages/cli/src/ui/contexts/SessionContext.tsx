@@ -241,68 +241,7 @@ interface SessionStatsContextValue {
 }
 
 function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
-  return {
-    models: Object.fromEntries(
-      Object.entries(metrics.models).map(([name, model]) => [
-        name,
-        {
-          api: { ...model.api },
-          tokens: { ...model.tokens },
-          bySource: Object.fromEntries(
-            Object.entries(model.bySource).map(([source, sourceMetrics]) => [
-              source,
-              {
-                api: { ...sourceMetrics.api },
-                tokens: { ...sourceMetrics.tokens },
-              },
-            ]),
-          ),
-        },
-      ]),
-    ),
-    tools: {
-      totalCalls: metrics.tools.totalCalls,
-      totalSuccess: metrics.tools.totalSuccess,
-      totalFail: metrics.tools.totalFail,
-      totalDurationMs: metrics.tools.totalDurationMs,
-      totalDecisions: { ...metrics.tools.totalDecisions },
-      byName: Object.fromEntries(
-        Object.entries(metrics.tools.byName).map(([name, stats]) => [
-          name,
-          {
-            count: stats.count,
-            success: stats.success,
-            fail: stats.fail,
-            durationMs: stats.durationMs,
-            decisions: { ...stats.decisions },
-          },
-        ]),
-      ),
-    },
-    files: {
-      totalLinesAdded: metrics.files.totalLinesAdded,
-      totalLinesRemoved: metrics.files.totalLinesRemoved,
-    },
-    ...(metrics.skills
-      ? {
-          skills: {
-            totalCalls: metrics.skills.totalCalls,
-            totalSuccess: metrics.skills.totalSuccess,
-            totalFail: metrics.skills.totalFail,
-            byName: Object.fromEntries(
-              Object.entries(metrics.skills.byName).map(([name, stats]) => [
-                name,
-                {
-                  count: stats.count,
-                  success: stats.success,
-                  fail: stats.fail,
-                },
-              ]),
-            ),
-          },
-        }
-      : {}),
-  };
+  return structuredClone(metrics);
 }
 
 function getMetricsForDisplay(sessionId: string): SessionMetrics {

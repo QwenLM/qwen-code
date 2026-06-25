@@ -1774,6 +1774,7 @@ export default {
     '提示：要查看完整的 token 明细，请运行 `/stats model`',
   'Model Stats For Nerds': '模型统计（技术细节）',
   'Tool Stats For Nerds': '工具统计（技术细节）',
+  'Skill Stats For Nerds': '技能统计（技术细节）',
   Metric: '指标',
   API: 'API',
   Session: '会话',
@@ -1808,6 +1809,7 @@ export default {
   'No API calls have been made in this session.':
     '本次会话中未进行任何 API 调用',
   'Tool Name': '工具名称',
+  'Skill Name': '技能名称',
   'Success Rate': '成功率',
   'Avg Duration': '平均耗时',
   'User Decision Summary': '用户决策摘要',
@@ -1818,6 +1820,8 @@ export default {
   ' Overall Agreement Rate:': ' 总体同意率：',
   'No tool calls have been made in this session.':
     '本次会话中未进行任何工具调用',
+  'No skill calls have been made in this session.':
+    '本次会话中未进行任何技能调用',
   'Session start time is unavailable, cannot calculate stats.':
     '会话开始时间不可用，无法计算统计信息',
 
@@ -2215,6 +2219,10 @@ export default {
     'Tokens — 输入：{{prompt}}，输出：{{output}}',
   'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
     '工具调用：{{total}}（{{success}} 成功，{{fail}} 失败）',
+  'Skill calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '技能调用：{{total}}（{{success}} 成功，{{fail}} 失败）',
+  '  {{name}}: {{count}} ({{success}} ok, {{fail}} fail)':
+    '  {{name}}：{{count}}（{{success}} 成功，{{fail}} 失败）',
   'Files: +{{added}} / -{{removed}} lines':
     '文件：+{{added}} / -{{removed}} 行',
   prompt: '输入',
@@ -2223,6 +2231,7 @@ export default {
   'Estimated cost: ${{cost}}': '预估费用：${{cost}}',
   'No model usage data yet.': '暂无模型使用数据。',
   'No tool usage data yet.': '暂无工具使用数据。',
+  'No skill usage data yet.': '暂无技能使用数据。',
 
   // StatsDialog
   Models: '模型',

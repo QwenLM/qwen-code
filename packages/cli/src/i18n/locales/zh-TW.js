@@ -1611,6 +1611,7 @@ export default {
     '提示：要查看完整的 token 明細，請運行 `/stats model`',
   'Model Stats For Nerds': '模型統計（技術細節）',
   'Tool Stats For Nerds': '工具統計（技術細節）',
+  'Skill Stats For Nerds': '技能統計（技術細節）',
   Metric: '指標',
   API: 'API',
   Session: '會話',
@@ -1645,6 +1646,7 @@ export default {
   'No API calls have been made in this session.':
     '本次會話中未進行任何 API 調用',
   'Tool Name': '工具名稱',
+  'Skill Name': '技能名稱',
   'Success Rate': '成功率',
   'Avg Duration': '平均耗時',
   'User Decision Summary': '用戶決策摘要',
@@ -1655,6 +1657,8 @@ export default {
   ' Overall Agreement Rate:': ' 總體同意率：',
   'No tool calls have been made in this session.':
     '本次會話中未進行任何工具調用',
+  'No skill calls have been made in this session.':
+    '本次會話中未進行任何技能調用',
   'Session start time is unavailable, cannot calculate stats.':
     '會話開始時間不可用，無法計算統計信息',
   'Command Format Migration': '命令格式遷移',
@@ -2053,6 +2057,7 @@ export default {
   Name: '名稱',
   'No model usage data yet.': '尚無模型使用資料。',
   'No tool usage data yet.': '尚無工具使用資料。',
+  'No skill usage data yet.': '尚無技能使用資料。',
   'Prompts: {{count}}': '提示：{{count}}',
   'Session duration: {{duration}}': '會話時長：{{duration}}',
   'Tokens \u2014 prompt: {{prompt}}, output: {{output}}':
@@ -2060,6 +2065,10 @@ export default {
   'Tool calls': '工具呼叫',
   'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
     '工具呼叫：{{total}}（{{success}} 成功，{{fail}} 失敗）',
+  'Skill calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '技能呼叫：{{total}}（{{success}} 成功，{{fail}} 失敗）',
+  '  {{name}}: {{count}} ({{success}} ok, {{fail}} fail)':
+    '  {{name}}：{{count}}（{{success}} 成功，{{fail}} 失敗）',
   cached: '快取',
   days: '天',
   output: '輸出',

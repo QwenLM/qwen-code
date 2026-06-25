@@ -1883,6 +1883,7 @@ export default {
     'Tip: For a full token breakdown, run `/stats model`.',
   'Model Stats For Nerds': 'Model Stats For Nerds',
   'Tool Stats For Nerds': 'Tool Stats For Nerds',
+  'Skill Stats For Nerds': 'Skill Stats For Nerds',
   Metric: 'Metric',
   API: 'API',
   Requests: 'Requests',
@@ -1897,6 +1898,7 @@ export default {
   'No API calls have been made in this session.':
     'No API calls have been made in this session.',
   'Tool Name': 'Tool Name',
+  'Skill Name': 'Skill Name',
   Calls: 'Calls',
   'Success Rate': 'Success Rate',
   'Avg Duration': 'Avg Duration',
@@ -1908,6 +1910,8 @@ export default {
   ' Overall Agreement Rate:': ' Overall Agreement Rate:',
   'No tool calls have been made in this session.':
     'No tool calls have been made in this session.',
+  'No skill calls have been made in this session.':
+    'No skill calls have been made in this session.',
   'Session start time is unavailable, cannot calculate stats.':
     'Session start time is unavailable, cannot calculate stats.',
 
@@ -2425,6 +2429,10 @@ export default {
     'Tokens — prompt: {{prompt}}, output: {{output}}',
   'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
     'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)',
+  'Skill calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    'Skill calls: {{total}} ({{success}} ok, {{fail}} fail)',
+  '  {{name}}: {{count}} ({{success}} ok, {{fail}} fail)':
+    '  {{name}}: {{count}} ({{success}} ok, {{fail}} fail)',
   'Files: +{{added}} / -{{removed}} lines':
     'Files: +{{added}} / -{{removed}} lines',
   prompt: 'prompt',
@@ -2433,6 +2441,7 @@ export default {
   'Estimated cost: ${{cost}}': 'Estimated cost: ${{cost}}',
   'No model usage data yet.': 'No model usage data yet.',
   'No tool usage data yet.': 'No tool usage data yet.',
+  'No skill usage data yet.': 'No skill usage data yet.',
 
   // StatsDialog
   Models: 'Models',

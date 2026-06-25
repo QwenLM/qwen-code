@@ -349,9 +349,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       .getDisabledSkillNames()
       .has(this.params.skill.toLowerCase());
     if (disabled) {
-      let disabledCommandFallbackAttempted = false;
       if (this.commandExecutor) {
-        disabledCommandFallbackAttempted = true;
         // Wrap in try/catch matching the non-disabled path's graceful
         // degradation: if the MCP server throws
         // (network error, timeout, protocol violation), fall through to
@@ -388,12 +386,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         this.config,
         new SkillLaunchEvent(this.params.skill, false, this.promptId),
       );
-      if (!disabledCommandFallbackAttempted) {
-        recordSkillInvocation(this.config, {
-          skillName: this.params.skill,
-          success: false,
-        });
-      }
       const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
       return { llmContent: msg, returnDisplay: msg };
     }
@@ -446,12 +438,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
           this.config,
           new SkillLaunchEvent(this.params.skill, false, this.promptId),
         );
-        if (!commandFallbackAttempted) {
-          recordSkillInvocation(this.config, {
-            skillName: this.params.skill,
-            success: false,
-          });
-        }
 
         // Get parse errors if any
         const parseErrors = this.skillManager.getParseErrors();
