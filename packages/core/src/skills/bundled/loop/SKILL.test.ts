@@ -53,12 +53,15 @@ describe('bundled loop skill', () => {
     expect(body).toContain('<task-notification>');
     expect(body).toContain('set LoopWakeup as a long fallback');
     expect(body).toContain('auto-stops on idle or max-events');
-    expect(body).toContain('handle that event first');
-    expect(body).toContain('per stdout line');
+    expect(body).toContain('handle that event before re-running the prompt');
+    expect(body).toContain('terminal `<task-notification>`');
+    expect(body).not.toContain('per stdout line');
     expect(body).toContain(
       'If the notification says the watched condition was met',
     );
     expect(body).toContain('If a monitor auto-stopped');
+    expect(body).toContain('restart it once');
+    expect(body).toContain('report the repeated auto-stop to the user');
     expect(body).toContain('If the signal is ambiguous');
     expect(body).toContain('Do not omit it just because something is watching');
     expect(body).toContain('not a bare `/loop` wakeup prompt');
