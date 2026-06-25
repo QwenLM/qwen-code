@@ -145,7 +145,9 @@ function startMockExtension() {
           jsonrpc: '2.0',
           id: ACP_INIT_ID,
           method: 'initialize',
-          params: {},
+          // Identify as the CDP bridge so the daemon's clientInfo.name gate
+          // registers this mock extension (mirrors the real extension).
+          params: { clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' } },
         }),
       );
     });

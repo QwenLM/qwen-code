@@ -148,7 +148,10 @@ async function connect(): Promise<void> {
       jsonrpc: '2.0',
       id: ACP_INIT_ID,
       method: 'initialize',
-      params: {},
+      // Identify this /acp connection as the CDP bridge so the daemon routes
+      // cdp_* frames here and NOT to web UI / Zed agent clients sharing /acp.
+      // The name must match the daemon's gate in serve/acp-http/index.ts.
+      params: { clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' } },
     });
   };
 

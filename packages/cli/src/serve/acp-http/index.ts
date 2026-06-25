@@ -897,16 +897,30 @@ export function mountAcpHttp(
             writeStderrLine(
               `qwen serve: /acp WS established ${conn.connectionId.slice(0, 8)} (loopback=${fromLoopback}, active=${registry.size})`,
             );
-            // Plan C (issue #5626): register this initialized connection as the
-            // active CDP bridge eagerly so a `/cdp` puppeteer client can bind
-            // immediately (the extension would otherwise only surface as the
-            // bridge on its first inbound `cdp_*` frame, which it never sends
-            // until the daemon `cdp_attach`es it — a chicken-and-egg deadlock).
-            // Single daemon = single extension = last-writer-wins; a non-CDP
-            // `/acp` client that never answers `cdp_*` just sits idle here.
+            // Plan C (issue #5626): register this connection as the active CDP
+            // bridge eagerly so a `/cdp` puppeteer client can bind immediately
+            // (the extension would otherwise only surface as the bridge on its
+            // first inbound `cdp_*` frame, which it never sends until the daemon
+            // `cdp_attach`es it — a chicken-and-egg deadlock). Gate on the
+            // extension's `clientInfo.name`: the web UI / Zed agent share this
+            // same `/acp` endpoint, and an un-gated last-writer-wins would let
+            // an agent connection capture `cdp_*` frames it can't answer,
+            // stealing the bridge from the extension. Single extension =
+            // last-writer-wins among bridge clients only.
+            const clientName =
+              message.params &&
+              typeof message.params === 'object' &&
+              !Array.isArray(message.params)
+                ? (
+                    (message.params as Record<string, unknown>)[
+                      'clientInfo'
+                    ] as { name?: string } | undefined
+                  )?.name
+                : undefined;
             if (
               opts.cdpTunnelOverWs === true &&
-              opts.cdpTunnelRegistry !== undefined
+              opts.cdpTunnelRegistry !== undefined &&
+              clientName === 'qwen-cdp-bridge'
             ) {
               cdpEndpoint = {
                 connectionId: conn.connectionId,
