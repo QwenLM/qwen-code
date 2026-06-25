@@ -4389,6 +4389,41 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('mergeConsecutiveAssistantMessages', () => {
+    it('should preserve reasoning_content from every merged assistant turn', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'First reasoning.', thought: true },
+              { text: 'First answer.' },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'Second reasoning.', thought: true },
+              { text: 'Second answer.' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('assistant');
+      expect(messages[0].content).toBe('First answer.Second answer.');
+      // The reasoning of the merged-away turn must not be silently dropped.
+      expect(
+        (messages[0] as { reasoning_content?: string }).reasoning_content,
+      ).toBe('First reasoning.Second reasoning.');
+    });
+
     it('should merge two consecutive assistant messages with string content', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',

@@ -1,23 +1,30 @@
 name: 'E2E Tests'
 
 on:
+  # E2E is slow and currently flaky, so it is NOT in the merge queue (gating the
+  # serial queue on it would stall every merge). It runs post-merge on `main`,
+  # plus a nightly full regression and on-demand. Promote it to `merge_group` +
+  # required once a stable subset is carved out.
   push:
     branches:
       - 'main'
       - 'feat/e2e/**'
-  merge_group:
+  schedule:
+    - cron: '0 4 * * *' # nightly full regression (~04:00 UTC), guaranteed signal
+  workflow_dispatch:
 
 concurrency:
-  # Key on the head ref so a `push` to a `feat/e2e/**` branch and a
-  # `pull_request` from that same branch share one group and cancel each
-  # other instead of running the matrix twice for the same change.
+  # Scope the group by event so back-to-back pushes to `main` cancel superseded
+  # runs (no pile-up when PRs merge in quick succession), without ever cancelling
+  # the nightly schedule or a manual dispatch — they share the ref but not the
+  # event. feat/e2e/** pushes still cancel their own superseded runs.
   group: |-
-    ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  # Cancel superseded PR / feature-branch runs, but let every `main`
-  # commit finish (complete per-commit e2e signal, matching ci.yml) and
-  # never cancel merge-queue runs.
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  # Cancel superseded pushes (main included now — only the latest tree matters,
+  # and it covers every merged change). The nightly run always finishes, so a
+  # busy merge window that keeps cancelling the push run still gets a signal.
   cancel-in-progress: |-
-    ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
+    ${{ github.event_name == 'push' }}
 
 jobs:
   e2e-test-linux:

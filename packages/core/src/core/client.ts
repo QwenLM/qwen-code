@@ -1773,7 +1773,7 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (this.config.getManagedAutoMemoryEnabled()) {
+        if (this.config.isManagedMemoryAvailable()) {
           // A previous recall may still be pending (slow side-query, new user
           // turn arrived before it settled). Abort it before installing the
           // new handle so the orphan doesn't keep running indefinitely.

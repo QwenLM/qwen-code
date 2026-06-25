@@ -308,6 +308,19 @@ export function registerSessionRoutes(
     }
   });
 
+  app.get('/session/:id/status', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(bridge.getSessionSummary(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/status',
+        sessionId,
+      });
+    }
+  });
+
   app.get('/session/:id/context', async (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;

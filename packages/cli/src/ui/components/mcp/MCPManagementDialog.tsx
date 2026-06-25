@@ -34,12 +34,14 @@ import {
   MCPServerStatus,
   DiscoveredMCPTool,
   MCPOAuthTokenStorage,
+  isGatedMcpScope,
   type MCPServerConfig,
   type AnyDeclarativeTool,
   type DiscoveredMCPPrompt,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
+import { loadMcpApprovals } from '../../../config/mcpApprovals.js';
 import { isToolValid, getToolInvalidReasons } from './utils.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
@@ -74,6 +76,12 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     const toolRegistry = config.getToolRegistry();
     const promptRegistry = config.getPromptRegistry();
     const resourceRegistry = config.getResourceRegistry();
+
+    // Approval state is keyed by the same project root the approval dialog
+    // writes under — `getWorkingDir()` (see useMcpApproval) — so the lookup
+    // matches what discovery gated on.
+    const approvals = loadMcpApprovals();
+    const approvalRoot = config.getWorkingDir();
 
     const serverInfos: MCPServerDisplayInfo[] = [];
 
@@ -137,6 +145,17 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         (mcpServerRequiresOAuth.get(name) === true ||
           (Boolean(serverConfig.oauth?.enabled) && !hasOAuthTokens));
 
+      // Why a gated (#4615) server is skipped by discovery: `pending` (awaiting
+      // a first/renewed approval) or `rejected`. Only gated scopes carry this;
+      // `approved` (and all non-gated scopes) leave it undefined.
+      let approvalState: 'pending' | 'rejected' | undefined;
+      if (isGatedMcpScope(serverConfig.scope)) {
+        const state = approvals.getState(approvalRoot, name, serverConfig);
+        if (state !== 'approved') {
+          approvalState = state;
+        }
+      }
+
       serverInfos.push({
         name,
         status,
@@ -149,6 +168,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         isDisabled,
         hasOAuthTokens,
         requiresAuth,
+        approvalState,
       });
     }
 

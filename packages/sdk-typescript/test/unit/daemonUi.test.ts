@@ -2646,7 +2646,7 @@ describe('daemon UI time schema (PR-B)', () => {
     });
   });
 
-  it('stamps assistant.done serverTimestamp onto the active assistant block', () => {
+  it('does not let assistant.done overwrite an existing assistant timestamp', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = reduceDaemonTranscriptEvents(
       state,
@@ -2657,6 +2657,41 @@ describe('daemon UI time schema (PR-B)', () => {
         data: {
           update: {
             _meta: { timestamp: 1_000 },
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'done' },
+          },
+        },
+      }),
+    );
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'assistant.done',
+        reason: 'end_turn',
+        eventId: 2,
+        serverTimestamp: 5_000,
+      },
+    ]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'done',
+      streaming: false,
+      eventId: 2,
+      serverTimestamp: 1_000,
+    });
+  });
+
+  it('uses assistant.done timestamp when the active assistant block has none', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'done' },
           },

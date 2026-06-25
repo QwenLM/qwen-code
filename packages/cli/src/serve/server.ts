@@ -280,6 +280,7 @@ function advertisedMaxPendingPromptsPerSession(
  *   - `POST /session/:id/load`
  *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
+ *   - `GET  /session/:id/status`
  *   - `GET  /session/:id/context`
  *   - `GET  /session/:id/supported-commands`
  *   - `GET  /session/:id/tasks`
