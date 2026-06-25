@@ -126,6 +126,7 @@ import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
@@ -7188,6 +7189,13 @@ class QwenAgent implements Agent {
       }
     }
 
+    // CDP tunnel (Plan C, #5626): auto-register chrome-devtools-mcp when the
+    // daemon forwarded the tunnel flag, so the agent can drive the real browser.
+    const cdpTunnelMcp = buildCdpTunnelMcpServer();
+    if (cdpTunnelMcp) {
+      sessionMcpServers['chrome-devtools'] = cdpTunnelMcp;
+    }
+
     const settings = this.settings.merged;
     const argvForSession = {
       ...this.argv,
@@ -7533,4 +7541,48 @@ function diffSettingsKeys(
     }
   }
   return changed;
+}
+
+/**
+ * CDP tunnel auto-wiring (Plan C, issue #5626).
+ *
+ * Builds the `chrome-devtools` session MCP server entry when the daemon runs
+ * `qwen serve` with the CDP-tunnel flag. The daemon forwards
+ * `QWEN_SERVE_CDP_TUNNEL_OVER_WS=1` + `QWEN_SERVE_CDP_TUNNEL_PORT` into this ACP
+ * child's env; we point the (patched) chrome-devtools-mcp at the daemon's
+ * `/cdp` endpoint so the agent gets its ready-made DevTools tools driving the
+ * user's real browser through the tunnel — no hand-written browser tools, no
+ * settings.json edit.
+ *
+ * Returns `undefined` (caller skips injection) when the flag is off, the
+ * forwarded port is missing/invalid, or chrome-devtools-mcp can't be resolved
+ * (e.g. a stripped build). `trust` is left unset so the tools default to 'ask'
+ * (per-call confirmation, like any project MCP server — no silent auto-approval
+ * of browser control).
+ */
+export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
+  if (process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] !== '1') return undefined;
+  const port = Number(process.env['QWEN_SERVE_CDP_TUNNEL_PORT']);
+  if (!Number.isInteger(port) || port <= 0) return undefined;
+  try {
+    const requireFromHere = createRequire(import.meta.url);
+    const pkgJsonPath = requireFromHere.resolve(
+      'chrome-devtools-mcp/package.json',
+    );
+    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
+      bin?: string | Record<string, string>;
+    };
+    const binRel =
+      typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin ?? {})[0];
+    if (!binRel) return undefined;
+    const binPath = path.join(path.dirname(pkgJsonPath), binRel);
+    return new MCPServerConfig(process.execPath, [
+      binPath,
+      '--wsEndpoint',
+      `ws://127.0.0.1:${port}/cdp`,
+    ]);
+  } catch {
+    // chrome-devtools-mcp not installed in this build — skip auto-wiring.
+    return undefined;
+  }
 }

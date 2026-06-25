@@ -780,6 +780,15 @@ export async function runQwenServe(
         ? String(opts.mcpClientBudget)
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
+    // CDP tunnel (Plan C, #5626): forward the flag + bound port so the spawned
+    // ACP child can auto-register chrome-devtools-mcp against this daemon's
+    // `/cdp` endpoint. Only meaningful with a fixed `--port` — the override map
+    // is frozen at bridge construction, so a post-listen ephemeral (`--port 0`)
+    // value can't be threaded this way.
+    QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
+    QWEN_SERVE_CDP_TUNNEL_PORT: opts.cdpTunnelOverWs
+      ? String(opts.port)
+      : undefined,
   };
 
   // Read settings once at boot for the workspace context filename and
