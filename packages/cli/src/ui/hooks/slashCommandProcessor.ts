@@ -29,6 +29,7 @@ import {
   addMCPStatusChangeListener,
   removeMCPStatusChangeListener,
   MCPServerStatus,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -41,7 +42,11 @@ import type {
 } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import {
+  CommandKind,
+  type CommandContext,
+  type SlashCommand,
+} from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
@@ -100,6 +105,10 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
   'history',
 ]);
+
+function getSkillCommandName(command: SlashCommand): string {
+  return command.skillDetail?.name ?? command.name;
+}
 
 export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
@@ -301,6 +310,10 @@ export const useSlashCommandProcessor = (
       } else if (message.type === MessageType.TOOL_STATS) {
         historyItemContent = {
           type: 'tool_stats',
+        };
+      } else if (message.type === MessageType.SKILL_STATS) {
+        historyItemContent = {
+          type: 'skill_stats',
         };
       } else if (message.type === MessageType.QUIT) {
         historyItemContent = {
@@ -665,6 +678,23 @@ export const useSlashCommandProcessor = (
         resolvedCommandPath.length > 1
           ? resolvedCommandPath.slice(1).join(' ')
           : undefined;
+      const isSkillCommand = commandToExecute?.kind === CommandKind.SKILL;
+      let skillInvocationRecorded = false;
+      const recordSkillCommandInvocation = (success: boolean) => {
+        if (
+          !config ||
+          !commandToExecute ||
+          !isSkillCommand ||
+          skillInvocationRecorded
+        ) {
+          return;
+        }
+        recordSkillInvocation(config, {
+          skillName: getSkillCommandName(commandToExecute),
+          success,
+        });
+        skillInvocationRecorded = true;
+      };
 
       try {
         if (commandToExecute) {
@@ -901,6 +931,7 @@ export const useSlashCommandProcessor = (
                     const blockingError = output.getBlockingError();
                     if (blockingError.blocked || output.shouldStopExecution()) {
                       hasError = true;
+                      recordSkillCommandInvocation(false);
                       addMessage({
                         type: MessageType.ERROR,
                         content: formatUserPromptExpansionBlockedMessage(
@@ -927,6 +958,7 @@ export const useSlashCommandProcessor = (
                     // consumers observe it after state has rendered.
                     updateItem(invocationItemId, { sentToModel: true });
                   }
+                  recordSkillCommandInvocation(true);
                   return {
                     type: 'submit_prompt',
                     content,
@@ -1051,6 +1083,7 @@ export const useSlashCommandProcessor = (
           return { type: 'handled' };
         }
         hasError = true;
+        recordSkillCommandInvocation(false);
         if (config) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],

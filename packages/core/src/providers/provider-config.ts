@@ -385,8 +385,7 @@ export function findExistingProviderModels(
     const raw = modelProviders[protocol];
     if (!Array.isArray(raw)) continue;
     const models = raw.filter(
-      (m): m is ProviderModelConfig =>
-        isProviderModelConfig(m) && ownsModel(m),
+      (m): m is ProviderModelConfig => isProviderModelConfig(m) && ownsModel(m),
     );
     if (models.length > 0) return { protocol, models };
   }
