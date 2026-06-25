@@ -18,7 +18,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { loadSettings } from '../../config/settings.js';
-import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
@@ -119,11 +119,10 @@ export function registerWorkspaceExtensionRoutes(
     new ExtensionManager({
       workspaceDir: boundWorkspace,
       isWorkspaceTrusted:
-        isWorkspaceTrusted(
+        getWorkspaceTrustStatus(
           loadSettings(boundWorkspace).merged,
-          undefined,
           boundWorkspace,
-        ).isTrusted ?? true,
+        ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(

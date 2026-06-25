@@ -40,6 +40,10 @@ package-lock.json
 # reserved for auto-generated skills — do not hand-author a project skill with
 # this prefix, or its directory will be ignored here.
 .qwen/skills/auto-skill-*/
+# Staging area for auto-skills awaiting confirmation (memory.autoSkillConfirm).
+# Already covered by `.qwen/*` above since it's never re-included, but listed
+# explicitly alongside auto-skill-*/ so the intent is obvious.
+.qwen/pending-skills/
 !.qwen/agents/
 !.qwen/agents/**
 

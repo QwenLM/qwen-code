@@ -91,6 +91,9 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }
+  if (req.method === 'POST' && path === '/workspace/setup-github') {
+    return { route: 'POST /workspace/setup-github' };
+  }
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
   }
@@ -125,6 +128,19 @@ export function resolveDaemonTelemetryRoute(
   if (path === '/workspace/permissions') {
     if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
     if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
+  }
+  if (path === '/workspace/trust') {
+    if (req.method === 'GET') return { route: 'GET /workspace/trust' };
+  }
+  if (req.method === 'POST' && path === '/workspace/trust/request') {
+    return { route: 'POST /workspace/trust/request' };
+  }
+  if (path === '/workspace/voice') {
+    if (req.method === 'GET') return { route: 'GET /workspace/voice' };
+    if (req.method === 'POST') return { route: 'POST /workspace/voice' };
+  }
+  if (req.method === 'POST' && path === '/workspace/voice/transcribe') {
+    return { route: 'POST /workspace/voice/transcribe' };
   }
   return undefined;
 }

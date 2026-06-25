@@ -775,6 +775,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
+    // Aborting a tick-in-flight ends any self-paced /loop: drop pending loop
+    // wakeups so the loop doesn't resume after the cancelled tick. Only clears
+    // session wakeups (never cron jobs); lazily-creating an empty scheduler
+    // here is inert.
+    const loopWakeupsCancelled =
+      config.getCronScheduler()?.cancelAllWakeups() ?? 0;
     // Cancel any in-flight auxiliary work so its Promise.then doesn't add
     // stale content after the user cancelled.
     for (const ac of auxiliaryAbortRefsRef.current) {
@@ -794,6 +800,7 @@ export const useGeminiStream = (
       config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
+      loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
     );
     logApiCancel(config, cancellationEvent);
 
@@ -807,6 +814,17 @@ export const useGeminiStream = (
       },
       Date.now(),
     );
+    if (loopWakeupsCancelled > 0) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: `Stopped the self-paced loop: cancelled ${loopWakeupsCancelled} pending wakeup${
+            loopWakeupsCancelled === 1 ? '' : 's'
+          }.`,
+        },
+        Date.now(),
+      );
+    }
     setPendingHistoryItem(null);
     clearRetryCountdown();
     // Wrap the consumer callback so a throw in AppContainer's cancel

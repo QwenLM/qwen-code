@@ -71,7 +71,9 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'approval_mode_changed',
   'tool_toggled',
   'settings_changed',
+  'trust_change_requested',
   'workspace_initialized',
+  'github_setup_completed',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
   'settings_reloaded',
@@ -582,6 +584,13 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonTrustChangeRequestedData {
+  workspaceCwd: string;
+  desiredState: 'trusted' | 'untrusted';
+  reason?: string;
+  [key: string]: unknown;
+}
+
 /**
  * Workspace-scoped: fan-outs to every active session SSE bus when
  * `POST /workspace/init` is invoked. The `action` field discriminates
@@ -602,6 +611,27 @@ export interface DaemonWorkspaceInitializedData {
   path: string;
   action: 'created' | 'overwrote' | 'noop';
   originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonGithubSetupCompletedData {
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: Array<{
+    sourcePath?: string;
+    path: string;
+    status: 'written' | 'failed';
+    sizeBytes?: number;
+    error?: string;
+  }>;
+  gitignore: {
+    path: '.gitignore';
+    status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped';
+    added?: string[];
+    error?: string;
+  };
+  warnings: string[];
   [key: string]: unknown;
 }
 
@@ -862,9 +892,17 @@ export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
   Record<string, unknown>
 >;
+export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
+  'trust_change_requested',
+  DaemonTrustChangeRequestedData
+>;
 export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
   'workspace_initialized',
   DaemonWorkspaceInitializedData
+>;
+export type DaemonGithubSetupCompletedEvent = DaemonEventEnvelope<
+  'github_setup_completed',
+  DaemonGithubSetupCompletedData
 >;
 export type DaemonMcpServerRestartedEvent = DaemonEventEnvelope<
   'mcp_server_restarted',
@@ -963,6 +1001,7 @@ export type DaemonControlEvent =
   | DaemonToolToggledEvent
   | DaemonSettingsChangedEvent
   | DaemonWorkspaceInitializedEvent
+  | DaemonGithubSetupCompletedEvent
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
   | DaemonSettingsReloadedEvent
@@ -995,6 +1034,7 @@ export type DaemonMcpGuardrailEvent =
 export type DaemonWorkspaceMutationEvent =
   | DaemonMemoryChangedEvent
   | DaemonAgentChangedEvent
+  | DaemonTrustChangeRequestedEvent
   | DaemonExtensionsChangedEvent;
 
 /**
@@ -1468,9 +1508,17 @@ export function asKnownDaemonEvent(
             Record<string, unknown>
           >)
         : undefined;
+    case 'trust_change_requested':
+      return isTrustChangeRequestedData(event.data)
+        ? (event as DaemonTrustChangeRequestedEvent)
+        : undefined;
     case 'workspace_initialized':
       return isWorkspaceInitializedData(event.data)
         ? (event as DaemonWorkspaceInitializedEvent)
+        : undefined;
+    case 'github_setup_completed':
+      return isGithubSetupCompletedData(event.data)
+        ? (event as DaemonGithubSetupCompletedEvent)
         : undefined;
     case 'mcp_server_restarted':
       return isMcpServerRestartedData(event.data)
@@ -1845,6 +1893,8 @@ export function reduceDaemonSessionEvent(
       };
     case 'settings_changed':
       return base;
+    case 'trust_change_requested':
+      return base;
     case 'workspace_initialized':
       // Workspace-scoped fan-out. Non-terminal — just records that a
       // QWEN.md scaffold was performed.
@@ -1853,6 +1903,8 @@ export function reduceDaemonSessionEvent(
         workspaceInitCount: base.workspaceInitCount + 1,
         lastWorkspaceInit: mergeOriginator(event.data, event),
       };
+    case 'github_setup_completed':
+      return base;
     case 'mcp_server_restarted':
       return {
         ...base,
@@ -2561,6 +2613,18 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
   );
 }
 
+function isTrustChangeRequestedData(
+  value: unknown,
+): value is DaemonTrustChangeRequestedData {
+  if (!isRecord(value)) return false;
+  const desiredState = value['desiredState'];
+  return (
+    isNonEmptyString(value['workspaceCwd']) &&
+    (desiredState === 'trusted' || desiredState === 'untrusted') &&
+    (value['reason'] === undefined || typeof value['reason'] === 'string')
+  );
+}
+
 function isWorkspaceInitializedData(
   value: unknown,
 ): value is DaemonWorkspaceInitializedData {
@@ -2568,6 +2632,45 @@ function isWorkspaceInitializedData(
   if (!isNonEmptyString(value['path'])) return false;
   const action = value['action'];
   return action === 'created' || action === 'overwrote' || action === 'noop';
+}
+
+function isGithubSetupCompletedData(
+  value: unknown,
+): value is DaemonGithubSetupCompletedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['releaseTag'])) return false;
+  if (!isNonEmptyString(value['readmeUrl'])) return false;
+  if (!Array.isArray(value['workflows'])) return false;
+  if (!value['workflows'].every(isGithubSetupWorkflowResult)) return false;
+  if (!isGithubSetupGitignoreResult(value['gitignore'])) return false;
+  return (
+    Array.isArray(value['warnings']) &&
+    value['warnings'].every((warning) => typeof warning === 'string')
+  );
+}
+
+function isGithubSetupWorkflowResult(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['path'])) return false;
+  const status = value['status'];
+  if (status !== 'written' && status !== 'failed') return false;
+  if (value['sizeBytes'] !== undefined && !isFiniteNumber(value['sizeBytes'])) {
+    return false;
+  }
+  return value['error'] === undefined || typeof value['error'] === 'string';
+}
+
+function isGithubSetupGitignoreResult(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value['path'] !== '.gitignore') return false;
+  const status = value['status'];
+  return (
+    status === 'created' ||
+    status === 'updated' ||
+    status === 'unchanged' ||
+    status === 'failed' ||
+    status === 'skipped'
+  );
 }
 
 function isMcpServerRestartedData(
