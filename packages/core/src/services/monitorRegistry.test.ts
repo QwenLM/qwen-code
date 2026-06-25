@@ -290,6 +290,7 @@ describe('MonitorRegistry', () => {
     const [displayText, modelText] = callback.mock.calls[0] as [string, string];
     expect(displayText).toContain('completed');
     expect(modelText).toContain('<status>completed</status>');
+    expect(modelText).toContain('<command>tail -f /var/log/app.log</command>');
     expect(modelText).toContain('Exited with code 0');
   });
 
