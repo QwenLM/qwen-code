@@ -216,7 +216,7 @@ jobs:
             # is empty) so a single weak tier-1 issue can't starve the run.
             echo "🔍 Tier 2 — unattended bugs created ${MAX_CREATED}..${MIN_CREATED} (newest first)..."
             gh issue list --repo "${REPO}" \
-              --search "is:open is:issue label:${BUG_LABEL} created:${MAX_CREATED}..${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
+              --search "is:open is:issue label:${BUG_LABEL} -label:${READY_FOR_AGENT_LABEL} created:${MAX_CREATED}..${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url,comments \
               > "${WORKDIR}/scan.json"
             filter_unattended_candidates "${WORKDIR}/tier2.json"
