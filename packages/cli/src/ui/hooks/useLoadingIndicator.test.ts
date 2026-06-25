@@ -215,6 +215,89 @@ describe('useLoadingIndicator', () => {
     expect(result.current.elapsedTime).toBe(1);
   });
 
+  it('should track rate baseline across multiple tool-execution pauses', async () => {
+    const { result, rerender } = renderHook(
+      ({ currentCandidatesTokens, currentStreamingChars, isToolExecuting }) =>
+        useLoadingIndicator(
+          StreamingState.Responding,
+          undefined,
+          currentCandidatesTokens,
+          currentStreamingChars,
+          isToolExecuting,
+        ),
+      {
+        initialProps: {
+          currentCandidatesTokens: 100,
+          currentStreamingChars: 400,
+          isToolExecuting: false,
+        },
+      },
+    );
+
+    expect(result.current.taskStartTokens).toBe(100);
+    expect(result.current.taskStartStreamingChars).toBe(400);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+      rerender({
+        currentCandidatesTokens: 100,
+        currentStreamingChars: 400,
+        isToolExecuting: true,
+      });
+    });
+
+    await act(async () => {
+      rerender({
+        currentCandidatesTokens: 5000,
+        currentStreamingChars: 2400,
+        isToolExecuting: true,
+      });
+    });
+
+    expect(result.current.taskStartTokens).toBe(5000);
+    expect(result.current.taskStartStreamingChars).toBe(2400);
+    expect(result.current.elapsedTime).toBe(1);
+
+    await act(async () => {
+      rerender({
+        currentCandidatesTokens: 5000,
+        currentStreamingChars: 2400,
+        isToolExecuting: false,
+      });
+    });
+
+    await act(async () => {
+      rerender({
+        currentCandidatesTokens: 6000,
+        currentStreamingChars: 2800,
+        isToolExecuting: false,
+      });
+    });
+
+    expect(result.current.taskStartTokens).toBe(5000);
+    expect(result.current.taskStartStreamingChars).toBe(2400);
+
+    await act(async () => {
+      rerender({
+        currentCandidatesTokens: 6000,
+        currentStreamingChars: 2800,
+        isToolExecuting: true,
+      });
+    });
+
+    await act(async () => {
+      rerender({
+        currentCandidatesTokens: 12000,
+        currentStreamingChars: 6800,
+        isToolExecuting: true,
+      });
+    });
+
+    expect(result.current.taskStartTokens).toBe(11000);
+    expect(result.current.taskStartStreamingChars).toBe(6400);
+    expect(result.current.elapsedTime).toBe(1);
+  });
+
   describe('token tracking', () => {
     it('should capture token snapshot when task starts', () => {
       const { result, rerender } = renderHook(
