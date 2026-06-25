@@ -124,6 +124,13 @@ export class CdpReverseLink {
   private disposed = false;
   /** Resolver for the in-flight `cdp_attach` (if any). */
   private pendingAttach: { id: number; pending: PendingCommand } | undefined;
+  /**
+   * Opens once the initial `cdp_attach` settles (success OR failure).
+   * `forwardToTab` awaits this so page-domain commands never race the
+   * extension's async `chrome.debugger.attach` (which pops the debugger banner
+   * and takes a tick). Undefined until {@link attach} is first called.
+   */
+  private attachGate: Promise<void> | undefined;
   /** Called when the extension reports the tab detached. */
   onDetach: ((reason: string) => void) | undefined;
 
@@ -141,11 +148,22 @@ export class CdpReverseLink {
    * The {@link CdpEmulatorCallbacks.forwardToTab} implementation: send a
    * `cdp_command` to the extension and await the correlated `cdp_result`.
    */
-  readonly forwardToTab = (
+  readonly forwardToTab = async (
     method: string,
     params: Record<string, unknown> | undefined,
-  ): Promise<unknown> =>
-    new Promise<unknown>((resolve, reject) => {
+  ): Promise<unknown> => {
+    if (this.disposed) {
+      throw { code: -32000, message: 'CDP tunnel closed' };
+    }
+    // Ordering gate: wait for the initial attach to settle before forwarding
+    // page-domain commands. Without this, a fast puppeteer `Network.enable`
+    // reaches the extension before `chrome.debugger.attach` finishes and fails
+    // "not attached to a tab". The gate resolves on attach success OR failure;
+    // on failure the command below still runs and fails cleanly.
+    if (this.attachGate) {
+      await this.attachGate;
+    }
+    return new Promise<unknown>((resolve, reject) => {
       if (this.disposed) {
         reject({ code: -32000, message: 'CDP tunnel closed' });
         return;
@@ -167,40 +185,50 @@ export class CdpReverseLink {
         });
       }
     });
+  };
 
   /**
    * Ask the extension to attach `chrome.debugger` to the active tab. Resolves
    * once the extension acks `cdp_attached` (or rejects on error/timeout).
    */
   attach(): Promise<{ url?: string; title?: string }> {
-    return new Promise((resolve, reject) => {
-      if (this.disposed) {
-        reject({ code: -32000, message: 'CDP tunnel closed' });
-        return;
-      }
-      const id = this.nextId++;
-      const timer = this.armTimeout(id, 'cdp_attach timed out');
-      // Reuse the PendingCommand shape; result carries the tab metadata.
-      this.pendingAttach = {
-        id,
-        pending: {
-          resolve: (result) =>
-            resolve((result ?? {}) as { url?: string; title?: string }),
-          reject,
-          timer,
-        },
-      };
-      try {
-        this.sendToExtension({ type: CDP_FRAME_TYPES.attach, id });
-      } catch (err) {
-        clearTimeout(timer);
-        this.pendingAttach = undefined;
-        reject({
-          code: -32000,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    });
+    const result = new Promise<{ url?: string; title?: string }>(
+      (resolve, reject) => {
+        if (this.disposed) {
+          reject({ code: -32000, message: 'CDP tunnel closed' });
+          return;
+        }
+        const id = this.nextId++;
+        const timer = this.armTimeout(id, 'cdp_attach timed out');
+        // Reuse the PendingCommand shape; result carries the tab metadata.
+        this.pendingAttach = {
+          id,
+          pending: {
+            resolve: (result) =>
+              resolve((result ?? {}) as { url?: string; title?: string }),
+            reject,
+            timer,
+          },
+        };
+        try {
+          this.sendToExtension({ type: CDP_FRAME_TYPES.attach, id });
+        } catch (err) {
+          clearTimeout(timer);
+          this.pendingAttach = undefined;
+          reject({
+            code: -32000,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    );
+    // Open the gate once the attach settles (success or failure) so awaiting
+    // page commands proceed or fail cleanly instead of racing the attach.
+    this.attachGate = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   /**
