@@ -1,7 +1,7 @@
 ---
 name: extension-creator
 description: Create, scaffold, customize, validate, and locally test Qwen Code extensions. Use when the user wants a new Qwen Code extension, needs help choosing an extension template, wants to add QWEN.md context, commands, skills, agents, MCP servers, settings, hooks, channels, or LSP servers, or asks how to link and test an extension locally. Invoke with `/extension-creator` followed by an extension path and optional template name.
-argument-hint: '<extension-path> [template|capabilities]'
+argument-hint: '<extension-path> [template]'
 allowedTools:
   - run_shell_command
   - write_file
