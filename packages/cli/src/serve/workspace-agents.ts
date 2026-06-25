@@ -22,6 +22,7 @@ import {
   InvalidClientIdError,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
+import { safeLogValue } from './server/request-helpers.js';
 
 /**
  * Pattern for the route-layer `:agentType` URL parameter. Matches the
@@ -677,23 +678,6 @@ export function mountWorkspaceAgentsRoutes(
       res.status(204).end();
     },
   );
-}
-
-/**
- * Wrap a string value for safe interpolation into stderr log lines.
- * `JSON.stringify` escapes control characters (`\n`, `\r`, etc.) and
- * wraps the result in quotes so any injection attempt surfaces as
- * visible-as-quoted-noise rather than a forged log line. Mirrors
- * `safeLogValue` in `server/request-helpers.ts`; we copy the
- * 82-byte truncation budget so attacker-controlled long names can't
- * blow up the operator's log shipper. Defense-in-depth — the
- * route's `validateAgentType` regex already rejects names with
- * control chars, but escaping also covers `agentType` derived from
- * sources we don't fully control (legacy on-disk shadows, future
- * routes adding new fields).
- */
-function safeLogValue(raw: unknown): string {
-  return JSON.stringify(String(raw)).slice(0, 82);
 }
 
 /**
