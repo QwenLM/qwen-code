@@ -54,6 +54,10 @@ import {
   PopoverContent,
 } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
+import { useVoiceDictation } from './voice/useVoiceDictation';
+import { VoiceMicControl } from './voice/VoiceMicControl';
+import { VoiceRecordingBar } from './voice/VoiceRecordingBar';
+import { VOICE_MODELS, DEFAULT_VOICE_MODEL } from './voice/voiceModels';
 import { coerceInputText } from '@/lib/input-text';
 import { getNextPermissionMode } from '@/lib/permission-mode-cycle';
 import { isMac, PATH_SEP, getPathBasename } from '@/lib/platform';
@@ -849,25 +853,38 @@ export function FreeFormInput({
     'enter' | 'cmd-enter'
   >('enter');
   const [spellCheck, setSpellCheck] = React.useState(false);
+  const [voiceModel, setVoiceModel] = React.useState(DEFAULT_VOICE_MODEL);
+  const [voiceEnabled, setVoiceEnabled] = React.useState(true);
 
   // Load input settings on mount
   React.useEffect(() => {
     const loadInputSettings = async () => {
       if (!window.electronAPI) return;
       try {
-        const [autoCapEnabled, sendKey, spellCheckEnabled] = await Promise.all([
-          window.electronAPI.getAutoCapitalisation(),
-          window.electronAPI.getSendMessageKey(),
-          window.electronAPI.getSpellCheck(),
-        ]);
+        const [autoCapEnabled, sendKey, spellCheckEnabled, voiceModelId, voiceOn] =
+          await Promise.all([
+            window.electronAPI.getAutoCapitalisation(),
+            window.electronAPI.getSendMessageKey(),
+            window.electronAPI.getSpellCheck(),
+            window.electronAPI.getVoiceModel(),
+            window.electronAPI.getVoiceEnabled(),
+          ]);
         setAutoCapitalisation(autoCapEnabled);
         setSendMessageKey(sendKey ?? 'enter');
         setSpellCheck(spellCheckEnabled);
+        setVoiceModel(voiceModelId ?? DEFAULT_VOICE_MODEL);
+        setVoiceEnabled(voiceOn);
       } catch (error) {
         logInputError('Failed to load input settings:', error);
       }
     };
     loadInputSettings();
+  }, []);
+
+  // Persist the selected voice (ASR) model; the voice server reads it per recording.
+  const handleVoiceModelChange = React.useCallback((modelId: string) => {
+    setVoiceModel(modelId);
+    void window.electronAPI?.setVoiceModel?.(modelId);
   }, []);
 
   // Double-Esc interrupt: show warning overlay on first Esc, interrupt on second
@@ -2016,6 +2033,24 @@ export function FreeFormInput({
     [syncToParent, sources, optimisticSourceSlugs, onSourcesChange],
   );
 
+  // Append a voice transcript to the composer (user reviews before sending).
+  const insertTranscript = React.useCallback(
+    (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const current = coerceInputText(inputRef.current ?? '');
+      const needsSpace = current.length > 0 && !/\s$/.test(current);
+      const next = current + (needsSpace ? ' ' : '') + trimmed;
+      // Set the cursor before the value update so the rich-input sync places it.
+      richInputRef.current?.setSelectionRange(next.length, next.length);
+      handleInputChange(next);
+      richInputRef.current?.focus();
+    },
+    [handleInputChange, richInputRef],
+  );
+
+  const voice = useVoiceDictation({ onInsert: insertTranscript });
+
   // Handle input with cursor position (for menu detection)
   const handleRichInput = React.useCallback(
     (value: string, cursorPosition: number) => {
@@ -2476,7 +2511,7 @@ export function FreeFormInput({
             />
 
             {/* Compact mode: permission mode drawer + standard icon badges for attach/working dir */}
-            {compactMode && (
+            {compactMode && !voice.isActive && (
               <>
                 {onPermissionModeChange && (
                   <CompactPermissionModeSelector
@@ -2511,7 +2546,7 @@ export function FreeFormInput({
             )}
 
             {/* Desktop: full badges row with labels and working directory */}
-            {!compactMode && (
+            {!compactMode && !voice.isActive && (
               <div className="flex items-center gap-1 min-w-32 shrink overflow-hidden">
                 {/* 1. Attach Files Badge */}
                 <FreeFormInputContextBadge
@@ -2542,13 +2577,21 @@ export function FreeFormInput({
               </div>
             )}
 
-            {/* Spacer */}
-            <div className="flex-1" />
+            {/* Spacer — or the voice recording bar while dictating */}
+            {voice.isActive ? (
+              <VoiceRecordingBar
+                levels={voice.levels}
+                elapsedMs={voice.elapsedMs}
+                interimText={voice.interimText}
+              />
+            ) : (
+              <div className="flex-1" />
+            )}
 
             {/* Right side: Context + Model + Send - never shrink so they're always visible */}
             <div className="flex items-center shrink-0">
               {/* 4. Context Usage Indicator */}
-              {!compactMode && contextUsageIndicator && (
+              {!compactMode && !voice.isActive && contextUsageIndicator && (
                 <ContextUsageIndicator
                   usedTokens={contextUsageIndicator.usedTokens}
                   totalTokens={contextUsageIndicator.totalTokens}
@@ -2560,7 +2603,7 @@ export function FreeFormInput({
               )}
 
               {/* 5. Model Selector - Hidden in compact mode (EditPopover embedding) */}
-              {!compactMode && (
+              {!compactMode && !voice.isActive && (
                 <DropdownMenu
                   open={modelDropdownOpen}
                   onOpenChange={setModelDropdownOpen}
@@ -2668,8 +2711,49 @@ export function FreeFormInput({
                         })}
                       </>
                     )}
+
+                    {/* Voice (ASR) model — independent of the chat connection.
+                        Hidden when voice dictation is disabled in settings. */}
+                    {voiceEnabled && (
+                      <>
+                        <div className="my-1 border-t border-border/50" />
+                        <div className="px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                          Voice model
+                        </div>
+                        {VOICE_MODELS.map((vm) => {
+                          const isSelected = voiceModel === vm.id;
+                          return (
+                            <StyledDropdownMenuItem
+                              key={vm.id}
+                              onSelect={() => handleVoiceModelChange(vm.id)}
+                              className="flex items-center justify-between px-2 py-2 rounded-lg cursor-pointer"
+                            >
+                              <div className="text-left">
+                                <div className="font-medium text-sm">
+                                  {vm.label}
+                                </div>
+                                <div className="text-xs text-muted-foreground">
+                                  {vm.kind === 'realtime'
+                                    ? 'Realtime — live transcript'
+                                    : 'Batch — transcribe on stop'}
+                                </div>
+                              </div>
+                              {isSelected && (
+                                <Check className="h-3 w-3 text-foreground shrink-0 ml-3" />
+                              )}
+                            </StyledDropdownMenuItem>
+                          );
+                        })}
+                      </>
+                    )}
                   </StyledDropdownMenuContent>
                 </DropdownMenu>
+              )}
+
+              {/* Voice dictation — mic (idle) / stop (recording); the recording
+                  bar replaces the toolbar middle while active */}
+              {voiceEnabled && voice.available && (
+                <VoiceMicControl voice={voice} disabled={disabled} />
               )}
 
               {/* 6. Send/Stop Button - Always show stop when processing */}

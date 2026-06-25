@@ -24,6 +24,10 @@ import {
   SettingsToggle,
   SettingsMenuSelectRow,
 } from '@/components/settings'
+import {
+  VOICE_MODELS,
+  DEFAULT_VOICE_MODEL,
+} from '@/components/app-shell/input/voice/voiceModels'
 
 export const meta: DetailsPageMeta = {
   navigator: 'settings',
@@ -46,19 +50,28 @@ export default function InputSettingsPage() {
   // Send message key state
   const [sendMessageKey, setSendMessageKey] = useState<'enter' | 'cmd-enter'>('enter')
 
+  // Voice dictation state
+  const [voiceEnabled, setVoiceEnabled] = useState(true)
+  const [voiceModel, setVoiceModel] = useState(DEFAULT_VOICE_MODEL)
+
   // Load settings on mount
   useEffect(() => {
     const loadSettings = async () => {
       if (!window.electronAPI) return
       try {
-        const [autoCapEnabled, spellCheckEnabled, sendKey] = await Promise.all([
-          window.electronAPI.getAutoCapitalisation(),
-          window.electronAPI.getSpellCheck(),
-          window.electronAPI.getSendMessageKey(),
-        ])
+        const [autoCapEnabled, spellCheckEnabled, sendKey, vEnabled, vModel] =
+          await Promise.all([
+            window.electronAPI.getAutoCapitalisation(),
+            window.electronAPI.getSpellCheck(),
+            window.electronAPI.getSendMessageKey(),
+            window.electronAPI.getVoiceEnabled(),
+            window.electronAPI.getVoiceModel(),
+          ])
         setAutoCapitalisation(autoCapEnabled)
         setSpellCheck(spellCheckEnabled)
         setSendMessageKey(sendKey)
+        setVoiceEnabled(vEnabled)
+        setVoiceModel(vModel)
       } catch (error) {
         console.error('Failed to load input settings:', error)
       }
@@ -80,6 +93,16 @@ export default function InputSettingsPage() {
     const key = value as 'enter' | 'cmd-enter'
     setSendMessageKey(key)
     window.electronAPI.setSendMessageKey(key)
+  }, [])
+
+  const handleVoiceEnabledChange = useCallback(async (enabled: boolean) => {
+    setVoiceEnabled(enabled)
+    await window.electronAPI.setVoiceEnabled(enabled)
+  }, [])
+
+  const handleVoiceModelChange = useCallback((value: string) => {
+    setVoiceModel(value)
+    window.electronAPI.setVoiceModel(value)
   }, [])
 
   return (
@@ -120,6 +143,37 @@ export default function InputSettingsPage() {
                       { value: 'cmd-enter', label: isMac ? t("settings.input.cmdEnterKey") : t("settings.input.ctrlEnterKey"), description: t("settings.input.cmdEnterKeyDesc") },
                     ]}
                   />
+                </SettingsCard>
+              </SettingsSection>
+
+              {/* Voice dictation */}
+              <SettingsSection
+                title={t('settings.input.voice')}
+                description={t('settings.input.voiceDesc')}
+              >
+                <SettingsCard>
+                  <SettingsToggle
+                    label={t('settings.input.voiceEnabled')}
+                    description={t('settings.input.voiceEnabledDesc')}
+                    checked={voiceEnabled}
+                    onCheckedChange={handleVoiceEnabledChange}
+                  />
+                  {voiceEnabled && (
+                    <SettingsMenuSelectRow
+                      label={t('settings.input.voiceModel')}
+                      description={t('settings.input.voiceModelDesc')}
+                      value={voiceModel}
+                      onValueChange={handleVoiceModelChange}
+                      options={VOICE_MODELS.map((vm) => ({
+                        value: vm.id,
+                        label: vm.label,
+                        description:
+                          vm.kind === 'realtime'
+                            ? 'Realtime — live transcript'
+                            : 'Batch — transcribe on stop',
+                      }))}
+                    />
+                  )}
                 </SettingsCard>
               </SettingsSection>
             </div>

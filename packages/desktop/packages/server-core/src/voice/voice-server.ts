@@ -1,0 +1,113 @@
+/**
+ * Standalone loopback WebSocket server for voice dictation.
+ *
+ * Runs separately from the main RPC `WsRpcServer` so raw PCM streaming never
+ * touches the RPC envelope/handshake protocol. Binds to 127.0.0.1 on a random
+ * port and authenticates with the same server token (passed in the `?token=`
+ * query, since a browser/renderer WebSocket cannot set an Authorization header).
+ */
+
+import { createServer, type Server as HttpServer } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
+import { WebSocketServer } from 'ws';
+import type { Logger } from '../runtime/platform';
+import {
+  createVoiceConnectionHandler,
+  type VoiceHandlerDeps,
+} from './voice-ws-handler';
+
+export interface VoiceServerOptions extends VoiceHandlerDeps {
+  /** Shared with the RPC server (instance.token); validated per upgrade. */
+  token: string;
+  host?: string;
+}
+
+export interface VoiceServer {
+  port: number;
+  /** ws://<host>:<port>/voice/stream (token is appended by the caller). */
+  url: string;
+  close(): Promise<void>;
+}
+
+/** Constant-time token comparison (loopback, but cheap to do right). */
+function tokenMatches(provided: string | null, expected: string): boolean {
+  if (provided == null) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export async function startVoiceServer(
+  options: VoiceServerOptions,
+): Promise<VoiceServer> {
+  const host = options.host ?? '127.0.0.1';
+  const log: Logger | undefined = options.logger;
+
+  const httpServer: HttpServer = createServer((_req, res) => {
+    res.writeHead(426, { 'Content-Type': 'text/plain' });
+    res.end('Upgrade Required');
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  const handle = createVoiceConnectionHandler(options);
+
+  httpServer.on('upgrade', (req, socket, head) => {
+    // A raw socket error during the upgrade window would otherwise crash the
+    // process with an unhandled 'error' event.
+    socket.on('error', () => {});
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://localhost');
+    } catch {
+      socket.destroy();
+      return;
+    }
+    if (url.pathname !== '/voice/stream') {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    if (!tokenMatches(url.searchParams.get('token'), options.token)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => handle(ws));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error) => reject(err);
+    httpServer.once('error', onError);
+    httpServer.listen(0, host, () => {
+      httpServer.removeListener('error', onError);
+      resolve();
+    });
+  });
+
+  const address = httpServer.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  log?.info(`voice: stream server listening on ws://${host}:${port}/voice/stream`);
+
+  // Idempotent close: terminate any open client so the http server can actually
+  // finish closing, and reuse the same promise for repeated calls.
+  let closePromise: Promise<void> | undefined;
+  return {
+    port,
+    url: `ws://${host}:${port}/voice/stream`,
+    close: () => {
+      if (!closePromise) {
+        closePromise = new Promise<void>((resolve) => {
+          for (const client of wss.clients) {
+            try {
+              client.terminate();
+            } catch {
+              // ignore
+            }
+          }
+          wss.close();
+          httpServer.close(() => resolve());
+        });
+      }
+      return closePromise;
+    },
+  };
+}

@@ -3,7 +3,7 @@
 import { loadShellEnv } from './shell-env'
 loadShellEnv()
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, session, shell } from 'electron'
 import { createHash, randomUUID } from 'crypto'
 import { hostname, homedir } from 'os'
 import { mkdirSync } from 'fs'
@@ -89,6 +89,7 @@ import type { PlatformServices } from '../runtime/platform'
 import { createElectronPlatform } from './platform'
 import type { HandlerDeps } from './handlers/handler-deps'
 import { bootstrapServer, releaseServerLock, parseServerPort } from '@craft-agent/server-core/bootstrap'
+import { startVoiceServer, resolveDesktopVoiceConfig, type VoiceServer } from '@craft-agent/server-core/voice'
 import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-agent/messaging-gateway'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { initModelRefreshService, getModelRefreshService, setFetcherPlatform } from '@craft-agent/server-core/model-fetchers'
@@ -195,6 +196,8 @@ let browserPaneManager: BrowserPaneManager | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
 let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
+let voiceServer: VoiceServer | null = null
+let voiceStreamUrl: string | null = null
 
 // Messaging gateway: the bootstrap handle is created once sessionManager is
 // available (inside createHandlerDeps) and populated with the WS publisher
@@ -401,6 +404,21 @@ app.whenReady().then(async () => {
 
   // Register thumbnail:// protocol handler (scheme was registered earlier, before app.whenReady)
   registerThumbnailHandler()
+
+  // Grant microphone access for the trusted main-window UI (voice dictation).
+  // The main window uses the default session (browser panes have their own
+  // partition + handler), so without this getUserMedia is blocked. Scope the
+  // grant to mic/media only — do NOT broaden the default session to every
+  // permission (geolocation, HID, serial, …).
+  const VOICE_PERMISSIONS = new Set(['media', 'audioCapture'])
+  session.defaultSession.setPermissionRequestHandler(
+    (_wc, permission, callback) => {
+      callback(VOICE_PERMISSIONS.has(permission))
+    },
+  )
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
+    VOICE_PERMISSIONS.has(permission),
+  )
 
   // Re-apply proxy settings now that Electron sessions are available
   // (first call before app.whenReady only configured Node-level proxy)
@@ -721,6 +739,19 @@ app.whenReady().then(async () => {
       moduleSink = instance.wsServer.push.bind(instance.wsServer)
       moduleClientResolver = resolveClientId
 
+      // Voice dictation: a separate loopback WS server (raw PCM, no RPC envelope)
+      // that reuses the RPC server token and transcribes via the qwen credentials.
+      try {
+        voiceServer = await startVoiceServer({
+          token: instance.token,
+          resolveConfig: resolveDesktopVoiceConfig,
+          logger: platform.logger,
+        })
+        voiceStreamUrl = `${voiceServer.url}?token=${encodeURIComponent(instance.token)}`
+      } catch (error) {
+        mainLog.error('Failed to start voice stream server:', error)
+      }
+
       // -----------------------------------------------------------------------
       // Messaging Gateway — attach the WS publisher, init local workspaces,
       // install the fan-out event sink. The handle was created inside
@@ -916,6 +947,9 @@ app.whenReady().then(async () => {
       })
       ipcMain.on('__get-ws-token', (e) => {
         e.returnValue = instance.token
+      })
+      ipcMain.on('__get-voice-stream-url', (e) => {
+        e.returnValue = voiceStreamUrl
       })
       ipcMain.on('__get-workspace-remote-config', (e) => {
         const wsId = windowManager?.getWorkspaceForWindow(e.sender.id)
@@ -1185,6 +1219,10 @@ app.on('before-quit', async (event) => {
 
     // Stop all model refresh timers
     getModelRefreshService().stopAll()
+
+    // Stop the voice stream server (terminates clients so it closes promptly).
+    await voiceServer?.close()
+    voiceServer = null
 
     // Stop messaging gateways so the WhatsApp worker subprocess exits cleanly.
     if (messagingHandle) {

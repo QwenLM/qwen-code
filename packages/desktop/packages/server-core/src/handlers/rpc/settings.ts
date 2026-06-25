@@ -82,6 +82,10 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.input.SET_AUTO_CAPITALISATION,
   RPC_CHANNELS.input.GET_SEND_MESSAGE_KEY,
   RPC_CHANNELS.input.SET_SEND_MESSAGE_KEY,
+  RPC_CHANNELS.input.GET_VOICE_MODEL,
+  RPC_CHANNELS.input.SET_VOICE_MODEL,
+  RPC_CHANNELS.input.GET_VOICE_ENABLED,
+  RPC_CHANNELS.input.SET_VOICE_ENABLED,
   RPC_CHANNELS.input.GET_SPELL_CHECK,
   RPC_CHANNELS.input.SET_SPELL_CHECK,
   RPC_CHANNELS.power.GET_KEEP_AWAKE,
@@ -653,6 +657,44 @@ export function registerSettingsHandlers(
         '@craft-agent/shared/config/storage'
       );
       setSendMessageKey(key);
+    },
+  );
+
+  // Get voice model setting
+  server.handle(RPC_CHANNELS.input.GET_VOICE_MODEL, async () => {
+    const { getVoiceModel } = await import(
+      '@craft-agent/shared/config/storage'
+    );
+    return getVoiceModel();
+  });
+
+  // Set voice model setting
+  server.handle(
+    RPC_CHANNELS.input.SET_VOICE_MODEL,
+    async (_ctx, model: string) => {
+      const { setVoiceModel } = await import(
+        '@craft-agent/shared/config/storage'
+      );
+      setVoiceModel(model);
+    },
+  );
+
+  // Get voice-enabled setting
+  server.handle(RPC_CHANNELS.input.GET_VOICE_ENABLED, async () => {
+    const { getVoiceEnabled } = await import(
+      '@craft-agent/shared/config/storage'
+    );
+    return getVoiceEnabled();
+  });
+
+  // Set voice-enabled setting
+  server.handle(
+    RPC_CHANNELS.input.SET_VOICE_ENABLED,
+    async (_ctx, enabled: boolean) => {
+      const { setVoiceEnabled } = await import(
+        '@craft-agent/shared/config/storage'
+      );
+      setVoiceEnabled(enabled);
     },
   );
 
