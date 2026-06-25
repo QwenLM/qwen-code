@@ -4,7 +4,7 @@ import { loadShellEnv } from './shell-env'
 loadShellEnv()
 
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, session, shell } from 'electron'
-import { createHash, randomUUID } from 'crypto'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import { hostname, homedir } from 'os'
 import { mkdirSync } from 'fs'
 import * as Sentry from '@sentry/electron/main'
@@ -411,14 +411,30 @@ app.whenReady().then(async () => {
   // grant to mic/media only — do NOT broaden the default session to every
   // permission (geolocation, HID, serial, …).
   const VOICE_PERMISSIONS = new Set(['media', 'audioCapture'])
+  const canUseVoicePermission = (
+    wc: { id: number } | null | undefined,
+    permission: string,
+  ) => Boolean(
+    wc &&
+    VOICE_PERMISSIONS.has(permission) &&
+    windowManager?.getWorkspaceForWindow(wc.id) != null,
+  )
   session.defaultSession.setPermissionRequestHandler(
-    (_wc, permission, callback) => {
-      callback(VOICE_PERMISSIONS.has(permission))
+    (wc, permission, callback) => {
+      const allowed = canUseVoicePermission(wc, permission)
+      if (!allowed) {
+        mainLog.debug(`defaultSession: denied permission '${permission}'`)
+      }
+      callback(allowed)
     },
   )
-  session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
-    VOICE_PERMISSIONS.has(permission),
-  )
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => {
+    const allowed = canUseVoicePermission(wc, permission)
+    if (!allowed) {
+      mainLog.debug(`defaultSession: denied permission check '${permission}'`)
+    }
+    return allowed
+  })
 
   // Re-apply proxy settings now that Electron sessions are available
   // (first call before app.whenReady only configured Node-level proxy)
@@ -740,14 +756,15 @@ app.whenReady().then(async () => {
       moduleClientResolver = resolveClientId
 
       // Voice dictation: a separate loopback WS server (raw PCM, no RPC envelope)
-      // that reuses the RPC server token and transcribes via the qwen credentials.
+      // with a voice-scoped token that transcribes via the qwen credentials.
       try {
+        const voiceToken = randomBytes(32).toString('hex')
         voiceServer = await startVoiceServer({
-          token: instance.token,
+          token: voiceToken,
           resolveConfig: resolveDesktopVoiceConfig,
           logger: platform.logger,
         })
-        voiceStreamUrl = `${voiceServer.url}?token=${encodeURIComponent(instance.token)}`
+        voiceStreamUrl = `${voiceServer.url}?token=${encodeURIComponent(voiceToken)}`
       } catch (error) {
         mainLog.error('Failed to start voice stream server:', error)
       }

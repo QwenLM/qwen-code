@@ -3,7 +3,7 @@
  *
  * Runs separately from the main RPC `WsRpcServer` so raw PCM streaming never
  * touches the RPC envelope/handshake protocol. Binds to 127.0.0.1 on a random
- * port and authenticates with the same server token (passed in the `?token=`
+ * port and authenticates with a voice-scoped token (passed in the `?token=`
  * query, since a browser/renderer WebSocket cannot set an Authorization header).
  */
 
@@ -17,7 +17,7 @@ import {
 } from './voice-ws-handler';
 
 export interface VoiceServerOptions extends VoiceHandlerDeps {
-  /** Shared with the RPC server (instance.token); validated per upgrade. */
+  /** Voice-scoped token validated per upgrade. */
   token: string;
   host?: string;
 }

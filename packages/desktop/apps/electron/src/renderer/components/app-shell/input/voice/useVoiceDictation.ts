@@ -5,7 +5,7 @@
  * server-side, so this hook doesn't need it.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVoiceCapture, type VoiceCaptureStatus } from './useVoiceCapture';
 
 /** Waveform bar count across the recording bar. */
@@ -101,21 +101,38 @@ export function useVoiceDictation(options: {
     start();
   }, [start]);
 
-  return {
-    available: Boolean(wsUrl),
-    status,
-    isRecording,
-    isConnecting,
-    isTranscribing,
-    isError: status === 'error',
-    isActive: isRecording || isConnecting || isTranscribing,
-    levels,
-    elapsedMs,
-    interimText,
-    errorMessage,
-    notice,
-    start: startDictation,
-    stop,
-    abort,
-  };
+  return useMemo(
+    () => ({
+      available: Boolean(wsUrl),
+      status,
+      isRecording,
+      isConnecting,
+      isTranscribing,
+      isError: status === 'error',
+      isActive: isRecording || isConnecting || isTranscribing,
+      levels,
+      elapsedMs,
+      interimText,
+      errorMessage,
+      notice,
+      start: startDictation,
+      stop,
+      abort,
+    }),
+    [
+      wsUrl,
+      status,
+      isRecording,
+      isConnecting,
+      isTranscribing,
+      levels,
+      elapsedMs,
+      interimText,
+      errorMessage,
+      notice,
+      startDictation,
+      stop,
+      abort,
+    ],
+  );
 }

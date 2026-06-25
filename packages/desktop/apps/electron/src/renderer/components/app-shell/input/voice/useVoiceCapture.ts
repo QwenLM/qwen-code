@@ -266,11 +266,16 @@ export function useVoiceCapture(
         ws.binaryType = 'arraybuffer';
         resourcesRef.current.ws = ws;
 
+        let lastLevelUpdate = 0;
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
           const { pcm, level } = floatToPcm16(
             event.inputBuffer.getChannelData(0),
           );
-          if (mountedRef.current) setAudioLevel(level);
+          const now = performance.now();
+          if (mountedRef.current && now - lastLevelUpdate >= 100) {
+            lastLevelUpdate = now;
+            setAudioLevel(level);
+          }
           if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
         };
 

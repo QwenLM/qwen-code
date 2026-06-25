@@ -72,7 +72,16 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   lookupHost?: VoiceHostLookup,
 ): Promise<void> {
   const hostname = new URL(baseUrl).hostname;
-  if (isLoopbackHost(hostname) || isIP(normalizeHostname(hostname)) !== 0) {
+  if (isLoopbackHost(hostname)) {
+    return;
+  }
+  const host = normalizeHostname(hostname);
+  if (isIP(host) !== 0) {
+    if (isPrivateNetworkIp(host)) {
+      throw new Error(
+        `Voice model '${model}': baseUrl is a private-network address.`,
+      );
+    }
     return;
   }
   let result: { address: string } | Array<{ address: string }>;

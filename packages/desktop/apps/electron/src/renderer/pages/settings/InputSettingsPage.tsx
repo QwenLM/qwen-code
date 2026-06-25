@@ -100,9 +100,9 @@ export default function InputSettingsPage() {
     await window.electronAPI.setVoiceEnabled(enabled)
   }, [])
 
-  const handleVoiceModelChange = useCallback((value: string) => {
+  const handleVoiceModelChange = useCallback(async (value: string) => {
     setVoiceModel(value)
-    window.electronAPI.setVoiceModel(value)
+    await window.electronAPI.setVoiceModel(value)
   }, [])
 
   return (

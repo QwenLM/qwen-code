@@ -115,6 +115,26 @@ describe('voice-model transport classification', () => {
 })
 
 describe('assertVoiceBaseUrlNetworkAllowed', () => {
+  it('rejects private IP-literal hosts without DNS lookup', async () => {
+    let called = false
+    const lookup = async () => {
+      called = true
+      return [{ address: '93.184.216.34' }]
+    }
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed('https://10.0.0.1:443', 'm', lookup),
+    ).rejects.toThrow(/private-network/)
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        'https://169.254.169.254',
+        'm',
+        lookup,
+      ),
+    ).rejects.toThrow(/private-network/)
+    expect(called).toBe(false)
+  })
+
   it('rejects a hostname that resolves to a private address', async () => {
     await expect(
       assertVoiceBaseUrlNetworkAllowed('https://evil.example', 'm', async () => [
