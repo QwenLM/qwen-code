@@ -47,20 +47,20 @@ Use this index to locate the right document for the user's question. Load only t
 
 ### Features
 
-| Topic                                       | Doc Path                           |
-| ------------------------------------------- | ---------------------------------- |
-| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md`   |
-| Auto mode (AI-driven approval)              | `docs/features/auto-mode.md`       |
-| Hooks (lifecycle hooks)                     | `docs/features/hooks.md`           |
-| MCP (Model Context Protocol)                | `docs/features/mcp.md`             |
-| Memory                                      | `docs/features/memory.md`          |
-| Skills system                               | `docs/features/skills.md`          |
-| Sub-agents                                  | `docs/features/sub-agents.md`      |
-| Sandbox / security                          | `docs/features/sandbox.md`         |
-| Slash commands                              | `docs/features/commands.md`        |
-| Headless / non-interactive mode             | `docs/features/headless.md`        |
-| LSP integration                             | `docs/features/lsp.md`             |
-| Token caching                               | `docs/features/token-caching.md`   |
+| Topic                                       | Doc Path                                |
+| ------------------------------------------- | --------------------------------------- |
+| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md`        |
+| Auto mode (AI-driven approval)              | `docs/features/auto-mode.md`            |
+| Hooks (lifecycle hooks)                     | `docs/features/hooks.md`                |
+| MCP (Model Context Protocol)                | `docs/features/mcp.md`                  |
+| Memory                                      | `docs/features/memory.md`               |
+| Skills system                               | `docs/features/skills.md`               |
+| Sub-agents                                  | `docs/features/sub-agents.md`           |
+| Sandbox / security                          | `docs/features/sandbox.md`              |
+| Slash commands                              | `docs/features/commands.md`             |
+| Headless / non-interactive mode             | `docs/features/headless.md`             |
+| LSP integration                             | `docs/features/lsp.md`                  |
+| Token caching                               | `docs/features/token-caching.md`        |
 | Language / i18n                             | `docs/features/language.md`             |
 | Arena mode                                  | `docs/features/arena.md`                |
 | Status line                                 | `docs/features/status-line.md`          |

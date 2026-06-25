@@ -187,6 +187,22 @@ describe('statsCommand', () => {
     );
   });
 
+  it('should display skill stats when using the "skills" subcommand', () => {
+    const skillsSubCommand = statsCommand.subCommands?.find(
+      (sc) => sc.name === 'skills',
+    );
+    if (!skillsSubCommand?.action) throw new Error('Subcommand has no action');
+
+    skillsSubCommand.action(mockContext, '');
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.SKILL_STATS,
+      },
+      expect.any(Number),
+    );
+  });
+
   describe('non-interactive mode', () => {
     let nonInteractiveContext: ReturnType<typeof createMockCommandContext>;
 
@@ -211,6 +227,38 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Session duration');
       expect(result.content).toContain('Prompts');
       expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('should return skill stats in text mode', async () => {
+      const skillsSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'skills',
+      );
+      if (!skillsSubCommand?.action)
+        throw new Error('Subcommand has no action');
+      nonInteractiveContext.session.stats.metrics.skills = {
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: {
+          review: { count: 2, success: 1, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      };
+
+      const result = (await skillsSubCommand.action(
+        nonInteractiveContext,
+        '',
+      )) as {
+        type: string;
+        messageType: string;
+        content: string;
+      };
+
+      expect(result.type).toBe('message');
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('Skill calls: 3 (2 ok, 1 fail)');
+      expect(result.content).toContain('review');
+      expect(result.content).toContain('testing');
     });
 
     it('should return info with zero duration if sessionStartTime is not available', async () => {
