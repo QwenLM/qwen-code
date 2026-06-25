@@ -644,6 +644,54 @@ describe('BaseLlmClient', () => {
       expect(mockGenerateContentStream).not.toHaveBeenCalled();
       expect(result.text).toBe('plain');
     });
+
+    it('propagates a mid-stream error and never returns the partial text', async () => {
+      async function* failingStream(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('partial');
+        throw new Error('connection reset');
+      }
+      mockGenerateContentStream.mockImplementation(async () => failingStream());
+
+      // A failure after some deltas have arrived rejects the whole call — the
+      // accumulated 'partial' text is never surfaced as a success — and, since
+      // the signal isn't aborted, the error is reported like the non-streaming
+      // path. This is the gateway-timeout-mid-inference scenario the PR targets.
+      await expect(
+        client.generateText({
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          model: 'test-model',
+          abortSignal: abortController.signal,
+          promptId: 'p',
+          stream: true,
+        }),
+      ).rejects.toThrow('connection reset');
+      expect(vi.mocked(reportError)).toHaveBeenCalled();
+    });
+
+    it('surfaces an abort that fires mid-stream and skips error reporting', async () => {
+      async function* abortingStream(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('chunk');
+        abortController.abort();
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      mockGenerateContentStream.mockImplementation(async () =>
+        abortingStream(),
+      );
+
+      // The `abortSignal.aborted` guard in the catch block rethrows the original
+      // error unwrapped and skips reportError, so a user-initiated cancellation
+      // mid-stream surfaces verbatim and is not logged as an API failure.
+      await expect(
+        client.generateText({
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          model: 'test-model',
+          abortSignal: abortController.signal,
+          promptId: 'p',
+          stream: true,
+        }),
+      ).rejects.toThrow('The operation was aborted.');
+      expect(vi.mocked(reportError)).not.toHaveBeenCalled();
+    });
   });
 
   describe('per-model resolution', () => {
