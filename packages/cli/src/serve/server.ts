@@ -4265,7 +4265,7 @@ export function createServeApp(
     }
 
     const serialized = JSON.stringify(entries);
-    if (serialized.length > 32 * 1024) {
+    if (Buffer.byteLength(serialized, 'utf8') > 32 * 1024) {
       res.status(413).json({
         error: 'runtime context payload exceeds 32 KiB limit',
         code: 'payload_too_large',

@@ -6165,18 +6165,26 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const appliedKeys: string[] = [];
+        const rejected: Array<{ key: string; reason: string }> = [];
         for (const [key, value] of Object.entries(
           entries as Record<string, unknown>,
         )) {
-          if (typeof value !== 'string') continue;
+          if (typeof value !== 'string') {
+            rejected.push({ key, reason: 'value_not_string' });
+            continue;
+          }
           if (value === '') {
-            config.removeRuntimeContextEntry(key);
-            appliedKeys.push(key);
+            if (config.getRuntimeContext().has(key)) {
+              config.removeRuntimeContextEntry(key);
+              appliedKeys.push(key);
+            }
           } else if (config.setRuntimeContextEntry(key, value)) {
             appliedKeys.push(key);
+          } else {
+            rejected.push({ key, reason: 'invalid_key_or_value' });
           }
         }
-        return { keys: appliedKeys };
+        return { keys: appliedKeys, rejected };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // Generate a one-sentence "where did I leave off" summary.
