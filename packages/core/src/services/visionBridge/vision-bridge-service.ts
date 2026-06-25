@@ -350,6 +350,13 @@ export async function runVisionBridge(params: {
       );
     }
 
+    // The transcription is no longer surfaced to the user or carried on the
+    // result; log it so a wrong primary-model answer can be traced to either a
+    // misread image or a downstream hallucination.
+    debugLogger.debug(
+      `vision bridge transcription via ${model}: ${description.slice(0, 500)}`,
+    );
+
     return {
       applied: true,
       status: 'ok',
