@@ -239,9 +239,7 @@ describe('detailed-span-attributes', () => {
         DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
       );
       expect(span.attrs['new_context_truncated']).toBe(true);
-      expect(span.attrs['new_context_original_length']).toBe(
-        '[USER PROMPT]\n'.length + 1024 * 1024 + 1,
-      );
+      expect(span.attrs['new_context_original_length']).toBe(1024 * 1024 + 1);
     });
 
     it('uses configured max length for user prompt attributes', () => {
@@ -253,9 +251,7 @@ describe('detailed-span-attributes', () => {
 
       expect(String(span.attrs['new_context'])).toHaveLength(50);
       expect(span.attrs['new_context_truncated']).toBe(true);
-      expect(span.attrs['new_context_original_length']).toBe(
-        '[USER PROMPT]\n'.length + 100,
-      );
+      expect(span.attrs['new_context_original_length']).toBe(100);
     });
   });
 
@@ -267,9 +263,7 @@ describe('detailed-span-attributes', () => {
     addUserPromptAttributes(config, userSpan, 'abcdef');
     expect(userSpan.attrs['new_context']).toBe('...');
     expect(userSpan.attrs['new_context_truncated']).toBe(true);
-    expect(userSpan.attrs['new_context_original_length']).toBe(
-      '[USER PROMPT]\nabcdef'.length,
-    );
+    expect(userSpan.attrs['new_context_original_length']).toBe('abcdef'.length);
 
     const systemSpan = createMockSpan();
     addSystemPromptAttributes(config, systemSpan, 'abcdef');
@@ -297,7 +291,7 @@ describe('detailed-span-attributes', () => {
     expect(toolInputSpan.attrs['tool_input']).toBe('...');
     expect(toolInputSpan.attrs['tool_input_truncated']).toBe(true);
     expect(toolInputSpan.attrs['tool_input_original_length']).toBe(
-      '[TOOL INPUT: Bash]\nabcdef'.length,
+      'abcdef'.length,
     );
 
     const toolResultSpan = createMockSpan();
@@ -305,7 +299,7 @@ describe('detailed-span-attributes', () => {
     expect(toolResultSpan.attrs['tool_result']).toBe('...');
     expect(toolResultSpan.attrs['tool_result_truncated']).toBe(true);
     expect(toolResultSpan.attrs['tool_result_original_length']).toBe(
-      '[TOOL RESULT: Read]\nabcdef'.length,
+      'abcdef'.length,
     );
   });
 
@@ -538,9 +532,7 @@ describe('detailed-span-attributes', () => {
 
       expect(span.attrs['tool_input_truncated']).toBe(true);
       expect(span.attrs['tool_input_original_length']).toBe(
-        '[TOOL INPUT: Bash]\n'.length +
-          DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH +
-          1,
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH + 1,
       );
     });
 
@@ -554,7 +546,7 @@ describe('detailed-span-attributes', () => {
       expect(String(span.attrs['tool_input'])).toHaveLength(50);
       expect(span.attrs['tool_input_truncated']).toBe(true);
       expect(span.attrs['tool_input_original_length']).toBe(
-        `[TOOL INPUT: ${toolName}]\n{"command":"ls"}`.length,
+        '{"command":"ls"}'.length,
       );
     });
 
@@ -586,9 +578,7 @@ describe('detailed-span-attributes', () => {
       addToolResultAttributes(config, span, 'Read', largeResult);
 
       expect(span.attrs['tool_result_truncated']).toBe(true);
-      expect(span.attrs['tool_result_original_length']).toBe(
-        '[TOOL RESULT: Read]\n'.length + 1024 * 1024 + 1,
-      );
+      expect(span.attrs['tool_result_original_length']).toBe(1024 * 1024 + 1);
     });
 
     it('keeps tool_result within the configured limit when tool name is long', () => {
@@ -601,7 +591,7 @@ describe('detailed-span-attributes', () => {
       expect(String(span.attrs['tool_result'])).toHaveLength(50);
       expect(span.attrs['tool_result_truncated']).toBe(true);
       expect(span.attrs['tool_result_original_length']).toBe(
-        `[TOOL RESULT: ${toolName}]\nfile contents here`.length,
+        'file contents here'.length,
       );
     });
   });

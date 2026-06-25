@@ -84,11 +84,11 @@ function truncatePrefixedContent(
   content: string,
   maxSize: number,
 ): { content: string; truncated: boolean; originalLength: number } {
-  const originalContent = `${prefix}${content}`;
-  const result = truncateContent(originalContent, maxSize);
+  const prefixedContent = `${prefix}${content}`;
+  const result = truncateContent(prefixedContent, maxSize);
   return {
     ...result,
-    originalLength: originalContent.length,
+    originalLength: content.length,
   };
 }
 
