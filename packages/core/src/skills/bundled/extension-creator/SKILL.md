@@ -212,7 +212,9 @@ visible in the current session.
   traversal, and symlink escapes unless the user explicitly approves the
   external target.
 - For `channels` in compiled templates, after trust review and build, verify
-  the `entry` file exists and can be imported, and that it exports a `plugin`
-  object with the expected `channelType` and a `createChannel` function.
+  the `entry` file exists, then read it and confirm it statically exports a
+  `plugin` object with the expected `channelType` and a `createChannel`
+  function. Do not dynamically import the module because import executes
+  top-level code before the user has approved the extension.
 - Keep the scaffold focused on the requested capability; do not add folders or
   build tooling beyond what the requested capabilities require.
