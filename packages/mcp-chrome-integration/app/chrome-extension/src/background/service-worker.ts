@@ -26,7 +26,7 @@ import {
 import { getDaemonConfig } from '../daemon/config.js';
 import { checkDaemonHealth } from '../daemon/discovery.js';
 
-/* global WebSocket, console, setTimeout */
+/* global WebSocket, console, setTimeout, chrome */
 
 const LOG_PREFIX = '[ServiceWorker]';
 
@@ -195,5 +195,27 @@ async function start(): Promise<void> {
   reconnectDelay = RECONNECT_MIN_MS;
   void connect();
 }
+
+/**
+ * MV3 keepalive. The service worker idles out after ~30s; without this the CDP
+ * tunnel silently drops whenever no puppeteer client is driving it, and the
+ * user has to keep the "Service Worker" DevTools window open to hold the worker
+ * awake. `chrome.alarms` is one of the few things that wakes a terminated
+ * worker — and each wake re-runs this file's top level, so `start()` re-opens
+ * the tunnel. The recurring `onAlarm` dispatch also keeps the idle timer from
+ * firing while the worker is alive.
+ */
+const KEEPALIVE_ALARM = 'cdp-tunnel-keepalive';
+// ponytail: 0.5min is the release-build floor; on a cold idle the reconnect can
+// lag up to one tick (~30s). Tighten only if that gap proves visible in use.
+chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  if (socket && socket.readyState === WebSocket.OPEN) return;
+  // Reconnect: a fresh worker has started===false (top-level start() also runs);
+  // a still-alive worker whose socket dropped has started===true.
+  if (started) void connect();
+  else void start();
+});
 
 void start();
