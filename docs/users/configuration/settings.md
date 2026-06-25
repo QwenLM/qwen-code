@@ -88,15 +88,15 @@ Settings are organized into categories. Most settings should be placed within th
 | `general.gitCoAuthor.pr`                   | boolean | Append a Qwen Code attribution line to pull request descriptions when running `gh pr create`.                                                                                                                                                                                                                   | `true`      |
 | `general.defaultFileEncoding`              | string  | Default encoding for new files. Use `"utf-8"` (default) for UTF-8 without BOM, or `"utf-8-bom"` for UTF-8 with BOM. Only change this if your project specifically requires BOM.                                                                                                                                 | `"utf-8"`   |
 | `general.cleanupPeriodDays`                | number  | Days to retain `~/.qwen/file-history/` session backups used by `/rewind`. Backups older than this are removed by a background pass that runs at most once per day. `0` = minimum retention (~1 hour): keeps sessions touched in the last hour plus the currently active one. Changes take effect after restart. | `30`        |
-| `general.language`                         | enum    | Language for the user interface. Use `"auto"` to detect from system settings, or a language code (e.g. `"zh-CN"`, `"fr"`). Custom codes can be added by placing JS locale files in `~/.qwen/locales/`. See [i18n](../features/language). Requires restart.                                                       | `"auto"`    |
-| `general.outputLanguage`                   | string  | Language for model output. Use `"auto"` to detect from system settings, or set a specific language. Requires restart.                                                                                                                                                                                          | `"auto"`    |
-| `general.dynamicCommandTranslation`        | boolean | Enable AI translation of dynamic slash-command descriptions. When disabled, dynamic commands keep their original descriptions and skip translation model calls.                                                                                                                                                | `false`     |
+| `general.language`                         | enum    | Language for the user interface. Use `"auto"` to detect from system settings, or a language code (e.g. `"zh-CN"`, `"fr"`). Custom codes can be added by placing JS locale files in `~/.qwen/locales/`. See [i18n](../features/language). Requires restart.                                                      | `"auto"`    |
+| `general.outputLanguage`                   | string  | Language for model output. Use `"auto"` to detect from system settings, or set a specific language. Requires restart.                                                                                                                                                                                           | `"auto"`    |
+| `general.dynamicCommandTranslation`        | boolean | Enable AI translation of dynamic slash-command descriptions. When disabled, dynamic commands keep their original descriptions and skip translation model calls.                                                                                                                                                 | `false`     |
 
 #### output
 
-| Setting         | Type   | Description                   | Default  | Possible Values    |
-| --------------- | ------ | ----------------------------- | -------- | ------------------ |
-| `output.format`         | string  | The format of the CLI output.                            | `"text"` | `"text"`, `"json"` |
+| Setting                 | Type    | Description                                                    | Default  | Possible Values    |
+| ----------------------- | ------- | -------------------------------------------------------------- | -------- | ------------------ |
+| `output.format`         | string  | The format of the CLI output.                                  | `"text"` | `"text"`, `"json"` |
 | `output.showTimestamps` | boolean | Show an `[HH:MM:SS]` timestamp before each assistant response. | `false`  |                    |
 
 #### ui
@@ -287,11 +287,12 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 
 #### memory
 
-| Setting                          | Type    | Description                                                                       | Default |
-| -------------------------------- | ------- | --------------------------------------------------------------------------------- | ------- |
-| `memory.enableManagedAutoMemory` | boolean | Enable background extraction of memories from conversations.                      | `true`  |
-| `memory.enableManagedAutoDream`  | boolean | Enable automatic consolidation (deduplication and cleanup) of collected memories. | `true`  |
-| `memory.enableAutoSkill`         | boolean | Enable background review for reusable project skills after tool-heavy sessions.   | `true`  |
+| Setting                          | Type    | Description                                                                                                                    | Default |
+| -------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| `memory.enableManagedAutoMemory` | boolean | Enable background extraction of memories from conversations.                                                                   | `true`  |
+| `memory.enableManagedAutoDream`  | boolean | Enable automatic consolidation (deduplication and cleanup) of collected memories.                                              | `true`  |
+| `memory.enableAutoSkill`         | boolean | Enable background review for reusable project skills after tool-heavy sessions.                                                | `true`  |
+| `memory.autoSkillConfirm`        | boolean | Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately. | `true`  |
 
 See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, and `/dream` commands.
 
@@ -469,11 +470,11 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 >
 > **Experimental features.** These toggles gate in-development capabilities and may change or be removed in future releases.
 
-| Setting                             | Type    | Description                                                                                                                                                                                                                                                                | Default |
-| ----------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `experimental.cron`                 | boolean | Enable in-session cron/loop tools (`cron_create`, `cron_list`, `cron_delete`) so the model can create recurring prompts. Can be disabled via the `QWEN_CODE_DISABLE_CRON=1` environment variable. Requires restart.                                                         | `true`  |
-| `experimental.agentTeam`            | boolean | Enable agent-team collaboration tools (`team_create`, `task_create`, `task_update`, `send_message`, etc.) for multi-agent coordination. Can also be enabled via `QWEN_CODE_ENABLE_AGENT_TEAM=1`. Requires restart.                                                          | `false` |
-| `experimental.artifact`             | boolean | Enable the Artifact tool, letting the model publish a self-contained HTML page and open it in the browser. Interactive, non-SDK sessions only. Toggle via `QWEN_CODE_ENABLE_ARTIFACT=1` / `QWEN_CODE_DISABLE_ARTIFACT=1`. Requires restart.                                 | `false` |
+| Setting                             | Type    | Description                                                                                                                                                                                                                                                                                          | Default |
+| ----------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `experimental.cron`                 | boolean | Enable in-session cron/loop tools (`cron_create`, `cron_list`, `cron_delete`) so the model can create recurring prompts. Can be disabled via the `QWEN_CODE_DISABLE_CRON=1` environment variable. Requires restart.                                                                                  | `true`  |
+| `experimental.agentTeam`            | boolean | Enable agent-team collaboration tools (`team_create`, `task_create`, `task_update`, `send_message`, etc.) for multi-agent coordination. Can also be enabled via `QWEN_CODE_ENABLE_AGENT_TEAM=1`. Requires restart.                                                                                   | `false` |
+| `experimental.artifact`             | boolean | Enable the Artifact tool, letting the model publish a self-contained HTML page and open it in the browser. Interactive, non-SDK sessions only. Toggle via `QWEN_CODE_ENABLE_ARTIFACT=1` / `QWEN_CODE_DISABLE_ARTIFACT=1`. Requires restart.                                                          | `false` |
 | `experimental.emitToolUseSummaries` | boolean | Generate a short LLM-based label after each tool-call batch completes. See [Tool-Use Summaries](../features/tool-use-summaries). Requires a fast model to be configured (`fastModel`); silently skipped otherwise. Can be overridden per-session with `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0` or `=1`. | `true`  |
 
 #### mcpServers

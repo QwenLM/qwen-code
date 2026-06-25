@@ -555,9 +555,15 @@ export class IdeClient {
 
   private getPortFromEnv(): string | undefined {
     const port = process.env['QWEN_CODE_IDE_SERVER_PORT'];
-    if (!port) {
+    if (!port || !/^\d+$/.test(port)) {
       return undefined;
     }
+
+    const portNumber = Number(port);
+    if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+      return undefined;
+    }
+
     return port;
   }
 
