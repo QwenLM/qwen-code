@@ -7,7 +7,6 @@
   "type": "module",
   "workspaces": [
     "packages/*",
-    "packages/mcp-chrome-integration/app/*",
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",

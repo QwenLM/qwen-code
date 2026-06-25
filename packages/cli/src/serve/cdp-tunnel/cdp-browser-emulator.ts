@@ -23,7 +23,7 @@
  * and events from the tab are re-tagged with the page session id on the way
  * back via {@link CdpBrowserEmulator.emitTabEvent}.
  *
- * See `packages/mcp-chrome-integration/docs/06-plan-c-cdp-tunnel.md`.
+ * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
 
 /** A CDP JSON-RPC frame on the wire (either direction). */

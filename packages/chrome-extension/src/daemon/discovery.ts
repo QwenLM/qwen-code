@@ -23,9 +23,7 @@ export async function checkDaemonHealth(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/health`, {
-      headers: config.token
-        ? { Authorization: `Bearer ${config.token}` }
-        : {},
+      headers: config.token ? { Authorization: `Bearer ${config.token}` } : {},
       signal: controller.signal,
     });
     if (!res.ok) {

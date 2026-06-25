@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 
-/* global process, console */
-
 /**
  * 将静态资源同步到目标扩展目录（默认 dist/extension 或通过 EXTENSION_OUT_DIR/--target 指定）。
  * - 复制 public 下的静态资源（manifest、icons）

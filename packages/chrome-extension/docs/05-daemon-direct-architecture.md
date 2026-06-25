@@ -54,6 +54,7 @@ daemon WS carry the same `mcp_message` frames.
   and inbound `handleMessage()` → `onmessage`.
 
 Data flow to reproduce over the daemon WS:
+
 ```
 agent MCP client → SdkControlClientTransport.send
   → daemon: sendMcpMessage('chrome-tools', jsonrpc)
@@ -92,6 +93,7 @@ agent MCP client → SdkControlClientTransport.send
 ## Daemon lifecycle (issue #5626 Q3)
 
 The extension can't spawn a process. Options, lightest-first:
+
 1. Manual `qwen serve` + `/health` discovery (Phase 1 default, zero install).
 2. Opt-in OS service registration so a daemon is always up — reuse the per-OS
    path logic in `native-host/scripts/` (it already writes the NativeMessagingHosts

@@ -20,7 +20,7 @@
  *
  * Single tab, single debugger.
  *
- * See `packages/mcp-chrome-integration/docs/06-plan-c-cdp-tunnel.md`.
+ * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
 
 /* global chrome, console, setInterval, clearInterval */

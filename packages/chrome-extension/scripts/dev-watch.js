@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 
-/* global process, console */
-
 /**
  * 开发模式：同步资源 + esbuild watch 到 dist/extension（可通过 EXTENSION_OUT_DIR 覆盖）。
  */

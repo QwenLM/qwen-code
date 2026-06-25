@@ -21,7 +21,7 @@
  * {@link CdpTunnelRegistry}. If no extension is connected the `/cdp` socket is
  * closed immediately with a clear reason (puppeteer surfaces it).
  *
- * See `packages/mcp-chrome-integration/docs/06-plan-c-cdp-tunnel.md`.
+ * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
 
 import type { WebSocket } from 'ws';

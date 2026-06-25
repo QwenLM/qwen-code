@@ -17,7 +17,7 @@
  *          npm start -- serve --port 4170 --hostname 127.0.0.1 --no-web \
  *          --workspace <abs-repo> --allow-origin chrome-extension://<ext-id>
  *   3. chrome://extensions → Load unpacked →
- *        packages/mcp-chrome-integration/app/chrome-extension/dist/extension
+ *        packages/chrome-extension/dist/extension
  *   4. Open the extension's "Service Worker" DevTools to keep the worker awake
  *      (until the extension ships a chrome.alarms keepalive), and have a normal
  *      page as the active tab.

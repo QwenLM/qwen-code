@@ -20,7 +20,7 @@
  * owns the socket and feeds inbound `cdp_result` / `cdp_event` / `cdp_detach`
  * frames back into the link.
  *
- * See `packages/mcp-chrome-integration/docs/06-plan-c-cdp-tunnel.md`.
+ * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
 
 import type { CdpBrowserEmulator } from './cdp-browser-emulator.js';
