@@ -223,10 +223,10 @@ jobs:
             jq -c 'map(. + {autofixTier: 2})' \
               "${WORKDIR}/tier2.json" > "${WORKDIR}/tier2.with-tier.json"
 
-            # Tier 1 first (priority), then tier 2; de-dupe by number preserving
-            # that order, drop comments, keep the top 10.
+            # Tier 1 first (priority), then tier 2; reserve a small tier-2
+            # slice so a full tier-1 slate cannot starve recent unattended bugs.
             jq -c -s \
-              '(.[0] + .[1])
+              '(.[0][0:7] + .[1][0:3])
                | reduce .[] as $x ([]; if any(.[]; .number == $x.number) then . else . + [$x] end)
                | .[0:10] | map(del(.comments))' \
               "${WORKDIR}/tier1.json" "${WORKDIR}/tier2.with-tier.json" > "${WORKDIR}/candidates.json"
