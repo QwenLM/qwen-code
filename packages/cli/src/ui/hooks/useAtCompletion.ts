@@ -400,10 +400,9 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         if (slowSearchTimer.current) {
           clearTimeout(slowSearchTimer.current);
         }
-        dispatch({
-          type: 'SEARCH_SUCCESS',
-          payload: [...extensionSuggestions, ...resourceSuggestions],
-        });
+        // When drilling into a specific server's resources (`@server:partial`),
+        // extension suggestions are noise — only show resource results here.
+        dispatch({ type: 'SEARCH_SUCCESS', payload: resourceSuggestions });
         return;
       }
 

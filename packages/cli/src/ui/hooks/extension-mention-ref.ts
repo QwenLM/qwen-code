@@ -63,6 +63,7 @@ export function getExtensionSuggestions(
   pattern: string,
 ): Suggestion[] {
   if (!config) return [];
+  if (config.isTrustedFolder?.() === false) return [];
   const extensions = config.getActiveExtensions?.() ?? [];
   if (extensions.length === 0) return [];
 

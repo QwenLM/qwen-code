@@ -244,6 +244,11 @@ export async function resolveAtCommandQuery({
         atPathToResolvedSpecMap.set(originalAtPath, pathName);
         continue;
       }
+      onDebugMessage(
+        `Extension "${extRef.name}" not found among active extensions. ` +
+          `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+      );
+      continue;
     }
 
     // MCP resource reference (`@server:uri`): detected BEFORE filesystem
