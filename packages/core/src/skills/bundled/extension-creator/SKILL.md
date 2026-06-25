@@ -26,8 +26,8 @@ scaffold command and bundled templates.
    `qwen extensions new <path> [template]`. If the extension already exists,
    skip scaffolding and read the existing `qwen-extension.json` before
    customizing it.
-4. If any command in the workflow fails, stop and report the error to the user
-   before continuing.
+4. If any command in the workflow fails, stop and report the error to the user.
+   Do not proceed to the next step until the user confirms how to continue.
 5. Customize the generated files for the user's extension.
 6. Check the extension shape before handing it back.
 7. Link the extension locally with `qwen extensions link <path>`.
@@ -94,10 +94,10 @@ Only run `npm install` and `npm run build` inside directories scaffolded by
 review above is complete.
 
 ```bash
-cd <extension-path>
-npm install
-npm run build
-qwen extensions link .
+cd <extension-path> && \
+  npm install && \
+  npm run build && \
+  qwen extensions link .
 ```
 
 If any step exits non-zero, stop and report the error to the user. Do not link
