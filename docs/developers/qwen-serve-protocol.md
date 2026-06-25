@@ -129,7 +129,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_stats',
- 'session_lsp',
+ 'session_lsp', 'session_status',
  'session_close', 'session_metadata', 'mcp_guardrails',
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
@@ -160,6 +160,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
 
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
+
+`session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id (`clientCount` / `hasActivePrompt` and the core fields). Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
 
 `session_approval_mode_control`, `workspace_tool_toggle`, `workspace_init`, and `workspace_mcp_restart` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) advertise the four mutation control routes documented under "Mutation: approval, tools, init, MCP restart" below. All four are strict-gated by the PR 15 mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
 
@@ -296,7 +298,10 @@ warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
 `mcp_budget_exhausted`, `rate_limit_hits`, and
-`workspace_status_unavailable`.
+`workspace_status_unavailable`. During the short window after the listener is
+ready but before the full runtime is mounted, `/daemon/status` may report
+`daemon_runtime_starting`; if the async runtime mount fails, it reports
+`daemon_runtime_failed` while non-status runtime routes return `503`.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits
@@ -346,6 +351,7 @@ Capability tags:
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
+- `session_status` → `GET /session/:id/status`
 
 Common status cell:
 

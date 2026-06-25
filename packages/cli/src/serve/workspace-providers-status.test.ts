@@ -158,6 +158,49 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('reports custom providerProtocol models under their resolved auth type', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'custom-model',
+        baseUrl: 'https://idealab.example/v1',
+      },
+      providerProtocol: { idealab: 'openai' },
+      modelProviders: {
+        idealab: [
+          {
+            id: 'custom-model',
+            name: 'Idealab Current',
+            baseUrl: 'https://idealab.example/v1',
+          },
+        ],
+        unmapped: [{ id: 'ignored-model', name: 'Ignored Model' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const openaiProvider = result.providers.find(
+      (p) => p.authType === 'openai',
+    );
+
+    expect(openaiProvider?.models).toMatchObject([
+      {
+        modelId: 'custom-model(openai)',
+        baseModelId: 'custom-model',
+        name: 'Idealab Current',
+        baseUrl: 'https://idealab.example/v1',
+        isCurrent: true,
+      },
+    ]);
+    expect(openaiProvider?.current).toBe(true);
+    expect(
+      result.providers
+        .flatMap((p) => p.models)
+        .some((m) => m.modelId === 'ignored-model(openai)'),
+    ).toBe(false);
+  });
+
   it('sanitizes credentials from provider warning URLs', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

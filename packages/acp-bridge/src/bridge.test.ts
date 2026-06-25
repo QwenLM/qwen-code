@@ -780,6 +780,7 @@ describe('createAcpSessionBridge', () => {
       attached: false,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { configOptions: [] },
       compactedReplay: [],
       liveJournal: [],
@@ -884,6 +885,7 @@ describe('createAcpSessionBridge', () => {
       attached: false,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { modes: null },
       lastEventId: 0,
     });
@@ -928,6 +930,7 @@ describe('createAcpSessionBridge', () => {
       attached: true,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { _meta: { tag: 'restored-foo' } },
       lastEventId: expect.any(Number),
     });
@@ -5233,6 +5236,39 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('getSessionSummary', () => {
+    it('returns the live summary for a known session id', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const summary = bridge.getSessionSummary(session.sessionId);
+      expect(summary).toMatchObject({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        hasActivePrompt: false,
+      });
+      // Agrees with the list builder for the same session — same source,
+      // single item.
+      const fromList = bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId);
+      expect(summary).toEqual(fromList);
+
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for an unknown session id', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      expect(() => bridge.getSessionSummary('missing')).toThrow(
+        SessionNotFoundError,
+      );
+      await bridge.shutdown();
+    });
+  });
+
   describe('setSessionModel', () => {
     /** Set up a channel where the agent records setSessionModel calls. */
     async function setup() {
@@ -8187,6 +8223,36 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('enriched listWorkspaceSessions', () => {
+    it('reports active prompt state when attaching to an existing session', async () => {
+      let finishPrompt: ((value: PromptResponse) => void) | undefined;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            promptImpl: () =>
+              new Promise<PromptResponse>((resolve) => {
+                finishPrompt = resolve;
+              }),
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'keep running' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(finishPrompt).toBeDefined();
+      });
+      const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(attached.attached).toBe(true);
+      expect(attached.hasActivePrompt).toBe(true);
+
+      finishPrompt!({ stopReason: 'end_turn' });
+      await prompt;
+      await bridge.shutdown();
+    });
+
     it('includes createdAt and metadata fields', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

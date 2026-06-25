@@ -60,6 +60,8 @@ import {
   setActiveGoal,
   clearActiveGoal,
   createDuplicateProviderToolCallResponse,
+  markDuplicateProviderToolCallResponseSent,
+  findRepeatedDuplicateProviderToolCall,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -513,6 +515,11 @@ export const useGeminiStream = (
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  // Scoped to a top-level submit and cleared below before a new user prompt.
+  // Repeated duplicate provider ids within that submit are terminal/drop-only.
+  const duplicateProviderToolCallResponseIdsRef = useRef<Set<string>>(
+    new Set(),
+  );
   const pendingDuplicateToolResponsesRef = useRef<
     PendingDuplicateToolResponses[]
   >([]);
@@ -775,6 +782,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
+    // Aborting a tick-in-flight ends any self-paced /loop: drop pending loop
+    // wakeups so the loop doesn't resume after the cancelled tick. Only clears
+    // session wakeups (never cron jobs); lazily-creating an empty scheduler
+    // here is inert.
+    const loopWakeupsCancelled =
+      config.getCronScheduler()?.cancelAllWakeups() ?? 0;
     // Cancel any in-flight auxiliary work so its Promise.then doesn't add
     // stale content after the user cancelled.
     for (const ac of auxiliaryAbortRefsRef.current) {
@@ -794,6 +807,7 @@ export const useGeminiStream = (
       config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
+      loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
     );
     logApiCancel(config, cancellationEvent);
 
@@ -807,6 +821,17 @@ export const useGeminiStream = (
       },
       Date.now(),
     );
+    if (loopWakeupsCancelled > 0) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: `Stopped the self-paced loop: cancelled ${loopWakeupsCancelled} pending wakeup${
+            loopWakeupsCancelled === 1 ? '' : 's'
+          }.`,
+        },
+        Date.now(),
+      );
+    }
     setPendingHistoryItem(null);
     clearRetryCountdown();
     // Wrap the consumer callback so a throw in AppContainer's cancel
@@ -1977,6 +2002,23 @@ export const useGeminiStream = (
         const historyCallIdsWithResponse: Set<string> = geminiClient
           ? geminiClient.getHistoryFunctionResponseIds()
           : new Set<string>();
+        const handledProviderIds = new Set([
+          ...handledProviderToolCallIdsRef.current,
+          ...historyCallIdsWithResponse,
+        ]);
+        const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
+          toolCallRequests,
+          (request) => request.providerCallId,
+          handledProviderIds,
+          duplicateProviderToolCallResponseIdsRef.current,
+        );
+        if (repeatedDuplicateRequest?.providerCallId) {
+          debugLogger.debug(
+            `[processGeminiStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
+          );
+          loopDetectedRef.current = true;
+          return StreamProcessingStatus.Completed;
+        }
 
         for (const request of toolCallRequests) {
           const providerCallId = request.providerCallId;
@@ -1989,6 +2031,11 @@ export const useGeminiStream = (
             handledProviderToolCallIdsRef.current.has(providerCallId) ||
             historyCallIdsWithResponse.has(providerCallId)
           ) {
+            markDuplicateProviderToolCallResponseSent(
+              providerCallId,
+              duplicateProviderToolCallResponseIdsRef.current,
+            );
+
             const response = createDuplicateProviderToolCallResponse(request);
             debugLogger.debug(
               `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
@@ -2116,6 +2163,7 @@ export const useGeminiStream = (
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
+        duplicateProviderToolCallResponseIdsRef.current.clear();
         pendingDuplicateToolResponsesRef.current = [];
         immediateDuplicateToolResponsesRef.current = null;
       }
