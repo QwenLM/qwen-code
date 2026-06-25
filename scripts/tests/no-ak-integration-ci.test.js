@@ -94,9 +94,10 @@ describe('no-AK integration CI wiring', () => {
       "name: 'Back off for stale merge ref to refresh'",
     );
 
-    // The cheap sanity guard stays: fail loud if HEAD lacks the PR head.
+    // The cheap sanity guard stays: fail loud if HEAD lacks the expected head
+    // (PR head, or the merge-queue head once this job also runs on merge_group).
     expect(ubuntuJob).toContain(
-      "name: 'Verify PR checkout includes head commit'",
+      "name: 'Verify checkout includes expected head commit'",
     );
     expect(ubuntuJob).toContain('git merge-base --is-ancestor');
     expect(ubuntuJob).toContain('github.event.pull_request.head.sha');

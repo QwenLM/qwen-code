@@ -490,6 +490,23 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # Shallow, mirroring the Ubuntu gate: nothing here walks git history,
+          # and a full-history clone is the heaviest transfer on the ECS runner.
+          fetch-depth: 1
+
+      # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS
+      # via classify_pr, so fail loud if the checkout lacks the merge-queue head
+      # rather than silently testing the wrong tree into a merge.
+      - name: 'Verify checkout includes expected head commit'
+        env:
+          EXPECTED_SHA: '${{ github.event.merge_group.head_sha }}'
+        run: |-
+          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
+            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
+            git log --oneline --decorate -5
+            exit 1
+          fi
 
       # Hosted downloads Node; self-hosted ECS reuses its pre-installed Node 22
       # (it can't reach nodejs.org reliably). Mirrors the Ubuntu gate.
