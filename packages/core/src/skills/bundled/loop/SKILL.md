@@ -46,7 +46,7 @@ Use this path only when the user supplied a prompt and no interval.
 2. If this tick opens with a `<task-notification>` block (a monitor or background event re-invoked you, not a bare `/loop` wakeup prompt), handle that event before re-running the prompt.
    - If the notification says the watched condition was met, finish the loop.
    - If a monitor auto-stopped on idle or max-events, restart it once if the watch is still useful, re-arm the fallback, report the restart count to the user, and include that count in the LoopWakeup prompt or reason (for example, `monitor restarted 1/1 time`) so it survives context compaction. If it auto-stops again on the next tick, end the loop and report the repeated auto-stop to the user.
-   - If the signal is ambiguous, re-arm a shorter follow-up and investigate on the next tick.
+   - If the signal is ambiguous, re-arm a shorter follow-up and investigate on the next tick. If the signal remains ambiguous for three consecutive ticks, end the loop and report that the watch could not reach a clear conclusion.
 3. Run the parsed prompt immediately now.
    - If it is a slash command, invoke it via the Skill tool.
    - Otherwise, act on it directly.

@@ -66,6 +66,7 @@ describe('bundled loop skill', () => {
     expect(body).toContain('report the repeated auto-stop to the user');
     expect(body).toContain('report the restart count');
     expect(body).toContain('If the signal is ambiguous');
+    expect(body).toContain('three consecutive ticks');
     expect(body).toContain('Do not omit it just because something is watching');
     expect(body).toContain('the work may hang');
     expect(body).toContain(
