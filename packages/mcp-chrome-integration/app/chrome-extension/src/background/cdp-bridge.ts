@@ -18,14 +18,10 @@
  *                                  has no onDetach of its own; the daemon
  *                                  synthesizes `Target.detachedFromTarget`)
  *
- * Single tab, single debugger. Mutually exclusive with the network-only
- * `chrome_network_debugger_*` tools (they share the one debugger session), so
- * an attach is refused while a network capture is in progress and vice versa.
+ * Single tab, single debugger.
  *
  * See `packages/mcp-chrome-integration/docs/06-plan-c-cdp-tunnel.md`.
  */
-
-import { isNetworkCapturing } from './browser-network-tools';
 
 /* global chrome, console */
 
@@ -77,14 +73,6 @@ let activeSend: CdpSend | null = null;
 /** Whether a frame `type` is one this bridge owns (daemon → extension). */
 export function isCdpBridgeFrame(type: unknown): boolean {
   return type === 'cdp_command' || type === 'cdp_attach';
-}
-
-/**
- * Whether the CDP tunnel currently has the debugger attached. The
- * network-debugger tools check this to enforce the single-debugger mutex.
- */
-export function isCdpTunnelAttached(): boolean {
-  return attachedTabId !== null;
 }
 
 /**
@@ -172,19 +160,6 @@ async function handleAttach(
   frame: CdpAttachFrame,
   send: CdpSend,
 ): Promise<void> {
-  // Mutual exclusion with the network-debugger tools (one debugger per tab).
-  if (isNetworkCapturing()) {
-    send({
-      type: 'cdp_attached',
-      id: frame.id,
-      error: {
-        message:
-          'A network capture is in progress; stop it before opening the CDP tunnel',
-      },
-    });
-    return;
-  }
-
   try {
     const tabId = await getActiveTabId();
     await new Promise<void>((resolve, reject) => {
