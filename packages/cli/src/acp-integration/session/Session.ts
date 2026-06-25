@@ -57,6 +57,7 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  buildContextUsage,
   injectPermissionRulesIfMissing,
   NotificationType,
   persistPermissionOutcome,
@@ -1674,6 +1675,11 @@ export class Session implements SessionContext {
         this.#getCurrentChat().getLastModelMessageText?.() ||
         '[no response text]';
 
+      const contextUsage = buildContextUsage(
+        this.config.getContentGeneratorConfig()?.contextWindowSize,
+        this.lastPromptTokenCount,
+      );
+
       const response = await messageBus.request<
         HookExecutionRequest,
         HookExecutionResponse
@@ -1684,6 +1690,7 @@ export class Session implements SessionContext {
           input: {
             stop_hook_active: true,
             last_assistant_message: responseText,
+            ...contextUsage,
           },
           signal: pendingSend.signal,
         },

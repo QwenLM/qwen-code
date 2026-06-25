@@ -1968,6 +1968,7 @@ export async function loadCliConfig(
     cliVersion: await getCliVersion(),
     ideMode,
     chatCompression: settings.model?.chatCompression,
+    autoCompactThreshold: settings.context?.autoCompactThreshold,
     folderTrust,
     interactive,
     trustedFolder,

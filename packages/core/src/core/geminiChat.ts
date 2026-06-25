@@ -1766,7 +1766,10 @@ export class GeminiChat {
       const contextLimit =
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const { hard } = computeThresholds(contextLimit);
+      const { hard } = computeThresholds(
+        contextLimit,
+        this.config.getAutoCompactThreshold(),
+      );
       const imageTokenEstimate = resolveSlimmingConfig(
         this.config.getChatCompression(),
       ).imageTokenEstimate;

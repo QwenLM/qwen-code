@@ -1667,6 +1667,16 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      autoCompactThreshold: {
+        type: 'number',
+        label: 'Auto-Compact Threshold',
+        category: 'Context',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Fraction of context window at which auto-compaction triggers (0-1). Default is 0.7 (70%).',
+        showInDialog: false,
+      },
     },
   },
 

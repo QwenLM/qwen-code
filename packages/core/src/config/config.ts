@@ -886,6 +886,7 @@ export interface ConfigParameters {
   importFormat?: 'tree' | 'flat';
   chatRecording?: boolean;
   chatCompression?: ChatCompressionSettings;
+  autoCompactThreshold?: number;
   interactive?: boolean;
   trustedFolder?: boolean;
   defaultFileEncoding?: FileEncodingType;
@@ -1332,6 +1333,7 @@ export class Config {
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
   private readonly chatCompression: ChatCompressionSettings | undefined;
+  private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
@@ -1560,6 +1562,7 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
     this.chatCompression = params.chatCompression;
+    this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
@@ -1745,9 +1748,22 @@ export class Config {
                 );
                 break;
               case 'Stop': {
+                // Extract context usage data from input if present
+                const contextUsageData =
+                  input['context_usage'] !== undefined &&
+                  input['context_limit'] !== undefined &&
+                  input['input_tokens'] !== undefined
+                    ? {
+                        context_usage: input['context_usage'] as number,
+                        context_limit: input['context_limit'] as number,
+                        input_tokens: input['input_tokens'] as number,
+                      }
+                    : undefined;
+
                 const stopResult = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
+                  contextUsageData,
                   signal,
                 );
                 result = stopResult.finalOutput
@@ -4568,6 +4584,14 @@ export class Config {
 
   getChatCompression(): ChatCompressionSettings | undefined {
     return this.chatCompression;
+  }
+
+  getAutoCompactThreshold(): number | undefined {
+    const threshold = this.autoCompactThreshold;
+    if (typeof threshold === 'number' && threshold > 0 && threshold <= 1) {
+      return threshold;
+    }
+    return undefined;
   }
 
   isInteractive(): boolean {

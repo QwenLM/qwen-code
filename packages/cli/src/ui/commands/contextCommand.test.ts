@@ -49,6 +49,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getChatCompression: vi.fn().mockReturnValue(undefined),
+    getAutoCompactThreshold: vi.fn(),
   } as unknown as Config;
 }
 
@@ -74,6 +75,7 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
   });
 
@@ -165,6 +167,7 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
