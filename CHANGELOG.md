@@ -12,6 +12,60 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.19.2](https://github.com/QwenLM/qwen-code/releases/tag/v0.19.2) - 2026-06-24
+
+### Added
+
+- serve: Add remote LSP status route ([#5741](https://github.com/QwenLM/qwen-code/pull/5741))
+- vision-bridge: transcribe images to text for text-only models ([#5126](https://github.com/QwenLM/qwen-code/pull/5126))
+- core: add deterministic guards for destructive commands in auto mode ([#5754](https://github.com/QwenLM/qwen-code/pull/5754))
+- cli: add extension operation polling ([#5753](https://github.com/QwenLM/qwen-code/pull/5753))
+- cli: match MCP resources globally on bare @ and show full references ([#5774](https://github.com/QwenLM/qwen-code/pull/5774))
+- cli: Add workspace permissions rules API ([#5743](https://github.com/QwenLM/qwen-code/pull/5743))
+- serve: voice dictation over the daemon for the Web Shell ([#5755](https://github.com/QwenLM/qwen-code/pull/5755))
+- voice: refine ASR transcripts with the fast model before insert ([#5794](https://github.com/QwenLM/qwen-code/pull/5794))
+
+### Changed
+
+- web-shell: restructure chat UI ([#5775](https://github.com/QwenLM/qwen-code/pull/5775))
+
+### Fixed
+
+- agent: cap fork turns and bubble fork permission prompts ([#5737](https://github.com/QwenLM/qwen-code/pull/5737))
+- vscode: always show chat view in the Activity Bar sidebar ([#5757](https://github.com/QwenLM/qwen-code/pull/5757))
+- cli: source /context token total from the per-session chat ([#5764](https://github.com/QwenLM/qwen-code/pull/5764))
+- core: Disambiguate duplicate model display names ([#5769](https://github.com/QwenLM/qwen-code/pull/5769))
+- cli: remove theme background fills from input box and user messages ([#5772](https://github.com/QwenLM/qwen-code/pull/5772))
+- cli: stabilize VP mouse interactions ([#5751](https://github.com/QwenLM/qwen-code/pull/5751))
+- vscode: clamp open file positions ([#5711](https://github.com/QwenLM/qwen-code/pull/5711))
+- config: fall back to user env files ([#5731](https://github.com/QwenLM/qwen-code/pull/5731))
+- core: require integer stop hook cap ([#5667](https://github.com/QwenLM/qwen-code/pull/5667))
+- core: require integer microcompaction keep count ([#5652](https://github.com/QwenLM/qwen-code/pull/5652))
+- core: Align MCP OAuth guidance and docs ([#5589](https://github.com/QwenLM/qwen-code/pull/5589))
+- cli: replace emoji thinking/summary icons with Unicode text symbols ([#5788](https://github.com/QwenLM/qwen-code/pull/5788))
+- cli: restore saved custom model IDs when re-entering the auth wizard ([#5654](https://github.com/QwenLM/qwen-code/pull/5654))
+- daemon: Reject stale prompt client admission ([#5784](https://github.com/QwenLM/qwen-code/pull/5784))
+- core: parse QWEN_SERVE_MCP_CLIENT_BUDGET strictly as a decimal integer ([#5752](https://github.com/QwenLM/qwen-code/pull/5752))
+- sdk: self-heal stale clientId on invalid_client_id prompts ([#5797](https://github.com/QwenLM/qwen-code/pull/5797))
+- cli: promote pasted image paths to attachments ([#5803](https://github.com/QwenLM/qwen-code/pull/5803))
+- sdk: raise browser daemon bundle budget to 126 KiB ([#5801](https://github.com/QwenLM/qwen-code/pull/5801))
+- cli: correctly map Claude MCP server transport types on import and in .mcp.json ([#5812](https://github.com/QwenLM/qwen-code/pull/5812))
+
+### Performance
+
+- cli: Optimize serve daemon startup ([#5785](https://github.com/QwenLM/qwen-code/pull/5785))
+
+### Documentation
+
+- fix config/command/auth drift and surface the model-providers page ([#5735](https://github.com/QwenLM/qwen-code/pull/5735))
+
+### Other
+
+- ci: collapse PR checks into Ubuntu gate ([#5767](https://github.com/QwenLM/qwen-code/pull/5767))
+- ci: harden Linux CI reliability (shallow ECS checkout + CodeQL timeout) ([#5810](https://github.com/QwenLM/qwen-code/pull/5810))
+- Expose MCP resource read tool ([#5781](https://github.com/QwenLM/qwen-code/pull/5781))
+- ci: move macOS/Windows tests and CodeQL off the per-PR path ([#5813](https://github.com/QwenLM/qwen-code/pull/5813))
+
 ## [0.19.1](https://github.com/QwenLM/qwen-code/releases/tag/v0.19.1) - 2026-06-23
 
 ### Added

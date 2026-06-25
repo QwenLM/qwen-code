@@ -142,6 +142,12 @@ describe('UiTelemetryService', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      skills: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      },
     });
     expect(service.getLastPromptTokenCount()).toBe(0);
   });
@@ -798,6 +804,40 @@ describe('UiTelemetryService', () => {
     });
   });
 
+  describe('Skill Invocation Metrics', () => {
+    it('aggregates successful and failed skill invocations by name', () => {
+      service.recordSkillInvocation('review', true);
+      service.recordSkillInvocation('review', false);
+      service.recordSkillInvocation('testing', true);
+
+      expect(service.getMetrics().skills).toEqual({
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: {
+          review: { count: 2, success: 1, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('handles skill names that collide with object prototype keys', () => {
+      service.recordSkillInvocation('constructor', true);
+      service.recordSkillInvocation('__proto__', false);
+
+      expect(service.getMetrics().skills?.byName['constructor']).toEqual({
+        count: 1,
+        success: 1,
+        fail: 0,
+      });
+      expect(service.getMetrics().skills?.byName['__proto__']).toEqual({
+        count: 1,
+        success: 0,
+        fail: 1,
+      });
+    });
+  });
+
   describe('resetLastPromptTokenCount', () => {
     it('should reset the last prompt token count to 0', () => {
       // First, set up some initial token count
@@ -1096,6 +1136,52 @@ describe('UiTelemetryService', () => {
       expect(metricsB.tools.totalCalls).toBe(2);
       expect(metricsB.tools.byName['Write']?.count).toBe(1);
       expect(metricsB.tools.byName['Read']?.count).toBe(1);
+    });
+
+    it('should isolate skill invocation metrics by session', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.recordSkillInvocation('review', false, SESSION_B);
+      service.recordSkillInvocation('testing', true, SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.skills).toEqual({
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        byName: {
+          review: { count: 1, success: 1, fail: 0 },
+        },
+      });
+      expect(metricsB.skills).toEqual({
+        totalCalls: 2,
+        totalSuccess: 1,
+        totalFail: 1,
+        byName: {
+          review: { count: 1, success: 0, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('removeSession should prevent late skill metrics from recreating bucket', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.removeSession(SESSION_A);
+
+      service.recordSkillInvocation('review', false, SESSION_A);
+
+      expect(service.getMetricsForSession(SESSION_A).skills).toEqual({
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      });
+      expect(service.getMetrics().skills?.byName['review']).toEqual({
+        count: 2,
+        success: 1,
+        fail: 1,
+      });
     });
 
     it('resetSession should not clear global metrics (replay scenario)', () => {

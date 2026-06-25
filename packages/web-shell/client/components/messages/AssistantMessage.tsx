@@ -37,10 +37,12 @@ export const AssistantMessage = memo(function AssistantMessage({
     if (!write) {
       return;
     }
-    void write.then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    void write
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {});
   }, [content]);
   return (
     <div className={styles.message}>
@@ -51,6 +53,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               content={content}
               source="assistant"
               deferMermaid={isStreaming}
+              enhanceTables={!isStreaming}
             />
           </div>
         </div>

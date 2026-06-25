@@ -650,6 +650,7 @@ export class QwenLogger {
         model: event.model,
         prompt_id: event.prompt_id,
         auth_type: event.auth_type,
+        loop_wakeups_cancelled: event.loop_wakeups_cancelled,
       },
     });
 

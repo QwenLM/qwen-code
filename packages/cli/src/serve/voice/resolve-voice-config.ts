@@ -15,7 +15,7 @@ import {
   isStreamingVoiceModel,
   resolveVoiceTranscriptionConfig,
   type VoiceModelLookup,
-} from '../../ui/voice/voice-transcriber.js';
+} from '../../services/voice-transcriber.js';
 
 /**
  * Fully-validated voice context for a daemon workspace. The browser captures

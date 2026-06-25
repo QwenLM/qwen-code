@@ -160,7 +160,15 @@ function dedupeRequestsByCallId(
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
-const GATE_EXEMPT_TOOLS = new Set(['read_file']);
+// Tools that bound their own output and must bypass the persistence gate.
+// read_file pages/truncates itself; read_mcp_resource caps text in
+// formatMcpResourceContents and sets maxOutputChars=Infinity — but this gate
+// runs first, so without the exemption a 28k–100k resource is spilled to a
+// stub before that self-cap takes effect and the model never sees the body.
+const GATE_EXEMPT_TOOLS = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.READ_MCP_RESOURCE,
+]);
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -2931,7 +2939,7 @@ export class CoreToolScheduler {
     } catch (error) {
       // _executeToolCallBody pre-sets span status (OK / FAILURE /
       // CANCELLED) only AFTER its main try/catch is entered. Throws
-      // from the prelude — addToolInputAttributes, getMessageBus,
+      // from the prelude — getMessageBus,
       // startToolExecutionSpan, etc. — happen BEFORE the
       // `scheduled → executing` transition, so the span would end
       // UNSET with no failure_kind AND the tool call would stay in
@@ -2969,6 +2977,30 @@ export class CoreToolScheduler {
     }
   }
 
+  private safelyAddToolInputAttributes(
+    span: Span,
+    toolName: string,
+    toolInput: string,
+  ): void {
+    try {
+      addToolInputAttributes(this.config, span, toolName, toolInput);
+    } catch (error) {
+      debugLogger.warn('Failed to add tool input span attributes:', error);
+    }
+  }
+
+  private safelyAddToolResultAttributes(
+    span: Span,
+    toolName: string,
+    toolResult: string,
+  ): void {
+    try {
+      addToolResultAttributes(this.config, span, toolName, toolResult);
+    } catch (error) {
+      debugLogger.warn('Failed to add tool result span attributes:', error);
+    }
+  }
+
   private async _executeToolCallBody(
     scheduledCall: ScheduledToolCall,
     signal: AbortSignal,
@@ -2991,8 +3023,7 @@ export class CoreToolScheduler {
     // when sensitive attributes are off, but the argument is computed
     // before the call.
     if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-      addToolInputAttributes(
-        this.config,
+      this.safelyAddToolInputAttributes(
         span,
         toolName,
         safeJsonStringify(toolInput) ?? '{}',
@@ -3052,8 +3083,7 @@ export class CoreToolScheduler {
           new Error(blockMessage),
           ToolErrorType.EXECUTION_DENIED,
         );
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `BLOCKED: ${blockMessage}`,
@@ -3193,8 +3223,7 @@ export class CoreToolScheduler {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `CANCELLED: ${cancelMessage}`,
@@ -3271,8 +3300,7 @@ export class CoreToolScheduler {
               new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
             );
-            addToolResultAttributes(
-              this.config,
+            this.safelyAddToolResultAttributes(
               span,
               toolName,
               `STOPPED: ${stopMessage}`,
@@ -3507,8 +3535,7 @@ export class CoreToolScheduler {
         // results can contain Part[] with large inlineData/media payloads
         // that we don't want to serialize when telemetry is off.
         if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-          addToolResultAttributes(
-            this.config,
+          this.safelyAddToolResultAttributes(
             span,
             toolName,
             typeof content === 'string'
@@ -3596,8 +3623,7 @@ export class CoreToolScheduler {
           errorMessage = persistResult.content;
         }
 
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `ERROR: ${errorMessage}`,
@@ -3665,8 +3691,7 @@ export class CoreToolScheduler {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `CANCELLED: ${cancelMessage}`,
@@ -3704,8 +3729,7 @@ export class CoreToolScheduler {
             exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `EXCEPTION: ${exceptionErrorMessage}`,

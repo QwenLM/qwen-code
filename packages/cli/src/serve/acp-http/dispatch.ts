@@ -35,6 +35,24 @@ import {
   MAX_READ_BYTES,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
+import {
+  isPermissionRuleType,
+  normalizePermissionRules,
+  PermissionRulesValidationError,
+  readPermissionRuleSet,
+} from '../../config/permission-settings.js';
+import { loadSettings } from '../../config/settings.js';
+import { WorkspaceVoiceError } from '../../services/voice-service.js';
+import { SetupGithubError, setupGithub } from '../../services/setup-github.js';
+import {
+  createSetupGithubFileOps,
+  resolveSetupGithubProxy,
+  sanitizeSetupGithubMessage,
+  sanitizeSetupGithubResult,
+  setupGithubEventData,
+} from '../routes/workspace-setup-github.js';
+import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
+import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
@@ -49,6 +67,10 @@ import {
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
+} from '../workspace-service/types.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
 } from '../workspace-service/types.js';
 import type { AcpConnection } from './connection-registry.js';
 import {
@@ -87,6 +109,13 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/env`,
   `${QWEN_METHOD_NS}workspace/preflight`,
   `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/trust`,
+  `${QWEN_METHOD_NS}workspace/trust/request`,
+  `${QWEN_METHOD_NS}workspace/permissions`,
+  `${QWEN_METHOD_NS}workspace/permissions/set`,
+  `${QWEN_METHOD_NS}workspace/voice`,
+  `${QWEN_METHOD_NS}workspace/voice/set`,
+  `${QWEN_METHOD_NS}workspace/setup-github`,
   `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
   // Wave 1: session extensions
@@ -283,6 +312,26 @@ function toRpcError(err: unknown): {
       code: RPC.INTERNAL_ERROR,
       message: err.message,
       data: { errorKind: 'memory_write_timeout' },
+    };
+  }
+  if (err instanceof WorkspaceVoiceError) {
+    return {
+      code:
+        err.status >= 400 && err.status < 500
+          ? RPC.INVALID_PARAMS
+          : RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: err.code },
+    };
+  }
+  if (err instanceof WorkspaceSettingsPartialPersistError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: {
+        errorKind: 'partial_persist_error',
+        committedKeys: err.committedWrites.map((write) => write.key),
+      },
     };
   }
   if (err instanceof TooManyActiveDeviceFlowsError) {
@@ -1223,6 +1272,244 @@ export class AcpDispatcher {
             { force },
           );
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/trust`: {
+          const result = await this.workspace.getWorkspaceTrustStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/trust/request`: {
+          const desiredState = params['desiredState'];
+          if (desiredState !== 'trusted' && desiredState !== 'untrusted') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`desiredState` must be "trusted" or "untrusted"',
+                ),
+              );
+            }
+            return;
+          }
+          const reason = params['reason'];
+          if (
+            reason !== undefined &&
+            (typeof reason !== 'string' ||
+              reason.length > MAX_TRUST_REASON_LENGTH)
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`reason\` must be a string up to ${MAX_TRUST_REASON_LENGTH} chars`,
+                ),
+              );
+            }
+            return;
+          }
+          const ctx = this.wsCtx(conn, method);
+          const status = await this.workspace.getWorkspaceTrustStatus(ctx);
+          if (!status.folderTrustEnabled) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_REQUEST,
+                  'Folder trust is disabled for this workspace',
+                ),
+              );
+            }
+            return;
+          }
+          const result = await this.workspace.requestWorkspaceTrustChange(ctx, {
+            desiredState,
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/permissions`: {
+          const result = await this.workspace.getWorkspacePermissionsStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/permissions/set`: {
+          const scope = params['scope'];
+          if (scope !== 'user' && scope !== 'workspace') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "user" or "workspace"',
+                ),
+              );
+            }
+            return;
+          }
+
+          const ruleType = params['ruleType'];
+          if (!isPermissionRuleType(ruleType)) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`ruleType` must be "allow", "ask", or "deny"',
+                ),
+              );
+            }
+            return;
+          }
+
+          let rules: string[];
+          try {
+            const settings = loadSettings(this.boundWorkspace);
+            const scopeSettings =
+              scope === 'workspace'
+                ? settings.workspace.settings
+                : settings.user.settings;
+            const existingRules =
+              readPermissionRuleSet(scopeSettings)[ruleType];
+            rules = normalizePermissionRules(params['rules'], {
+              existingRules,
+            });
+          } catch (err) {
+            if (err instanceof PermissionRulesValidationError) {
+              if (id !== undefined) {
+                conn.sendConn(error(id, RPC.INVALID_PARAMS, err.message));
+              }
+              return;
+            }
+            throw err;
+          }
+
+          let result: unknown;
+          try {
+            result = await this.workspace.setWorkspacePermissionRules(
+              this.wsCtx(conn, method),
+              { scope, ruleType, rules },
+            );
+          } catch (err) {
+            if (
+              err instanceof WorkspacePermissionRulesSessionRequiredError &&
+              id !== undefined
+            ) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, err.message, {
+                  errorKind: 'permission_session_required',
+                }),
+              );
+              return;
+            }
+            throw err;
+          }
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/voice`: {
+          const result = await this.workspace.getWorkspaceVoiceStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/voice/set`: {
+          const update = parseWorkspaceVoiceUpdateParams(params);
+          if ('error' in update) {
+            if (id !== undefined) {
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, update.error));
+            }
+            return;
+          }
+
+          const result = await this.workspace.setWorkspaceVoiceSettings(
+            this.wsCtx(conn, method),
+            update,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/setup-github`: {
+          if (params['consent'] !== true) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`consent` must be true', {
+                  errorKind: 'github_setup_consent_required',
+                }),
+              );
+            }
+            return;
+          }
+          if (!this.fsFactory) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured', {
+                  errorKind: 'internal_error',
+                }),
+              );
+            }
+            return;
+          }
+          try {
+            const result = await setupGithub({
+              cwd: this.boundWorkspace,
+              workspaceRoot: this.boundWorkspace,
+              proxy: resolveSetupGithubProxy(this.boundWorkspace),
+              abortSignal: conn.abortSignal,
+              fileOps: createSetupGithubFileOps(
+                this.fsFactory,
+                `ACP ${method}`,
+                conn.clientId,
+              ),
+            });
+            this.bridge.publishWorkspaceEvent({
+              type: 'github_setup_completed',
+              data: setupGithubEventData(result),
+              ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+            } as BridgeEvent);
+            this.replyConn(conn, id, result as unknown);
+          } catch (err) {
+            if (err instanceof SetupGithubError && id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  err.status >= 500 ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
+                  sanitizeSetupGithubMessage(err.message, this.boundWorkspace),
+                  {
+                    errorKind: err.code,
+                    ...(err.partial
+                      ? {
+                          partial: true,
+                          result: err.partialResult
+                            ? sanitizeSetupGithubResult(
+                                err.partialResult,
+                                this.boundWorkspace,
+                              )
+                            : null,
+                        }
+                      : {}),
+                  },
+                ),
+              );
+              return;
+            }
+            throw err;
+          }
           return;
         }
 

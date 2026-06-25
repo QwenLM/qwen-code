@@ -217,7 +217,9 @@ closes bridge sessions, and deletes transcript files. It uses
 
 `GET /session/:id/stats` returns usage statistics: model metrics
 (input/output tokens, cache reads/writes, total cost), per-tool call counts and
-latencies, and file edit counts.
+latencies, file edit counts, and per-skill invocation counts for the live
+session. The `skills` block reflects skill body loads and skill slash commands
+within this session only; it is not a cross-session activity aggregate.
 
 ### Session Tasks (`session_tasks` capability tag)
 

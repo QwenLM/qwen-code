@@ -470,6 +470,7 @@ vi.mock('./service/filesystem.js', () => ({
 vi.mock('../config/settings.js', () => ({
   SettingScope: { User: 'User', Workspace: 'Workspace' },
   loadSettings: vi.fn(),
+  reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
 vi.mock('../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: vi.fn((settings: unknown) => settings),
@@ -562,6 +563,7 @@ import {
   normalizeCoreSettingValue,
   extractFilesFromTarGz,
   fetchAllowedGitHub,
+  createWorkspaceMcpBudget,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -2898,6 +2900,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         enableManagedAutoMemory: true,
         enableManagedAutoDream: true,
         enableAutoSkill: true,
+        autoSkillConfirm: true,
       },
     });
     await expect(
@@ -2924,6 +2927,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         enableManagedAutoMemory: true,
         enableManagedAutoDream: true,
         enableAutoSkill: true,
+        autoSkillConfirm: true,
       },
     });
 
@@ -7179,6 +7183,79 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('clears removed providerProtocol mappings and refreshes auth on workspace reload', async () => {
+    const providerConfig = {
+      idealab: [
+        {
+          id: 'qwen3',
+          name: 'Qwen 3',
+          baseUrl: 'https://idealab.example/v1',
+        },
+      ],
+    };
+    let mergedSettings: Record<string, unknown> = {
+      modelProviders: providerConfig,
+      providerProtocol: { idealab: 'openai' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        mergedSettings = { modelProviders: providerConfig };
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-reload'),
+      getAuthType: vi.fn().mockReturnValue('openai'),
+    });
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-reload'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+    expect(cfg.reloadModelProvidersConfig).toHaveBeenCalledWith(
+      providerConfig,
+      {},
+    );
+    expect(cfg.refreshAuth).toHaveBeenCalledWith('openai');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes extension commands for the live session', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),
@@ -7289,5 +7366,42 @@ describe('sessionLanguage multi-session propagation', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+});
+
+describe('createWorkspaceMcpBudget — env parsing', () => {
+  const KEY = 'QWEN_SERVE_MCP_CLIENT_BUDGET';
+  const MODE = 'QWEN_SERVE_MCP_BUDGET_MODE';
+  const onEvent = vi.fn();
+
+  afterEach(() => {
+    delete process.env[KEY];
+    delete process.env[MODE];
+    vi.clearAllMocks();
+  });
+
+  it('accepts a plain positive decimal integer', () => {
+    process.env[KEY] = '100';
+    expect(createWorkspaceMcpBudget(onEvent)).toBeDefined();
+  });
+
+  it('accepts a trimmed decimal integer', () => {
+    process.env[KEY] = '  42  ';
+    expect(createWorkspaceMcpBudget(onEvent)).toBeDefined();
+  });
+
+  // Mirrors McpClientManager.readBudgetFromEnv: a loose Number() would coerce
+  // these (0x10=16, 1e2=100, 1.0=1) and silently set a budget. The strict
+  // /^\d+$/ + isSafeInteger parse must reject them.
+  it.each(['0x10', '1e2', '1.0', '0b101', '5 abc', 'abc', '-5', '0', ' '])(
+    'rejects non-decimal-integer value %j',
+    (raw) => {
+      process.env[KEY] = raw;
+      expect(createWorkspaceMcpBudget(onEvent)).toBeUndefined();
+    },
+  );
+
+  it('returns undefined when the budget env var is unset', () => {
+    expect(createWorkspaceMcpBudget(onEvent)).toBeUndefined();
   });
 });
