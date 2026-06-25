@@ -772,6 +772,11 @@ jobs:
           if [ "$is_draft" = "true" ]; then
             finish_without_agent skip "PR #${PR_NUMBER} is draft."
           fi
+          # A deleted head repository makes headRepository null, so head_repo would
+          # be "/" or "owner/" and the push URL malformed. Bail before the fetch.
+          if [ -z "$head_repo_owner" ] || [ -z "$head_repo_name" ]; then
+            finish_without_agent unsupported "PR #${PR_NUMBER}'s head repository was deleted; cannot push a resolution back."
+          fi
 
           # Fetch the PR head through refs/pull/N/head — the base repo mirrors it
           # for both same-repo and fork PRs — into a synthetic local tracking ref so
@@ -1095,15 +1100,18 @@ jobs:
               # Classify in priority order:
               # 1. workflow_scope — resolving merges the base branch in, which
               #    carries its .github/workflows/** changes; GitHub rejects any PAT
-              #    without the `workflow` scope from updating workflow files. This is
-              #    the common failure in this repo (the base changes workflows often),
-              #    so give it its own actionable reason.
+              #    without the `workflow` scope from updating workflow files. Anchor
+              #    on GitHub's server phrase "refusing to allow ... workflow" — NOT a
+              #    loose `workflow.*scope`, which the attacker-controlled branch name
+              #    in git's `! [remote rejected] HEAD -> <branch>` echo could trip
+              #    (e.g. a branch named `fix-workflow-scope`), producing a comment
+              #    that tells maintainers to grant the bot the workflow scope.
               # 2. permission — 403, or a 404 "not found" (GitHub hides repos a token
               #    can't see) which is an access problem in practice.
               # 3. moved — the head branch advanced, so force-with-lease declined.
-              if grep -qiE 'workflow.*scope' "$push_log"; then
+              if grep -qiE 'refusing to allow.*workflow' "$push_log"; then
                 push_fail_reason='workflow_scope'
-              elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist|could not read' "$push_log"; then
+              elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
                 push_fail_reason='permission'
               elif grep -qiE 'stale info|force-with-lease|non-fast-forward|fetch first' "$push_log"; then
                 push_fail_reason='moved'
@@ -1131,7 +1139,7 @@ jobs:
                       echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`. For a fork PR this needs **Allow edits by maintainers** enabled, and GitHub blocks maintainer edits on forks owned by an organization. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     moved)
-                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve."
+                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     *)
                       echo "Qwen Code resolved the merge conflicts, but pushing to \`${HEAD_REPO}\` failed. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
