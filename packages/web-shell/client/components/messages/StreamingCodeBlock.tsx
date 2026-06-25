@@ -28,7 +28,7 @@ interface StreamingCodeBlockProps {
  * controller is already closed/errored, it reports `diverged` so the caller can
  * rebuild the stream instead of feeding it inconsistent chunks.
  */
-function enqueueSuffix(
+export function enqueueSuffix(
   controller: ReadableStreamDefaultController<string>,
   sent: string,
   next: string,
@@ -109,8 +109,15 @@ export function StreamingCodeBlock({
           sentRef.current = result.sent;
         }
       })
-      .catch(() => {
-        if (!cancelled) setFailed(true);
+      .catch((err) => {
+        if (!cancelled) {
+          console.warn(
+            '[web-shell] streaming highlighter failed to load for lang=%s',
+            lang,
+            err,
+          );
+          setFailed(true);
+        }
       });
 
     return () => {

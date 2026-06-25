@@ -1,6 +1,8 @@
 import {
   Component,
+  createContext,
   memo,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -471,48 +473,77 @@ class EnhancedMarkdownTableBoundary extends Component<
   }
 }
 
+// Carries the streaming flag to CodeBlock via context instead of a closure, so
+// the `code` renderer below can be a single stable reference. Toggling
+// isStreaming then no longer changes the `code` element type, so React reuses
+// the same CodeBlock/StreamingCodeBlock instances across the streaming→settled
+// transition (preserving their state) instead of unmounting and remounting.
+const IsStreamingContext = createContext(false);
+
+function MarkdownCode({
+  className,
+  children,
+}: {
+  className?: string;
+  children?: ReactNode;
+}) {
+  const isStreaming = useContext(IsStreamingContext);
+  const isBlock =
+    className?.startsWith('language-') ||
+    (typeof children === 'string' && children.includes('\n'));
+
+  if (isBlock) {
+    return (
+      <CodeBlock className={className} isStreaming={isStreaming}>
+        {String(children)}
+      </CodeBlock>
+    );
+  }
+  return <InlineCode>{children}</InlineCode>;
+}
+
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  return <>{children}</>;
+}
+
+function MarkdownLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children?: ReactNode;
+}) {
+  const safeHref = isSafeHref(href) ? href : undefined;
+  return (
+    <a
+      href={safeHref}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={styles.link}
+    >
+      {children}
+    </a>
+  );
+}
+
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const safeSrc = isSafeImageSrc(src) ? src : undefined;
+  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+}
+
+// `code`/`pre`/`a`/`img` are stable references; only `table` is created per
+// call (it closes over enhanceTables/tableResetKey). Recreating the components
+// object for a table reset therefore never changes the `code` element type, so
+// code blocks are not remounted.
 function createComponents(
-  isStreaming?: boolean,
   enhanceTables?: boolean,
   tableResetKey = '',
 ): Components {
   return {
-    code({
-      className,
-      children,
-    }: {
-      className?: string;
-      children?: ReactNode;
-    }) {
-      const isBlock =
-        className?.startsWith('language-') ||
-        (typeof children === 'string' && children.includes('\n'));
-
-      if (isBlock) {
-        return (
-          <CodeBlock className={className} isStreaming={isStreaming}>
-            {String(children)}
-          </CodeBlock>
-        );
-      }
-      return <InlineCode>{children}</InlineCode>;
-    },
-    pre({ children }: { children?: ReactNode }) {
-      return <>{children}</>;
-    },
-    a({ href, children }: { href?: string; children?: ReactNode }) {
-      const safeHref = isSafeHref(href) ? href : undefined;
-      return (
-        <a
-          href={safeHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={styles.link}
-        >
-          {children}
-        </a>
-      );
-    },
+    code: MarkdownCode,
+    pre: MarkdownPre,
+    a: MarkdownLink,
+    img: MarkdownImage,
     table({ children }: { children?: ReactNode }) {
       const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
       if (enhanceTables) {
@@ -529,15 +560,10 @@ function createComponents(
       }
       return fallback;
     },
-    img({ src, alt }: { src?: string; alt?: string }) {
-      const safeSrc = isSafeImageSrc(src) ? src : undefined;
-      return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
-    },
   };
 }
 
 const COMPONENTS_DEFAULT = createComponents();
-const COMPONENTS_STREAMING = createComponents(true);
 
 export const Markdown = memo(function Markdown({
   content,
@@ -553,10 +579,10 @@ export const Markdown = memo(function Markdown({
       : content;
   const components = useMemo(() => {
     if (enhanceTables) {
-      return createComponents(isStreaming, true, renderedContent);
+      return createComponents(true, renderedContent);
     }
-    return isStreaming ? COMPONENTS_STREAMING : COMPONENTS_DEFAULT;
-  }, [isStreaming, enhanceTables, renderedContent]);
+    return COMPONENTS_DEFAULT;
+  }, [enhanceTables, renderedContent]);
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
@@ -580,13 +606,15 @@ export const Markdown = memo(function Markdown({
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
     >
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
-        components={renderedComponents}
-      >
-        {renderedContent}
-      </ReactMarkdown>
+      <IsStreamingContext.Provider value={!!isStreaming}>
+        <ReactMarkdown
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
+          components={renderedComponents}
+        >
+          {renderedContent}
+        </ReactMarkdown>
+      </IsStreamingContext.Provider>
     </div>
   );
 });
