@@ -519,6 +519,69 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
+  describe('isUserInitiated', () => {
+    it('user-initiated group renders all collapsible tools individually', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'r2',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Success,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          isUserInitiated={true}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // All tools render individually, no summary line
+      expect(frame).toContain('MockTool[r1]');
+      expect(frame).toContain('MockTool[r2]');
+      expect(frame).not.toContain('Read 2 files');
+    });
+  });
+
+  describe('Memory-only group with error', () => {
+    it('memory-only group with errored tool falls through to expanded path', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'm2',
+          name: 'SaveMemory',
+          isMemoryOp: 'write',
+          status: ToolCallStatus.Error,
+          resultDisplay: 'Memory write failed',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={1}
+          memoryWriteCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // Should NOT show compact memory badge — error forces expanded path
+      expect(frame).toContain('MockTool[m1]');
+      expect(frame).toContain('MockTool[m2]');
+    });
+  });
+
   describe('SubAgent focus', () => {
     // Helper to build a running SubAgent result display
     const createRunningSubagentDisplay = (
