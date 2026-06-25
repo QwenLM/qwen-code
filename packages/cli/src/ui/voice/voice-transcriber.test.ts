@@ -669,6 +669,29 @@ describe('voice-transcriber', () => {
     ).toBe(false);
   });
 
+  it('drops a keyterm echo even when user keyterms make the set large', () => {
+    const keyterms = [
+      'grep',
+      'regex',
+      'typescript',
+      'json',
+      'oauth',
+      'subagent',
+      'worktree',
+      'endpoint',
+      'middleware',
+      'schema',
+      ...Array.from({ length: 190 }, (_, i) => `customterm${i}`),
+    ];
+
+    expect(
+      isKeytermEcho(
+        'grep regex typescript json oauth subagent worktree endpoint middleware schema',
+        keyterms.join(' '),
+      ),
+    ).toBe(true);
+  });
+
   it('posts audio to chat/completions as input_audio content', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,

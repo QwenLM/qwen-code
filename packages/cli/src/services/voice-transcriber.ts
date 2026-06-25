@@ -21,6 +21,7 @@ import { readVoiceLanguage } from './voice-settings.js';
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
 const MIN_KEYTERM_ECHO_TOKENS = 8;
+const MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS = 10;
 const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
 const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
 
@@ -426,7 +427,8 @@ export function isKeytermEcho(
   const isEcho =
     overlap >= MIN_KEYTERM_ECHO_TOKENS &&
     transcriptRatio >= 0.9 &&
-    keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO;
+    (keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO ||
+      overlap >= MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS);
   if (isEcho) {
     debugLogger.debug(
       `[voice] dropped likely keyterm echo: transcriptRatio=${transcriptRatio.toFixed(2)} keytermRatio=${keytermRatio.toFixed(2)} text="${transcript}"`,
