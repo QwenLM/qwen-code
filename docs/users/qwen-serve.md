@@ -86,8 +86,30 @@ The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
-`GET /session/:id/context`, `GET /session/:id/supported-commands`, and
+`GET /session/:id/status`, `GET /session/:id/context`,
+`GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`, and `GET /session/:id/lsp`.
+
+`GET /session/:id/status` returns the live bridge summary for a single session:
+`sessionId`, `workspaceCwd`, `createdAt`, optional `displayName`, `clientCount`,
+and `hasActivePrompt`. It answers `200` with the summary when the daemon holds a
+live session with that id, and `404` (body `{ "error": …, "sessionId": … }`)
+otherwise. Use it to poll whether one known session is still running
+(`hasActivePrompt`) or how many clients are attached (`clientCount`) without
+fetching and scanning the whole paginated session list:
+
+```bash
+curl http://127.0.0.1:4170/session/$SESSION_ID/status
+# → {"sessionId":"…","workspaceCwd":"…","createdAt":"…","clientCount":1,"hasActivePrompt":false}
+```
+
+This is the raw live-session view, so `clientCount` and `hasActivePrompt` match
+the corresponding entry in `GET /workspace/:id/sessions` — but the two routes
+are not byte-identical. The list endpoint enriches each item with persisted
+session-store data: its `createdAt` is the persisted first-prompt time, and it
+adds `updatedAt` plus a `displayName` derived from the stored title or first
+prompt. `/status` instead reports the live session's own `createdAt`, omits
+`updatedAt`, and returns `displayName` only when one is set on the live session.
 
 `GET /session/:id/lsp` returns structured per-session LSP status. Start the
 daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
@@ -238,7 +260,7 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 | `--http-bridge`                         | `true`          | Stage 1 mode: one `qwen --acp` child per daemon (bound to one workspace at boot, per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02); N sessions multiplex onto that child via ACP `newSession()`. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--allow-origin <pat>`                  | —               | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). Cross-origin allowlist for browser webui clients. Repeatable. Each value is `*` (any origin — boot refuses if no bearer token is configured; `--require-auth` on loopback is recommended so `/health` and `/demo` are also bearer-gated, since both are pre-auth on loopback by default) or a canonical URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path / userinfo / query). **Subdomain wildcards (`https://*.example.com`) are intentionally unsupported** — list each subdomain explicitly, or use `*` with a configured token (and `--require-auth` for full hardening). Matched origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, methods, headers, max-age, and exposed `Retry-After`); unmatched origins still get a 403 with the same envelope as today's wall. `Origin: null` (sandboxed iframes, file:// docs) is always rejected, even under `*`. Pre-flight via `caps.features.allow_origin`. Loopback self-origin hits are unaffected. |
 | `--web` / `--no-web`                    | `true`          | Serve the built Web Shell SPA at the daemon root (`GET /`, `/assets/*`, and SPA deep-link fallback). The static shell is registered **before** the bearer-auth gate — a browser can't attach a token to a `<script>` subresource or an address-bar navigation, the shell carries no secrets, and every API route stays token-gated regardless. On non-loopback binds a one-line stderr warning notes the UI is reachable without auth. Use `--no-web` for an API-only daemon. No effect when the build omits the Web Shell assets (the daemon logs a breadcrumb and runs API-only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `--open`                                | `false`         | After the listener is up, open the Web Shell in your default browser at the daemon URL (with `#token=` appended as a URL fragment when a token is configured — a fragment is never sent to the server, keeping the token out of access logs and Referer headers). No-op with `--no-web`, or in headless / CI / SSH environments where no browser is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `--open`                                | `false`         | After the listener is up, open the Web Shell in your default browser at the daemon URL (with `#token=` appended as a URL fragment when a token is configured — a fragment is never sent to the server, keeping the token out of access logs and Referer headers). No-op with `--no-web`, or in headless / CI / SSH environments where no browser is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 > **Sizing the load knobs.** `--max-sessions` is the **new-child** cap.
 > Three other layers also limit load — when sizing for a high-concurrency

@@ -13,13 +13,14 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   createNonInteractivePromptId,
   main,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
-  startInteractiveUI,
 } from './gemini.js';
+import { startInteractiveUI } from './ui/startInteractiveUI.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
@@ -28,6 +29,31 @@ import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
+
+describe('gemini import boundary', () => {
+  it('does not statically import ACP or noninteractive auth branches', () => {
+    const source = readFileSync('src/gemini.tsx', 'utf8');
+
+    expect(source).not.toContain(
+      "import { runAcpAgent } from './acp-integration/acpAgent.js'",
+    );
+    expect(source).not.toContain(
+      "import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js'",
+    );
+    expect(source).not.toContain(
+      "import { initializeApp } from './core/initializer.js'",
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/acp-integration\/acpAgent\.js['"]\s*\)/,
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/validateNonInterActiveAuth\.js['"]\s*\)/,
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/core\/initializer\.js['"]\s*\)/,
+    );
+  });
+});
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -114,6 +140,10 @@ vi.mock('./core/initializer.js', () => ({
 
 vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
+}));
+
+vi.mock('./ui/AppContainer.js', () => ({
+  AppContainer: () => null,
 }));
 
 // Stub the settings watcher: main() constructs one and calls startWatching()
@@ -205,6 +235,7 @@ describe('gemini.tsx main function', () => {
         getDebugMode: () => false,
         getListExtensions: () => false,
         getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
         initialize: vi.fn(),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
         getIdeMode: () => false,
@@ -331,6 +362,7 @@ describe('gemini.tsx main function', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -436,6 +468,7 @@ describe('gemini.tsx main function', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn().mockImplementation(async () => {
         initialized = true;
       }),
@@ -762,6 +795,7 @@ describe('gemini.tsx main function', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -895,6 +929,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -1005,6 +1040,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -1091,6 +1127,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,

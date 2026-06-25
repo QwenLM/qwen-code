@@ -7,6 +7,7 @@ describe('Qwen memory settings', () => {
       enableManagedAutoMemory: true,
       enableManagedAutoDream: false,
       enableAutoSkill: false,
+      autoSkillConfirm: true,
     })
   })
 
@@ -16,11 +17,13 @@ describe('Qwen memory settings', () => {
         enableManagedAutoMemory: false,
         enableManagedAutoDream: 'yes',
         enableAutoSkill: true,
+        autoSkillConfirm: false,
       }),
     ).toEqual({
       enableManagedAutoMemory: false,
       enableManagedAutoDream: false,
       enableAutoSkill: true,
+      autoSkillConfirm: false,
     })
   })
 })

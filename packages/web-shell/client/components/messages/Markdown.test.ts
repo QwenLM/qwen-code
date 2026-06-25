@@ -1,12 +1,19 @@
 /**
  * @vitest-environment jsdom
  */
-import { act, createElement } from 'react';
+import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WebShellCustomizationProvider } from '../../customization';
+import { I18nProvider } from '../../i18n';
+import * as EnhancedTableModule from './EnhancedMarkdownTable';
 import { isSafeHref, isSafeImageSrc, Markdown } from './Markdown';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('isSafeHref', () => {
   it('allows https URLs', () => {
@@ -96,6 +103,145 @@ describe('isSafeImageSrc', () => {
 
   it('allows relative paths', () => {
     expect(isSafeImageSrc('/images/logo.png')).toBe(true);
+  });
+});
+
+describe('Markdown enhanced tables', () => {
+  it('uses enhanced table controls when enabled', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, {
+            content: '| A |\n| --- |\n| 1 |',
+            enhanceTables: true,
+          }),
+        ),
+      );
+    });
+
+    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Details');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('keeps enhanced table when source customizes table rendering', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(
+            WebShellCustomizationProvider,
+            {
+              value: {
+                markdown: {
+                  components: {
+                    table({ children }: { children?: ReactNode }) {
+                      return createElement(
+                        'table',
+                        { 'data-custom-table': 'true' },
+                        children,
+                      );
+                    },
+                  },
+                },
+              },
+            },
+            createElement(Markdown, {
+              content: '| A |\n| --- |\n| 1 |',
+              source: 'assistant',
+              enhanceTables: true,
+            }),
+          ),
+        ),
+      );
+    });
+
+    expect(container.textContent).toContain('Quick copy');
+    expect(container.querySelector('[data-custom-table="true"]')).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('uses plain table rendering when enhancement is disabled', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, {
+            content: '| A |\n| --- |\n| 1 |',
+            enhanceTables: false,
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('table')).not.toBeNull();
+    expect(container.textContent).not.toContain('Quick copy');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('renders the plain table fallback when enhancement throws', () => {
+    vi.spyOn(EnhancedTableModule, 'EnhancedMarkdownTable').mockImplementation(
+      () => {
+        throw new Error('Enhanced table failed');
+      },
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, {
+            content: '| A |\n| --- |\n| 1 |',
+            enhanceTables: true,
+          }),
+        ),
+      );
+    });
+
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(table?.textContent).toContain('A');
+    expect(table?.textContent).toContain('1');
+    expect(container.textContent).not.toContain('Quick copy');
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] enhanced markdown table failed:',
+      expect.any(Error),
+      expect.any(String),
+    );
+
+    act(() => root.unmount());
+    container.remove();
   });
 });
 

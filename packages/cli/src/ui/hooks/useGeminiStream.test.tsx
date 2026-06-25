@@ -2592,6 +2592,80 @@ describe('useGeminiStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('drops repeated history-paired duplicate provider ids after the first synthetic response', async () => {
+    const client = new MockedGeminiClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['tool-history']));
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate again' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-fresh',
+              providerCallId: 'tool-fresh',
+              name: 'shell',
+              args: { command: 'echo fresh' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts).toHaveLength(1);
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
   it('does not deduplicate tool calls without provider ids in the TUI stream', async () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
@@ -4907,6 +4981,109 @@ describe('useGeminiStream', () => {
         }),
         expect.any(Number),
       );
+    });
+
+    it('cancels pending self-paced loop wakeups and notifies on a tick-in-flight abort', async () => {
+      const cancelAllWakeups = vi.fn().mockReturnValue(2);
+      (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue({
+        cancelAllWakeups,
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {}); // keep the tick open
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        result.current.submitQuery('keep checking the deploy');
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(cancelAllWakeups).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Stopped the self-paced loop: cancelled 2 pending wakeups.',
+        },
+        expect.any(Number),
+      );
+      // The count is annotated onto the abort telemetry (4th ctor arg).
+      expect(MockedApiCancelEvent.mock.calls.at(-1)?.[3]).toBe(2);
+    });
+
+    it('uses the singular form when exactly one wakeup was cancelled', async () => {
+      const cancelAllWakeups = vi.fn().mockReturnValue(1);
+      (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue({
+        cancelAllWakeups,
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {}); // keep the tick open
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        result.current.submitQuery('keep checking the deploy');
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Stopped the self-paced loop: cancelled 1 pending wakeup.',
+        },
+        expect.any(Number),
+      );
+      expect(MockedApiCancelEvent.mock.calls.at(-1)?.[3]).toBe(1);
+    });
+
+    it('shows no loop notice when the abort cancelled no wakeups', async () => {
+      const cancelAllWakeups = vi.fn().mockReturnValue(0);
+      (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue({
+        cancelAllWakeups,
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {}); // keep the tick open
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        result.current.submitQuery('ordinary request');
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      // Always attempted; only the user-facing notice and the telemetry
+      // annotation are gated on a positive count.
+      expect(cancelAllWakeups).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('self-paced loop'),
+        }),
+        expect.any(Number),
+      );
+      expect(MockedApiCancelEvent.mock.calls.at(-1)?.[3]).toBeUndefined();
     });
 
     it('should prevent further processing after cancellation', async () => {

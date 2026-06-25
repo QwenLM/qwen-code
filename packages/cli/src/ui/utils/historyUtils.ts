@@ -71,6 +71,7 @@ export function isSyntheticHistoryItem(
     case 'stats':
     case 'model_stats':
     case 'tool_stats':
+    case 'skill_stats':
     case 'quit':
     case 'compression':
     case 'summary':
