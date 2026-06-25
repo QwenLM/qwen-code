@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qwen Code</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      #ui {
+        border: 0;
+        width: 100%;
+        height: 100vh;
+        display: none;
+      }
+      #status {
+        font:
+          13px/1.5 system-ui,
+          sans-serif;
+        color: #555;
+        padding: 16px;
+      }
+      #status code {
+        font-family: ui-monospace, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The extension has no UI of its own; it hosts the daemon's Web Shell
+         (chat + tools) here so the side panel is the everyday entry point. -->
+    <div id="status">Connecting to <code>qwen serve</code>…</div>
+    <iframe
+      id="ui"
+      title="Qwen Code"
+      allow="clipboard-read; clipboard-write"
+    ></iframe>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

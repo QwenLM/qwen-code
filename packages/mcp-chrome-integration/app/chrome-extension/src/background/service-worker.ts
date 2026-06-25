@@ -222,15 +222,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 // The extension has no UI of its own (it's a pure CDP-tunnel pipe; chat lives
-// in the daemon web UI). Clicking the toolbar icon opens that web UI so the
-// icon is still a useful entry point instead of a dead click.
-chrome.action.onClicked.addListener(async () => {
-  try {
-    const { baseUrl } = await getDaemonConfig();
-    await chrome.tabs.create({ url: baseUrl });
-  } catch (error) {
-    console.warn(LOG_PREFIX, 'Failed to open web UI:', error);
-  }
-});
+// in the daemon web UI). Clicking the toolbar icon opens the side panel, which
+// hosts that web UI in an iframe (see sidepanel.html) — a docked sidebar
+// rather than a full tab.
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((error) =>
+    console.warn(LOG_PREFIX, 'Failed to set side panel behavior:', error),
+  );
 
 void start();

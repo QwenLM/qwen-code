@@ -1928,8 +1928,20 @@ export function createServeApp(
   // opts.serveWebShell=false to opt out.
   const webShellDir =
     opts.serveWebShell !== false ? deps.webShellDir : undefined;
+  // Extension origins (chrome-extension://…) explicitly allowed via
+  // --allow-origin may frame the Web Shell so the extension can host the UI in
+  // a Chrome side panel (issue #5626). All other origins still get
+  // frame-ancestors 'none' + X-Frame-Options: DENY.
+  const webShellFrameAncestors =
+    opts.allowOrigins && opts.allowOrigins.length > 0
+      ? [...parseAllowOriginPatterns(opts.allowOrigins).origins].filter(
+          (o) =>
+            o.startsWith('chrome-extension://') ||
+            o.startsWith('moz-extension://'),
+        )
+      : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir);
+    mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
   app.use(bearerAuth(opts.token));
@@ -4952,7 +4964,7 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir);
+    mountWebShellSpaFallback(app, webShellDir, webShellFrameAncestors);
   }
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
