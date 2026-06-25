@@ -46,9 +46,12 @@ scaffold command and bundled templates.
 6. If any command in the workflow fails, stop and report the error to the user.
    Do not proceed to the next step until the user confirms how to continue.
 7. Customize the generated files for the user's extension.
-8. Run the Before Handoff checklist below. If any check fails, fix the issue
+8. Run the Local Test Flow trust review below. For the `mcp-server` and
+   `starter` templates, run `npm install && npm run build` in the extension
+   directory after the trust review is complete.
+9. Run the Before Handoff checklist below. If any check fails, fix the issue
    and re-check before proceeding.
-9. Link the extension locally with `qwen extensions link "$extension_path"`.
+10. Link the extension locally with `qwen extensions link "$extension_path"`.
    The trust prompt does not show `hooks`, `channels`, or `lspServers`, so
    summarize those entries to the user before linking. Present the trust prompt
    output to the user and wait for their explicit approval. Do not auto-approve.
@@ -98,15 +101,17 @@ Code extension fields include:
   `channels.<type>.entry` must import a module exporting `plugin` with a
   matching `channelType` and a `createChannel` function.
 - `lspServers` - inline `.lsp.json`-style object or JSON path. It only applies
-  when LSP support is enabled.
+  when LSP support is enabled. When `lspServers` is a JSON file path, the loaded
+  file resolves path variables such as `${extensionPath}` and `${workspacePath}`;
+  environment variables are not substituted in external LSP config files.
 
 Qwen Code hydrates path variables in string fields throughout
 `qwen-extension.json`. Use `${extensionPath}` for the extension root,
 `${workspacePath}` for the active workspace root, and `${/}` or
 `${pathSeparator}` for the platform path separator. `${CLAUDE_PLUGIN_ROOT}` is
 also substituted as a legacy alias for `${extensionPath}`. Environment variables
-such as `${HOME}` are also resolved by the runtime, so avoid unintended
-`${...}` references in string fields. For example:
+such as `${HOME}` and `$HOME` are also resolved by the runtime, so avoid
+unintended `$`-prefixed references in string fields. For example:
 `"args": ["${extensionPath}${/}dist${/}server.js"]`.
 
 Use these resource locations when needed:
@@ -145,15 +150,10 @@ review above is complete.
 cd -- "$extension_path" && \
   npm install && \
   npm run build
-
-# STOP: run the Before Handoff checklist before linking.
-
-# After explicit user approval to proceed with the trust prompt:
-qwen extensions link .
 ```
 
-If any step exits non-zero, stop and report the error to the user. Do not link
-an extension that failed to build.
+If any step exits non-zero, stop and report the error to the user. Do not run
+the Before Handoff checklist or link an extension that failed to build.
 
 For context, commands, skills, or agent-only extensions:
 
@@ -174,15 +174,22 @@ visible in the current session.
   duplicate, and re-check referenced files from the Before Handoff checklist.
   Also inspect debug logging for `Warning: Skipping extension in <path>`, which
   contains the specific load failure reason.
-- When iterating on a linked extension, make the file changes, re-run the Before
-  Handoff checklist and the Local Test Flow trust review on all modified files,
-  run the relevant build or validation again, then run
-  `qwen extensions uninstall <name>`, where `<name>` is the `name` field from
-  `qwen-extension.json` and not the directory path, followed by
-  `qwen extensions link "$extension_path"` if Qwen Code does not pick up the
-  updated linked state. Summarize `hooks`, `channels`, and `lspServers`, present
-  the trust prompt output to the user, and wait for their explicit approval
-  before re-linking.
+
+## Iterating on a Linked Extension
+
+1. Make the file changes.
+2. Re-run the Local Test Flow trust review on all modified files.
+3. Run the relevant build or validation again.
+4. Re-run the Before Handoff checklist. For compiled templates, perform channel
+   `entry` checks after the build step.
+5. Restart Qwen Code if the updated extension behavior is not visible in the
+   current session.
+6. If the update is still not picked up after restart, run
+   `qwen extensions uninstall <name>`, where `<name>` is the `name` field from
+   `qwen-extension.json` and not the directory path, then run
+   `qwen extensions link "$extension_path"`.
+7. Before re-linking, summarize `hooks`, `channels`, and `lspServers`, present
+   the trust prompt output to the user, and wait for explicit approval.
 
 ## Before Handoff
 
@@ -195,6 +202,7 @@ visible in the current session.
   ```
 - Confirm `name` is set and contains only letters, digits, underscores, dots,
   and dashes, and is not exactly `.` or `..`.
+- Confirm `version` is set to a valid semver string, for example `"1.0.0"`.
 - Confirm referenced folders or files exist when `contextFileName`, `commands`,
   `skills`, `agents`, `mcpServers`, `hooks`, `channels`, or `lspServers` are
   configured.
@@ -203,8 +211,8 @@ visible in the current session.
   candidate remains inside the resolved root. Reject absolute paths, `..`
   traversal, and symlink escapes unless the user explicitly approves the
   external target.
-- For `channels`, after trust review and build, verify the `entry` file exists
-  and can be imported, and that it exports a `plugin` object with the expected
-  `channelType` and a `createChannel` function.
+- For `channels` in compiled templates, after trust review and build, verify
+  the `entry` file exists and can be imported, and that it exports a `plugin`
+  object with the expected `channelType` and a `createChannel` function.
 - Keep the scaffold focused on the requested capability; do not add folders or
   build tooling beyond what the requested capabilities require.
