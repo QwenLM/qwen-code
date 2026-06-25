@@ -6,6 +6,7 @@
 
 import type { Config, Extension } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -36,7 +37,9 @@ export function buildExtensionRef(extensionName: string): string {
 
 /**
  * Case-insensitive match of an extension name against a list of extensions.
- * Matches against both `extension.name` and `extension.displayName`.
+ * Matches against `extension.name` and `extension.config.name` (the canonical
+ * slugs). `displayName` is intentionally excluded: it often contains spaces
+ * which the `@`-path parser truncates at, so matching would be unreliable.
  */
 export function matchExtensionByRef(
   name: string,
@@ -46,8 +49,7 @@ export function matchExtensionByRef(
   return extensions.find(
     (ext) =>
       ext.name.toLowerCase() === lower ||
-      ext.config.name.toLowerCase() === lower ||
-      (ext.displayName && ext.displayName.toLowerCase() === lower),
+      ext.config.name.toLowerCase() === lower,
   );
 }
 
@@ -69,22 +71,17 @@ export function getExtensionSuggestions(
     .filter((ext) => {
       const displayName = (ext.displayName || ext.name).toLowerCase();
       const name = ext.name.toLowerCase();
-      return (
-        displayName.startsWith(query) ||
-        name.startsWith(query) ||
-        displayName.includes(query) ||
-        name.includes(query)
-      );
+      return displayName.includes(query) || name.includes(query);
     })
     .sort((a, b) => {
       const aName = (a.displayName || a.name).toLowerCase();
       const bName = (b.displayName || b.name).toLowerCase();
-      // Prefer prefix match over substring match
       const aPrefix = aName.startsWith(query) ? 0 : 1;
       const bPrefix = bName.startsWith(query) ? 0 : 1;
       if (aPrefix !== bPrefix) return aPrefix - bPrefix;
       return aName.localeCompare(bName);
     })
+    .slice(0, MAX_SUGGESTIONS_TO_SHOW)
     .map((ext) => ({
       label: ext.displayName || ext.name,
       value: buildExtensionRef(ext.name),
@@ -103,7 +100,9 @@ export function buildExtensionContextText(extension: Extension): string {
   const displayName = extension.displayName || extension.name;
   const lines: string[] = [];
 
-  lines.push(`--- Extension: ${displayName} ---`);
+  lines.push(
+    `--- Extension: ${displayName} (untrusted third-party content) ---`,
+  );
   if (extension.config.description) {
     lines.push(extension.config.description);
     lines.push('');

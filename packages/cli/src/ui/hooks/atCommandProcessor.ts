@@ -236,7 +236,11 @@ export async function resolveAtCommandQuery({
     if (extRef) {
       const extension = matchExtensionByRef(extRef.name, activeExtensions);
       if (extension) {
-        extensionMentions.push({ originalAtPath, extension });
+        if (
+          !extensionMentions.some((m) => m.extension.name === extension.name)
+        ) {
+          extensionMentions.push({ originalAtPath, extension });
+        }
         atPathToResolvedSpecMap.set(originalAtPath, pathName);
         continue;
       }
@@ -560,6 +564,11 @@ export async function resolveAtCommandQuery({
   }
 
   // Build extension context parts and display cards for @-mentioned extensions.
+  // Aggregate cap across all extensions to prevent unbounded context injection.
+  const EXTENSION_CONTEXT_BUDGET = 200_000; // 200KB total
+  const PER_FILE_CAP = 50_000; // 50KB per context file
+  let extensionContextBudgetRemaining = EXTENSION_CONTEXT_BUDGET;
+
   const extensionParts: Part[] = [];
   const extensionDisplays: IndividualToolCallDisplay[] = [];
   const extensionLabels: string[] = [];
@@ -568,26 +577,47 @@ export async function resolveAtCommandQuery({
     const displayName = extension.displayName || extension.name;
     const callId = `client-extension-${userMessageTimestamp}-${i}`;
 
-    // Build context text describing the extension's capabilities.
     let contextText = buildExtensionContextText(extension);
 
-    // Read extension context files (e.g., QWEN.md bundled with the extension)
-    // and append their content to the injection block.
+    // Read extension context files in parallel, with path traversal and
+    // budget checks.
     if (extension.contextFiles && extension.contextFiles.length > 0) {
-      for (const contextFilePath of extension.contextFiles) {
-        try {
-          const content = await fs.readFile(contextFilePath, 'utf-8');
-          if (content.trim()) {
-            // Cap at 50KB per context file to avoid blowing up the context
-            const cappedContent =
-              content.length > 50_000
-                ? content.slice(0, 50_000) + '\n... (truncated)'
-                : content;
-            contextText += `\n\n${cappedContent}`;
+      const fileReads = await Promise.allSettled(
+        extension.contextFiles.map(async (contextFilePath) => {
+          const resolved = path.resolve(contextFilePath);
+          if (!isSubpath(extension.path, resolved)) {
+            onDebugMessage(
+              `Skipping context file outside extension directory: ${contextFilePath}`,
+            );
+            return null;
           }
-        } catch {
-          // Skip unreadable context files silently
+          return fs.readFile(resolved, 'utf-8');
+        }),
+      );
+
+      for (let j = 0; j < fileReads.length; j++) {
+        const outcome = fileReads[j];
+        if (outcome.status === 'rejected') {
+          onDebugMessage(
+            `Failed to read extension context file ${extension.contextFiles[j]}: ${getErrorMessage(outcome.reason)}`,
+          );
+          continue;
         }
+        const content = outcome.value;
+        if (!content || !content.trim()) continue;
+        if (extensionContextBudgetRemaining <= 0) {
+          onDebugMessage(
+            `Extension context budget exhausted, skipping remaining files.`,
+          );
+          break;
+        }
+        const cap = Math.min(PER_FILE_CAP, extensionContextBudgetRemaining);
+        const cappedContent =
+          content.length > cap
+            ? content.slice(0, cap) + '\n... (truncated)'
+            : content;
+        contextText += `\n\n${cappedContent}`;
+        extensionContextBudgetRemaining -= cappedContent.length;
       }
     }
 
