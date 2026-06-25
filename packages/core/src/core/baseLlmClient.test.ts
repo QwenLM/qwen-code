@@ -677,7 +677,14 @@ describe('BaseLlmClient', () => {
           stream: true,
         }),
       ).rejects.toThrow('connection reset');
-      expect(vi.mocked(reportError)).toHaveBeenCalled();
+      // The streaming failure is reported with the `[streaming]` marker so an
+      // oncall can tell it apart from the original non-streaming 504 (#5861).
+      expect(vi.mocked(reportError)).toHaveBeenCalledWith(
+        expect.any(Error),
+        'Error generating text content via API [streaming].',
+        expect.anything(),
+        'generateText-api',
+      );
     });
 
     it('surfaces an abort that fires mid-stream and skips error reporting', async () => {
