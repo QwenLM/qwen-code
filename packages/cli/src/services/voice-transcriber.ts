@@ -430,8 +430,10 @@ export function isKeytermEcho(
     (keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO ||
       overlap >= MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS);
   if (isEcho) {
+    const branch =
+      keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO ? 'ratio' : 'absolute';
     debugLogger.debug(
-      `[voice] dropped likely keyterm echo: transcriptRatio=${transcriptRatio.toFixed(2)} keytermRatio=${keytermRatio.toFixed(2)} text="${transcript}"`,
+      `[voice] dropped likely keyterm echo (${branch}): overlap=${overlap} keysetSize=${keyset.size} transcriptRatio=${transcriptRatio.toFixed(2)} keytermRatio=${keytermRatio.toFixed(2)} text="${transcript}"`,
     );
   }
   return isEcho;

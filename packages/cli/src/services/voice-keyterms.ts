@@ -232,7 +232,7 @@ function readRegularFileNoFollow({
 function parseKeyterms(content: string): string[] {
   return content
     .split(/\r?\n/)
-    .map((line) => line.replace(/(?:^|\s+)#.*$/, '').trim())
+    .map((line) => line.replace(/^\s*#.*$/, '').trim())
     .filter((line) => line.length > 0);
 }
 

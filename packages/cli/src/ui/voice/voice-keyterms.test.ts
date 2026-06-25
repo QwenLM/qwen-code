@@ -87,18 +87,22 @@ describe('buildVoiceKeyterms', () => {
       expect(terms).toContain('TypeScript'); // globals still present
     });
 
-    it('ignores blank lines and "#" comments (including indented comments)', () => {
+    it('ignores blank lines and whole-line "#" comments', () => {
       fs.writeFileSync(
         path.join(qwenDir, 'voice-keyterms.txt'),
-        '# project terms\n\n  Kubernetes # container orchestration  \nC#\nF#\n   # indented comment\n',
+        '# project terms\n\n  Kubernetes # container orchestration  \nIssue #42\nPR #5817\nC#\nF#\n   # indented comment\n',
       );
       const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
-      expect(terms).toContain('Kubernetes');
+      expect(terms).toContain('Kubernetes # container orchestration');
+      expect(terms).toContain('Issue #42');
+      expect(terms).toContain('PR #5817');
       expect(terms).toContain('C#');
       expect(terms).toContain('F#');
       expect(terms).not.toContain('C');
       expect(terms).not.toContain('F');
-      expect(terms).not.toContain('Kubernetes # container orchestration');
+      expect(terms).not.toContain('Kubernetes');
+      expect(terms).not.toContain('Issue');
+      expect(terms).not.toContain('PR');
       expect(terms).not.toContain('# project terms');
       expect(terms).not.toContain('# indented comment');
     });
