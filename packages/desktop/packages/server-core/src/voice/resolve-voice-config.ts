@@ -150,7 +150,7 @@ function fromEnv(env: NodeJS.ProcessEnv): ResolvedCredentials | undefined {
     return {
       apiKey: dashscopeKey,
       baseUrl: normalizeBaseUrl(
-        env['OPENAI_BASE_URL']?.trim() || DEFAULT_DASHSCOPE_BASE_URL,
+        env['DASHSCOPE_PROXY_BASE_URL']?.trim() || DEFAULT_DASHSCOPE_BASE_URL,
       ),
     };
   }

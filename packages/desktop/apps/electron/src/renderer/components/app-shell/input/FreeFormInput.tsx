@@ -1780,6 +1780,7 @@ export function FreeFormInput({
 
   // Submit message - backend handles queueing and interruption
   const submitMessage = React.useCallback(() => {
+    if (voice.isActive) return false;
     const hasContent =
       input.trim() || attachments.length > 0 || followUpItems.length > 0;
     if (!hasContent || disabled) return false;
@@ -1834,6 +1835,7 @@ export function FreeFormInput({
     optimisticSourceSlugs,
     onSourcesChange,
     richInputRef,
+    voice.isActive,
   ]);
 
   // Listen for craft:submit-input events (simulate pressing the Send button)
@@ -2774,7 +2776,9 @@ export function FreeFormInput({
                   size="icon"
                   aria-label={t('shortcuts.sendMessage')}
                   className="send-btn h-7 w-7 rounded-full shrink-0 ml-2"
-                  disabled={!hasContent || disabled || disableSend}
+                  disabled={
+                    !hasContent || disabled || disableSend || voice.isActive
+                  }
                   data-tutorial="send-button"
                 >
                   <ArrowUp className="h-4 w-4" />

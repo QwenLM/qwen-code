@@ -6,10 +6,12 @@ describe('transcribeQwenAsrBatch', () => {
     let requestUrl = ''
     let requestBody: unknown
     let requestHeaders: HeadersInit | undefined
+    let requestInit: RequestInit | undefined
     const fetchFn = async (url: string | URL | Request, init?: RequestInit) => {
       requestUrl = String(url)
       requestBody = JSON.parse(String(init?.body))
       requestHeaders = init?.headers
+      requestInit = init
       return Response.json({
         choices: [{ message: { content: ' hello desktop ' } }],
       })
@@ -35,6 +37,7 @@ describe('transcribeQwenAsrBatch', () => {
       Authorization: 'Bearer secret-key',
       'Content-Type': 'application/json',
     })
+    expect(requestInit?.redirect).toBe('error')
     expect(requestBody).toMatchObject({
       model: 'qwen3-asr-flash',
       asr_options: { enable_itn: true, language: 'en' },

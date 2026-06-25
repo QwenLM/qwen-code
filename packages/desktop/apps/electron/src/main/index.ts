@@ -411,25 +411,40 @@ app.whenReady().then(async () => {
   // grant to mic/media only — do NOT broaden the default session to every
   // permission (geolocation, HID, serial, …).
   const VOICE_PERMISSIONS = new Set(['media', 'audioCapture'])
+  const isAudioOnlyMediaRequest = (
+    permission: string,
+    details?: { mediaTypes?: readonly string[]; mediaType?: string },
+  ) => {
+    if (permission === 'audioCapture') return true
+    if (permission !== 'media') return false
+    const mediaTypes =
+      details?.mediaTypes ?? (details?.mediaType ? [details.mediaType] : [])
+    return (
+      mediaTypes.length > 0 &&
+      mediaTypes.every((mediaType) => mediaType === 'audio')
+    )
+  }
   const canUseVoicePermission = (
     wc: { id: number } | null | undefined,
     permission: string,
+    details?: { mediaTypes?: readonly string[]; mediaType?: string },
   ) => Boolean(
     wc &&
     VOICE_PERMISSIONS.has(permission) &&
+    isAudioOnlyMediaRequest(permission, details) &&
     windowManager?.getWorkspaceForWindow(wc.id) != null,
   )
   session.defaultSession.setPermissionRequestHandler(
-    (wc, permission, callback) => {
-      const allowed = canUseVoicePermission(wc, permission)
+    (wc, permission, callback, details) => {
+      const allowed = canUseVoicePermission(wc, permission, details)
       if (!allowed) {
         mainLog.debug(`defaultSession: denied permission '${permission}'`)
       }
       callback(allowed)
     },
   )
-  session.defaultSession.setPermissionCheckHandler((wc, permission) => {
-    const allowed = canUseVoicePermission(wc, permission)
+  session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => {
+    const allowed = canUseVoicePermission(wc, permission, details)
     if (!allowed) {
       mainLog.debug(`defaultSession: denied permission check '${permission}'`)
     }

@@ -29,6 +29,12 @@ export function isPrivateNetworkIp(hostname: string): boolean {
   if (isLoopbackHost(host)) {
     return false;
   }
+  if (host.includes(':')) {
+    const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);
+    if (ipv4Embedded) {
+      return isPrivateNetworkIp(ipv4Embedded[1]!);
+    }
+  }
   const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (ipv4Mapped) {
     return isPrivateNetworkIp(ipv4Mapped[1]!);
@@ -49,14 +55,18 @@ export function isPrivateNetworkIp(hostname: string): boolean {
     );
   }
   if (isIP(host) === 6) {
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '0', 16);
     return (
       host === '::' ||
-      host.startsWith('fe80:') ||
-      host.startsWith('fc') ||
-      host.startsWith('fd')
+      (firstHextet & 0xffc0) === 0xfe80 ||
+      (firstHextet & 0xfe00) === 0xfc00
     );
   }
   return false;
+}
+
+function isBlockedResolvedIp(address: string): boolean {
+  return isLoopbackHost(address) || isPrivateNetworkIp(address);
 }
 
 async function defaultLookupHost(
@@ -93,7 +103,7 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     );
   }
   const records = Array.isArray(result) ? result : [result];
-  if (records.some((record) => isPrivateNetworkIp(record.address))) {
+  if (records.some((record) => isBlockedResolvedIp(record.address))) {
     throw new Error(
       `Voice model '${model}' resolved to a private-network address.`,
     );

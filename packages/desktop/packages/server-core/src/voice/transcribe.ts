@@ -18,6 +18,7 @@ export interface VoiceConfig {
   model: string;
   baseUrl: string;
   apiKey?: string;
+  language?: string;
 }
 
 export interface VoiceAudio {
@@ -104,6 +105,7 @@ export async function transcribeQwenAsrBatch(
           messages,
           asr_options: asrOptions,
         }),
+        redirect: 'error',
         signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
       },
     );

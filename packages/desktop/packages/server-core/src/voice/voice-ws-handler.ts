@@ -70,11 +70,12 @@ function errMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function toStreamConfig(config: VoiceConfig): VoiceStreamConfig {
+export function toStreamConfig(config: VoiceConfig): VoiceStreamConfig {
   return {
     baseUrl: config.baseUrl,
     model: config.model,
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    ...(config.language ? { language: config.language } : {}),
   };
 }
 

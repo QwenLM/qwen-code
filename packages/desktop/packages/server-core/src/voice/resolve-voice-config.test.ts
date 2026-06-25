@@ -103,6 +103,35 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.apiKey).toBe('openai-key')
     expect(config.baseUrl).toBe('https://proxy.example.com/openai/v1')
   })
+
+  it('does not send DASHSCOPE_API_KEY to OPENAI_BASE_URL', async () => {
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {
+        DASHSCOPE_API_KEY: 'dashscope-key',
+        OPENAI_BASE_URL: 'https://proxy.example.com/openai',
+      },
+      readQwenJson: async () => undefined,
+    })
+
+    expect(config.apiKey).toBe('dashscope-key')
+    expect(config.baseUrl).toBe(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    )
+  })
+
+  it('uses DashScope-specific proxy env for DASHSCOPE_API_KEY', async () => {
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {
+        DASHSCOPE_API_KEY: 'dashscope-key',
+        DASHSCOPE_PROXY_BASE_URL: 'https://dashscope-proxy.example.com/asr',
+      },
+      readQwenJson: async () => undefined,
+    })
+
+    expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
+  })
 })
 
 describe('normalizeBaseUrl', () => {

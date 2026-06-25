@@ -69,6 +69,13 @@ import {
 } from '@craft-agent/server-core/transport';
 import { isValidWorkingDirectory } from '../../utils/path-validation';
 
+const VALID_VOICE_MODELS = new Set([
+  'qwen3-asr-flash',
+  'qwen3-asr-flash-realtime',
+  'paraformer-realtime-v2',
+  'fun-asr-realtime',
+]);
+
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.workspace.SETTINGS_GET,
   RPC_CHANNELS.workspace.SETTINGS_UPDATE,
@@ -672,6 +679,9 @@ export function registerSettingsHandlers(
   server.handle(
     RPC_CHANNELS.input.SET_VOICE_MODEL,
     async (_ctx, model: string) => {
+      if (!VALID_VOICE_MODELS.has(model)) {
+        throw new Error(`Unsupported voice model: ${model}`);
+      }
       const { setVoiceModel } = await import(
         '@craft-agent/shared/config/storage'
       );

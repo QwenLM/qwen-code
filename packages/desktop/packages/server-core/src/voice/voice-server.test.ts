@@ -1,6 +1,10 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import { describe, expect, it } from 'bun:test'
-import { closeVoiceServerResources, tokenMatches } from './voice-server'
+import {
+  closeVoiceServerResources,
+  isAllowedVoiceOrigin,
+  tokenMatches,
+} from './voice-server'
 
 describe('tokenMatches', () => {
   it('accepts the exact token only', () => {
@@ -8,6 +12,15 @@ describe('tokenMatches', () => {
     expect(tokenMatches(null, 'secret-token')).toBe(false)
     expect(tokenMatches('wrong-token', 'secret-token')).toBe(false)
     expect(tokenMatches('secret-token-extra', 'secret-token')).toBe(false)
+  })
+})
+
+describe('isAllowedVoiceOrigin', () => {
+  it('allows app origins and rejects browser origins', () => {
+    expect(isAllowedVoiceOrigin(undefined)).toBe(true)
+    expect(isAllowedVoiceOrigin('file://')).toBe(true)
+    expect(isAllowedVoiceOrigin('qwen://app')).toBe(true)
+    expect(isAllowedVoiceOrigin('https://evil.example')).toBe(false)
   })
 })
 

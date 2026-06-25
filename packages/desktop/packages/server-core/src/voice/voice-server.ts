@@ -57,6 +57,14 @@ interface ClosableHttpServer {
   closeAllConnections?: () => void;
 }
 
+export function isAllowedVoiceOrigin(origin: string | undefined): boolean {
+  return (
+    !origin ||
+    origin.startsWith('file://') ||
+    origin.startsWith('qwen://')
+  );
+}
+
 export function closeVoiceServerResources(
   httpServer: ClosableHttpServer,
   wss: ClosableWebSocketServer,
@@ -114,6 +122,11 @@ export async function startVoiceServer(
     }
     if (url.pathname !== '/voice/stream') {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    if (!isAllowedVoiceOrigin(req.headers.origin)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }

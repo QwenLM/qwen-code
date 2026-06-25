@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { createVoiceConnectionHandler } from './voice-ws-handler'
+import { createVoiceConnectionHandler, toStreamConfig } from './voice-ws-handler'
 
 class FakeWebSocket {
   readonly OPEN = 1
@@ -37,6 +37,22 @@ async function flush() {
 }
 
 describe('createVoiceConnectionHandler', () => {
+  it('passes configured language to streaming transports', () => {
+    expect(
+      toStreamConfig({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        apiKey: 'key',
+        language: 'en',
+      }),
+    ).toEqual({
+      model: 'qwen3-asr-flash-realtime',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'key',
+      language: 'en',
+    })
+  })
+
   it('finalizes batch audio through the injected transcriber', async () => {
     let receivedPcm: Uint8Array | undefined
     const ws = new FakeWebSocket()
@@ -74,13 +90,16 @@ describe('createVoiceConnectionHandler', () => {
   it('streams realtime audio through the injected session', async () => {
     const pushed: Uint8Array[] = []
     let aborted = false
+    let streamLanguage: string | undefined
     const ws = new FakeWebSocket()
     const handler = createVoiceConnectionHandler({
       resolveConfig: () => ({
         model: 'qwen3-asr-flash-realtime',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        language: 'en',
       }),
       openStream: async (_config, callbacks) => {
+        streamLanguage = _config.language
         callbacks.onInterim?.('partial transcript')
         return {
           pushAudio: (pcm) => pushed.push(pcm),
@@ -116,6 +135,7 @@ describe('createVoiceConnectionHandler', () => {
       type: 'final',
       text: 'final transcript',
     })
+    expect(streamLanguage).toBe('en')
     expect(aborted).toBe(false)
   })
 })

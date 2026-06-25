@@ -335,13 +335,24 @@ export function useVoiceCapture(
         };
 
         ws.onmessage = (event: MessageEvent) => {
-          let msg: { type?: string; text?: string; message?: string };
+          let msg: {
+            type?: string;
+            text?: string;
+            message?: string;
+            streaming?: boolean;
+          };
           try {
             msg = JSON.parse(String(event.data));
           } catch {
             return;
           }
-          if (msg.type === 'interim') {
+          if (msg.type === 'ready') {
+            if (msg.streaming === false) {
+              clearTranscribeTimeout();
+            } else if (statusRef.current === 'recording') {
+              armTranscribeTimeout(generation);
+            }
+          } else if (msg.type === 'interim') {
             if (mountedRef.current) setInterimText(msg.text ?? '');
             if (statusRef.current === 'recording') {
               armTranscribeTimeout(generation);
@@ -381,7 +392,14 @@ export function useVoiceCapture(
         );
       }
     })();
-  }, [wsUrl, fail, finishWith, applyStatus, armTranscribeTimeout]);
+  }, [
+    wsUrl,
+    fail,
+    finishWith,
+    applyStatus,
+    armTranscribeTimeout,
+    clearTranscribeTimeout,
+  ]);
 
   const stop = useCallback(() => {
     const ws = resourcesRef.current.ws;
