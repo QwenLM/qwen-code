@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { logSkillLaunch } from '../telemetry/index.js';
+import { logSkillLaunch, recordSkillInvocation } from '../telemetry/index.js';
 import { SkillTool, type SkillParams } from './skill.js';
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay } from './tools.js';
@@ -38,6 +38,7 @@ type SkillToolWithProtectedMethods = SkillTool & {
 vi.mock('../skills/skill-manager.js');
 vi.mock('../telemetry/index.js', () => ({
   logSkillLaunch: vi.fn(),
+  recordSkillInvocation: vi.fn(),
   SkillLaunchEvent: class {
     constructor(
       public skill_name: string,
@@ -79,6 +80,7 @@ describe('SkillTool', () => {
     vi.useFakeTimers();
 
     mockAddSessionAllowRule = vi.fn();
+    vi.mocked(recordSkillInvocation).mockClear();
 
     // Create mock config
     config = {
@@ -609,6 +611,10 @@ describe('SkillTool', () => {
       expect(result.returnDisplay).toBe(
         'Specialized skill for reviewing code quality',
       );
+      expect(recordSkillInvocation).toHaveBeenCalledWith(config, {
+        skillName: 'code-review',
+        success: true,
+      });
     });
 
     it('should include allowedTools in result when present', async () => {
@@ -680,6 +686,10 @@ describe('SkillTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Skill "non-existent" not found');
+      expect(recordSkillInvocation).toHaveBeenCalledWith(config, {
+        skillName: 'non-existent',
+        success: false,
+      });
     });
 
     it('should handle execution errors gracefully', async () => {
@@ -699,6 +709,10 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Failed to load skill');
       expect(llmText).toContain('Loading failed');
+      expect(recordSkillInvocation).toHaveBeenCalledWith(config, {
+        skillName: 'code-review',
+        success: false,
+      });
     });
 
     it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
@@ -828,6 +842,7 @@ describe('SkillTool', () => {
           prompt_id: 'prompt-via-executor',
         }),
       );
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('returns the executor error from the disabled-skill delegation path', async () => {
@@ -1136,6 +1151,24 @@ describe('SkillTool', () => {
       expect(result.returnDisplay).toBe(
         'UserPromptExpansion blocked: Blocked by policy',
       );
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
+    });
+
+    it('does not record skill stats when commandExecutor throws', async () => {
+      const executor = vi.fn().mockRejectedValue(new Error('MCP timeout'));
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', '');
+      expect(partToString(result.llmContent)).toContain('MCP timeout');
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('logs prompt attribution when executor returns an error', async () => {
@@ -1231,6 +1264,7 @@ describe('SkillTool', () => {
       // distinguish a disabled-skill→command pass-through from a real
       // skill execution. See comment in skill.ts execute().
       expect(result.returnDisplay).toBe('Delegated to command: mytool');
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('returns the disabled-specific error when no command alternative exists', async () => {
@@ -1250,6 +1284,10 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toMatch(/is disabled/);
       expect(llmText).toMatch(/skills manage|skills\.disabled/);
+      expect(recordSkillInvocation).toHaveBeenCalledWith(config, {
+        skillName: 'testing',
+        success: false,
+      });
     });
 
     it('returns the disabled-specific error when the executor returns null', async () => {
@@ -1272,6 +1310,7 @@ describe('SkillTool', () => {
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
       const llmText = partToString(result.llmContent);
       expect(llmText).toMatch(/is disabled/);
+      expect(recordSkillInvocation).not.toHaveBeenCalled();
     });
 
     it('returns command executor errors for disabled skill command alternatives', async () => {

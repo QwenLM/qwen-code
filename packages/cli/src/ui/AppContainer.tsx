@@ -208,6 +208,7 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from './contexts/BackgroundTaskViewContext.js';
+import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -1584,7 +1585,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
-  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const {
+    dialogOpen: bgTasksDialogOpen,
+    entries: bgTaskEntries,
+    livePanelFocused: bgLivePanelFocused,
+  } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
@@ -2536,6 +2541,15 @@ export const AppContainer = (props: AppContainerProps) => {
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
+  // Re-measure the footer whenever the LiveAgentPanel's height can change
+  // (agents launching / finishing / focus), so `controlsHeight` — and thus
+  // `availableTerminalHeight` — never goes stale below the composer. See
+  // getLiveAgentPanelLayoutKey for the full rationale (#5798).
+  const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
+    bgTaskEntries,
+    bgLivePanelFocused,
+  );
+
   useLayoutEffect(() => {
     if (!mainControlsRef.current) {
       setControlsHeight((previousHeight) =>
@@ -2557,6 +2571,7 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     dialogsVisible,
     stickyTodosLayoutKey,
+    liveAgentPanelLayoutKey,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
