@@ -20,13 +20,17 @@ scaffold command and bundled templates.
 ## Workflow
 
 1. Identify the target extension path and requested capabilities.
-2. If the path does not exist, scaffold with
+2. Run `qwen extensions new --help` when you need to confirm the currently
+   available templates.
+3. If the path does not exist, scaffold with
    `qwen extensions new <path> [template]`. If the extension already exists,
    skip scaffolding and read the existing `qwen-extension.json` before
    customizing it.
-3. Customize the generated files for the user's extension.
-4. Check the extension shape before handing it back.
-5. Link the extension locally with `qwen extensions link <path>`.
+4. If any command in the workflow fails, stop and report the error to the user
+   before continuing.
+5. Customize the generated files for the user's extension.
+6. Check the extension shape before handing it back.
+7. Link the extension locally with `qwen extensions link <path>`.
 
 ## Template Selection
 
@@ -49,42 +53,45 @@ folders by hand.
 Keep `qwen-extension.json` at the extension root. Common runtime-relevant Qwen
 Code extension fields include:
 
-- `name`
+- `name` - unique extension id. Use only letters, digits, underscores, dots,
+  and dashes.
 - `version`
 - `displayName`
 - `description`
 - `contextFileName`
-- `mcpServers`
-- `settings`
-- `hooks`
-- `channels`
-- `lspServers`
+- `mcpServers` - MCP server startup config. Use `${extensionPath}` and `${/}`
+  for portable paths, for example
+  `"args": ["${extensionPath}${/}dist${/}server.js"]`.
+- `settings` - user-provided configuration.
+- `hooks` - lifecycle hooks.
+- `channels` - custom channel adapters.
+- `lspServers` - LSP server configuration.
 
-Use these companion locations when needed:
+Use these resource locations when needed:
 
 - `QWEN.md` for extension context.
 - `commands/` for slash command markdown files.
 - `skills/` for skill folders containing `SKILL.md`.
 - `agents/` for subagent markdown files.
-- `mcpServers` in `qwen-extension.json` for MCP server startup config.
-- `settings` in `qwen-extension.json` for user-provided configuration.
-- `hooks` in `qwen-extension.json` for lifecycle hooks.
-- `channels` in `qwen-extension.json` for custom channel adapters.
-- `lspServers` in `qwen-extension.json` for LSP server configuration.
 
 Qwen Code discovers command, skill, and agent resources from the corresponding
 folders, so prefer the folder structure for those resources.
 
 ## Local Test Flow
 
+If the user provides a pre-existing path, review `package.json` scripts when
+present and review `qwen-extension.json` before running any npm command or
+linking the extension. Pay special attention to `install`, `preinstall`,
+`postinstall`, `build`, `hooks`, `mcpServers`, `channels`, and `lspServers`.
+These fields can execute arbitrary code. Flag suspicious command values such as
+network downloads, piped shells, or encoded payloads; describe the concern to
+the user and ask whether to proceed.
+
 For templates with TypeScript or MCP server code:
 
 Only run `npm install` and `npm run build` inside directories scaffolded by
-`qwen extensions new` in the current session. If the user provides a
-pre-existing path, review the `package.json` scripts and `qwen-extension.json`
-before running any npm command or linking the extension. Pay special attention
-to `install`, `preinstall`, `postinstall`, `build`, `hooks`, `mcpServers`,
-`channels`, and `lspServers`.
+`qwen extensions new` in the current session, unless the pre-existing path
+review above is complete.
 
 ```bash
 cd <extension-path>
@@ -92,6 +99,9 @@ npm install
 npm run build
 qwen extensions link .
 ```
+
+If any step exits non-zero, stop and report the error to the user. Do not link
+an extension that failed to build.
 
 For context, commands, skills, or agent-only extensions:
 
@@ -105,6 +115,8 @@ visible in the current session.
 ## Before Handoff
 
 - Confirm `qwen-extension.json` exists at the extension root.
+- Confirm `name` is set and contains only letters, digits, underscores, dots,
+  and dashes.
 - Confirm referenced folders or files exist when `contextFileName`, `commands`,
   `skills`, `agents`, `mcpServers`, `hooks`, `channels`, or `lspServers` are
   configured.
