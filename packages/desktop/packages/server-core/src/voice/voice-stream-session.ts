@@ -300,12 +300,13 @@ export function openVoiceStream(
         finishReject = null;
       } else if (event === 'task-failed') {
         clearConnectTimer();
+        const code = msg.header?.error_code ?? 'error';
+        const message = formatServerErrorMessage(msg.header?.error_message);
+        debugLogger.warn(
+          `[voice] stream failed at ${streamUrl} task ${taskId} (${code}): ${message}`,
+        );
         fail(
-          new Error(
-            `Voice stream failed at ${streamUrl} task ${taskId} (${msg.header?.error_code ?? 'error'}): ${formatServerErrorMessage(
-              msg.header?.error_message,
-            )}`,
-          ),
+          new Error(`Voice stream failed (${code}): ${message}`),
         );
       }
     });

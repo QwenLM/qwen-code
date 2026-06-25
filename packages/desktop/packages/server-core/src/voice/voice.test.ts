@@ -7,6 +7,35 @@ import {
 } from './net-guard'
 import { isStreamingVoiceModel, resolveVoiceTransport } from './voice-model'
 import { isDashscopeCompatible, normalizeBaseUrl } from './resolve-voice-config'
+import { openVoiceStream, type SocketLike } from './voice-stream-session'
+
+class FakeSocket implements SocketLike {
+  readonly OPEN = 1
+  readyState = this.OPEN
+  bufferedAmount = 0
+  sent: Array<string | Uint8Array> = []
+  private readonly handlers = new Map<string, Array<(...args: unknown[]) => void>>()
+
+  send(data: string | Uint8Array) {
+    this.sent.push(data)
+  }
+
+  close() {
+    this.readyState = 3
+  }
+
+  on(event: string, cb: (...args: unknown[]) => void) {
+    const handlers = this.handlers.get(event) ?? []
+    handlers.push(cb)
+    this.handlers.set(event, handlers)
+  }
+
+  emit(event: string, ...args: unknown[]) {
+    for (const handler of this.handlers.get(event) ?? []) {
+      handler(...args)
+    }
+  }
+}
 
 describe('encodeWav', () => {
   it('prepends a 44-byte mono 16 kHz s16le header', () => {
@@ -111,6 +140,42 @@ describe('voice-model transport classification', () => {
     expect(isStreamingVoiceModel('qwen3-asr-flash')).toBe(false)
     expect(isStreamingVoiceModel('qwen3-asr-flash-realtime')).toBe(true)
     expect(isStreamingVoiceModel('paraformer-realtime-v2')).toBe(true)
+  })
+})
+
+describe('openVoiceStream', () => {
+  it('does not expose stream URLs or task IDs in server failure errors', async () => {
+    const socket = new FakeSocket()
+    const sessionPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('message', JSON.stringify({ header: { event: 'task-started' } }))
+    const session = await sessionPromise
+    const finishPromise = session.finish()
+
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: {
+          event: 'task-failed',
+          error_code: 'InvalidParameter',
+          error_message: 'provider rejected audio',
+        },
+      }),
+    )
+
+    await expect(finishPromise).rejects.toThrow(
+      'Voice stream failed (InvalidParameter): provider rejected audio',
+    )
+    await expect(finishPromise).rejects.not.toThrow('wss://')
+    await expect(finishPromise).rejects.not.toThrow('/api-ws/v1/inference')
+    await expect(finishPromise).rejects.not.toThrow('task ')
   })
 })
 
