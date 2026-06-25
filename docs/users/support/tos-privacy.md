@@ -85,7 +85,7 @@ When enabled, Qwen Code may collect:
 
 Whether your code, including prompts and answers, is used to train AI models depends on your authentication method and the specific AI service provider you use:
 
-- **Qwen OAuth**: Data usage is governed by [Qwen's Privacy Policy](https://qwen.ai/privacy). Please refer to their policy for specific details about data collection and model training practices.
+- **Qwen OAuth**: Data usage is governed by [Qwen's Privacy Policy](https://qwen.ai/privacypolicy). Please refer to their policy for specific details about data collection and model training practices.
 
 - **Alibaba Cloud Coding Plan**: Data usage is governed by Alibaba Cloud's privacy policy. Please refer to their policy for specific details about data collection and model training practices.
 
