@@ -630,6 +630,37 @@ describe('handleAtCommand', () => {
         `Ignored 1 files:\nQwen-ignored: ${qwenIgnoredFile}`,
       );
     });
+
+    it('should skip files ignored by .agentignore in @ commands', async () => {
+      await createTestFile(
+        path.join(testRootDir, '.agentignore'),
+        'agent/output.js',
+      );
+      const agentIgnoredFile = await createTestFile(
+        path.join(testRootDir, 'agent', 'output.js'),
+        'console.log("Hello");',
+      );
+      const query = `@${agentIgnoredFile}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 204,
+        signal: abortController.signal,
+      });
+
+      expect(result).toMatchObject({
+        processedQuery: [{ text: query }],
+        shouldProceed: true,
+      });
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${agentIgnoredFile} is qwen-ignored and will be skipped.`,
+      );
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Ignored 1 files:\nQwen-ignored: ${agentIgnoredFile}`,
+      );
+    });
   });
   it('should process non-ignored files when .qwenignore is present', async () => {
     await createTestFile(
@@ -1413,14 +1444,34 @@ describe('handleAtCommand', () => {
       });
 
       const serialized = JSON.stringify(result.processedQuery);
-      // The body is fenced so the model can tell server content from the
-      // user's own prompt.
+      // The body is fenced (with a per-call nonce after the label) so the model
+      // can tell server content from the user's own prompt and a hostile server
+      // can't forge the closing marker.
       expect(serialized).toContain(
-        '--- Content from MCP resource myserver:res://d ---',
+        '--- Content from MCP resource myserver:res://d [',
       );
       expect(serialized).toContain('HELLO');
       expect(serialized).toContain(
-        '--- End of MCP resource myserver:res://d ---',
+        '--- End of MCP resource myserver:res://d [',
+      );
+    });
+
+    it('injects an attributed diagnostic for an empty @ resource read', async () => {
+      // An empty read must not leave a dangling @server:uri with no content;
+      // the @ path injects the same diagnostic the read_mcp_resource tool does.
+      const readMcpResource = vi.fn().mockResolvedValue({ contents: [] });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://empty',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 612,
+        signal: abortController.signal,
+      });
+
+      expect(JSON.stringify(result.processedQuery)).toContain(
+        '--- MCP resource myserver:res://empty: (no readable content) ---',
       );
     });
 

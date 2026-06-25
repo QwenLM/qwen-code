@@ -267,7 +267,9 @@ describe('workflowsCommand', () => {
   describe('P7b: persisted snapshots', () => {
     const tmpDirs: string[] = [];
 
-    function snapshot(overrides: Partial<WorkflowSnapshot> = {}): WorkflowSnapshot {
+    function snapshot(
+      overrides: Partial<WorkflowSnapshot> = {},
+    ): WorkflowSnapshot {
       return {
         runId: 'wf_snap',
         meta: null,
@@ -316,9 +318,11 @@ describe('workflowsCommand', () => {
 
     afterEach(async () => {
       await Promise.all(
-        tmpDirs.splice(0).map((d) =>
-          fs.rm(d, { recursive: true, force: true }).catch(() => {}),
-        ),
+        tmpDirs
+          .splice(0)
+          .map((d) =>
+            fs.rm(d, { recursive: true, force: true }).catch(() => {}),
+          ),
       );
     });
 

@@ -1,7 +1,6 @@
 .panel {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-
   border-radius: var(--radius);
   padding: 8px 12px;
   width: 100%;

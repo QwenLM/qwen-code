@@ -9,13 +9,6 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
-import type {
-  ApprovalMode,
-  Protocol,
-  Extension,
-  ExtensionInstallMetadata,
-  ExtensionSetting,
-} from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
   ALL_PROVIDERS,
@@ -37,6 +30,10 @@ import {
   recordDaemonHttpRequest,
   recordDaemonHttpResponse,
   withDaemonRequestSpan,
+  type ApprovalMode,
+  type Extension,
+  type ExtensionInstallMetadata,
+  type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { DaemonLogger } from './daemon-logger.js';
@@ -59,18 +56,24 @@ import {
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
 } from './auth/device-flow.js';
-import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
+import {
+  mapDomainErrorToErrorKind,
+  type DaemonStatusProvider,
+} from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
+import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { isServeDebugMode } from './debug-mode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
-import { isWorkspaceTrusted } from '../config/trustedFolders.js';
+import { getWorkspaceTrustStatus } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
+import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
   buildDaemonStatusResponse,
+  type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from './daemon-status.js';
 import {
@@ -130,12 +133,20 @@ import {
 } from './fs/index.js';
 import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
 import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
+import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
+import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
+import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
+import {
+  registerWorkspaceVoiceRoutes,
+  type WorkspaceVoiceRouteDeps,
+} from './routes/workspace-voice.js';
+import { hasConfiguredBatchVoiceTranscriptionModel } from '../services/voice-service.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
   createRateLimiter,
@@ -152,6 +163,23 @@ import {
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
   return activeSseCount;
+}
+
+function isWorkspaceVoiceTranscriptionAvailable(
+  boundWorkspace: string,
+): boolean {
+  try {
+    return hasConfiguredBatchVoiceTranscriptionModel(
+      loadSettings(boundWorkspace),
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: workspace voice transcription capability check failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return false;
+  }
 }
 
 /**
@@ -208,12 +236,16 @@ export function resolveBridgeFsFactory(input: {
   injected?: WorkspaceFileSystemFactory;
   trusted: boolean;
   emit?: (event: BridgeEvent) => void;
+  customIgnoreFiles?: string[];
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
     boundWorkspace: input.boundWorkspace,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
+    ...(input.customIgnoreFiles !== undefined
+      ? { customIgnoreFiles: input.customIgnoreFiles }
+      : {}),
   });
 }
 
@@ -237,6 +269,21 @@ export class InvalidCursorError extends Error {
   }
 }
 
+function parseSessionCursor(cursor: string): number | undefined {
+  if (cursor === '') return undefined;
+  const trimmed = cursor.trim();
+  const parsed = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    parsed > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new InvalidCursorError(cursor);
+  }
+  return parsed;
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -250,12 +297,8 @@ export async function listWorkspaceSessionsForResponse(
   const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
 
   let numericCursor: number | undefined;
-  if (options?.cursor) {
-    const parsed = Number(options.cursor);
-    if (!Number.isFinite(parsed)) {
-      throw new InvalidCursorError(options.cursor);
-    }
-    numericCursor = parsed;
+  if (options?.cursor != null) {
+    numericCursor = parseSessionCursor(options.cursor);
   }
   const isFirstPage = numericCursor === undefined;
 
@@ -751,7 +794,9 @@ export interface ServeAppDeps {
    * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
+  startup?: DaemonStartupSnapshot;
   workspace?: DaemonWorkspaceService;
+  statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
     workspace: string,
     toolName: string,
@@ -763,7 +808,16 @@ export interface ServeAppDeps {
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
+  ) => Promise<void | import('../config/settings.js').LoadedSettings>;
+  persistSettings?: (
+    workspace: string,
+    writes: Array<{
+      scope: import('../config/settings.js').SettingScope;
+      key: string;
+      value: unknown;
+    }>,
   ) => Promise<void>;
+  voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
 function resolveDaemonTelemetryRoute(
@@ -839,6 +893,9 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }
+  if (req.method === 'POST' && path === '/workspace/setup-github') {
+    return { route: 'POST /workspace/setup-github' };
+  }
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
   }
@@ -869,6 +926,23 @@ function resolveDaemonTelemetryRoute(
   if (path === '/workspace/settings') {
     if (req.method === 'GET') return { route: 'GET /workspace/settings' };
     if (req.method === 'POST') return { route: 'POST /workspace/settings' };
+  }
+  if (path === '/workspace/permissions') {
+    if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
+    if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
+  }
+  if (path === '/workspace/trust') {
+    if (req.method === 'GET') return { route: 'GET /workspace/trust' };
+  }
+  if (req.method === 'POST' && path === '/workspace/trust/request') {
+    return { route: 'POST /workspace/trust/request' };
+  }
+  if (path === '/workspace/voice') {
+    if (req.method === 'GET') return { route: 'GET /workspace/voice' };
+    if (req.method === 'POST') return { route: 'POST /workspace/voice' };
+  }
+  if (req.method === 'POST' && path === '/workspace/voice/transcribe') {
+    return { route: 'POST /workspace/voice/transcribe' };
   }
   return undefined;
 }
@@ -1000,9 +1074,11 @@ function advertisedMaxPendingPromptsPerSession(
  *   - `POST /session/:id/load`
  *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
+ *   - `GET  /session/:id/status`
  *   - `GET  /session/:id/context`
  *   - `GET  /session/:id/supported-commands`
  *   - `GET  /session/:id/tasks`
+ *   - `GET  /session/:id/lsp`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/heartbeat`
@@ -1065,10 +1141,20 @@ export function createServeApp(
     injected: deps.fsFactory,
     trusted: false,
   });
+  let cachedVoiceTranscriptionAvailable: boolean | undefined;
+  const invalidateServeFeaturesCache = () => {
+    cachedVoiceTranscriptionAvailable = undefined;
+  };
+  const getCachedVoiceTranscriptionAvailable = () => {
+    cachedVoiceTranscriptionAvailable ??=
+      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+    return cachedVoiceTranscriptionAvailable;
+  };
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
     opts.enableSessionShell === true && tokenConfigured;
+  const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
@@ -1080,7 +1166,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
-      statusProvider: createDaemonStatusProvider(),
+      statusProvider,
       // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
       // readTextFile pick up trust / TOCTOU / audit.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
@@ -1206,7 +1292,9 @@ export function createServeApp(
     createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
-      statusProvider: createDaemonStatusProvider(),
+      statusProvider,
+      workspaceProvidersStatusProvider:
+        createWorkspaceProvidersStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
@@ -1221,7 +1309,19 @@ export function createServeApp(
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
-      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+      ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
+      ...(deps.persistSettings
+        ? { persistSettings: deps.persistSettings }
+        : {}),
+      publishWorkspaceEvent: (event) => {
+        if (
+          event.type === 'settings_changed' ||
+          event.type === 'settings_reloaded'
+        ) {
+          invalidateServeFeaturesCache();
+        }
+        bridge.publishWorkspaceEvent(event);
+      },
     });
   let extensionInstallQueue: Promise<unknown> = Promise.resolve();
   let extensionInstallQueueDepth = 0;
@@ -1237,7 +1337,7 @@ export function createServeApp(
     extensionInstallQueue = next.catch(() => undefined);
     return next;
   };
-  const EXTENSION_MUTATION_TIMEOUT_MS = 120_000;
+  const EXTENSION_MUTATION_TIMEOUT_MS = 10 * 60_000;
   const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
   const isExtensionQueueFullError = (err: unknown): boolean =>
     err instanceof Error && err.message === 'Extension operation queue is full';
@@ -1270,9 +1370,11 @@ export function createServeApp(
   const createExtensionManager = () =>
     new ExtensionManager({
       workspaceDir: boundWorkspace,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(boundWorkspace).merged,
-      ),
+      isWorkspaceTrusted:
+        getWorkspaceTrustStatus(
+          loadSettings(boundWorkspace).merged,
+          boundWorkspace,
+        ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -1411,6 +1513,65 @@ export function createServeApp(
     name?: string;
     version?: string;
   };
+  type ExtensionOperationStatus = {
+    v: 1;
+    operationId: string;
+    operation: string;
+    status:
+      | 'queued'
+      | 'running'
+      | 'succeeded'
+      | 'succeeded_with_refresh_error'
+      | 'failed';
+    createdAt: number;
+    updatedAt: number;
+    source?: string;
+    name?: string;
+    result?: ExtensionMutationEvent & {
+      refreshed?: number;
+      failed?: number;
+      error?: string;
+    };
+    error?: string;
+  };
+  const extensionOperations = new Map<string, ExtensionOperationStatus>();
+  const MAX_EXTENSION_OPERATION_HISTORY = 100;
+  const isTerminalExtensionOperation = (
+    operation: ExtensionOperationStatus,
+  ): boolean => operation.status !== 'queued' && operation.status !== 'running';
+  const redactExtensionOperationResult = (
+    event: ExtensionMutationEvent,
+  ): ExtensionMutationEvent => ({
+    ...event,
+    ...(event.source ? { source: redactUrlCredentials(event.source) } : {}),
+  });
+  const rememberExtensionOperation = (
+    operation: ExtensionOperationStatus,
+  ): void => {
+    extensionOperations.set(operation.operationId, operation);
+    while (extensionOperations.size > MAX_EXTENSION_OPERATION_HISTORY) {
+      let evicted = false;
+      for (const [id, storedOperation] of extensionOperations) {
+        if (!isTerminalExtensionOperation(storedOperation)) continue;
+        extensionOperations.delete(id);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
+    }
+  };
+  const updateExtensionOperation = (
+    operationId: string,
+    patch: Partial<Omit<ExtensionOperationStatus, 'operationId' | 'createdAt'>>,
+  ): void => {
+    const current = extensionOperations.get(operationId);
+    if (!current) return;
+    extensionOperations.set(operationId, {
+      ...current,
+      ...patch,
+      updatedAt: Date.now(),
+    });
+  };
   const runQueuedExtensionMutation = (
     operation: string,
     failureContext: { source?: string; name?: string },
@@ -1423,9 +1584,24 @@ export function createServeApp(
       sendExtensionQueueFull(res);
       return;
     }
-    res.status(202).json({ accepted: true });
+    const operationId = crypto.randomUUID();
+    const now = Date.now();
+    rememberExtensionOperation({
+      v: 1,
+      operationId,
+      operation,
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+      ...(failureContext.source
+        ? { source: redactUrlCredentials(failureContext.source) }
+        : {}),
+      ...(failureContext.name ? { name: failureContext.name } : {}),
+    });
+    res.status(202).json({ accepted: true, operationId });
     void enqueueExtensionInstall(async () => {
       try {
+        updateExtensionOperation(operationId, { status: 'running' });
         const extensionManager = createExtensionManager();
         await extensionManager.refreshCache();
         const event = await withExtensionTimeout(
@@ -1436,6 +1612,14 @@ export function createServeApp(
         extensionsStatusCache = undefined;
         try {
           const result = await bridge.refreshExtensionsForAllSessions(event);
+          updateExtensionOperation(operationId, {
+            status: 'succeeded',
+            result: {
+              ...redactExtensionOperationResult(event),
+              refreshed: result.refreshed,
+              failed: result.failed,
+            },
+          });
           writeStderrLine(
             `qwen serve: extensions ${operation}: refreshed ${result.refreshed} session(s), ${result.failed} failed`,
           );
@@ -1445,6 +1629,15 @@ export function createServeApp(
               ? refreshErr.message
               : String(refreshErr),
           );
+          updateExtensionOperation(operationId, {
+            status: 'succeeded_with_refresh_error',
+            result: {
+              ...redactExtensionOperationResult(event),
+              refreshed: 0,
+              failed: 1,
+              error: message.slice(0, 500),
+            },
+          });
           try {
             bridge.broadcastExtensionsChanged({
               ...event,
@@ -1469,6 +1662,10 @@ export function createServeApp(
         const message = redactUrlCredentials(
           err instanceof Error ? err.message : String(err),
         );
+        updateExtensionOperation(operationId, {
+          status: 'failed',
+          error: message.slice(0, 500),
+        });
         try {
           bridge.broadcastExtensionsChanged({
             status: 'failed',
@@ -1498,11 +1695,16 @@ export function createServeApp(
         }
       }
     }).catch((err) => {
+      const message = redactUrlCredentials(
+        err instanceof Error ? err.message : String(err),
+      );
+      updateExtensionOperation(operationId, {
+        status: 'failed',
+        error: message.slice(0, 500),
+      });
       try {
         writeStderrLine(
-          `qwen serve: extensions ${operation}: queued task failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `qwen serve: extensions ${operation}: queued task failed: ${message}`,
         );
       } catch {
         // Last-resort guard for detached async work.
@@ -1882,6 +2084,12 @@ export function createServeApp(
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
+      voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
+      // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
+      // on). A configured token no longer suppresses it — the browser carries
+      // the bearer token via the WS subprotocol, which the upgrade listener
+      // verifies (acp-http/index.ts).
+      voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 
@@ -1902,6 +2110,7 @@ export function createServeApp(
           bridge,
           workspace,
           daemonLog,
+          startup: deps.startup,
           qwenCodeVersion: deps.qwenCodeVersion,
           acpHandle: acpHandleRef.current,
           rateLimiter,
@@ -2078,6 +2287,33 @@ export function createServeApp(
     }
   });
 
+  app.get('/workspace/extensions/operations/:operationId', async (req, res) => {
+    try {
+      buildWorkspaceCtx(
+        req,
+        'GET /workspace/extensions/operations/:operationId',
+      );
+      const operationId = req.params['operationId'];
+      if (!operationId) {
+        res.status(400).json({ error: 'Missing extension operation id' });
+        return;
+      }
+      const operation = extensionOperations.get(operationId);
+      if (!operation) {
+        res.status(404).json({
+          error: `Extension operation "${operationId}" not found`,
+          code: 'extension_operation_not_found',
+        });
+        return;
+      }
+      res.status(200).json(operation);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /workspace/extensions/operations/:operationId',
+      });
+    }
+  });
+
   // POST /workspace/extensions/install — install an extension and refresh
   // all active sessions asynchronously.
   app.post(
@@ -2131,9 +2367,17 @@ export function createServeApp(
           res.status(400).json({ error: '`registry` must be a string' });
           return;
         }
+        const sourceValue = source;
+        const refValue = typeof ref === 'string' ? ref : undefined;
+        const autoUpdateValue =
+          typeof autoUpdate === 'boolean' ? autoUpdate : undefined;
+        const allowPreReleaseValue =
+          typeof allowPreRelease === 'boolean' ? allowPreRelease : undefined;
+        const registryValue =
+          typeof registry === 'string' ? registry : undefined;
         const registryUrl =
-          registry !== undefined
-            ? parseExtensionRegistryUrl(registry, res)
+          registryValue !== undefined
+            ? parseExtensionRegistryUrl(registryValue, res)
             : undefined;
         if (registryUrl === null) return;
         if (consent !== true) {
@@ -2142,16 +2386,16 @@ export function createServeApp(
           });
           return;
         }
-        if (!validateExtensionSourceHost(source, res)) {
+        if (!validateExtensionSourceHost(sourceValue, res)) {
           return;
         }
 
         runQueuedExtensionMutation(
           'install',
-          { source },
+          { source: sourceValue },
           res,
           async (extensionManager) => {
-            const installMetadata = await parseInstallSource(source);
+            const installMetadata = await parseInstallSource(sourceValue);
 
             if (
               installMetadata.type !== 'git' &&
@@ -2162,10 +2406,10 @@ export function createServeApp(
                 'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
               );
             }
-            if (installMetadata.type === 'npm' && ref) {
+            if (installMetadata.type === 'npm' && refValue) {
               throw new Error('--ref is not applicable for npm extensions.');
             }
-            if (installMetadata.type !== 'npm' && registry) {
+            if (installMetadata.type !== 'npm' && registryValue) {
               throw new Error(
                 '--registry is only applicable for npm extensions.',
               );
@@ -2177,12 +2421,17 @@ export function createServeApp(
               installMetadata.registryUrl = registryUrl;
             }
             const extension = await extensionManager.installExtension(
-              { ...installMetadata, ref, autoUpdate, allowPreRelease },
+              {
+                ...installMetadata,
+                ref: refValue,
+                autoUpdate: autoUpdateValue,
+                allowPreRelease: allowPreReleaseValue,
+              },
               () => Promise.resolve(),
             );
             return {
               status: 'installed',
-              source,
+              source: sourceValue,
               name: extension.name,
               version: extension.config.version,
             };
@@ -2497,6 +2746,35 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+  registerWorkspaceSetupGithubRoutes(app, {
+    boundWorkspace,
+    bridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  registerWorkspaceTrustRoutes(app, {
+    boundWorkspace,
+    workspace,
+    mutate,
+    safeBody,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
+
+  const broadcastSettingsChanged = (
+    key: string,
+    value: unknown,
+    scope: string,
+    clientId: string | undefined,
+  ) => {
+    invalidateServeFeaturesCache();
+    bridge.publishWorkspaceEvent({
+      type: 'settings_changed',
+      data: { key, value, scope },
+      ...(clientId ? { originatorClientId: clientId } : {}),
+    });
+  };
 
   if (deps.persistSetting) {
     const persistSetting = deps.persistSetting;
@@ -2504,18 +2782,33 @@ export function createServeApp(
       boundWorkspace,
       mutate,
       safeBody,
-      persistSetting,
-      broadcastSettingsChanged: (key, value, scope, clientId) => {
-        bridge.publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: { key, value, scope },
-          ...(clientId ? { originatorClientId: clientId } : {}),
-        });
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
       },
+      broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, bridge),
     });
   }
+  registerWorkspacePermissionsRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    workspace,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
+  registerWorkspaceVoiceRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    persistSettings: deps.persistSettings,
+    transcribe: deps.voiceTranscriber,
+    broadcastSettingsChanged,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
 
   // A2UI action inbound (the upstream half of A2UI-over-MCP): user
   // interactions from web clients are proxied to the UI MCP server's
@@ -2723,7 +3016,7 @@ export function createServeApp(
           knownProvider.protocolOptions && knownProvider.protocolOptions.length
             ? knownProvider.protocolOptions
             : [knownProvider.protocol];
-        if (!allowedProtocols.includes(installRequest.protocol as Protocol)) {
+        if (!allowedProtocols.includes(installRequest.protocol)) {
           res.status(400).json({
             error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
             code: 'unsupported_protocol',
@@ -3031,6 +3324,19 @@ export function createServeApp(
     }
   });
 
+  app.get('/session/:id/status', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(bridge.getSessionSummary(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/status',
+        sessionId,
+      });
+    }
+  });
+
   app.get('/session/:id/context', async (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
@@ -3097,6 +3403,19 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/tasks',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/lsp', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.getSessionLspStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/lsp',
         sessionId,
       });
     }
@@ -3265,6 +3584,13 @@ export function createServeApp(
           ...(clientId !== undefined ? { clientId } : {}),
           limit: err.limit,
           pendingCount: err.pendingCount,
+        });
+      }
+      if (daemonLog && err instanceof InvalidClientIdError) {
+        daemonLog.warn('prompt admission rejected: invalid client id', {
+          sessionId,
+          promptId,
+          ...(clientId !== undefined ? { clientId } : {}),
         });
       }
       sendBridgeError(res, err, {
@@ -3825,7 +4151,7 @@ export function createServeApp(
       try {
         const response = await bridge.rewindSession(
           sessionId,
-          { promptId },
+          { promptId, rewindFiles: body['rewindFiles'] !== false },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);
@@ -4158,6 +4484,7 @@ export function createServeApp(
       try {
         const ctx = buildWorkspaceCtx(req, 'POST /workspace/reload', clientId);
         const result = await workspace.reload(ctx);
+        invalidateServeFeaturesCache();
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/reload' });
@@ -4707,6 +5034,15 @@ export function createServeApp(
     token: opts.token,
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
+    // Browser captures audio and streams raw PCM here; the daemon transcribes
+    // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
+    // listener's loopback/CSRF/bearer checks.
+    extraWsRoutes: [
+      {
+        path: '/voice/stream',
+        onConnection: createVoiceWsConnectionHandler(boundWorkspace),
+      },
+    ],
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;

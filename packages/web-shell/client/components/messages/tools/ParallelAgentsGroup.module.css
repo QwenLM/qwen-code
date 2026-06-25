@@ -1,10 +1,124 @@
+.wrap {
+  margin: 8px 0;
+}
+
+.summary {
+  width: 100%;
+  margin: 0;
+  padding: 2px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #a1a2a3;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.summary:hover,
+.summary:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.summaryIcon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.summaryIcon svg {
+  display: block;
+}
+
+.summaryToolIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.summaryText {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.summaryTextActive {
+  color: #a1a2a3;
+  background-image: linear-gradient(
+    105deg,
+    #a1a2a3 0%,
+    #a1a2a3 46%,
+    rgba(255, 255, 255, 0.92) 50%,
+    #a1a2a3 54%,
+    #a1a2a3 100%
+  );
+  background-size: 300% 100%;
+  background-position: 150% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: summary-shine 5s linear infinite;
+}
+
+@keyframes summary-shine {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -150% 0;
+  }
+}
+
+.summaryDot {
+  margin: 0 6px;
+}
+
+.chevronRight,
+.chevronDown {
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.summary:hover .chevronRight,
+.summary:hover .chevronDown,
+.summary:focus-visible .chevronRight,
+.summary:focus-visible .chevronDown {
+  opacity: 1;
+}
+
+.chevronRight {
+  transform: rotate(-45deg);
+}
+
+.chevronDown {
+  transform: rotate(45deg);
+  margin-top: -3px;
+}
+
 .group {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius);
   padding: 8px 12px;
-  margin-bottom: 12px;
-  margin-left: 14px;
+  margin: 5px 0;
   min-width: 0;
   overflow: hidden;
 }

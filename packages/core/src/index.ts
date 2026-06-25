@@ -33,10 +33,12 @@ export {
   type ModelConfigValidationResult,
   ModelRegistry,
   modelRegistryKey,
+  resolveProviderProtocol,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type ModelSwitchMetadata,
   MODEL_GENERATION_CONFIG_FIELDS,
   type OnModelChangeCallback,
@@ -83,6 +85,9 @@ export * from './tools/tools.js';
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
+// Shared MCP resource content formatter (used by the `@` injection path and
+// the read_mcp_resource tool).
+export * from './tools/mcp-resource-content.js';
 // pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
@@ -136,6 +141,10 @@ export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
 export type { GrepTool, GrepToolParams } from './tools/grep.js';
 export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';
 export type { LspTool, LspToolParams, LspOperation } from './tools/lsp.js';
+export type {
+  ReadMcpResourceTool,
+  ReadMcpResourceToolParams,
+} from './tools/read-mcp-resource.js';
 export type {
   ShellTool,
   ShellToolParams,
@@ -192,6 +201,8 @@ export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
+export * from './services/visionBridge/vision-bridge-service.js';
+export * from './services/visionBridge/image-part-utils.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
@@ -401,6 +412,11 @@ export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  QwenIgnoreParser,
+} from './utils/qwenIgnoreParser.js';
+export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';

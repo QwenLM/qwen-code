@@ -143,6 +143,8 @@ export interface DaemonSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 /**
@@ -437,6 +439,7 @@ export interface DaemonWorkspaceProvidersStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];
@@ -935,6 +938,30 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
 }
 
+export interface DaemonLspServerStatus {
+  name: string;
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+  languages: string[];
+  transport?: string;
+  command?: string;
+  error?: string;
+}
+
+export interface DaemonSessionLspStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  enabled: boolean;
+  configuredServers: number;
+  readyServers: number;
+  failedServers: number;
+  inProgressServers: number;
+  notStartedServers: number;
+  statusUnavailable?: true;
+  initializationError?: string;
+  servers: DaemonLspServerStatus[];
+}
+
 export interface DaemonSessionStatsModelMetrics {
   api: {
     totalRequests: number;
@@ -963,6 +990,12 @@ export interface DaemonSessionStatsToolByName {
   };
 }
 
+export interface DaemonSessionStatsSkillByName {
+  count: number;
+  success: number;
+  fail: number;
+}
+
 /** Returned from `GET /session/:id/stats`. */
 export interface DaemonSessionStatsStatus {
   v: 1;
@@ -982,6 +1015,12 @@ export interface DaemonSessionStatsStatus {
   files: {
     totalLinesAdded: number;
     totalLinesRemoved: number;
+  };
+  skills?: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, DaemonSessionStatsSkillByName>;
   };
 }
 
@@ -1076,6 +1115,107 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
+export type DaemonVoiceMode = 'hold' | 'tap';
+
+export type DaemonVoiceTransport =
+  | 'qwen-asr-chat'
+  | 'qwen-asr-realtime'
+  | 'dashscope-task-realtime';
+
+export interface DaemonVoiceModelDescriptor {
+  id: string;
+  transport: DaemonVoiceTransport;
+}
+
+export interface DaemonWorkspaceVoiceStatus {
+  v: 1;
+  workspaceCwd: string;
+  enabled: boolean;
+  mode: DaemonVoiceMode;
+  language: string;
+  voiceModel: string | null;
+  availableVoiceModels: DaemonVoiceModelDescriptor[];
+}
+
+export interface DaemonWorkspaceVoiceUpdate {
+  enabled?: boolean;
+  mode?: DaemonVoiceMode;
+  language?: string;
+  voiceModel?: string;
+}
+
+export type DaemonVoiceAudioInput = Blob | ArrayBuffer | Uint8Array;
+
+export interface DaemonWorkspaceVoiceTranscribeOptions {
+  mimeType: string;
+  voiceModel?: string;
+  clientId?: string;
+}
+
+export interface DaemonWorkspaceVoiceTranscriptionResult {
+  v: 1;
+  text: string;
+  model: string;
+  transport: DaemonVoiceTransport;
+}
+
+export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
+
+export type DaemonWorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
+
+export type DaemonWorkspaceTrustLevel =
+  | 'TRUST_FOLDER'
+  | 'TRUST_PARENT'
+  | 'DO_NOT_TRUST';
+
+export interface DaemonWorkspaceTrustStatus {
+  v: 1;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  effective: {
+    state: DaemonWorkspaceTrustState;
+    source: DaemonWorkspaceTrustSource;
+  };
+  explicitTrustLevel: DaemonWorkspaceTrustLevel | null;
+  requiresDaemonRestartForChanges: true;
+}
+
+export type DaemonWorkspaceTrustDesiredState = 'trusted' | 'untrusted';
+
+export interface DaemonWorkspaceTrustChangeRequest {
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  reason?: string;
+}
+
+export interface DaemonWorkspaceTrustChangeResult {
+  accepted: boolean;
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  requiresOperatorAction: true;
+}
+
+export type DaemonPermissionScope = 'user' | 'workspace';
+
+export type DaemonPermissionRuleType = 'allow' | 'ask' | 'deny';
+
+export interface DaemonPermissionRuleSet {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+export interface DaemonWorkspacePermissionScopeState {
+  path: string;
+  rules: DaemonPermissionRuleSet;
+}
+
+export interface DaemonWorkspacePermissionsStatus {
+  v: 1;
+  user: DaemonWorkspacePermissionScopeState;
+  workspace: DaemonWorkspacePermissionScopeState;
+  merged: DaemonPermissionRuleSet;
+  isTrusted: boolean;
+}
+
 /**
  * Result body of `POST /workspace/init`.
  *
@@ -1095,6 +1235,38 @@ export interface DaemonSettingUpdateResult {
 export interface DaemonInitWorkspaceResult {
   path: string;
   action: 'created' | 'overwrote' | 'noop';
+}
+
+export interface DaemonGithubSetupRequest {
+  consent: true;
+}
+
+export interface DaemonGithubSetupWorkflowResult {
+  sourcePath: string;
+  path: string;
+  status: 'written' | 'failed';
+  sizeBytes?: number;
+  error?: string;
+}
+
+export interface DaemonGithubSetupGitignoreResult {
+  path: '.gitignore';
+  status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped';
+  added?: string[];
+  error?: string;
+}
+
+export interface DaemonGithubSetupResult {
+  kind: 'github_setup';
+  workspaceCwd: string;
+  gitRepoRoot: string;
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: DaemonGithubSetupWorkflowResult[];
+  gitignore: DaemonGithubSetupGitignoreResult;
+  warnings: string[];
+  partial?: boolean;
 }
 
 /**
@@ -1752,9 +1924,40 @@ export interface ExtensionInstallRequest {
 
 export interface ExtensionInstallResponse {
   accepted: true;
+  operationId: string;
 }
 
 export type ExtensionMutationResponse = ExtensionInstallResponse;
+
+export type ExtensionOperationState =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'succeeded_with_refresh_error'
+  | 'failed';
+
+export interface ExtensionOperationResult {
+  status: 'installed' | 'enabled' | 'disabled' | 'updated' | 'uninstalled';
+  source?: string;
+  name?: string;
+  version?: string;
+  refreshed?: number;
+  failed?: number;
+  error?: string;
+}
+
+export interface ExtensionOperationStatus {
+  v: 1;
+  operationId: string;
+  operation: string;
+  status: ExtensionOperationState;
+  createdAt: number;
+  updatedAt: number;
+  source?: string;
+  name?: string;
+  result?: ExtensionOperationResult;
+  error?: string;
+}
 
 export type ExtensionScope = 'user' | 'workspace';
 

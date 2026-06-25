@@ -20,6 +20,7 @@ import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
+  ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceExtensionsStatus,
@@ -39,6 +40,7 @@ export interface RewindSnapshotInfo {
 
 export interface RewindRequest {
   promptId: string;
+  rewindFiles?: boolean;
 }
 
 export interface RewindResponse {
@@ -80,6 +82,8 @@ export interface BridgeSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -302,10 +306,10 @@ export interface AcpSessionBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `PromptQueueFullError` and pre-aborted signals throw
-   * synchronously so HTTP routes can reject before returning 202. Deferred
-   * failures such as `SessionNotFoundError` may be returned as rejected
-   * promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject before
+   * returning 202. Deferred failures such as `SessionNotFoundError` may be
+   * returned as rejected promises.
    */
   sendPrompt(
     sessionId: string,
@@ -389,6 +393,15 @@ export interface AcpSessionBridge {
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
 
   /**
+   * Live status summary for a single session by id — the same shape
+   * `listWorkspaceSessions` produces per item. Throws
+   * `SessionNotFoundError` when no live session with that id exists on
+   * this daemon. Lets a caller that already holds a session id poll
+   * `hasActivePrompt` / `clientCount` without scanning the whole list.
+   */
+  getSessionSummary(sessionId: string): BridgeSessionSummary;
+
+  /**
    * Record a client heartbeat for the session. Throws
    * `SessionNotFoundError` for unknown ids and `InvalidClientIdError`
    * when the supplied `clientId` is not registered for this session.
@@ -468,6 +481,9 @@ export interface AcpSessionBridge {
 
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+
+  /** Read sanitized LSP server status for a live session. */
+  getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
   /** Cancel a background task in a live session. */
   cancelSessionTask(
@@ -746,7 +762,7 @@ export interface AcpSessionBridge {
    */
   isChannelLive(): boolean;
 
-  /** Number of sessions with an active prompt (promptActive === true). */
+  /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
   /**

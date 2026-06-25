@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,6 +21,7 @@ import {
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
+import { clearSessionCommits } from './destructive-commands.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
@@ -1363,5 +1364,120 @@ describe('shouldRunAutoModeForCall', () => {
     expect(shouldRunAutoModeForCall(ApprovalMode.DEFAULT, 'unknown_tool')).toBe(
       false,
     );
+  });
+});
+
+// ─── L5.2.5 destructive command guard integration ────────────────────────
+
+describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
+  const cwd = '/Users/test/project';
+  const baseConfig = makeConfig([cwd]);
+
+  beforeEach(() => {
+    clearSessionCommits();
+  });
+
+  it('blocks git reset --hard via shell tool before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'fix the bug' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('blocked:destructive-command');
+    if (decision.via === 'blocked:destructive-command') {
+      expect(decision.reason).toContain('git reset --hard');
+    }
+  });
+
+  it('blocks terraform destroy via shell tool', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.SHELL,
+        command: 'terraform destroy',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'update infra' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  it('allows destructive commands when user explicitly mentions discard', async () => {
+    // With "discard" in the prompt, the guard should NOT block.
+    // The call will fall through to the classifier (which is mocked away
+    // here — we just verify it doesn't get blocked:destructive-command).
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [
+        {
+          role: 'user',
+          parts: [{ text: 'discard all local changes and reset' }],
+        },
+      ],
+      config: baseConfig,
+      signal: new AbortController().signal,
+      skipClassifierReason: 'total_denial',
+    });
+    // Should NOT be blocked:destructive-command; instead falls through
+    // to fallback because we set skipClassifierReason.
+    expect(decision.via).not.toBe('blocked:destructive-command');
+  });
+
+  it('does not block non-shell tools', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.READ_FILE, filePath: '/any/file.txt' },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'read the file' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('fast-path:allowlist');
+  });
+
+  it('blocks shell indirection: bash -c "git reset --hard"', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.SHELL,
+        command: 'bash -c "git reset --hard"',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'fix something' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  it('applyAutoModeDecision handles blocked:destructive-command', () => {
+    const setAutoModeDenialState = vi.fn();
+    const denialState = {
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    };
+    const result = applyAutoModeDecision(
+      {
+        via: 'blocked:destructive-command',
+        reason: 'Blocked destructive git command',
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+    expect(result.kind).toBe('blocked');
+    if (result.kind === 'blocked') {
+      expect(result.errorMessage).toContain('Blocked destructive git command');
+      expect(result.errorMessage).toContain('Do not try to complete');
+    }
+    expect(setAutoModeDenialState).toHaveBeenCalled();
   });
 });

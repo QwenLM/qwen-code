@@ -108,7 +108,19 @@ export async function collectContextData(
   const contextWindowSize =
     contentGeneratorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
 
-  const apiTotalTokens = uiTelemetryService.getLastPromptTokenCount();
+  // Prefer the per-session chat's API-reported count. `uiTelemetryService` is
+  // a process-global singleton shared by every session in a `serve` daemon, so
+  // reading it here reports whichever session most recently completed a turn
+  // (#5763). The active chat carries the correct per-session value; fall back
+  // to the global singleton only when no chat exists yet (first /context,
+  // --continue resume before any send).
+  const geminiClient = config.getGeminiClient?.();
+  const apiTotalTokens = geminiClient?.isInitialized?.()
+    ? geminiClient.getChat().getLastPromptTokenCount()
+    : uiTelemetryService.getLastPromptTokenCount();
+  // Cached-content tokens have no per-chat mirror today (only the global
+  // singleton is written, geminiChat.ts), so this read stays global. It only
+  // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
   const systemPromptText = getCoreSystemPrompt(undefined, modelName);

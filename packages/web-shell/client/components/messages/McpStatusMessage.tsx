@@ -56,7 +56,11 @@ function parseMcpStatusMessage(
   return parsed;
 }
 
-export { serializeMcpStatusMessage, parseMcpStatusMessage };
+export {
+  serializeMcpStatusMessage,
+  parseMcpStatusMessage,
+  type SerializedMcpStatusMessage,
+};
 
 function statusDisplay(
   server: DaemonWorkspaceMcpServerStatus,
@@ -836,5 +840,3 @@ export function McpStatusMessage({
     </div>
   );
 }
-
-export { ACTIVE_EVENT as MCP_STATUS_ACTIVE_EVENT };

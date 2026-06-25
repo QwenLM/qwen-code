@@ -21,11 +21,90 @@ vi.mock('@qwen-code/qwen-code-core', () => {
       this.code = code;
     }
   }
-  return { SkillError };
+  class FatalConfigError extends Error {}
+  const noopLogger = {
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  };
+  class Storage {
+    constructor(private readonly workspace: string) {}
+
+    static getGlobalQwenDir() {
+      return process.env['QWEN_HOME'] ?? '/tmp/.qwen';
+    }
+
+    static getGlobalSettingsPath() {
+      return `${Storage.getGlobalQwenDir()}/settings.json`;
+    }
+
+    getWorkspaceSettingsPath() {
+      return `${this.workspace}/.qwen/settings.json`;
+    }
+  }
+
+  class ModelsConfig {
+    getAllConfiguredModels() {
+      return [];
+    }
+  }
+
+  return {
+    SkillError,
+    FatalConfigError,
+    ApprovalMode: {
+      DEFAULT: 'default',
+      AUTO_EDIT: 'autoEdit',
+      YOLO: 'yolo',
+    },
+    DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
+    DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 100_000,
+    DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 100_000,
+    DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 2000,
+    DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 100_000,
+    DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
+    SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
+    DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES: ['.agentignore', '.aiignore'],
+    QWEN_DIR: '.qwen',
+    Storage,
+    ModelsConfig,
+    atomicWriteFileSync: vi.fn(),
+    createDebugLogger: () => noopLogger,
+    getErrorMessage: (error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+    ideContextStore: {
+      get: () => undefined,
+    },
+    isWithinRoot: (location: string, root: string) =>
+      location === root || location.startsWith(`${root}/`),
+    stripRuntimeSnapshotPrefix: (value: string) => value,
+  };
 });
+
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+}));
 
 const { createDaemonWorkspaceService } = await import('../index.js');
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  resetHomeEnvBootstrapForTesting,
+  SettingScope,
+  SETTINGS_DIRECTORY_NAME,
+} from '../../../config/settings.js';
+import {
+  resetTrustedFoldersForTesting,
+  TRUSTED_FOLDERS_FILENAME,
+  TrustLevel,
+} from '../../../config/trustedFolders.js';
+import { WorkspaceVoiceError } from '../../../services/voice-service.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
+} from '../types.js';
 import type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
@@ -68,12 +147,429 @@ function makeCtx(
   };
 }
 
+async function withIsolatedQwenHome<T>(fn: () => Promise<T>): Promise<T> {
+  return withIsolatedWorkspace(() => fn());
+}
+
+async function writeJson(file: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(value, null, 2), 'utf8');
+}
+
+async function withIsolatedWorkspace<T>(
+  fn: (paths: { home: string; workspace: string }) => Promise<T>,
+): Promise<T> {
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'facade-ws-'));
+  const home = path.join(scratch, 'home');
+  const workspace = path.join(scratch, 'workspace');
+  const originalQwenHome = process.env['QWEN_HOME'];
+  const originalTrustedFoldersPath =
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+  await fs.mkdir(home, { recursive: true });
+  await fs.mkdir(workspace, { recursive: true });
+  process.env['QWEN_HOME'] = home;
+  process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
+    home,
+    TRUSTED_FOLDERS_FILENAME,
+  );
+  resetHomeEnvBootstrapForTesting();
+  resetTrustedFoldersForTesting();
+  try {
+    return await fn({ home, workspace });
+  } finally {
+    await fs.rm(scratch, { recursive: true, force: true });
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+    if (originalTrustedFoldersPath === undefined) {
+      delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    } else {
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+        originalTrustedFoldersPath;
+    }
+    resetHomeEnvBootstrapForTesting();
+    resetTrustedFoldersForTesting();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe('createDaemonWorkspaceService', () => {
+  beforeEach(() => {
+    mockWriteStderrLine.mockClear();
+  });
+
+  describe('workspace voice', () => {
+    it('reports missing voice settings persistence as a structured voice error', async () => {
+      const svc = createDaemonWorkspaceService(makeDeps());
+
+      let caught: unknown;
+      try {
+        await svc.setWorkspaceVoiceSettings(makeCtx(), { enabled: false });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(WorkspaceVoiceError);
+      expect(caught).toMatchObject({
+        name: 'WorkspaceVoiceError',
+        status: 501,
+        code: 'not_implemented',
+      });
+    });
+
+    it('persists voice settings through batch persistence and publishes events', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSettings = vi.fn(async () => {});
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ persistSettings, publishWorkspaceEvent }),
+        );
+
+        const result = await svc.setWorkspaceVoiceSettings(
+          makeCtx({ originatorClientId: 'voice-client' }),
+          { enabled: false, mode: 'tap', language: 'english' },
+        );
+
+        expect(persistSettings).toHaveBeenCalledWith('/workspace', [
+          {
+            scope: SettingScope.User,
+            key: 'general.voice.mode',
+            value: 'tap',
+          },
+          {
+            scope: SettingScope.User,
+            key: 'general.voice.language',
+            value: 'english',
+          },
+          {
+            scope: SettingScope.User,
+            key: 'general.voice.enabled',
+            value: false,
+          },
+        ]);
+        expect(publishWorkspaceEvent).toHaveBeenCalledTimes(3);
+        expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+          type: 'settings_changed',
+          data: {
+            key: 'general.voice.enabled',
+            value: false,
+            scope: 'user',
+          },
+          originatorClientId: 'voice-client',
+        });
+        expect(result.v).toBe(1);
+      });
+    });
+
+    it('rejects invalid voice settings before persisting', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSettings = vi.fn(async () => {});
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ persistSettings, publishWorkspaceEvent }),
+        );
+
+        await expect(
+          svc.setWorkspaceVoiceSettings(makeCtx(), {
+            voiceModel: 'not-configured',
+          }),
+        ).rejects.toMatchObject({ code: 'unknown_voice_model' });
+        await expect(
+          svc.setWorkspaceVoiceSettings(makeCtx(), {}),
+        ).rejects.toMatchObject({ code: 'invalid_voice_update' });
+
+        expect(persistSettings).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+      });
+    });
+
+    it('does not publish fallback voice writes when a later write fails', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSetting = vi.fn(
+          async (
+            _workspace: string,
+            _scope: SettingScope,
+            key: string,
+            _value: unknown,
+          ) => {
+            if (key === 'general.voice.language') {
+              throw new Error('disk full');
+            }
+          },
+        );
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ persistSetting, publishWorkspaceEvent }),
+        );
+
+        await expect(
+          svc.setWorkspaceVoiceSettings(
+            makeCtx({ originatorClientId: 'voice-client' }),
+            { mode: 'tap', language: 'english' },
+          ),
+        ).rejects.toMatchObject({
+          name: 'WorkspaceSettingsPartialPersistError',
+          committedWrites: [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+          ],
+          cause: expect.objectContaining({ message: 'disk full' }),
+        });
+
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('partial persist error'),
+        );
+      });
+    });
+
+    it('publishes committed batch voice writes when batch persistence partially fails', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const persistSettings = vi.fn(async (_workspace, writes) => {
+        throw new WorkspaceSettingsPartialPersistError(
+          'batch failed',
+          [writes[0]!],
+          new Error('disk full'),
+        );
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ persistSettings, publishWorkspaceEvent }),
+      );
+
+      await expect(
+        svc.setWorkspaceVoiceSettings(
+          makeCtx({ originatorClientId: 'voice-client' }),
+          { mode: 'tap', language: 'english' },
+        ),
+      ).rejects.toThrow(WorkspaceSettingsPartialPersistError);
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'general.voice.mode',
+          value: 'tap',
+          scope: 'user',
+        },
+        originatorClientId: 'voice-client',
+      });
+    });
+  });
+
+  describe('workspace permissions', () => {
+    it('sets permission rules through the ACP command when a session is live', async () => {
+      const acpResult = {
+        v: 1,
+        user: {
+          path: '/user/settings.json',
+          rules: { allow: [], ask: [], deny: [] },
+        },
+        workspace: {
+          path: '/workspace/.qwen/settings.json',
+          rules: { allow: ['Shell(*)'], ask: [], deny: [] },
+        },
+        merged: { allow: ['Shell(*)'], ask: [], deny: [] },
+        isTrusted: true,
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(acpResult);
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      const result = await svc.setWorkspacePermissionRules(
+        makeCtx({ originatorClientId: 'perm-client' }),
+        { scope: 'workspace', ruleType: 'allow', rules: ['Shell(*)'] },
+      );
+
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/permissions/setRules',
+        {
+          cwd: '/workspace',
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: ['Shell(*)'],
+        },
+      );
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'permissions.allow',
+          value: ['Shell(*)'],
+          scope: 'workspace',
+        },
+        originatorClientId: 'perm-client',
+      });
+      expect(result).toBe(acpResult);
+    });
+
+    it('rejects permission updates when ACP has no live session', async () => {
+      await withIsolatedQwenHome(async () => {
+        const invokeWorkspaceCommand = vi
+          .fn()
+          .mockRejectedValue(new SessionNotFoundError('session-1'));
+        const persistSetting = vi.fn(async () => {});
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            invokeWorkspaceCommand,
+            persistSetting,
+            publishWorkspaceEvent,
+          }),
+        );
+
+        await expect(
+          svc.setWorkspacePermissionRules(
+            makeCtx({ originatorClientId: 'perm-client' }),
+            { scope: 'user', ruleType: 'deny', rules: ['Shell(rm -rf *)'] },
+          ),
+        ).rejects.toThrow(WorkspacePermissionRulesSessionRequiredError);
+
+        expect(persistSetting).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+      });
+    });
+
+    it('rethrows non-session permission command errors without fallback persistence', async () => {
+      const invokeWorkspaceCommand = vi
+        .fn()
+        .mockRejectedValue(new Error('bridge failed'));
+      const persistSetting = vi.fn(async () => {});
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          invokeWorkspaceCommand,
+          persistSetting,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspacePermissionRules(makeCtx(), {
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: ['Shell(*)'],
+        }),
+      ).rejects.toThrow('bridge failed');
+
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
   describe('status methods', () => {
+    it('getWorkspaceTrustStatus reads current settings and trusted folders', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [workspace]: TrustLevel.TRUST_FOLDER,
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspaceTrustStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          workspaceCwd: workspace,
+          folderTrustEnabled: true,
+          effective: { state: 'trusted', source: 'file' },
+          explicitTrustLevel: TrustLevel.TRUST_FOLDER,
+        });
+      });
+    });
+
+    it('getWorkspacePermissionsStatus reads scoped and merged settings', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          permissions: {
+            allow: ['Shell(git *)'],
+            deny: ['Read(.env)'],
+          },
+        });
+        await writeJson(
+          path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+          {
+            permissions: {
+              allow: ['Read(src/**)'],
+              ask: ['Shell(npm *)'],
+            },
+          },
+        );
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspacePermissionsStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          user: {
+            path: `${home}/settings.json`,
+            rules: {
+              allow: ['Shell(git *)'],
+              ask: [],
+              deny: ['Read(.env)'],
+            },
+          },
+          workspace: {
+            path: `${workspace}/${SETTINGS_DIRECTORY_NAME}/settings.json`,
+            rules: {
+              allow: ['Read(src/**)'],
+              ask: ['Shell(npm *)'],
+              deny: [],
+            },
+          },
+          merged: {
+            allow: ['Shell(git *)', 'Read(src/**)'],
+            ask: ['Shell(npm *)'],
+            deny: ['Read(.env)'],
+          },
+        });
+      });
+    });
+
+    it('getWorkspaceVoiceStatus reads daemon-local voice settings', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          voiceModel: 'qwen3-asr-flash',
+          general: {
+            voice: {
+              enabled: true,
+              mode: 'tap',
+              language: 'english',
+            },
+          },
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspaceVoiceStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          workspaceCwd: workspace,
+          enabled: true,
+          mode: 'tap',
+          language: 'english',
+          voiceModel: 'qwen3-asr-flash',
+          availableVoiceModels: [],
+        });
+      });
+    });
+
     it('getWorkspaceMcpStatus delegates to queryWorkspaceStatus with correct method', async () => {
       const queryWorkspaceStatus = vi
         .fn()
@@ -146,7 +642,41 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.skills).toEqual([]);
     });
 
-    it('getWorkspaceProvidersStatus delegates with correct method', async () => {
+    it('getWorkspaceProvidersStatus uses daemon-local provider when present', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, providers: [] });
+      const workspaceProvidersStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        acpChannelLive: false,
+        current: {
+          authType: 'USE_OPENAI',
+          modelId: 'fresh-model(USE_OPENAI)',
+        },
+        providers: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceProvidersStatusProvider,
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.getWorkspaceProvidersStatus(makeCtx());
+
+      expect(result.current?.modelId).toBe('fresh-model(USE_OPENAI)');
+      expect(result.acpChannelLive).toBe(false);
+      expect(workspaceProvidersStatusProvider).toHaveBeenCalledWith(
+        '/workspace',
+        false,
+      );
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+
+    it('getWorkspaceProvidersStatus keeps ACP fallback without daemon-local provider', async () => {
       const queryWorkspaceStatus = vi
         .fn()
         .mockResolvedValue({ v: 1, providers: [] });
@@ -386,6 +916,35 @@ describe('createDaemonWorkspaceService', () => {
         svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
       ).rejects.toThrow('disk full');
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('requestWorkspaceTrustChange', () => {
+    it('publishes trust_change_requested with originatorClientId', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ boundWorkspace: '/my/workspace', publishWorkspaceEvent }),
+      );
+
+      const result = await svc.requestWorkspaceTrustChange(
+        makeCtx({ originatorClientId: 'c-42' }),
+        { desiredState: 'untrusted', reason: 'remote user request' },
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'trust_change_requested',
+        data: {
+          workspaceCwd: '/my/workspace',
+          desiredState: 'untrusted',
+          reason: 'remote user request',
+        },
+        originatorClientId: 'c-42',
+      });
+      expect(result).toEqual({
+        accepted: false,
+        desiredState: 'untrusted',
+        requiresOperatorAction: true,
+      });
     });
   });
 

@@ -139,7 +139,10 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       await fs.mkdir(`${dir}/${runId}`, { recursive: true });
       await fs.writeFile(`${dir}/${runId}/journal.jsonl`, '{}\n', 'utf8');
       // Distinct runId per write; startTime ascending. Each write prunes.
-      await writeWorkflowSnapshot(config, task({ runId, startTime: 1_000 + i }));
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId, startTime: 1_000 + i }),
+      );
     }
     const entries = await fs.readdir(dir);
     const files = entries.filter((f) => f.endsWith('.json'));
@@ -147,5 +150,49 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(files.length).toBe(MAX_RETAINED_SNAPSHOTS);
     // The pruned runs' journal directories are gone too (no orphan leak).
     expect(journalDirs.length).toBe(MAX_RETAINED_SNAPSHOTS);
+  });
+
+  // Security: prune derives `runId` from the snapshot filename and feeds it to
+  // a recursive `fs.rm`. A crafted `.json` name must NOT let that delete
+  // anything but a well-formed `wf_<hex>` run dir — a file named `...json`
+  // yields `runId = ".."` (parent dir), `notarun.json` yields a sibling dir.
+  it('does not recursively delete via a crafted snapshot filename (path traversal)', async () => {
+    const config = fakeConfig(projectDir);
+    const dir = config.storage.getWorkflowRunsDir();
+    await fs.mkdir(dir, { recursive: true });
+
+    // Canary in the runs dir's PARENT — a `..` traversal would delete it.
+    const canary = path.join(dir, '..', 'CANARY.txt');
+    await fs.writeFile(canary, 'keep', 'utf8');
+    // A non-run sibling dir INSIDE the runs dir — a `notarun.json` stem targets it.
+    await fs.mkdir(path.join(dir, 'notarun'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'notarun', 'keep.txt'), 'keep', 'utf8');
+
+    // Fill to the cap with legit run snapshots (no prune yet at == cap).
+    for (let i = 0; i < MAX_RETAINED_SNAPSHOTS; i++) {
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId: `wf_${i.toString(16)}`, startTime: 10_000 + i }),
+      );
+    }
+    // Plant two malicious snapshot files as the OLDEST (pruned first):
+    //   `...json`      → stem `..`      → would rm the parent (project root)
+    //   `notarun.json` → stem `notarun` → would rm the sibling dir
+    for (const name of ['...json', 'notarun.json']) {
+      const p = path.join(dir, name);
+      await fs.writeFile(p, '{}', 'utf8');
+      await fs.utimes(p, new Date(0), new Date(0)); // oldest → selected to prune
+    }
+    // One more legit write tips the count over the cap and triggers prune.
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_ff', startTime: 99_999 }),
+    );
+
+    // The guard spared both the parent canary and the non-run sibling dir.
+    await expect(fs.access(canary)).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(dir, 'notarun', 'keep.txt')),
+    ).resolves.toBeUndefined();
   });
 });

@@ -24,6 +24,7 @@ import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
@@ -36,7 +37,6 @@ import type {
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
-  Protocol,
   createContentGenerator,
   createContentGeneratorConfig,
   resolveContentGeneratorConfigWithSources,
@@ -530,6 +530,255 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('MCP hot-reload (sub-task 3)', () => {
+    const srvA: MCPServerConfig = { command: 'a' };
+    const srvB: MCPServerConfig = { command: 'b' };
+
+    it('setMcpServers REPLACES (not merges) and works post-init', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA },
+      });
+      await config.initialize();
+
+      // addMcpServers would throw post-init; setMcpServers must not.
+      config.setMcpServers({ b: srvB });
+
+      const settingsLayer = config.getSettingsMcpServers();
+      expect(settingsLayer).toEqual({ b: srvB });
+      expect(settingsLayer).not.toHaveProperty('a');
+    });
+
+    it('reinitializeMcpServers is a safe no-op before initialize()', async () => {
+      const config = new Config({ ...baseParams });
+      // No tool registry yet — must not throw and must not connect.
+      await expect(
+        config.reinitializeMcpServers({ a: srvA }),
+      ).resolves.toBeUndefined();
+      expect(config.getSettingsMcpServers()).toEqual({ a: srvA });
+    });
+
+    it('records MCP servers removed by a reconcile and self-heals on re-add', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+
+      // Drop `a` → tracked as recently removed.
+      await config.reinitializeMcpServers({ b: srvB });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['a']);
+
+      // Drop `b` too → both tracked.
+      await config.reinitializeMcpServers({});
+      expect(config.getRecentlyRemovedMcpServers().sort()).toEqual(['a', 'b']);
+
+      // Re-add `a` → it self-heals out of the set; `b` stays removed.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['b']);
+    });
+
+    it('classifies a server filtered by a narrowed allow-list as not_allowed (not removed)', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB });
+
+      // Narrow the allow-list to just `a` (mirrors editing mcp.allowed). `b` is
+      // still configured (merged map) but filtered out of the effective map.
+      config.setAllowedMcpServers(['a']);
+
+      // `b` is NOT "removed" — it's still in config, just not allowed. The
+      // tool-not-found path can still explain it precisely, with the right
+      // recovery action (adjust mcp.allowed, not "re-add the server").
+      expect(config.getRecentlyRemovedMcpServers()).not.toContain('b');
+      expect(config.getMcpServerUnavailableReason('b')).toBe('not_allowed');
+      expect(config.getMcpServerUnavailableReason('a')).toBeUndefined();
+    });
+
+    it('classifies excluded / pending / removed servers with the right reason', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB, c: srvA },
+      });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB, c: srvA });
+
+      config.setExcludedMcpServers(['b']);
+      config.setPendingMcpServers(['c']);
+      expect(config.getMcpServerUnavailableReason('b')).toBe('excluded');
+      expect(config.getMcpServerUnavailableReason('c')).toBe(
+        'pending_approval',
+      );
+
+      // Delete `a` from config → removed this session.
+      await config.reinitializeMcpServers({ b: srvB, c: srvA });
+      expect(config.getMcpServerUnavailableReason('a')).toBe('removed');
+      // A never-configured name has no reason (falls through to generic).
+      expect(config.getMcpServerUnavailableReason('ghost')).toBeUndefined();
+    });
+
+    it('reinitializeMcpServers replaces config then drives incremental reconcile', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      await config.reinitializeMcpServers({ b: srvB });
+
+      expect(config.getSettingsMcpServers()).toEqual({ b: srvB });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(
+        config,
+      );
+    });
+
+    it('coalesces a reconcile request that arrives mid-flight into one extra pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Make the first pass hang until we release it, so the second call
+      // arrives while the first is in flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      const first = config.reinitializeMcpServers({ b: srvB });
+      // Second call lands mid-flight → coalesced, not a third pass.
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      release();
+      await Promise.all([first, second]);
+
+      // One in-flight pass + one drained follow-up = exactly 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('rethrows a failed reconcile and resets the in-progress guard so the next call still runs', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // First pass fails — reinitialize must surface the error.
+      manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+        new Error('reconcile boom'),
+      );
+      await expect(config.reinitializeMcpServers({ b: srvB })).rejects.toThrow(
+        'reconcile boom',
+      );
+
+      // Guard must have been reset in `finally`; a subsequent call must not be
+      // silently coalesced/dropped — it runs a fresh pass.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the coalesce flag when a reconcile throws, so the next call runs exactly one pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until we reject it; while it is in flight a second call
+      // arrives and is coalesced (sets the pending flag).
+      let reject!: (e: Error) => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((_, rej) => {
+            reject = rej;
+          }),
+      );
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      reject(new Error('reconcile boom'));
+      await expect(first).rejects.toThrow('reconcile boom');
+      // The coalesced caller awaits the shared in-flight pass, so it observes
+      // the SAME failure rather than resolving before its change was applied.
+      await expect(second).rejects.toThrow('reconcile boom');
+
+      // The throw must have cleared the pending flag too. A subsequent
+      // unrelated reconcile must run EXACTLY ONE pass — not an extra stale
+      // drain pass left over from the coalesced-then-aborted request.
+      manager.discoverAllMcpToolsIncremental.mockClear();
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+    });
+
+    it('a coalesced reconcile awaits the in-flight pass + its drain (does not resolve early)', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until released; the second call lands mid-flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      let secondResolved = false;
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config
+        .reinitializeMcpServers({ a: srvA, b: srvB })
+        .then(() => {
+          secondResolved = true;
+        });
+
+      // While pass 1 is still in flight the coalesced caller must NOT have
+      // resolved — it is chained onto the shared in-flight reconcile, so its
+      // change has not been applied yet.
+      await Promise.resolve();
+      expect(secondResolved).toBe(false);
+
+      release();
+      await Promise.all([first, second]);
+      expect(secondResolved).toBe(true);
+      // pass 1 + exactly one drain (for the coalesced change) = 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('admission-list setters and getMcpGating round-trip', () => {
+      const config = new Config({ ...baseParams });
+      config.setExcludedMcpServers(['x']);
+      config.setAllowedMcpServers(['y']);
+      config.setPendingMcpServers(['z']);
+      expect(config.getMcpGating()).toEqual({
+        excluded: ['x'],
+        allowed: ['y'],
+        pending: ['z'],
+      });
+      expect(config.getAllowedMcpServers()).toEqual(['y']);
+    });
+  });
+
   describe('MemoryPressureMonitor isolation', () => {
     it('returns a distinct monitor for child Configs created via Object.create', async () => {
       const parent = new Config(baseParams);
@@ -942,6 +1191,16 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
+    });
+
+    it('registers read_mcp_resource so the model can read MCP resources', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
     describe('isArtifactEnabled', () => {
@@ -1454,6 +1713,35 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getEffectiveInputModalities', () => {
+    type MutableConfigInternals = {
+      contentGeneratorConfig: ContentGeneratorConfig;
+    };
+
+    // Mirrors exactly what fileUtils uses to decide media support, so the file
+    // reader's strip decision and the vision-bridge gate can never disagree.
+    it('returns the resolved modalities from the content generator config', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-model',
+        modalities: { image: true },
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({ image: true });
+    });
+
+    it('treats a model with no resolved modalities as text-only', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-unknown-model',
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({});
+    });
+  });
+
   describe('model switching with different credentials (OpenAI)', () => {
     it('returns undefined for bare Qwen OAuth fast models under active OpenAI auth', async () => {
       const config = new Config({
@@ -1462,28 +1750,14 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'coder-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'qwen3.7-max',
-                name: 'qwen3.7-max',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'DASHSCOPE_API_KEY',
-              },
-            ],
-          },
-          [AuthType.USE_ANTHROPIC]: {
-            protocol: Protocol.ANTHROPIC,
-            models: [
-              {
-                id: 'claude-opus-4-7',
-                name: 'claude-opus-4-7',
-                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-                envKey: 'IDEALAB_OPUS_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1499,28 +1773,22 @@ describe('Server Config (config.ts)', () => {
         model: 'shared-model',
         fastModel: 'openai:shared-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'shared-model',
-                name: 'OpenAI shared model',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'DASHSCOPE_API_KEY',
-              },
-            ],
-          },
-          [AuthType.USE_ANTHROPIC]: {
-            protocol: Protocol.ANTHROPIC,
-            models: [
-              {
-                id: 'shared-model',
-                name: 'Anthropic shared model',
-                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-                envKey: 'IDEALAB_OPUS_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'shared-model',
+              name: 'OpenAI shared model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'shared-model',
+              name: 'Anthropic shared model',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1534,17 +1802,14 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'qwen-oauth:coder-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'qwen3.7-max',
-                name: 'qwen3.7-max',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'DASHSCOPE_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1558,23 +1823,20 @@ describe('Server Config (config.ts)', () => {
         model: 'qwen3.7-max',
         fastModel: 'fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'qwen3.7-max',
-                name: 'qwen3.7-max',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'DASHSCOPE_API_KEY',
-              },
-              {
-                id: 'fast-model',
-                name: 'fast-model',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'DASHSCOPE_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'fast-model',
+              name: 'fast-model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1590,17 +1852,14 @@ describe('Server Config (config.ts)', () => {
         model: 'gpt-4',
         fastModel: 'openai:deepseek-v4-flash',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'deepseek-v4-flash',
-                name: 'deepseek-v4-flash',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'DASHSCOPE_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1623,17 +1882,14 @@ describe('Server Config (config.ts)', () => {
           baseUrl: { kind: 'programmatic', detail: 'test' },
         },
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'registry-model',
-                name: 'Registry Model',
-                baseUrl: 'https://api.openai.com/v1',
-                envKey: 'OPENAI_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'registry-model',
+              name: 'Registry Model',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
         },
       });
       config.getModelsConfig().detectAndCaptureRuntimeModel();
@@ -1648,17 +1904,14 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'missing-fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_ANTHROPIC]: {
-            protocol: Protocol.ANTHROPIC,
-            models: [
-              {
-                id: 'claude-opus-4-7',
-                name: 'claude-opus-4-7',
-                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-                envKey: 'IDEALAB_OPUS_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1672,17 +1925,14 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'missing-fast-model',
         modelProvidersConfig: {
-          [AuthType.USE_ANTHROPIC]: {
-            protocol: Protocol.ANTHROPIC,
-            models: [
-              {
-                id: 'claude-opus-4-7',
-                name: 'claude-opus-4-7',
-                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-                envKey: 'IDEALAB_OPUS_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1698,17 +1948,14 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'openai:',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'deepseek-v4-flash',
-                name: 'deepseek-v4-flash',
-                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                envKey: 'DASHSCOPE_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1722,17 +1969,14 @@ describe('Server Config (config.ts)', () => {
         model: 'claude-opus-4-7',
         fastModel: 'fast',
         modelProvidersConfig: {
-          [AuthType.USE_ANTHROPIC]: {
-            protocol: Protocol.ANTHROPIC,
-            models: [
-              {
-                id: 'claude-opus-4-7',
-                name: 'claude-opus-4-7',
-                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-                envKey: 'IDEALAB_OPUS_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
         },
       });
 
@@ -1746,23 +1990,20 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         authType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'model-a',
-                name: 'Model A',
-                baseUrl: 'https://api.example.com/v1',
-                envKey: 'API_KEY_A',
-              },
-              {
-                id: 'model-b',
-                name: 'Model B',
-                baseUrl: 'https://api.example.com/v1',
-                envKey: 'API_KEY_B',
-              },
-            ],
-          },
+          openai: [
+            {
+              id: 'model-a',
+              name: 'Model A',
+              baseUrl: 'https://api.example.com/v1',
+              envKey: 'API_KEY_A',
+            },
+            {
+              id: 'model-b',
+              name: 'Model B',
+              baseUrl: 'https://api.example.com/v1',
+              envKey: 'API_KEY_B',
+            },
+          ],
         },
       });
 
@@ -1946,7 +2187,7 @@ describe('Server Config (config.ts)', () => {
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
     const config = new Config({
       ...baseParams,
-      enableManagedAutoMemory: false,
+      bareMode: true,
       generationConfig: { contextWindowSize: 1000 },
     });
 
@@ -2356,6 +2597,27 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).not.toContain('# auto memory');
   });
 
+  describe('isManagedMemoryAvailable', () => {
+    it('returns true when bareMode is false', () => {
+      const config = new Config({ ...baseParams, bareMode: false });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+
+    it('returns false when bareMode is true', () => {
+      const config = new Config({ ...baseParams, bareMode: true });
+      expect(config.isManagedMemoryAvailable()).toBe(false);
+    });
+
+    it('returns true even when enableManagedAutoMemory is false', () => {
+      const config = new Config({
+        ...baseParams,
+        enableManagedAutoMemory: false,
+        bareMode: false,
+      });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+  });
+
   it('refreshHierarchicalMemory should exclude implicit cwd from bare include-directories', async () => {
     const explicitDir = '/tmp/explicit';
     const config = new Config({
@@ -2440,6 +2702,10 @@ describe('Server Config (config.ts)', () => {
   it('should set default file filtering settings when not provided', () => {
     const config = new Config(baseParams);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(true);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.agentignore',
+      '.aiignore',
+    ]);
   });
 
   it('should set custom file filtering settings when provided', () => {
@@ -2447,10 +2713,17 @@ describe('Server Config (config.ts)', () => {
       ...baseParams,
       fileFiltering: {
         respectGitIgnore: false,
+        customIgnoreFiles: ['.cursorignore'],
       },
     };
     const config = new Config(paramsWithFileFiltering);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore, .cursorignore',
+    );
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {
@@ -2726,6 +2999,62 @@ describe('Server Config (config.ts)', () => {
       expect(
         configWithoutTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
       ).toBe(false);
+    });
+
+    it('should return provided sensitiveSpanAttributeMaxLength setting', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          sensitiveSpanAttributeMaxLength: 65_536,
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+    });
+
+    it('should default sensitiveSpanAttributeMaxLength to 1MiB', () => {
+      const configWithTelemetry = new Config({
+        ...baseParams,
+        telemetry: { enabled: true },
+      });
+      expect(
+        configWithTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+
+      const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
+      delete paramsWithoutTelemetry.telemetry;
+      const configWithoutTelemetry = new Config(paramsWithoutTelemetry);
+      expect(
+        configWithoutTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+    });
+
+    it('should reject invalid sensitiveSpanAttributeMaxLength values', () => {
+      for (const [value, label] of [
+        [0, '0'],
+        [Number.NaN, 'NaN'],
+        [Number.POSITIVE_INFINITY, 'Infinity'],
+        [
+          SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1,
+          String(SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1),
+        ],
+      ] as const) {
+        expect(
+          () =>
+            new Config({
+              ...baseParams,
+              telemetry: {
+                enabled: true,
+                sensitiveSpanAttributeMaxLength: value,
+              },
+            }),
+        ).toThrow(
+          new RegExp(
+            `Invalid telemetry\\.sensitiveSpanAttributeMaxLength.*got ${label}`,
+          ),
+        );
+      }
     });
 
     it('should return default telemetry target if telemetry object is not provided', () => {
@@ -4819,17 +5148,14 @@ describe('Model Switching and Config Updates', () => {
         authType: AuthType.USE_OPENAI,
         model: 'gpt-4o',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'gpt-4o',
-                name: 'GPT-4o',
-                baseUrl: 'https://api.openai.example.com/v1',
-                envKey: 'OPENAI_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
         },
       });
 
@@ -4842,17 +5168,14 @@ describe('Model Switching and Config Updates', () => {
         authType: AuthType.USE_OPENAI,
         model: 'custom-runtime-model',
         modelProvidersConfig: {
-          [AuthType.USE_OPENAI]: {
-            protocol: Protocol.OPENAI,
-            models: [
-              {
-                id: 'gpt-4o',
-                name: 'GPT-4o',
-                baseUrl: 'https://api.openai.example.com/v1',
-                envKey: 'OPENAI_API_KEY',
-              },
-            ],
-          },
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
         },
       });
 
@@ -4869,6 +5192,27 @@ describe('Model Switching and Config Updates', () => {
       // getModel() returns 'some-model', getModelDisplayName returns it as-is
       // because currentAuthType is falsy
       expect(config.getModelDisplayName()).toBe('some-model');
+    });
+  });
+
+  describe('getAutoSkillConfirmEnabled', () => {
+    it('defaults to true when autoSkillConfirm is unset', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+    });
+
+    it('returns false when autoSkillConfirm is explicitly disabled', () => {
+      const config = new Config({ ...baseParams, autoSkillConfirm: false });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+
+    it('is forced false in bare mode even when autoSkillConfirm is true', () => {
+      const config = new Config({
+        ...baseParams,
+        autoSkillConfirm: true,
+        bareMode: true,
+      });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
     });
   });
 });

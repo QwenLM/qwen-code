@@ -86,8 +86,34 @@ The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
-`GET /session/:id/context`, `GET /session/:id/supported-commands`, and
-`GET /session/:id/tasks`.
+`GET /session/:id/status`, `GET /session/:id/context`,
+`GET /session/:id/supported-commands`, and
+`GET /session/:id/tasks`, and `GET /session/:id/lsp`.
+
+`GET /session/:id/status` returns the live bridge summary for a single session:
+`sessionId`, `workspaceCwd`, `createdAt`, optional `displayName`, `clientCount`,
+and `hasActivePrompt`. It answers `200` with the summary when the daemon holds a
+live session with that id, and `404` (body `{ "error": …, "sessionId": … }`)
+otherwise. Use it to poll whether one known session is still running
+(`hasActivePrompt`) or how many clients are attached (`clientCount`) without
+fetching and scanning the whole paginated session list:
+
+```bash
+curl http://127.0.0.1:4170/session/$SESSION_ID/status
+# → {"sessionId":"…","workspaceCwd":"…","createdAt":"…","clientCount":1,"hasActivePrompt":false}
+```
+
+This is the raw live-session view, so `clientCount` and `hasActivePrompt` match
+the corresponding entry in `GET /workspace/:id/sessions` — but the two routes
+are not byte-identical. The list endpoint enriches each item with persisted
+session-store data: its `createdAt` is the persisted first-prompt time, and it
+adds `updatedAt` plus a `displayName` derived from the stored title or first
+prompt. `/status` instead reports the live session's own `createdAt`, omits
+`updatedAt`, and returns `displayName` only when one is set on the live session.
+
+`GET /session/:id/lsp` returns structured per-session LSP status. Start the
+daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
+otherwise the route returns `enabled: false` with no servers.
 
 `GET /daemon/status` is the consolidated troubleshooting snapshot. The default
 `detail=summary` reads only in-memory daemon state (sessions, permissions,
@@ -461,7 +487,15 @@ The bridge keeps **one channel per daemon** (one daemon per workspace, per §02)
 
 ## Logging in to a remote daemon (issue #4175 PR 21)
 
-When the daemon runs on a remote pod (no shared display with you), you can still log in to a Qwen account by triggering an OAuth device flow over HTTP. The daemon polls the IdP itself; your job is just to open a URL on whatever device has a browser.
+When the daemon runs on a remote pod (no shared display with you), a client can
+trigger an OAuth device flow over HTTP. The daemon polls the IdP itself; your job
+is just to open a URL on whatever device has a browser.
+
+> [!note]
+>
+> Qwen OAuth free tier was discontinued on 2026-04-15. The `qwen-oauth`
+> examples below document the device-flow protocol shape and legacy provider
+> identifier; new setups should use a currently supported auth provider.
 
 ```bash
 # 1. Start a flow. The daemon contacts the IdP, returns a code + URL.

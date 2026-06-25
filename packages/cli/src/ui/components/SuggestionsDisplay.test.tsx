@@ -71,6 +71,52 @@ describe('SuggestionsDisplay', () => {
     expect(output.split('\n').length).toBeLessThanOrEqual(2);
   });
 
+  it('keeps the full MCP resource reference on one line and truncates its description (reverse mode)', () => {
+    // Two resources that share a long `server:scheme://` prefix and differ only
+    // in the tail — the discriminating part. The reference (label) must stay
+    // intact on a single line so the two rows are distinguishable; the
+    // description yields the width and truncates instead.
+    const a = 'asys-mcp-http:asight://skills/ppu_bubble_analysis';
+    const b = 'asys-mcp-http:asight://skills/ppu_operator_performance';
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[
+          {
+            label: a,
+            value: a,
+            description:
+              'Analyze PPU bubble (idle time) from a loaded trace report.',
+          },
+          {
+            label: b,
+            value: b,
+            description:
+              'Analyze PPU operator performance from a loaded trace report.',
+          },
+        ]}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput="asys-mcp-http:asight"
+        mode="reverse"
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    // Each full reference appears verbatim (the tail is NOT truncated away), so
+    // the two rows can be told apart.
+    expect(output).toContain(a);
+    expect(output).toContain(b);
+    // The description is what gets cut — its tail must be gone, ellipsized.
+    expect(output).toContain('…');
+    expect(output).not.toContain('loaded trace report.');
+    // One visible row per suggestion: the label is not wrapped onto extra lines.
+    expect(
+      output.split('\n').filter((l) => l.includes('asys-mcp-http:')),
+    ).toHaveLength(2);
+  });
+
   it('collapses newlines in multi-line descriptions so a row stays one line', () => {
     const description = [
       'First line of the skill description.',

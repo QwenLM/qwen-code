@@ -177,6 +177,50 @@ describe('POST /session/:id/a2ui-action', () => {
     expect(configs[0]).toEqual(STDIO_SERVER.config);
   });
 
+  it('skips unusable runtime configs and uses a later valid server', async () => {
+    const badConnected: McpServerCell = {
+      name: 'a2ui-bad',
+      mcpStatus: 'connected',
+      config: { httpUrl: 'not a url' },
+    };
+    const goodListed: McpServerCell = {
+      name: 'a2ui-good',
+      config: { command: 'node', args: ['good.mjs'] },
+    };
+    const { app, configs } = makeApp({
+      servers: [badConnected, goodListed],
+    });
+
+    await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' })
+      .expect(200);
+
+    expect(configs[0]).toEqual(goodListed.config);
+  });
+
+  it('skips mixed runtime configs with invalid httpUrl before stdio fallback', async () => {
+    const badMixed: McpServerCell = {
+      name: 'a2ui-bad-mixed',
+      mcpStatus: 'connected',
+      config: { command: 'node', httpUrl: 'not a url' },
+    };
+    const goodListed: McpServerCell = {
+      name: 'a2ui-good',
+      config: { command: 'node', args: ['good.mjs'] },
+    };
+    const { app, configs } = makeApp({
+      servers: [badMixed, goodListed],
+    });
+
+    await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' })
+      .expect(200);
+
+    expect(configs[0]).toEqual(goodListed.config);
+  });
+
   it('falls back to workspace settings when daemon status is unavailable', async () => {
     const ws = await fsp.mkdtemp(path.join(os.tmpdir(), 'a2ui-action-test-'));
     await fsp.mkdir(path.join(ws, '.qwen'), { recursive: true });
@@ -193,6 +237,30 @@ describe('POST /session/:id/a2ui-action', () => {
         .send({ name: 'go' })
         .expect(200);
       expect(configs[0]).toEqual({ command: 'node', args: ['x.mjs'] });
+    } finally {
+      await fsp.rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('skips unusable workspace settings configs during fallback', async () => {
+    const ws = await fsp.mkdtemp(path.join(os.tmpdir(), 'a2ui-action-test-'));
+    await fsp.mkdir(path.join(ws, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(ws, '.qwen', 'settings.json'),
+      JSON.stringify({
+        mcpServers: {
+          'bad-a2ui': { command: '' },
+          'good-a2ui': { httpUrl: 'https://example.com/mcp' },
+        },
+      }),
+    );
+    try {
+      const { app, configs } = makeApp({ serversError: true, workspace: ws });
+      await request(app)
+        .post('/session/s1/a2ui-action')
+        .send({ name: 'go' })
+        .expect(200);
+      expect(configs[0]).toEqual({ httpUrl: 'https://example.com/mcp' });
     } finally {
       await fsp.rm(ws, { recursive: true, force: true });
     }
@@ -322,7 +390,15 @@ describe('helpers', () => {
 
   it('usableServerConfig accepts stdio or streamable-http shapes only', () => {
     expect(usableServerConfig({ command: 'node' })).toBe(true);
+    expect(usableServerConfig({ command: '' })).toBe(false);
+    expect(usableServerConfig({ command: '   ' })).toBe(false);
+    expect(usableServerConfig({ httpUrl: 'http://x/mcp' })).toBe(true);
     expect(usableServerConfig({ httpUrl: 'https://x/mcp' })).toBe(true);
+    expect(usableServerConfig({ httpUrl: 'not a url' })).toBe(false);
+    expect(usableServerConfig({ httpUrl: 'ftp://x/mcp' })).toBe(false);
+    expect(usableServerConfig({ command: 'node', httpUrl: 'not a url' })).toBe(
+      false,
+    );
     expect(usableServerConfig({})).toBe(false);
     expect(usableServerConfig(undefined)).toBe(false);
   });

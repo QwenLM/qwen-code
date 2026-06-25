@@ -1438,7 +1438,10 @@ export async function loadCliConfig(
     }
   }
 
-  const fileService = new FileDiscoveryService(cwd);
+  const fileService = new FileDiscoveryService(
+    cwd,
+    settings.context?.fileFiltering?.customIgnoreFiles,
+  );
 
   const includeDirectories = (
     bareMode ? [] : (settings.context?.includeDirectories ?? [])
@@ -1806,6 +1809,7 @@ export async function loadCliConfig(
   }
 
   const modelProvidersConfig = settings.modelProviders;
+  const providerProtocolConfig = settings.providerProtocol;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -1881,9 +1885,15 @@ export async function loadCliConfig(
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
     mcpServers,
+    topTierMcpServers,
     pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
+      : undefined,
+    // The flag ONLY (not the settings-derived list) — the hot-reload upper
+    // bound. Undefined when `--allowed-mcp-server-names` was not passed.
+    cliAllowedMcpServerNames: argv.allowedMcpServerNames
+      ? argv.allowedMcpServerNames.filter(Boolean)
       : undefined,
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)
@@ -1953,6 +1963,7 @@ export async function loadCliConfig(
     outputFormat,
     includePartialMessages,
     modelProvidersConfig,
+    providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
@@ -1991,6 +2002,9 @@ export async function loadCliConfig(
     enableAutoSkill: bareMode
       ? false
       : (settings.memory?.enableAutoSkill ?? true),
+    autoSkillConfirm: bareMode
+      ? false
+      : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode

@@ -49,10 +49,25 @@ function blockForever(): Promise<never> {
  * Exported for tests.
  */
 export async function maybeOpenWebShellBrowser(
-  handle: { url: string; webShellMounted: boolean; resolvedToken?: string },
+  handle: {
+    url: string;
+    webShellMounted: boolean;
+    resolvedToken?: string;
+    runtimeReady?: Promise<void>;
+  },
   open: boolean,
 ): Promise<void> {
   if (!open || !handle.webShellMounted || !shouldLaunchBrowser()) return;
+  try {
+    await handle.runtimeReady;
+  } catch (runtimeErr) {
+    writeStderrLine(
+      `qwen serve: Web Shell runtime not ready; skipping --open: ${
+        runtimeErr instanceof Error ? runtimeErr.message : String(runtimeErr)
+      }`,
+    );
+    return;
+  }
   try {
     const target = new URL(handle.url);
     // Node's URL returns the IPv6 wildcard as `[::]` (bracketed), never `::`.
@@ -106,6 +121,7 @@ interface ServeArgs {
   'rate-limit-mutation'?: number;
   'rate-limit-read'?: number;
   'rate-limit-window-ms'?: number;
+  experimentalLsp?: boolean;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -178,6 +194,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+      })
+      .option('experimental-lsp', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Forward the experimental LSP opt-in to spawned agent sessions.',
       })
       .option('web', {
         type: 'boolean',
@@ -467,9 +489,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       }
     }
 
-    // Lazy-load the serve module so non-serve invocations don't pay for
-    // express + body-parser + qs in their startup path.
-    const { runQwenServe } = await import('../serve/index.js');
+    // Lazy-load the slim serve runner so the yargs fallback path does not pull
+    // the public serve barrel, which also exports REST/ACP runtime modules.
+    const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const handle = await runQwenServe({
         port: argv.port,
@@ -516,6 +538,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitMutation !== undefined ? { rateLimitMutation } : {}),
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
+        ...(argv.experimentalLsp === true ? { experimentalLsp: true } : {}),
       });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).

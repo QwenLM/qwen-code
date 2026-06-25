@@ -20,6 +20,7 @@ import { useAnimatedScrollbar } from '../../hooks/useAnimatedScrollbar.js';
 import { StaticRender } from './StaticRender.js';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { measureElementPosition } from '../../utils/measure-element-position.js';
 
 const debugLogger = createDebugLogger('VIRTUALIZED_LIST');
 
@@ -55,6 +56,8 @@ export type VirtualizedListRef<T> = {
     viewPosition?: number;
   }) => void;
   getScrollIndex: () => number;
+  hitTestScrollbar: (location: { col: number; row: number }) => boolean;
+  scrollToScrollbarRow: (row: number) => void;
   getScrollState: () => {
     scrollTop: number;
     scrollHeight: number;
@@ -193,6 +196,7 @@ function VirtualizedList<T>(
   });
 
   const containerRef = useRef<DOMElement>(null);
+  const rootRef = useRef<DOMElement>(null);
 
   const { width: measuredContainerWidth, height: measuredContainerHeight } =
     useBoxMetrics(containerRef as React.RefObject<DOMElement>);
@@ -579,6 +583,79 @@ function VirtualizedList<T>(
     maxScroll,
   );
 
+  const getScrollbarGeometry = useCallback(() => {
+    const shouldShowScrollbar = (props.showScrollbar ?? true) && maxScroll > 0;
+    if (
+      !shouldShowScrollbar ||
+      !rootRef.current ||
+      scrollableContainerHeight <= 0
+    ) {
+      return null;
+    }
+
+    const metrics = measureElementPosition(rootRef.current);
+    if (metrics.width <= 0 || metrics.height <= 0) return null;
+
+    return {
+      col: metrics.x + metrics.width - 1,
+      top: metrics.y,
+      height: scrollableContainerHeight,
+    };
+  }, [props.showScrollbar, maxScroll, scrollableContainerHeight]);
+
+  const hitTestScrollbar = useCallback(
+    ({ col, row }: { col: number; row: number }) => {
+      const geometry = getScrollbarGeometry();
+      if (!geometry) return false;
+
+      const zeroBasedCol = col - 1;
+      const zeroBasedRow = row - 1;
+      return (
+        zeroBasedCol === geometry.col &&
+        zeroBasedRow >= geometry.top &&
+        zeroBasedRow < geometry.top + geometry.height
+      );
+    },
+    [getScrollbarGeometry],
+  );
+
+  const scrollToScrollbarRow = useCallback(
+    (row: number) => {
+      const geometry = getScrollbarGeometry();
+      if (!geometry) return;
+
+      const zeroBasedRow = row - 1;
+      const rowInTrack = Math.max(
+        0,
+        Math.min(geometry.height - 1, zeroBasedRow - geometry.top),
+      );
+      const scrollRatio = rowInTrack / Math.max(1, geometry.height - 1);
+      const newScrollTop = Math.round(scrollRatio * maxScroll);
+      if (newScrollTop >= maxScroll) {
+        setIsStickingToBottom(true);
+        setPendingScrollTop(Number.MAX_SAFE_INTEGER);
+        if (data.length > 0) {
+          setScrollAnchor({
+            index: data.length - 1,
+            offset: SCROLL_TO_ITEM_END,
+          });
+        }
+      } else {
+        setIsStickingToBottom(false);
+        setPendingScrollTop(newScrollTop);
+        setScrollAnchor(getAnchorForScrollTop(newScrollTop, offsets));
+      }
+    },
+    [
+      data.length,
+      getAnchorForScrollTop,
+      getScrollbarGeometry,
+      maxScroll,
+      offsets,
+      setPendingScrollTop,
+    ],
+  );
+
   useImperativeHandle(
     ref,
     () => ({
@@ -694,6 +771,8 @@ function VirtualizedList<T>(
           }
         }
       },
+      hitTestScrollbar,
+      scrollToScrollbarRow,
       getScrollIndex: () => scrollAnchor.index,
       getScrollState: () => {
         const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
@@ -713,6 +792,8 @@ function VirtualizedList<T>(
       scrollableContainerHeight,
       getScrollTop,
       setPendingScrollTop,
+      hitTestScrollbar,
+      scrollToScrollbarRow,
     ],
   );
 
@@ -775,6 +856,7 @@ function VirtualizedList<T>(
 
   return (
     <Box
+      ref={rootRef}
       width="100%"
       height={
         props.containerHeight !== undefined ? props.containerHeight : '100%'

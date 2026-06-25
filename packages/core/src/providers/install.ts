@@ -4,28 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Protocol } from '../core/contentGenerator.js';
 import type { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig, ProviderConfig } from '../models/types.js';
+import type { ModelProvidersConfig } from '../models/types.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
   ProviderSettingsAdapter,
 } from './types.js';
-
-const AUTH_TYPE_TO_PROTOCOL: Record<string, Protocol> = {
-  openai: Protocol.OPENAI,
-  'qwen-oauth': Protocol.QWEN_OAUTH,
-  gemini: Protocol.GEMINI,
-  'vertex-ai': Protocol.GEMINI,
-  anthropic: Protocol.ANTHROPIC,
-};
-
-export function authTypeToProtocol(authType: AuthType): Protocol {
-  return Object.hasOwn(AUTH_TYPE_TO_PROTOCOL, authType)
-    ? AUTH_TYPE_TO_PROTOCOL[authType]
-    : Protocol.OPENAI;
-}
 
 /**
  * Environment variable names an install plan must never set — they alter
@@ -62,10 +47,7 @@ function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
 ): ModelProvidersConfig {
-  const existingProvider = existingModelProviders[patch.authType];
-  const existingModels = Array.isArray(existingProvider)
-    ? existingProvider
-    : (existingProvider?.models ?? []);
+  const existingModels = existingModelProviders[patch.authType] ?? [];
 
   let updatedModels = patch.models;
   if (patch.mergeStrategy === 'append') {
@@ -87,17 +69,9 @@ function applyModelProvidersPatch(
         : [...patch.models, ...preservedModels];
   }
 
-  // Preserve the existing provider config (protocol, baseUrl, envKey) and update models
-  const updatedProvider: ProviderConfig = {
-    protocol: existingProvider?.protocol ?? authTypeToProtocol(patch.authType),
-    models: updatedModels,
-    ...(existingProvider?.baseUrl ? { baseUrl: existingProvider.baseUrl } : {}),
-    ...(existingProvider?.envKey ? { envKey: existingProvider.envKey } : {}),
-  };
-
   return {
     ...existingModelProviders,
-    [patch.authType]: updatedProvider,
+    [patch.authType]: updatedModels,
   };
 }
 
@@ -216,7 +190,7 @@ export async function applyProviderInstallPlan(
       );
       settings.setValue(
         `modelProviders.${patch.authType}`,
-        updatedModelProviders[patch.authType],
+        updatedModelProviders[patch.authType] ?? [],
       );
     }
 

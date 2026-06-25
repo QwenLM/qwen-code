@@ -16,11 +16,9 @@ import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
 
 const AUTO_MODE_FIRST_TIME_MESSAGE =
-  '✨ Auto mode enabled.\n' +
-  '   An LLM classifier evaluates each tool call and auto-approves safe actions,\n' +
-  '   blocks risky ones. Most read-only operations and in-cwd edits skip the\n' +
-  '   classifier for speed. To exit: Shift+Tab or /approval-mode default.\n' +
-  '   (This notice will not appear again.)';
+  'Auto mode enabled.\n' +
+  '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
+  '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.';
 
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;

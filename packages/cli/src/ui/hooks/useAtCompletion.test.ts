@@ -415,6 +415,47 @@ describe('useAtCompletion', () => {
       ]);
     });
 
+    it('should respect configured custom qwen ignore files', async () => {
+      const structure: FileSystemStructure = {
+        '.cursorignore': 'cursor-secret.txt',
+        '.agentignore': 'agent-secret.txt',
+        'cursor-secret.txt': '',
+        'agent-secret.txt': '',
+        'visible.txt': '',
+      };
+      testRootDir = await createTmpDir(structure);
+
+      const customIgnoreConfig = {
+        getEnableRecursiveFileSearch: () => true,
+        getFileFilteringOptions: vi.fn(() => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        })),
+        getFileFilteringEnableFuzzySearch: () => true,
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          '',
+          customIgnoreConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        '.agentignore',
+        '.cursorignore',
+        'agent-secret.txt',
+        'visible.txt',
+      ]);
+    });
+
     it('should work correctly when config is undefined', async () => {
       const structure: FileSystemStructure = {
         node_modules: {},
@@ -677,6 +718,407 @@ describe('useAtCompletion', () => {
       expect(result.current.suggestions.map((s) => s.value)).toEqual([
         'my:server:res://doc',
       ]);
+    });
+
+    it('matches a resource by its friendly name/title, not just the URI', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: (name: string) =>
+            name === 'demo'
+              ? [
+                  {
+                    uri: 'file:///docs/spec.md',
+                    name: 'spec',
+                    title: 'Project Spec',
+                    serverName: 'demo',
+                  },
+                ]
+              : [],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'demo:Project',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // 'Project' matches only the title 'Project Spec', not the URI; the
+      // injected value is still the canonical URI reference.
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'demo:file:///docs/spec.md',
+      ]);
+    });
+
+    it('matches the URI case-insensitively', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            { uri: 'file:///docs/Spec.md', name: 's', serverName: 'demo' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'demo:spec',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // Lowercase 'spec' still matches 'file:///docs/Spec.md'.
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'demo:file:///docs/Spec.md',
+      ]);
+    });
+
+    it('ranks prefix above substring and URI above name across both fields', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            { uri: 'y', name: 'my doc', serverName: 'demo' }, // name substring → rank 3
+            { uri: 'api/doc', name: 'zzz', serverName: 'demo' }, // uri substring → rank 2
+            { uri: 'x', name: 'doc-notes', serverName: 'demo' }, // name prefix → rank 1
+            { uri: 'doc/a', name: 'zzz', serverName: 'demo' }, // uri prefix → rank 0
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'demo:doc',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'demo:doc/a',
+        'demo:x',
+        'demo:api/doc',
+        'demo:y',
+      ]);
+    });
+
+    it('surfaces the friendly name as the suggestion description', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            {
+              uri: 'file:///docs/spec.md',
+              name: 'spec',
+              title: 'Project Spec',
+              serverName: 'demo',
+            },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'demo:spec',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      expect(result.current.suggestions[0].description).toBe('Project Spec');
+    });
+  });
+
+  describe('MCP server discovery', () => {
+    it('suggests matching servers (with resources) alongside files for a bare @<partial>', async () => {
+      testRootDir = await createTmpDir({ 'my-notes.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: (name: string) =>
+            name === 'myserver'
+              ? [{ uri: 'res://x', name: 'x', serverName: 'myserver' }]
+              : [],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'my', resourceConfig, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      // Server entry is prepended (before files) and expands to `@myserver:`.
+      expect(values[0]).toBe('myserver:');
+      expect(values).toContain('my-notes.txt');
+      const serverSug = result.current.suggestions.find(
+        (s) => s.value === 'myserver:',
+      );
+      // `isDirectory` => no trailing space => completion re-triggers into the
+      // resource list once `@myserver:` is inserted.
+      expect(serverSug?.isDirectory).toBe(true);
+    });
+
+    it('does not suggest servers for the empty @ trigger (files only)', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            { uri: 'res://x', name: 'x', serverName: 'myserver' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, '', resourceConfig, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).toContain('file.txt');
+      expect(values).not.toContain('myserver:');
+    });
+
+    it('does not suggest servers that expose no resources', async () => {
+      testRootDir = await createTmpDir({ 'my-notes.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({ getResourcesByServer: () => [] }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'my', resourceConfig, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).not.toContain('myserver:');
+      expect(values).toContain('my-notes.txt');
+    });
+
+    it('does not suggest servers in an untrusted folder', async () => {
+      testRootDir = await createTmpDir({ 'my-notes.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        isTrustedFolder: () => false,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [
+            { uri: 'res://x', name: 'x', serverName: 'myserver' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'my', resourceConfig, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).not.toContain('myserver:');
+      expect(values).toContain('my-notes.txt');
+    });
+  });
+
+  describe('Global MCP resource completion', () => {
+    it('matches resources globally for a bare @<partial> with no server prefix', async () => {
+      testRootDir = await createTmpDir({ 'unrelated.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ 'asys-mcp-http': {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [],
+          getAllResources: () => [
+            {
+              uri: 'asight://skills/ppu_bubble',
+              name: 'bubble',
+              serverName: 'asys-mcp-http',
+            },
+            {
+              uri: 'asight://skills/ppu_op',
+              name: 'op',
+              serverName: 'asys-mcp-http',
+            },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'asight',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      // 'asight' is not a configured server name and carries no ':' — yet both
+      // resources match by URI prefix and are injected as @server:uri.
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).toContain('asys-mcp-http:asight://skills/ppu_bubble');
+      expect(values).toContain('asys-mcp-http:asight://skills/ppu_op');
+    });
+
+    it('matches a resource globally by its friendly name/title', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [],
+          getAllResources: () => [
+            {
+              uri: 'file:///x/spec.md',
+              name: 'spec',
+              title: 'Project Spec',
+              serverName: 'demo',
+            },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'Project',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      expect(result.current.suggestions.map((s) => s.value)).toContain(
+        'demo:file:///x/spec.md',
+      );
+    });
+
+    it('prepends globally-matched resources before file results', async () => {
+      // A file AND a resource both match 'doc'.
+      testRootDir = await createTmpDir({ 'doc.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [],
+          getAllResources: () => [
+            { uri: 'doc://readme', name: 'r', serverName: 'demo' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'doc', resourceConfig, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(1);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      const resIdx = values.indexOf('demo:doc://readme');
+      const fileIdx = values.indexOf('doc.txt');
+      expect(resIdx).toBeGreaterThanOrEqual(0);
+      expect(fileIdx).toBeGreaterThanOrEqual(0);
+      // Resources come first so a file flood can't bury them.
+      expect(resIdx).toBeLessThan(fileIdx);
+    });
+
+    it('does not surface global resources for the empty @ trigger (files only)', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [],
+          getAllResources: () => [
+            { uri: 'res://x', name: 'x', serverName: 'demo' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, '', resourceConfig, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const values = result.current.suggestions.map((s) => s.value);
+      expect(values).toContain('file.txt');
+      expect(values).not.toContain('demo:res://x');
+    });
+
+    it('does not surface global resources in an untrusted folder', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        isTrustedFolder: () => false,
+        getMcpServers: () => ({ demo: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: () => [],
+          getAllResources: () => [
+            { uri: 'asight://secret', name: 's', serverName: 'demo' },
+          ],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'asight',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await new Promise((r) => setTimeout(r, 300));
+      expect(result.current.suggestions.map((s) => s.value)).not.toContain(
+        'demo:asight://secret',
+      );
     });
   });
 });

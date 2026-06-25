@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Protocol } from '../../core/contentGenerator.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { ProviderConfig, ModelSpec } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ export const tokenPlanProvider: ProviderConfig = {
   label: 'Token Plan',
   description:
     'For teams and companies · Usage-based billing with dedicated endpoint',
-  protocol: Protocol.OPENAI,
+  protocol: AuthType.USE_OPENAI,
   baseUrl: TOKEN_PLAN_BASE_URL,
   envKey: TOKEN_PLAN_ENV_KEY,
   models: TOKEN_PLAN_MODELS,

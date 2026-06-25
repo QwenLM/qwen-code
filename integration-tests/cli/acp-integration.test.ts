@@ -467,7 +467,28 @@ function setupAcpTest(
 
   it('supports session/set_config_option for mode and model', async () => {
     const rig = new TestRig();
-    rig.setup('acp set config option');
+    // Inject a deterministic openai provider model so `availableModels` always
+    // contains a settable openai entry. The previous version relied on the
+    // env-driven OPENAI_MODEL being captured as a runtime-model snapshot and
+    // enumerated, which is environment-sensitive and flaked in CI (the openai
+    // model could be absent from `availableModels`, failing the assertion
+    // below). A registry model configured via `modelProviders` is always
+    // enumerated and switchable without inference, making this test
+    // deterministic regardless of how the ambient openai credentials resolve.
+    rig.setup('acp set config option', {
+      settings: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'e2e-set-config-option-model',
+              name: 'E2E Set Config Option Model',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      },
+    });
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -528,9 +549,10 @@ function setupAcpTest(
       expect(modelOption!.currentValue).toBeTruthy();
 
       // Test: Set model using set_config_option
-      // Use openai model to avoid auth issues
+      // Target the deterministic openai provider model injected via settings
+      // above (avoids auth issues and is always present in `availableModels`).
       const openaiModel = newSession.models.availableModels.find((model) =>
-        model.modelId.includes('openai'),
+        model.modelId.includes('e2e-set-config-option-model'),
       );
       expect(openaiModel).toBeDefined();
 

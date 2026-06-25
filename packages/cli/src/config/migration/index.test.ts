@@ -21,9 +21,6 @@ describe('Migration Framework Integration', () => {
         model: 'gemini',
         disableAutoUpdate: true,
         disableLoadingPhrases: false,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result = runMigrations(v1Settings, 'user');
@@ -59,9 +56,6 @@ describe('Migration Framework Integration', () => {
         $version: 2,
         ui: { theme: 'light' },
         general: { disableAutoUpdate: false },
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result = runMigrations(v2Settings, 'user');
@@ -101,9 +95,6 @@ describe('Migration Framework Integration', () => {
       const v1Settings = {
         theme: 'dark',
         disableAutoUpdate: true,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result1 = runMigrations(v1Settings, 'user');
@@ -182,9 +173,6 @@ describe('Migration Framework Integration', () => {
         theme: 'dark',
         disableAutoUpdate: true,
         disableLoadingPhrases: true,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       const result = scheduler.migrate(v1Settings);
@@ -240,9 +228,6 @@ describe('Migration Framework Integration', () => {
       const cleanV2Settings = {
         $version: 2,
         ui: { theme: 'dark' },
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       // needsMigration should report that migration is needed
@@ -324,9 +309,6 @@ describe('Migration Framework Integration', () => {
       const oldVersionSettings = {
         $version: SETTINGS_VERSION - 1,
         general: { disableAutoUpdate: true },
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       // needsMigration should return true for old version
@@ -348,9 +330,6 @@ describe('Migration Framework Integration', () => {
         $version: 'invalid',
         theme: 'dark',
         disableAutoUpdate: true,
-        modelProviders: {
-          openai: [{ id: 'gpt-4o' }],
-        },
       };
 
       // Should detect migration needed based on V1 shape
@@ -398,6 +377,60 @@ describe('Migration Framework Integration', () => {
       expect(needsMigration(result1.settings)).toBe(false);
       const result2 = runMigrations(result1.settings, 'user');
       expect(result2.executedMigrations).toHaveLength(0);
+    });
+  });
+
+  describe('downgrade: v5 -> v4 (revert of #5089)', () => {
+    it('needsMigration returns true for a $version:5 settings file', () => {
+      expect(
+        needsMigration({
+          $version: 5,
+          modelProviders: {
+            openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+          },
+        }),
+      ).toBe(true);
+    });
+
+    it('needsMigration returns false for a genuinely newer ($version:6) file', () => {
+      expect(needsMigration({ $version: SETTINGS_VERSION + 2 })).toBe(false);
+    });
+
+    it('runMigrations downgrades v5 modelProviders back to v4 arrays', () => {
+      const v5Settings = {
+        $version: 5,
+        modelProviders: {
+          openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+          'vertex-ai': { protocol: 'gemini', models: [{ id: 'gemini-pro' }] },
+        },
+      };
+
+      const result = runMigrations(v5Settings, 'user');
+
+      expect(result.finalVersion).toBe(SETTINGS_VERSION);
+      expect(result.executedMigrations).toEqual([
+        { fromVersion: 5, toVersion: 4 },
+      ]);
+      expect(
+        (result.settings as Record<string, unknown>)['modelProviders'],
+      ).toEqual({
+        openai: [{ id: 'gpt-4o' }],
+        'vertex-ai': [{ id: 'gemini-pro' }],
+      });
+    });
+
+    it('is idempotent — the downgraded result needs no further migration', () => {
+      const v5Settings = {
+        $version: 5,
+        modelProviders: {
+          openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+        },
+      };
+      const downgraded = runMigrations(v5Settings, 'user').settings;
+      expect(needsMigration(downgraded)).toBe(false);
+      expect(runMigrations(downgraded, 'user').executedMigrations).toHaveLength(
+        0,
+      );
     });
   });
 });

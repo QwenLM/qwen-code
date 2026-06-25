@@ -8,7 +8,6 @@ import type {
   AuthType,
   ContentGeneratorConfig,
   InputModalities,
-  Protocol,
 } from '../core/contentGenerator.js';
 import type { ConfigSources } from '../utils/configResolver.js';
 
@@ -61,27 +60,33 @@ export interface ModelConfig {
   capabilities?: ModelCapabilities;
   /** Generation configuration (sampling parameters) */
   generationConfig?: ModelGenerationConfig;
+  /** When true, this model only appears in the fast model selector, not the main model list */
+  fastOnly?: boolean;
+  /** When true, this model only appears in the voice model selector, not the main model list */
+  voiceOnly?: boolean;
 }
 
 /**
- * Provider configuration for modelProviders
- */
-export interface ProviderConfig {
-  /** Protocol to use for this provider (required) */
-  protocol: Protocol;
-  /** Models available from this provider */
-  models: ModelConfig[];
-  /** Default base URL for this provider */
-  baseUrl?: string;
-  /** Environment variable name to read API key from */
-  envKey?: string;
-}
-
-/**
- * Model providers configuration grouped by authType
+ * Model providers configuration grouped by provider id.
+ *
+ * The key is a provider identity. For built-in providers it equals an
+ * {@link AuthType} value (e.g. `openai`, `gemini`); custom providers may use any
+ * id (e.g. `idealab`) as long as a {@link ProviderProtocolConfig} entry maps it
+ * to an SDK protocol.
  */
 export type ModelProvidersConfig = {
-  [authType: string]: ProviderConfig;
+  [providerId: string]: ModelConfig[];
+};
+
+/**
+ * Maps a `modelProviders` provider id to the SDK protocol that should route its
+ * requests. The value is an {@link AuthType} string (e.g. `openai`, `gemini`,
+ * `anthropic`). Lets a custom provider id (e.g. `idealab`) declare which built-in
+ * protocol it speaks, decoupling provider identity from SDK routing without
+ * changing the `modelProviders` array shape (so older versions stay compatible).
+ */
+export type ProviderProtocolConfig = {
+  [providerId: string]: string;
 };
 
 /**
@@ -116,6 +121,11 @@ export interface AvailableModel {
   modalities?: InputModalities;
   baseUrl?: string;
   envKey?: string;
+
+  /** When true, this model only appears in the fast model selector */
+  fastOnly?: boolean;
+  /** When true, this model only appears in the voice model selector */
+  voiceOnly?: boolean;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;

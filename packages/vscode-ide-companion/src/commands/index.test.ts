@@ -129,33 +129,13 @@ describe('registerNewCommands', () => {
     expect(executeCommand).not.toHaveBeenCalled();
   });
 
-  it('focusChat focuses the secondary sidebar when it is supported', async () => {
+  it('focusChat focuses the Activity Bar chat view', async () => {
     registerNewCommands(
       context as never,
       log,
       diffManager as never,
       () => [],
       vi.fn() as never,
-      undefined,
-      true,
-    );
-
-    await getRegisteredHandler(focusChatCommand)();
-
-    expect(executeCommand).toHaveBeenCalledWith(
-      'qwen-code.chatView.secondary.focus',
-    );
-  });
-
-  it('focusChat falls back to the primary sidebar when secondary sidebar is unavailable', async () => {
-    registerNewCommands(
-      context as never,
-      log,
-      diffManager as never,
-      () => [],
-      vi.fn() as never,
-      undefined,
-      false,
     );
 
     await getRegisteredHandler(focusChatCommand)();

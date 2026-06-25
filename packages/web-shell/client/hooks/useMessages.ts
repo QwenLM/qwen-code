@@ -13,6 +13,7 @@ export function useMessages(
         labels: {
           promptCancelled: t('request.cancelled'),
           branchSuccess: (name) => t('branch.success', { name }),
+          midTurnInserted: (message) => t('midTurn.inserted', { message }),
         },
       }),
     [blocks, t],

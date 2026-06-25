@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType, Protocol } from '../core/contentGenerator.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type ResolvedModelConfig,
   type AvailableModel,
 } from './types.js';
@@ -23,19 +24,46 @@ const debugLogger = createDebugLogger('MODEL_REGISTRY');
 export { QWEN_OAUTH_MODELS } from './constants.js';
 
 /**
- * Validates if a string key is a valid AuthType.
- * Since AuthType is now a string type, any non-empty string is valid.
+ * Validates if a string key is a valid AuthType enum value.
  * @param key - The key to validate
  * @returns The validated AuthType or undefined if invalid
  */
 function validateAuthTypeKey(key: string): AuthType | undefined {
-  // Any non-empty string is a valid AuthType
-  if (key && key.trim().length > 0) {
-    return key;
+  // Check if the key is a valid AuthType enum value
+  if (Object.values(AuthType).includes(key as AuthType)) {
+    return key as AuthType;
   }
 
   // Invalid key
   return undefined;
+}
+
+/**
+ * Resolve the SDK protocol (an {@link AuthType}) that should route a
+ * `modelProviders` provider id.
+ *
+ * Precedence:
+ *  1. An explicit {@link ProviderProtocolConfig} entry for the provider id.
+ *  2. The provider id itself when it is already a built-in protocol
+ *     (e.g. `openai`, `gemini`) — preserves the pre-existing behavior.
+ *
+ * Returns `undefined` for an unknown provider id with no mapping, or an explicit
+ * mapping whose value is not a known protocol, so the caller skips it (keeping
+ * the typo guard for hand-edited settings). Pure: callers decide how loudly to
+ * report a skip. Additive — configs without `providerProtocol` behave as before.
+ */
+export function resolveProviderProtocol(
+  providerId: string,
+  providerProtocol?: ProviderProtocolConfig,
+): AuthType | undefined {
+  const explicit =
+    providerProtocol && Object.hasOwn(providerProtocol, providerId)
+      ? providerProtocol[providerId]
+      : undefined;
+  if (explicit !== undefined) {
+    return validateAuthTypeKey(explicit);
+  }
+  return validateAuthTypeKey(providerId);
 }
 
 function shouldUseCanonicalModalities(modelId: string): boolean {
@@ -57,7 +85,9 @@ export function modelRegistryKey(id: string, baseUrl?: string): string {
  */
 export class ModelRegistry {
   private modelsByAuthType: Map<AuthType, Map<string, ResolvedModelConfig>>;
-  private protocolByAuthType = new Map<string, Protocol>();
+
+  /** providerId -> SDK protocol mapping; persists across reloads. */
+  private providerProtocolConfig: ProviderProtocolConfig;
 
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
@@ -70,35 +100,59 @@ export class ModelRegistry {
     }
   }
 
-  constructor(modelProvidersConfig?: ModelProvidersConfig) {
+  constructor(
+    modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
+  ) {
     this.modelsByAuthType = new Map();
+    this.providerProtocolConfig = providerProtocolConfig ?? {};
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
-    this.protocolByAuthType.set(AuthType.QWEN_OAUTH, Protocol.QWEN_OAUTH);
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
 
-    // Register user-configured models for other authTypes
-    if (modelProvidersConfig) {
-      for (const [rawKey, providerConfig] of Object.entries(
-        modelProvidersConfig,
-      )) {
-        const authType = validateAuthTypeKey(rawKey);
+    // Register user-configured models for other providers
+    this.registerProvidersConfig(modelProvidersConfig);
+  }
 
-        if (!authType) {
-          debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Skipping.`,
-          );
-          continue;
-        }
+  /**
+   * Register every user-configured provider under its resolved SDK protocol.
+   * A provider id maps to a protocol via {@link resolveProviderProtocol}
+   * (explicit `providerProtocol` entry, or the id itself when it is a built-in
+   * protocol). Unmapped unknown ids are skipped with a warning.
+   */
+  private registerProvidersConfig(
+    modelProvidersConfig?: ModelProvidersConfig,
+  ): void {
+    if (!modelProvidersConfig) return;
 
-        // Skip qwen-oauth as it uses hard-coded models
-        if (authType === AuthType.QWEN_OAUTH) {
-          continue;
-        }
+    for (const [providerId, models] of Object.entries(modelProvidersConfig)) {
+      const protocol = resolveProviderProtocol(
+        providerId,
+        this.providerProtocolConfig,
+      );
 
-        this.protocolByAuthType.set(authType, providerConfig.protocol);
-        this.registerAuthTypeModels(authType, providerConfig.models);
+      if (!protocol) {
+        const knownProtocols = Object.values(AuthType).join(', ');
+        const mapped = Object.hasOwn(this.providerProtocolConfig, providerId)
+          ? this.providerProtocolConfig[providerId]
+          : undefined;
+        const message =
+          mapped !== undefined
+            ? `Provider "${providerId}" maps to "${mapped}" via providerProtocol, ` +
+              `which is not a known protocol (${knownProtocols}); skipping.`
+            : `Provider "${providerId}" in modelProviders is not a built-in protocol ` +
+              `(${knownProtocols}) and has no providerProtocol mapping; skipping. ` +
+              `Add providerProtocol["${providerId}"] to route it to an SDK protocol.`;
+        debugLogger.warn(message);
+        continue;
       }
+
+      // qwen-oauth uses hard-coded models and cannot be overridden
+      if (protocol === AuthType.QWEN_OAUTH) {
+        continue;
+      }
+
+      this.registerAuthTypeModels(protocol, models, providerId);
     }
   }
 
@@ -111,14 +165,39 @@ export class ModelRegistry {
   private registerAuthTypeModels(
     authType: AuthType,
     models: ModelConfig[],
+    providerId?: string,
   ): void {
-    const modelMap = new Map<string, ResolvedModelConfig>();
+    // Defensive: runtime data from settings.json can violate the static type —
+    // e.g. a hand-edited file, or one still in the reverted #5089 V5 shape
+    // ({ protocol, models }) that the CLI v5->v4 migration has not yet
+    // rewritten. Skip such entries with a clear warning instead of throwing an
+    // opaque "models is not iterable" from the loop below.
+    if (!Array.isArray(models)) {
+      debugLogger.warn(
+        `modelProviders for provider "${providerId ?? authType}" is not an array; ` +
+          `skipping. Expected ModelConfig[]; legacy { protocol, models } entries ` +
+          `are normally rewritten by the v5->v4 settings migration.`,
+      );
+      return;
+    }
+
+    // Merge into any existing map for this protocol: multiple provider ids can
+    // resolve to the same protocol (e.g. `openai` and a custom `idealab` both
+    // routing to the openai protocol). First registration of a composite
+    // (id + baseUrl) key wins.
+    const modelMap =
+      this.modelsByAuthType.get(authType) ??
+      new Map<string, ResolvedModelConfig>();
+    const providerLabel =
+      providerId && providerId !== authType
+        ? ` (provider "${providerId}")`
+        : '';
 
     for (const config of models) {
       const key = modelRegistryKey(config.id, config.baseUrl);
       if (modelMap.has(key)) {
         debugLogger.warn(
-          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for authType "${authType}". Using the first registered config.`,
+          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for protocol "${authType}"${providerLabel}. Using the first registered config.`,
         );
         continue;
       }
@@ -151,15 +230,9 @@ export class ModelRegistry {
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
       envKey: model.envKey,
+      fastOnly: model.fastOnly,
+      voiceOnly: model.voiceOnly,
     }));
-  }
-
-  /**
-   * Get all registered authTypes.
-   * Used by getAllConfiguredModels to include custom providers.
-   */
-  getAuthTypes(): AuthType[] {
-    return Array.from(this.modelsByAuthType.keys());
   }
 
   /**
@@ -217,14 +290,6 @@ export class ModelRegistry {
   }
 
   /**
-   * Get the protocol for an authType.
-   * Returns undefined if the authType is not registered.
-   */
-  getProtocolForAuthType(authType: AuthType): Protocol | undefined {
-    return this.protocolByAuthType.get(authType);
-  }
-
-  /**
    * Resolve model config by applying defaults
    */
   private resolveModelConfig(
@@ -264,14 +329,32 @@ export class ModelRegistry {
         `Model config in authType '${authType}' missing required field: id`,
       );
     }
+    if (config.fastOnly && config.voiceOnly) {
+      debugLogger.warn(
+        `Model "${config.id}" in authType "${authType}" has both fastOnly and voiceOnly set. It will be unreachable in all model selectors.`,
+      );
+    }
   }
 
   /**
    * Reload models from updated configuration.
    * Clears existing user-configured models and re-registers from new config.
    * Preserves hard-coded qwen-oauth models.
+   *
+   * @param providerProtocolConfig - Updated provider->protocol map. `undefined`
+   *   PRESERVES the existing map (so a reload carrying only modelProviders does
+   *   not lose the mapping); any object value REPLACES it, so passing `{}`
+   *   clears the mapping. Callers that want to preserve must omit the argument,
+   *   not pass `settings.providerProtocol ?? {}`.
    */
-  reloadModels(modelProvidersConfig?: ModelProvidersConfig): void {
+  reloadModels(
+    modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
+  ): void {
+    if (providerProtocolConfig !== undefined) {
+      this.providerProtocolConfig = providerProtocolConfig;
+    }
+
     // Clear existing user-configured models (preserve qwen-oauth)
     for (const authType of this.modelsByAuthType.keys()) {
       if (authType !== AuthType.QWEN_OAUTH) {
@@ -279,35 +362,7 @@ export class ModelRegistry {
       }
     }
 
-    // Clear existing user-configured protocols (preserve qwen-oauth)
-    for (const authType of this.protocolByAuthType.keys()) {
-      if (authType !== AuthType.QWEN_OAUTH) {
-        this.protocolByAuthType.delete(authType);
-      }
-    }
-
-    // Re-register user-configured models for other authTypes
-    if (modelProvidersConfig) {
-      for (const [rawKey, providerConfig] of Object.entries(
-        modelProvidersConfig,
-      )) {
-        const authType = validateAuthTypeKey(rawKey);
-
-        if (!authType) {
-          debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Skipping.`,
-          );
-          continue;
-        }
-
-        // Skip qwen-oauth as it uses hard-coded models
-        if (authType === AuthType.QWEN_OAUTH) {
-          continue;
-        }
-
-        this.protocolByAuthType.set(authType, providerConfig.protocol);
-        this.registerAuthTypeModels(authType, providerConfig.models);
-      }
-    }
+    // Re-register user-configured models under their resolved protocol
+    this.registerProvidersConfig(modelProvidersConfig);
   }
 }

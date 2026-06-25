@@ -66,7 +66,6 @@ export function buildAgentContentGeneratorConfig(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (nextConfig as any)[field] = undefined;
     }
-    nextConfig.protocol = modelsConfig.getProtocol(authOverrides.authType);
   }
 
   if (resolvedModel) {
@@ -185,9 +184,8 @@ export function resolveCredentialField(
   if (explicitValue) return explicitValue;
   if (inheritedValue) return inheritedValue;
 
-  const envMapping = Object.hasOwn(AUTH_ENV_MAPPINGS, authType)
-    ? AUTH_ENV_MAPPINGS[authType as keyof typeof AUTH_ENV_MAPPINGS]
-    : undefined;
+  const envMapping =
+    AUTH_ENV_MAPPINGS[authType as keyof typeof AUTH_ENV_MAPPINGS];
   if (!envMapping) return undefined;
 
   for (const envKey of envMapping[field]) {

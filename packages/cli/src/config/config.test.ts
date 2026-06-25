@@ -1566,6 +1566,26 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
   });
 
+  it('should use sensitiveSpanAttributeMaxLength from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+  });
+
+  it('should default sensitiveSpanAttributeMaxLength to 1MiB', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(
+      1024 * 1024,
+    );
+  });
+
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -2540,6 +2560,27 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getAutoSkillEnabled()).toBe(true);
   });
 
+  it('autoSkillConfirm: defaults to true when unset', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+  });
+
+  it('autoSkillConfirm: passes memory.autoSkillConfirm: false through to config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      memory: {
+        autoSkillConfirm: false,
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
@@ -2634,12 +2675,14 @@ describe('loadCliConfig chatCompression', () => {
       model: {
         chatCompression: {
           imageTokenEstimate: 1234,
+          maxRecentFilesToRetain: 7,
         },
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getChatCompression()).toEqual({
       imageTokenEstimate: 1234,
+      maxRecentFilesToRetain: 7,
     });
   });
 
@@ -3175,6 +3218,23 @@ describe('loadCliConfig fileFiltering', () => {
       expect(getter(config)).toBe(value);
     },
   );
+
+  it('should pass customIgnoreFiles from settings to config', async () => {
+    const settings: Settings = {
+      context: {
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore, .cursorignore',
+    );
+  });
 });
 
 describe('Output format', () => {
@@ -3345,6 +3405,17 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should prioritize QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH', '131072');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(131_072);
   });
 
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {

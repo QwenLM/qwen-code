@@ -5,6 +5,7 @@
  */
 
 import type { DaemonClient } from './DaemonClient.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
 import {
   isNonBlockingAccepted,
   matchTurnEvent,
@@ -24,6 +25,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonSessionState,
@@ -48,6 +50,8 @@ export interface DaemonReplaySnapshot {
 export interface DaemonSessionClientOptions {
   client: DaemonClient;
   session: DaemonSession;
+  /** True when load/resume attached to a session with an in-flight prompt. */
+  hasActivePrompt?: boolean;
   /** ACP state returned by load/resume; empty for create/attach clients. */
   state?: DaemonSessionState;
   /**
@@ -93,8 +97,11 @@ export class DaemonSessionClient {
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
   readonly replaySnapshot: DaemonReplaySnapshot;
+  readonly hasActivePrompt: boolean;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
+  /** In-flight `reattach()` so concurrent prompts re-register only once. */
+  private reattaching?: Promise<void>;
   private readonly promptLimit: number;
   private readonly _pendingPrompts = new Map<
     string,
@@ -108,6 +115,7 @@ export class DaemonSessionClient {
     this.client = opts.client;
     this.session = { ...opts.session };
     this.state = { ...(opts.state ?? {}) };
+    this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
@@ -156,7 +164,12 @@ export class DaemonSessionClient {
     // of the bounded ring"; if older events have already been evicted,
     // clients receive the retained suffix and continue live from there.
     const lastEventId = !session.attached || req.modelServiceId ? 0 : undefined;
-    return new DaemonSessionClient({ client, session, lastEventId });
+    return new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt: session.hasActivePrompt,
+      lastEventId,
+    });
   }
 
   /**
@@ -172,6 +185,7 @@ export class DaemonSessionClient {
   ): Promise<DaemonSessionClient> {
     const {
       state,
+      hasActivePrompt,
       compactedReplay,
       liveJournal,
       lastEventId: serverLastEventId,
@@ -180,6 +194,7 @@ export class DaemonSessionClient {
     return new DaemonSessionClient({
       client,
       session,
+      hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
       replaySnapshot: {
@@ -203,12 +218,14 @@ export class DaemonSessionClient {
   ): Promise<DaemonSessionClient> {
     const {
       state,
+      hasActivePrompt,
       lastEventId: serverLastEventId,
       ...session
     } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
       client,
       session,
+      hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
     });
@@ -244,11 +261,8 @@ export class DaemonSessionClient {
   ): Promise<PromptResult> {
     signal?.throwIfAborted();
     if (!this.subscriptionActive) {
-      return await this.client.prompt(
-        this.sessionId,
-        req,
-        signal,
-        this.clientId,
+      return await this.withClientIdSelfHeal(() =>
+        this.client.prompt(this.sessionId, req, signal, this.clientId),
       );
     }
 
@@ -258,11 +272,13 @@ export class DaemonSessionClient {
     );
     let accepted: NonBlockingPromptAccepted | PromptResult;
     try {
-      accepted = await this.client.promptNonBlocking(
-        this.sessionId,
-        req,
-        signal,
-        this.clientId,
+      accepted = await this.withClientIdSelfHeal(() =>
+        this.client.promptNonBlocking(
+          this.sessionId,
+          req,
+          signal,
+          this.clientId,
+        ),
       );
       if (!isNonBlockingAccepted(accepted)) {
         releaseAdmission();
@@ -307,6 +323,73 @@ export class DaemonSessionClient {
     });
   }
 
+  /**
+   * Submit a prompt and return as soon as the daemon accepts it.
+   *
+   * This is admission-only: it does not reserve a client-side prompt slot,
+   * register the prompt in `_pendingPrompts`, or wait for the matching
+   * `turn_complete` / `turn_error` SSE event. Callers that need final turn
+   * results should use `prompt()` or manage SSE terminal events themselves.
+   */
+  async submitPrompt(
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<NonBlockingPromptAccepted> {
+    signal?.throwIfAborted();
+    const accepted = await this.withClientIdSelfHeal(() =>
+      this.client.promptNonBlocking(this.sessionId, req, signal, this.clientId),
+    );
+    if (!isNonBlockingAccepted(accepted)) {
+      throw new Error('Expected non-blocking prompt acceptance');
+    }
+    return accepted;
+  }
+
+  /**
+   * Run a prompt-admission call, recovering from a stale `clientId`.
+   *
+   * A daemon restart (or session reload) wipes the daemon's in-memory client
+   * registration, so a prompt sent with our now-unknown `clientId` is rejected
+   * at admission with `400 invalid_client_id` (see PR #5784). That rejection
+   * happens before the turn is registered, so the prompt never ran — retrying
+   * cannot double-execute. We re-register to obtain a fresh `clientId` and
+   * retry the admission exactly once. Any other error (and a second
+   * `invalid_client_id`) propagates.
+   */
+  private async withClientIdSelfHeal<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isInvalidClientId(err)) throw err;
+      await this.reattach();
+      return await fn();
+    }
+  }
+
+  /**
+   * Re-register this client against the (already-restored) session to obtain a
+   * fresh daemon-assigned `clientId`. Concurrent callers coalesce onto a single
+   * in-flight `resume` so we never orphan extra registrations.
+   */
+  private async reattach(): Promise<void> {
+    if (this.reattaching) return this.reattaching;
+    // Send no clientId so the bridge issues a fresh registration rather than
+    // validating the stale one. Pass workspaceCwd explicitly: the daemon's
+    // restore path resolves the workspace key before its existing-session fast
+    // path, and that resolution rejects a missing/relative path.
+    this.reattaching = this.client
+      .resumeSession(this.sessionId, { workspaceCwd: this.workspaceCwd })
+      .then((session) => {
+        // Refresh only the clientId; leave the SSE cursor and ACP state intact.
+        this.session.clientId = session.clientId;
+      });
+    try {
+      await this.reattaching;
+    } finally {
+      this.reattaching = undefined;
+    }
+  }
+
   async cancel(): Promise<void> {
     await this.client.cancel(this.sessionId, this.clientId);
   }
@@ -336,9 +419,15 @@ export class DaemonSessionClient {
     return await this.client.getRewindSnapshots(this.sessionId);
   }
 
-  async rewind(promptId: string): Promise<DaemonRewindResult> {
+  async rewind(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): Promise<DaemonRewindResult> {
     return await this.client.rewindSession(this.sessionId, promptId, {
       clientId: this.clientId,
+      ...(opts?.rewindFiles !== undefined
+        ? { rewindFiles: opts.rewindFiles }
+        : {}),
     });
   }
 
@@ -432,6 +521,10 @@ export class DaemonSessionClient {
 
   async tasks(): Promise<DaemonSessionTasksStatus> {
     return await this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  async lspStatus(): Promise<DaemonSessionLspStatus> {
+    return await this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
 
   async cancelTask(
@@ -623,4 +716,18 @@ function validateLastEventId(
     throw new TypeError('invalid lastEventId');
   }
   return lastEventId;
+}
+
+/**
+ * True for the daemon's `400 invalid_client_id` prompt-admission rejection
+ * (the stale-clientId signal a daemon restart / session reload produces).
+ */
+function isInvalidClientId(err: unknown): boolean {
+  return (
+    err instanceof DaemonHttpError &&
+    err.status === 400 &&
+    typeof err.body === 'object' &&
+    err.body !== null &&
+    (err.body as { code?: unknown }).code === 'invalid_client_id'
+  );
 }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Protocol } from '../../core/contentGenerator.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const REQUESTY_ENV_KEY = 'REQUESTY_API_KEY';
@@ -15,7 +15,7 @@ export const requestyProvider: ProviderConfig = {
   label: 'Requesty',
   description:
     'Connect with a Requesty API key (get one from app.requesty.ai/api-keys)',
-  protocol: Protocol.OPENAI,
+  protocol: AuthType.USE_OPENAI,
   baseUrl: REQUESTY_BASE_URL,
   envKey: REQUESTY_ENV_KEY,
   models: [

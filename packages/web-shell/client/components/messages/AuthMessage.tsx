@@ -5,11 +5,8 @@ import {
   type DaemonAuthProviderCatalog,
   type DaemonAuthProviderDescriptor,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import styles from './AuthMessage.module.css';
-
-export const AUTH_ACTIVE_EVENT = 'web-shell:auth-panel-active';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
@@ -131,18 +128,6 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const id = `auth-${Math.random().toString(36).slice(2)}`;
-    window.dispatchEvent(
-      new CustomEvent(AUTH_ACTIVE_EVENT, { detail: { id, active: true } }),
-    );
-    return () => {
-      window.dispatchEvent(
-        new CustomEvent(AUTH_ACTIVE_EVENT, { detail: { id, active: false } }),
-      );
-    };
-  }, []);
-
-  useEffect(() => {
     workspaceActions
       .getAuthProviders()
       .then((next) => {
@@ -173,7 +158,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       );
   }, [catalog, groupId, groups]);
 
-  const steps = provider?.steps ?? [];
+  const steps = useMemo(() => provider?.steps ?? [], [provider?.steps]);
   const currentStep = steps[stepIndex] as AuthStep | undefined;
   const shouldReview = provider?.showAdvancedConfig === true;
   const advancedOptionValues = useMemo<AdvancedOptionValue[]>(
@@ -184,25 +169,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     [modality],
   );
   const advancedContextIndex = advancedOptionValues.indexOf('context');
-  const advancedCount = advancedOptionValues.length;
-  const totalSteps = steps.length + (shouldReview ? 1 : 0);
   const isInputStep =
     currentStep === 'apiKey' ||
     currentStep === 'models' ||
     (currentStep === 'baseUrl' && !Array.isArray(provider?.baseUrl));
-
-  const selectableCount =
-    view === 'groups'
-      ? groups.length
-      : view === 'providers'
-        ? providers.length
-        : currentStep === 'protocol'
-          ? (provider?.protocolOptions ?? [provider?.protocol]).length
-          : currentStep === 'baseUrl' && Array.isArray(provider?.baseUrl)
-            ? provider.baseUrl.length
-            : currentStep === 'advancedConfig'
-              ? advancedCount
-              : 0;
 
   const [optionIndex, setOptionIndex] = useState(0);
 
@@ -251,6 +221,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       return;
     }
     if (view === 'review') {
+      if (steps.length === 0) {
+        setView(setupBackView);
+        return;
+      }
       setView('step');
       setStepIndex(Math.max(0, steps.length - 1));
       return;
@@ -543,41 +517,6 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     ],
   );
 
-  useDelayedGlobalKeyDown(
-    (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        goBack();
-        return;
-      }
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        activate();
-        return;
-      }
-      if (event.key === ' ') {
-        if (currentStep === 'advancedConfig') {
-          event.preventDefault();
-          activate();
-        }
-        return;
-      }
-      if (
-        selectableCount > 0 &&
-        (event.key === 'ArrowUp' || event.key === 'ArrowDown')
-      ) {
-        event.preventDefault();
-        const delta = event.key === 'ArrowUp' ? -1 : 1;
-        const update = (value: number) =>
-          (value + selectableCount + delta) % selectableCount;
-        if (view === 'groups') setGroupIndex(update);
-        else if (view === 'providers') setProviderIndex(update);
-        else setOptionIndex(update);
-      }
-    },
-    [activate, currentStep, goBack, selectableCount, view],
-  );
-
   const renderOptions = <T extends string>(
     options: Array<Option<T>>,
     selected: number,
@@ -585,7 +524,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   ) => (
     <div className={styles.options}>
       {options.map((option, index) => (
-        <div
+        <button
+          type="button"
           key={option.value}
           className={`${styles.option} ${selected === index ? styles.optionActive : ''}`}
           onClick={() => {
@@ -593,18 +533,13 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             activateAtIndex(index);
           }}
         >
-          <span className={styles.pointer}>
-            {selected === index ? '›' : ' '}
-          </span>
-          <div>
-            <div className={styles.label}>
-              {index + 1}. {option.label}
-            </div>
+          <div className={styles.optionText}>
+            <div className={styles.label}>{option.label}</div>
             {option.description && (
               <div className={styles.description}>{option.description}</div>
             )}
           </div>
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -843,90 +778,127 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     thinking,
   ]);
 
-  return (
-    <div className={styles.panel} data-keyboard-scope>
-      <div className={styles.title}>
-        {view === 'groups'
-          ? t('auth.title')
-          : view === 'providers'
-            ? t(
-                groups.find((group: AuthGroup) => group.id === groupId)
-                  ?.label ?? '',
-              )
-            : provider && currentStep
-              ? `${t(provider.uiLabels?.flowTitle ?? provider.label)} · ${t(
-                  'auth.stepCount',
-                  {
-                    step: stepIndex + 1,
-                    total: totalSteps,
-                  },
-                )} · ${titleForStep(currentStep, provider, t)}`
-              : provider && view === 'review'
-                ? `${t(provider.uiLabels?.flowTitle ?? provider.label)} · ${t(
-                    'auth.stepCount',
-                    {
-                      step: totalSteps,
-                      total: totalSteps,
-                    },
-                  )} · ${t('auth.review')}`
-                : t('auth.review')}
-      </div>
-      {loading && <div className={styles.muted}>{t('common.loading')}</div>}
-      {view === 'groups' &&
-        !loading &&
-        renderOptions(
-          groups.map((group: AuthGroup) => ({
-            value: group.id,
-            label: t(group.label),
-            description: t(group.description),
-          })),
-          groupIndex,
-          setGroupIndex,
-        )}
-      {view === 'providers' &&
-        renderOptions(
-          providers.map((item: DaemonAuthProviderDescriptor) => ({
-            value: item.id,
-            label: t(item.label),
-            description: t(item.description),
-          })),
-          providerIndex,
-          setProviderIndex,
-        )}
-      {view === 'step' && renderStep()}
-      {view === 'review' && (
+  const stepItems = useMemo(() => {
+    const items = [t('auth.step.group'), t('auth.step.provider')];
+    if (provider) {
+      items.push(
+        ...steps.map((step) => titleForStep(step as AuthStep, provider, t)),
+      );
+      if (shouldReview) items.push(t('auth.review'));
+    }
+    return items;
+  }, [provider, shouldReview, steps, t]);
+
+  const activeStep = useMemo(() => {
+    if (view === 'groups') return 1;
+    if (view === 'providers') return 2;
+    if (view === 'step') return Math.min(3 + stepIndex, stepItems.length);
+    return stepItems.length;
+  }, [stepIndex, stepItems.length, view]);
+
+  const body = (() => {
+    if (loading)
+      return <div className={styles.muted}>{t('common.loading')}</div>;
+    if (view === 'groups') {
+      return (
         <>
-          <div className={styles.text}>{t('auth.reviewText')}</div>
-          <div className={styles.preview}>{review}</div>
+          {renderOptions(
+            groups.map((group: AuthGroup) => ({
+              value: group.id,
+              label: t(group.label),
+              description: t(group.description),
+            })),
+            groupIndex,
+            setGroupIndex,
+          )}
+          <div className={styles.terms}>
+            <div>{t('auth.termsTitle')}:</div>
+            <a
+              className={styles.link}
+              href="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
+            </a>
+          </div>
         </>
-      )}
+      );
+    }
+    if (view === 'providers') {
+      return renderOptions(
+        providers.map((item: DaemonAuthProviderDescriptor) => ({
+          value: item.id,
+          label: t(item.label),
+          description: t(item.description),
+        })),
+        providerIndex,
+        setProviderIndex,
+      );
+    }
+    if (view === 'step') return renderStep();
+    return (
+      <>
+        <div className={styles.text}>{t('auth.reviewText')}</div>
+        <div className={styles.preview}>{review}</div>
+      </>
+    );
+  })();
+
+  const primaryAction = () => {
+    if (view === 'review') {
+      save();
+      return;
+    }
+    if (isInputStep || currentStep === 'advancedConfig') {
+      goNext();
+      return;
+    }
+    activate();
+  };
+
+  return (
+    <div className={styles.panel}>
+      <div className={styles.steps}>
+        {stepItems.map((label, index) => {
+          const stepNumber = index + 1;
+          return (
+            <div
+              key={`${stepNumber}:${label}`}
+              className={`${styles.stepPill} ${
+                stepNumber === activeStep ? styles.stepPillActive : ''
+              } ${stepNumber < activeStep ? styles.stepPillDone : ''}`}
+            >
+              <span className={styles.stepNumber}>{stepNumber}</span>
+              <span className={styles.stepLabel}>{label}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className={styles.body}>{body}</div>
       {error && <div className={styles.error}>{error}</div>}
-      {view === 'groups' && !loading && (
-        <div className={styles.terms}>
-          <div>{t('auth.termsTitle')}:</div>
-          <a
-            className={styles.link}
-            href="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
-            target="_blank"
-            rel="noreferrer"
-          >
-            https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
-          </a>
-        </div>
-      )}
-      {view !== 'groups' && (
-        <div className={styles.footer}>
-          {currentStep === 'advancedConfig'
-            ? t('auth.footer.advanced')
-            : view === 'review'
-              ? saving
-                ? t('auth.saving')
-                : t('auth.footer.save')
-              : isInputStep
-                ? t('auth.footer.input')
-                : t('auth.footer.back')}
-        </div>
-      )}
+      <div className={styles.actions}>
+        <button
+          type="button"
+          className={styles.actionButton}
+          onClick={goBack}
+          disabled={view === 'groups' || loading || saving}
+        >
+          {t('common.previous')}
+        </button>
+        <button
+          type="button"
+          className={styles.actionButton}
+          onClick={primaryAction}
+          disabled={loading || saving}
+        >
+          {view === 'review'
+            ? saving
+              ? t('auth.saving')
+              : t('auth.save')
+            : t('common.next')}
+        </button>
+      </div>
     </div>
   );
 }

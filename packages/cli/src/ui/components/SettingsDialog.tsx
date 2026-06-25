@@ -37,8 +37,8 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
-import chalk from 'chalk';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import {
   type SettingsValue,
   TOGGLE_TYPES,
@@ -821,10 +821,10 @@ export function SettingsDialog({
                 );
                 const afterCursor = cpSlice(editBuffer, editCursorPos + 1);
                 displayValue =
-                  beforeCursor + chalk.inverse(atCursor) + afterCursor;
+                  beforeCursor + renderSoftwareCursor(atCursor) + afterCursor;
               } else if (cursorVisible && editCursorPos >= cpLen(editBuffer)) {
-                // Cursor is at the end - show inverted space
-                displayValue = editBuffer + chalk.inverse(' ');
+                // Cursor is at the end - show software cursor space
+                displayValue = editBuffer + renderSoftwareCursor(' ');
               } else {
                 // Cursor not visible
                 displayValue = editBuffer;

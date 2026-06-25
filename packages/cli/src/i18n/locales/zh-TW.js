@@ -203,6 +203,7 @@ export default {
   'toolDisplayName.EnterWorktree': '進入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流程',
+  'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
@@ -651,6 +652,7 @@ export default {
   'toggle vim mode on/off': '切換 vim 模式開關',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
   'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show skill-specific usage statistics.': '顯示技能相關的使用統計資訊',
   'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
   'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
   'Export token usage statistics to CSV or JSON.':
@@ -1193,6 +1195,7 @@ export default {
   'Size:': '大小：',
   '{{count}} bytes': '{{count}} 位元組',
   'Reference in chat': '在對話中引用',
+  'MCP resource server': 'MCP 資源伺服器',
   '{{count}} invalid tools': '{{count}} 個無效工具',
   invalid: '無效',
   'invalid: {{reason}}': '無效：{{reason}}',
@@ -1271,8 +1274,10 @@ export default {
     '語音聽寫需要麥克風存取。macOS 會在你首次錄音時彈出授權請求——請同意後重新開始。彈窗開啟期間的首次錄音可能為空。',
   'Voice: recording': '語音：錄音中',
   'Voice: transcribing': '語音：轉寫中',
+  'Voice: refining': '語音：優化中',
   'listening…': '聆聽中…',
   'transcribing…': '轉寫中…',
+  'refining…': '優化中…',
   'Content generator configuration not available.': '內容生成器配置不可用',
   'Authentication type not available.': '認證類型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1961,6 +1966,7 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
   Running: '執行中',

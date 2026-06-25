@@ -7,10 +7,11 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
-import { InputPrompt } from './InputPrompt.js';
+import { InputPrompt, classifyPastedImagePaths } from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -30,7 +31,7 @@ import { useVoiceInput } from '../hooks/use-voice-input.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import {
@@ -344,6 +345,7 @@ describe('InputPrompt', () => {
         getProjectRoot: () => path.join('test', 'project'),
         getTargetDir: () => path.join('test', 'project', 'src'),
         getVimMode: () => false,
+        getFastModel: () => undefined,
         getWorkspaceContext: () => ({
           getDirectories: () => ['/test/project/src'],
         }),
@@ -444,6 +446,41 @@ describe('InputPrompt', () => {
       expect(handleVoiceKeypress).not.toHaveBeenCalled();
     });
     expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('passes a voice refinement callback when a fast model is configured', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: expect.any(Function) }),
+    );
+    unmount();
+  });
+
+  it('omits voice refinement when refineTranscript is disabled', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+    const settings = {
+      merged: {
+        general: { voice: { refineTranscript: false } },
+      },
+    } as LoadedSettings;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />, {
+      settings,
+    });
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: undefined }),
+    );
     unmount();
   });
 
@@ -3019,8 +3056,8 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      // The component will render the text with the character at the cursor inverted.
-      expect(frame).toContain(`hel${chalk.inverse('l')}o world`);
+      // The component will render the text with the character at the cursor styled.
+      expect(frame).toContain(`hel${renderSoftwareCursor('l')}o world`);
       unmount();
     });
 
@@ -3036,11 +3073,11 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('h')}ello`);
+      expect(frame).toContain(`${renderSoftwareCursor('h')}ello`);
       unmount();
     });
 
-    it('should display cursor at the end of the line as an inverted space', async () => {
+    it('should display cursor at the end of the line as a styled space', async () => {
       mockBuffer.text = 'hello';
       mockBuffer.lines = ['hello'];
       mockBuffer.viewportVisualLines = ['hello'];
@@ -3052,7 +3089,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -3069,7 +3106,7 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       // The token '@path/to/file' is colored, and the cursor highlights one char inside it.
-      expect(frame).toContain(`@path/${chalk.inverse('t')}o/file`);
+      expect(frame).toContain(`@path/${renderSoftwareCursor('t')}o/file`);
       unmount();
     });
 
@@ -3086,7 +3123,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello ${chalk.inverse('👍')} world`);
+      expect(frame).toContain(`hello ${renderSoftwareCursor('👍')} world`);
       unmount();
     });
 
@@ -3103,7 +3140,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello 👍${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello 👍${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -3119,7 +3156,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(chalk.inverse(' '));
+      expect(frame).toContain(renderSoftwareCursor(' '));
       unmount();
     });
 
@@ -3135,7 +3172,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}world`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}world`);
       unmount();
     });
 
@@ -3157,7 +3194,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`sec${chalk.inverse('o')}nd line`);
+      expect(frame).toContain(`sec${renderSoftwareCursor('o')}nd line`);
       unmount();
     });
 
@@ -3178,7 +3215,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('s')}econd line`);
+      expect(frame).toContain(`${renderSoftwareCursor('s')}econd line`);
       unmount();
     });
 
@@ -3199,7 +3236,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`first line${chalk.inverse(' ')}`);
+      expect(frame).toContain(`first line${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -3222,9 +3259,9 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       const lines = frame!.split('\n');
-      // The line with the cursor should just be an inverted space inside the box border
+      // The line with the cursor should just be a styled space inside the box border
       expect(
-        lines.find((l) => l.includes(chalk.inverse(' '))),
+        lines.find((l) => l.includes(renderSoftwareCursor(' '))),
       ).not.toBeUndefined();
       unmount();
     });
@@ -3254,7 +3291,7 @@ describe('InputPrompt', () => {
       // Check that all lines, including the empty one, are rendered.
       // This implicitly tests that the Box wrapper provides height for the empty line.
       expect(frame).toContain('hello');
-      expect(frame).toContain(`world${chalk.inverse(' ')}`);
+      expect(frame).toContain(`world${renderSoftwareCursor(' ')}`);
 
       const outputLines = frame!.split('\n');
       // The number of lines should be 2 for the border plus 3 for the content.
@@ -3992,9 +4029,9 @@ describe('InputPrompt', () => {
         <InputPrompt {...props} />,
       );
       await wait();
-      expect(stdout.lastFrame()).not.toContain(`{chalk.inverse(' ')}`);
+      expect(stdout.lastFrame()).not.toContain(`{renderSoftwareCursor(' ')}`);
       // This snapshot is good to make sure there was an input prompt but does
-      // not show the inverted cursor because snapshots do not show colors.
+      // not show the software cursor because snapshots do not show colors.
       expect(stdout.lastFrame()).toMatchSnapshot();
       unmount();
     });
@@ -4938,7 +4975,9 @@ describe('InputPrompt', () => {
       mockBuffer.setText('');
       mockBuffer.visualCursor = [0, 0];
 
-      const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
       await wait();
 
       stdin.write('[B'); // Down arrow at the bottom edge
@@ -5168,3 +5207,42 @@ function clean(str: string | undefined): string {
   // Remove ANSI escape codes and trim whitespace
   return stripAnsi(str).trim();
 }
+
+describe('classifyPastedImagePaths', () => {
+  it('treats a lone @-prefixed image path (terminal Cmd+V injection) as all-image', () => {
+    const result = classifyPastedImagePaths(
+      '@/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',
+    );
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual([
+      '/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',
+    ]);
+  });
+
+  it('splits multiple space- and newline-separated image paths', () => {
+    const result = classifyPastedImagePaths(
+      '/a/one.png /b/two.jpg\n/c/three.webp',
+    );
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual([
+      '/a/one.png',
+      '/b/two.jpg',
+      '/c/three.webp',
+    ]);
+  });
+
+  it('unwraps surrounding quotes and shell-escaped spaces', () => {
+    const result = classifyPastedImagePaths('"/a/my image.png"');
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual(['/a/my image.png']);
+  });
+
+  it('does not treat plain text or non-image paths as image paste', () => {
+    expect(classifyPastedImagePaths('just some text').allImages).toBe(false);
+    expect(classifyPastedImagePaths('/src/index.ts').imagePaths).toEqual([]);
+    // A path followed by free text is left for normal text handling.
+    expect(
+      classifyPastedImagePaths('@/a/img.png describe this').allImages,
+    ).toBe(false);
+  });
+});

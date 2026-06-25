@@ -289,6 +289,28 @@ describe('createAcpSessionBridge', () => {
                 tasks: [],
               };
             }
+            if (method === 'qwen/status/session/lsp') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                workspaceCwd: WS_A,
+                enabled: true,
+                configuredServers: 1,
+                readyServers: 1,
+                failedServers: 0,
+                inProgressServers: 0,
+                notStartedServers: 0,
+                servers: [
+                  {
+                    name: 'typescript',
+                    status: 'READY',
+                    languages: ['typescript'],
+                    transport: 'stdio',
+                    command: 'typescript-language-server',
+                  },
+                ],
+              };
+            }
             return {
               v: 1,
               sessionId: params['sessionId'],
@@ -322,10 +344,24 @@ describe('createAcpSessionBridge', () => {
       sessionId: session.sessionId,
       tasks: [],
     });
+    await expect(
+      bridge.getSessionLspStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      enabled: true,
+      configuredServers: 1,
+      servers: [
+        {
+          name: 'typescript',
+          status: 'READY',
+        },
+      ],
+    });
     expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/lsp',
     ]);
 
     await bridge.shutdown();
@@ -511,6 +547,9 @@ describe('createAcpSessionBridge', () => {
     await expect(
       bridge.getSessionTasksStatus('missing'),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(bridge.getSessionLspStatus('missing')).rejects.toBeInstanceOf(
+      SessionNotFoundError,
+    );
   });
 
   it('reuses an echoed daemon-issued client id on attach', async () => {
@@ -554,7 +593,7 @@ describe('createAcpSessionBridge', () => {
         { clientId: first.clientId },
       ),
     ).resolves.toMatchObject({ stopReason: 'end_turn' });
-    await expect(
+    expect(() =>
       bridge.sendPrompt(
         second.sessionId,
         {
@@ -564,7 +603,8 @@ describe('createAcpSessionBridge', () => {
         undefined,
         { clientId: second.clientId },
       ),
-    ).rejects.toBeInstanceOf(InvalidClientIdError);
+    ).toThrow(InvalidClientIdError);
+    expect(bridge.activePromptCount).toBe(0);
 
     await bridge.shutdown();
   });
@@ -740,6 +780,7 @@ describe('createAcpSessionBridge', () => {
       attached: false,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { configOptions: [] },
       compactedReplay: [],
       liveJournal: [],
@@ -844,6 +885,7 @@ describe('createAcpSessionBridge', () => {
       attached: false,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { modes: null },
       lastEventId: 0,
     });
@@ -888,6 +930,7 @@ describe('createAcpSessionBridge', () => {
       attached: true,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { _meta: { tag: 'restored-foo' } },
       lastEventId: expect.any(Number),
     });
@@ -4165,6 +4208,22 @@ describe('createAcpSessionBridge', () => {
       expect(setModelCalls).toHaveLength(1);
       expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
       expect(setModelCalls[0]?.modelId).toBe('qwen3-coder');
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const switched = await it.next();
+      expect(switched.value?.type).toBe('model_switched');
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.originatorClientId).toBe(session.clientId);
+      expect(settingsChanged.value?.data).toEqual({
+        key: 'model.name',
+        value: 'qwen3-coder',
+      });
+      abort.abort();
       await bridge.shutdown();
     });
 
@@ -5177,6 +5236,39 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('getSessionSummary', () => {
+    it('returns the live summary for a known session id', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const summary = bridge.getSessionSummary(session.sessionId);
+      expect(summary).toMatchObject({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        hasActivePrompt: false,
+      });
+      // Agrees with the list builder for the same session — same source,
+      // single item.
+      const fromList = bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId);
+      expect(summary).toEqual(fromList);
+
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for an unknown session id', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      expect(() => bridge.getSessionSummary('missing')).toThrow(
+        SessionNotFoundError,
+      );
+      await bridge.shutdown();
+    });
+  });
+
   describe('setSessionModel', () => {
     /** Set up a channel where the agent records setSessionModel calls. */
     async function setup() {
@@ -5246,6 +5338,12 @@ describe('createAcpSessionBridge', () => {
         sessionId: session.sessionId,
         modelId: 'qwen3-coder',
       });
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.data).toEqual({
+        key: 'model.name',
+        value: 'qwen3-coder',
+      });
       abort.abort();
       await bridge.shutdown();
     });
@@ -5268,13 +5366,16 @@ describe('createAcpSessionBridge', () => {
       const next = await it.next();
       expect(next.value?.type).toBe('model_switched');
       expect(next.value?.originatorClientId).toBe(session.clientId);
+      const settingsChanged = await it.next();
+      expect(settingsChanged.value?.type).toBe('settings_changed');
+      expect(settingsChanged.value?.originatorClientId).toBe(session.clientId);
       abort.abort();
       await bridge.shutdown();
     });
 
     it('rejects unregistered client ids on session-scoped requests', async () => {
       const { bridge, session } = await setup();
-      await expect(
+      expect(() =>
         bridge.sendPrompt(
           session.sessionId,
           {
@@ -5284,7 +5385,8 @@ describe('createAcpSessionBridge', () => {
           undefined,
           { clientId: 'client-not-issued' },
         ),
-      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      ).toThrow(InvalidClientIdError);
+      expect(bridge.activePromptCount).toBe(0);
       await expect(
         bridge.cancelSession(session.sessionId, undefined, {
           clientId: 'client-not-issued',
@@ -8121,6 +8223,36 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('enriched listWorkspaceSessions', () => {
+    it('reports active prompt state when attaching to an existing session', async () => {
+      let finishPrompt: ((value: PromptResponse) => void) | undefined;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            promptImpl: () =>
+              new Promise<PromptResponse>((resolve) => {
+                finishPrompt = resolve;
+              }),
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'keep running' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(finishPrompt).toBeDefined();
+      });
+      const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(attached.attached).toBe(true);
+      expect(attached.hasActivePrompt).toBe(true);
+
+      finishPrompt!({ stopReason: 'end_turn' });
+      await prompt;
+      await bridge.shutdown();
+    });
+
     it('includes createdAt and metadata fields', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
@@ -9312,11 +9444,13 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
         undefined,
       );
 
-      const seen: Array<{ type: string; modelId?: string }> = [];
+      const seen: Array<{ type: string; modelId?: string; value?: string }> =
+        [];
       for await (const e of iter) {
         seen.push({
           type: e.type,
           modelId: (e.data as { modelId?: string })?.modelId,
+          value: (e.data as { value?: string })?.value,
         });
         if (seen.filter((s) => s.type === 'model_switched').length === 2) break;
       }
@@ -9324,6 +9458,17 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       // First the requested change, then the corrective one from reconcile.
       expect(switches[0]?.modelId).toBe('qwen-max');
       expect(switches[1]?.modelId).toBe('qwen-turbo');
+      const requestedSwitchIndex = seen.findIndex(
+        (s) => s.type === 'model_switched' && s.modelId === 'qwen-max',
+      );
+      const settingsChangedIndex = seen.findIndex(
+        (s) => s.type === 'settings_changed' && s.value === 'qwen-max',
+      );
+      const correctiveSwitchIndex = seen.findIndex(
+        (s) => s.type === 'model_switched' && s.modelId === 'qwen-turbo',
+      );
+      expect(settingsChangedIndex).toBeGreaterThan(requestedSwitchIndex);
+      expect(settingsChangedIndex).toBeLessThan(correctiveSwitchIndex);
       abort.abort();
       await bridge.shutdown();
     });

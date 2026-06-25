@@ -18,6 +18,8 @@ vi.mock('../telemetry/index.js', () => ({
   })),
   DEFAULT_TELEMETRY_TARGET: 'none',
   DEFAULT_OTLP_ENDPOINT: '',
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
   refreshSessionContext: vi.fn(),
@@ -30,12 +32,6 @@ vi.mock('../core/contentGenerator.js', () => ({
   createContentGeneratorConfig: vi.fn().mockReturnValue({}),
   createContentGenerator: vi.fn().mockReturnValue({}),
   AuthType: { API_KEY: 'apiKey' },
-  Protocol: {
-    OPENAI: 'openai',
-    QWEN_OAUTH: 'qwen-oauth',
-    GEMINI: 'gemini',
-    ANTHROPIC: 'anthropic',
-  },
 }));
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({

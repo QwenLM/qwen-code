@@ -32,6 +32,7 @@ import type {
 } from './agent-events.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { createConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
+import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import {
@@ -76,8 +77,10 @@ export function resolveMaxAgentsPerRun(
   if (raw === undefined || raw.trim() === '') {
     return DEFAULT_MAX_AGENTS_PER_RUN;
   }
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 1) {
+  // Parse through the shared helper so only plain decimal integers are
+  // accepted; Number() alone would let "0x10"/"1e3"/"1.0" slip through.
+  const parsed = parsePositiveIntegerEnv(raw, 0);
+  if (parsed < 1) {
     debugLogger.warn(
       `Invalid ${MAX_WORKFLOW_AGENTS_ENV}=${JSON.stringify(raw)}, ` +
         `using default (${DEFAULT_MAX_AGENTS_PER_RUN})`,
@@ -117,8 +120,10 @@ export function resolveConcurrencyLimit(
 ): number {
   const raw = env[MAX_WORKFLOW_CONCURRENCY_ENV];
   if (raw !== undefined && raw.trim() !== '') {
-    const parsed = Number(raw);
-    if (Number.isInteger(parsed) && parsed >= 1) {
+    // Parse through the shared helper so only plain decimal integers are
+    // accepted; Number() alone would let "0x10"/"1e2"/"1.0" slip through.
+    const parsed = parsePositiveIntegerEnv(raw, 0);
+    if (parsed >= 1) {
       if (parsed > HARD_MAX_CONCURRENCY_CEILING) {
         debugLogger.warn(
           `${MAX_WORKFLOW_CONCURRENCY_ENV}=${parsed} exceeds hard ceiling ` +
@@ -369,7 +374,14 @@ export function createProductionDispatch(
     );
     return runStallResilient(
       (attemptSignal, emitter) =>
-        runSingleDispatch(config, prompt, opts, attemptSignal, emitter, onTokens),
+        runSingleDispatch(
+          config,
+          prompt,
+          opts,
+          attemptSignal,
+          emitter,
+          onTokens,
+        ),
       {
         stallMs,
         signal,
@@ -711,7 +723,8 @@ async function runOverridePath(
     // no emitter was passed (legacy / direct callers), fall back to a fresh
     // emitter only in schema mode (the watchdog is then absent, matching the
     // pre-P-stall behaviour for direct override-path callers).
-    const eventEmitter = emitter ?? (schemaState ? new AgentEventEmitter() : undefined);
+    const eventEmitter =
+      emitter ?? (schemaState ? new AgentEventEmitter() : undefined);
     if (schemaState && eventEmitter) {
       attachSchemaListeners(eventEmitter, schemaState);
     }
@@ -1336,7 +1349,8 @@ export class WorkflowOrchestrator {
                   `respawn(s) for runId=${runId}.`,
               );
             }
-            const label = typeof opts.label === 'string' ? opts.label : undefined;
+            const label =
+              typeof opts.label === 'string' ? opts.label : undefined;
             try {
               emitter?.agentDispatched?.(label);
             } catch (e) {

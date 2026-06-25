@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Protocol } from '../../core/contentGenerator.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const zaiProvider: ProviderConfig = {
   id: 'zai',
   label: 'Z.AI API Key',
   description: 'Quick setup for Z.AI models',
-  protocol: Protocol.OPENAI,
+  protocol: AuthType.USE_OPENAI,
   baseUrl: [
     {
       id: 'standard-api-key',

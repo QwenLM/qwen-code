@@ -18,9 +18,14 @@ interface AskUserQuestionProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  variant?: 'inline' | 'floating';
 }
 
-export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
+export function AskUserQuestion({
+  request,
+  onConfirm,
+  variant = 'inline',
+}: AskUserQuestionProps) {
   const { t } = useI18n();
   const questions = useMemo(
     () =>
@@ -388,7 +393,11 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
   };
 
   return (
-    <div className={styles.question}>
+    <div
+      className={`${styles.question} ${
+        variant === 'floating' ? styles.floating : ''
+      }`}
+    >
       {/* Header line like CLI */}
       <div className={styles.titleLine}>
         <span className={styles.icon}>?</span>
@@ -590,11 +599,6 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
           </div>
         </>
       ) : null}
-
-      {/* Footer hint */}
-      <div className={styles.footer}>
-        {isMulti ? t('askUser.footerMulti') : t('askUser.footer')}
-      </div>
     </div>
   );
 }
