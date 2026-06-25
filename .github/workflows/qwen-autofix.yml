@@ -221,8 +221,11 @@ jobs:
                   "repos/${REPO}/issues/${number}/comments" \
                   --jq '.[] | {authorAssociation: .author_association, author: {login: (.user.login // "")}}' \
                   > "${comments_file}"; then
-                  jq -c --slurpfile comments "${comments_file}" \
-                    '. + {comments: $comments}' <<< "${issue}" >> "${ndjson}"
+                  if ! jq -c --slurpfile comments "${comments_file}" \
+                    '. + {comments: $comments}' <<< "${issue}" >> "${ndjson}"; then
+                    echo "::warning::Failed to assemble refreshed comments for issue #${number}; using issue-list comments."
+                    printf '%s\n' "${issue}" >> "${ndjson}"
+                  fi
                 else
                   echo "::warning::Failed to refresh comments for issue #${number}; using issue-list comments."
                   printf '%s\n' "${issue}" >> "${ndjson}"
@@ -285,8 +288,8 @@ jobs:
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             fi
 
-            TIER1_COUNT="$(jq length "${WORKDIR}/tier1.json")"
-            TIER2_COUNT="$(jq length "${WORKDIR}/tier2.with-tier.json")"
+            TIER1_COUNT="$(jq length "${WORKDIR}/tier1.json" 2>/dev/null || echo 0)"
+            TIER2_COUNT="$(jq length "${WORKDIR}/tier2.with-tier.json" 2>/dev/null || echo 0)"
             echo "  Tier-1: ${TIER1_COUNT}, Tier-2 (after filter): ${TIER2_COUNT}"
           fi
 
