@@ -58,6 +58,11 @@ interface VoiceContext {
 export interface VoiceHandlerDeps {
   /** Resolve the configured ASR endpoint + credentials at request time. */
   resolveConfig: () => Promise<VoiceConfig> | VoiceConfig;
+  openStream?: (
+    config: VoiceConfig,
+    callbacks: VoiceStreamCallbacks,
+  ) => Promise<VoiceStreamSession>;
+  transcribeBatch?: (config: VoiceConfig, pcm: Uint8Array) => Promise<string>;
   logger?: Logger;
 }
 
@@ -73,7 +78,7 @@ function toStreamConfig(config: VoiceConfig): VoiceStreamConfig {
   };
 }
 
-async function openStreamFor(
+async function defaultOpenStreamFor(
   config: VoiceConfig,
   callbacks: VoiceStreamCallbacks,
 ): Promise<VoiceStreamSession> {
@@ -87,7 +92,7 @@ async function openStreamFor(
   );
 }
 
-async function transcribeBatch(
+async function defaultTranscribeBatch(
   config: VoiceConfig,
   pcm: Uint8Array,
 ): Promise<string> {
@@ -126,6 +131,8 @@ export function createVoiceConnectionHandler(
   deps: VoiceHandlerDeps,
 ): (ws: WebSocket) => void {
   const log = deps.logger;
+  const openStream = deps.openStream ?? defaultOpenStreamFor;
+  const transcribeBatch = deps.transcribeBatch ?? defaultTranscribeBatch;
   // Shared across all connections from this server (factory closure).
   let activeSessions = 0;
 
@@ -241,7 +248,7 @@ export function createVoiceConnectionHandler(
           onInterim: (text) => sendJson({ type: 'interim', text }),
           onError: (error) => fail(errMessage(error)),
         };
-        const opening = openStreamFor(config, callbacks);
+        const opening = openStream(config, callbacks);
         sessionPromise = opening;
         let opened: VoiceStreamSession;
         try {
