@@ -37,10 +37,12 @@ export const AssistantMessage = memo(function AssistantMessage({
     if (!write) {
       return;
     }
-    void write.then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    void write
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {});
   }, [content]);
   return (
     <div className={styles.message}>
