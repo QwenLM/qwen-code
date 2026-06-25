@@ -692,6 +692,26 @@ describe('BaseLlmClient', () => {
       ).rejects.toThrow('The operation was aborted.');
       expect(vi.mocked(reportError)).not.toHaveBeenCalled();
     });
+
+    it('returns an empty result for a stream that yields no chunks', async () => {
+      // A stream that closes immediately (no content, no usage) must resolve to
+      // an empty string rather than throw — the boundary the streaming branch
+      // introduces. mockTextStream([]) yields nothing.
+      mockGenerateContentStream.mockImplementation(async () =>
+        mockTextStream([]),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(result.text).toBe('');
+      expect(result.usage).toBeUndefined();
+    });
   });
 
   describe('per-model resolution', () => {
