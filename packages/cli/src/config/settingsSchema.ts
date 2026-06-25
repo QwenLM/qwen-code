@@ -1674,8 +1674,13 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as number | undefined,
         description:
-          'Fraction of context window at which auto-compaction triggers (0-1). Default is 0.7 (70%).',
+          'Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.7 (70%).',
         showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'number',
+          minimum: 0.01,
+          maximum: 1,
+        },
       },
     },
   },

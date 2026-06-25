@@ -101,6 +101,7 @@ import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js'
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
+import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
@@ -1748,17 +1749,11 @@ export class Config {
                 );
                 break;
               case 'Stop': {
-                // Extract context usage data from input if present
-                const contextUsageData =
-                  input['context_usage'] !== undefined &&
-                  input['context_limit'] !== undefined &&
-                  input['input_tokens'] !== undefined
-                    ? {
-                        context_usage: input['context_usage'] as number,
-                        context_limit: input['context_limit'] as number,
-                        input_tokens: input['input_tokens'] as number,
-                      }
-                    : undefined;
+                // Extract context usage data from input with runtime validation
+                const contextUsageData = buildContextUsage(
+                  input['context_limit'] as number | undefined,
+                  (input['input_tokens'] as number | undefined) ?? 0,
+                );
 
                 const stopResult = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,

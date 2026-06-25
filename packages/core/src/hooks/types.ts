@@ -871,12 +871,9 @@ export interface ContextUsageData {
 /**
  * Stop hook input
  */
-export interface StopInput extends HookInput {
+export interface StopInput extends HookInput, Partial<ContextUsageData> {
   stop_hook_active: boolean;
   last_assistant_message: string;
-  context_usage?: number;
-  context_limit?: number;
-  input_tokens?: number;
 }
 
 /**
