@@ -494,76 +494,10 @@ export async function resolveAtCommandQuery({
     };
   }
 
-  // Read files (if any). A hard read error aborts the turn, as before — but
-  // any resource tool-cards already gathered are still surfaced.
-  const fileParts: Part[] = [];
-  let fileDisplays: IndividualToolCallDisplay[] = [];
-  if (pathSpecsToRead.length > 0) {
-    try {
-      const result = await readManyFiles(config, {
-        paths: pathSpecsToRead,
-        signal,
-        preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
-      });
-
-      const parts = Array.isArray(result.contentParts)
-        ? result.contentParts
-        : [result.contentParts];
-
-      // Create individual tool call displays for each file read
-      fileDisplays = result.files.map((file, index) => ({
-        callId: `client-read-${userMessageTimestamp}-${index}`,
-        name: file.isDirectory ? 'Read Directory' : 'Read File',
-        description: file.isDirectory
-          ? `Read directory ${path.basename(file.filePath)}`
-          : `Read file ${path.basename(file.filePath)}`,
-        status: file.error ? ToolCallStatus.Error : ToolCallStatus.Success,
-        resultDisplay: file.error
-          ? `Failed to read ${path.basename(file.filePath)}: ${file.error}`
-          : undefined,
-        confirmationDetails: undefined,
-      }));
-
-      if (parts.length > 0 && !result.error) {
-        // readManyFiles now returns properly formatted parts with headers and prefixes
-        for (const part of parts) {
-          fileParts.push(typeof part === 'string' ? { text: part } : part);
-        }
-      } else {
-        onDebugMessage('readManyFiles returned no content or empty content.');
-      }
-    } catch (error: unknown) {
-      const errorToolCallDisplay: IndividualToolCallDisplay = {
-        callId: `client-read-${userMessageTimestamp}`,
-        name: 'Read File(s)',
-        description: 'Error attempting to read files',
-        status: ToolCallStatus.Error,
-        resultDisplay: `Error reading files (${contentLabelsForDisplay.join(', ')}): ${getErrorMessage(error)}`,
-        confirmationDetails: undefined,
-      };
-      const errorMessage =
-        typeof errorToolCallDisplay.resultDisplay === 'string'
-          ? errorToolCallDisplay.resultDisplay
-          : undefined;
-      // Resource labels are merged in too: a resource may have been read
-      // successfully before the file read failed, and its card is already in
-      // `resourceDisplays` above — the audit trail must not drop it.
-      const labelsOnError = [...contentLabelsForDisplay, ...resourceLabels];
-      return {
-        processedQuery: null,
-        shouldProceed: false,
-        toolDisplays: [...resourceDisplays, errorToolCallDisplay],
-        filesRead: labelsOnError,
-        recording: {
-          filesRead: labelsOnError,
-          status: 'error',
-          message: errorMessage,
-        },
-      };
-    }
-  }
-
   // Build extension context parts and display cards for @-mentioned extensions.
+  // Processed BEFORE file reads so that extension labels/displays are available
+  // in the file-read error path (mirroring how resourceDisplays/resourceLabels
+  // are already built before the file read).
   // Aggregate cap across all extensions to prevent unbounded context injection.
   const EXTENSION_CONTEXT_BUDGET = 200_000; // 200KB total
   const PER_FILE_CAP = 50_000; // 50KB per context file
@@ -631,6 +565,78 @@ export async function resolveAtCommandQuery({
       resultDisplay: undefined,
       confirmationDetails: undefined,
     });
+  }
+
+  // Read files (if any). A hard read error aborts the turn, as before — but
+  // any extension/resource tool-cards already gathered are still surfaced.
+  const fileParts: Part[] = [];
+  let fileDisplays: IndividualToolCallDisplay[] = [];
+  if (pathSpecsToRead.length > 0) {
+    try {
+      const result = await readManyFiles(config, {
+        paths: pathSpecsToRead,
+        signal,
+        preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
+      });
+
+      const parts = Array.isArray(result.contentParts)
+        ? result.contentParts
+        : [result.contentParts];
+
+      fileDisplays = result.files.map((file, index) => ({
+        callId: `client-read-${userMessageTimestamp}-${index}`,
+        name: file.isDirectory ? 'Read Directory' : 'Read File',
+        description: file.isDirectory
+          ? `Read directory ${path.basename(file.filePath)}`
+          : `Read file ${path.basename(file.filePath)}`,
+        status: file.error ? ToolCallStatus.Error : ToolCallStatus.Success,
+        resultDisplay: file.error
+          ? `Failed to read ${path.basename(file.filePath)}: ${file.error}`
+          : undefined,
+        confirmationDetails: undefined,
+      }));
+
+      if (parts.length > 0 && !result.error) {
+        for (const part of parts) {
+          fileParts.push(typeof part === 'string' ? { text: part } : part);
+        }
+      } else {
+        onDebugMessage('readManyFiles returned no content or empty content.');
+      }
+    } catch (error: unknown) {
+      const errorToolCallDisplay: IndividualToolCallDisplay = {
+        callId: `client-read-${userMessageTimestamp}`,
+        name: 'Read File(s)',
+        description: 'Error attempting to read files',
+        status: ToolCallStatus.Error,
+        resultDisplay: `Error reading files (${contentLabelsForDisplay.join(', ')}): ${getErrorMessage(error)}`,
+        confirmationDetails: undefined,
+      };
+      const errorMessage =
+        typeof errorToolCallDisplay.resultDisplay === 'string'
+          ? errorToolCallDisplay.resultDisplay
+          : undefined;
+      const labelsOnError = [
+        ...extensionLabels,
+        ...contentLabelsForDisplay,
+        ...resourceLabels,
+      ];
+      return {
+        processedQuery: null,
+        shouldProceed: false,
+        toolDisplays: [
+          ...extensionDisplays,
+          ...resourceDisplays,
+          errorToolCallDisplay,
+        ],
+        filesRead: labelsOnError,
+        recording: {
+          filesRead: labelsOnError,
+          status: 'error',
+          message: errorMessage,
+        },
+      };
+    }
   }
 
   // File and resource content are grouped by type, NOT interleaved by their
