@@ -122,6 +122,22 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).toContain(':${HEAD_SHA}"');
   });
 
+  it('fetches the PR head into a collision-free local ref', () => {
+    expect(resolveJob).toContain(
+      'head_fetch_ref="refs/remotes/origin/qwen-resolve/pr-${PR_NUMBER}/head"',
+    );
+    expect(resolveJob).toContain(
+      '"+refs/pull/${PR_NUMBER}/head:${head_fetch_ref}"',
+    );
+    expect(resolveJob).not.toContain(
+      '+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/${head_ref}',
+    );
+    expect(resolveJob).toContain('HEAD_FETCH_REF:');
+    expect(resolveJob).toContain(
+      'git diff --name-only -z --diff-filter=ACMRT "$HEAD_FETCH_REF" HEAD',
+    );
+  });
+
   it('keeps the verification-gate failure checks on resolve-pr', () => {
     // These guard against prompt-injection symptoms; a future edit that drops
     // any of them from the credentialed conflict-resolution path must fail here.
