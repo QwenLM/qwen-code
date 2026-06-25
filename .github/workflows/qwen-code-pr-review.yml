@@ -621,13 +621,14 @@ jobs:
           startsWith(github.event.comment.body, '@qwen-code /resolve ') ||
           startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', '\n'))))
       )
-    # Prefer the self-hosted ECS pool, but honor the MAINTAINER_ECS_RUNNER_DISABLED
-    # kill-switch (like the review path): if ECS is toggled off, fall back to an
-    # ephemeral hosted runner so /resolve still works. NOTE: this job's verification
-    # gate runs the untrusted PR's build/typecheck/lint/test; on the reused ECS
-    # workspace the cleanup step below keeps stale per-run artifacts from leaking
-    # between PRs (hosted runners are ephemeral, so they need no such cleanup).
-    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # Pinned to an ephemeral hosted runner. The conflict-resolution agent step
+    # runs with `sandbox: true`, which on Linux needs docker or podman to launch
+    # the sandbox; the self-hosted ECS pool ships no container runtime, so routing
+    # this job there fails the agent before it starts (exit 44, "failed to
+    # determine command for sandbox"). Hosted runners ship docker and are
+    # ephemeral, which also suits running the untrusted PR's build/typecheck/
+    # lint/test in the verification gate below.
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 90
     concurrency:
       group: 'qwen-resolve-${{ github.event.issue.number || github.event.inputs.pr_number }}'
@@ -644,10 +645,10 @@ jobs:
       WORKDIR: '/tmp/qwen-resolve'
       DRY_RUN: '${{ github.event.inputs.dry_run || false }}'
     steps:
-      # Self-hosted runners reuse the workspace and /tmp across jobs. A prior
-      # /resolve can leave stale ${WORKDIR} reports (failure.md, no-action.md, ...)
-      # that the verification gate would misread as this run's outcome, plus stale
-      # git worktrees that trip the checkout. Clean defensively; never fail the job.
+      # Defensive cleanup. Hosted runners start clean so this is normally a no-op,
+      # but a stale ${WORKDIR} report (failure.md, no-action.md, ...) or leftover
+      # git worktree would make the verification gate or checkout misread this
+      # run's outcome. Clean before anything else; never fail the job.
       - name: 'Clean stale resolve workspace'
         run: |-
           set -uo pipefail
@@ -1133,9 +1134,11 @@ jobs:
               push_failed=true
               echo "::error::Push rejected; the branch was updated concurrently. Re-run /resolve."
             fi
-            # Scrub the PAT from .git/config: this job runs on a self-hosted ECS
-            # runner where .git/config persists between jobs, so a later job could
-            # otherwise read the token. Runs regardless of push outcome.
+            # Scrub the PAT from .git/config defensively. Hosted runners are
+            # ephemeral so .git/config does not persist, but scrubbing the token
+            # as soon as the push is done keeps it out of the workspace that the
+            # untrusted PR's build/lint/test step runs in. Runs regardless of
+            # push outcome.
             git remote set-url origin "https://github.com/${REPO}.git"
           fi
 
