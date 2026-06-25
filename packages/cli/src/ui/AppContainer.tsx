@@ -3083,6 +3083,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.customWittyPhrases,
     responseCandidateTokens,
     streamingResponseLengthRef.current,
+    thought,
   );
 
   useAttentionNotifications({
