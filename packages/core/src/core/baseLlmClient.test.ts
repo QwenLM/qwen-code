@@ -591,6 +591,18 @@ describe('BaseLlmClient', () => {
       });
 
       expect(mockGenerateContentStream).toHaveBeenCalledTimes(1);
+      // The streaming branch builds the same request object as the non-stream
+      // path: resolved model, contents, and a config carrying the abortSignal.
+      expect(mockGenerateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'test-model',
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          config: expect.objectContaining({
+            abortSignal: abortController.signal,
+          }),
+        }),
+        'p',
+      );
       expect(mockGenerateContent).not.toHaveBeenCalled();
       // Deltas are concatenated, then trimmed once at the end.
       expect(result.text).toBe('Hello, world');
@@ -888,6 +900,17 @@ describe('BaseLlmClient', () => {
       });
 
       expect(fastGenerateContentStream).toHaveBeenCalledTimes(1);
+      // Streamed against the resolved per-model identity, not the main model.
+      expect(fastGenerateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: fastModel,
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          config: expect.objectContaining({
+            abortSignal: abortController.signal,
+          }),
+        }),
+        'p',
+      );
       // The constructor-injected default generator must not be touched.
       expect(mockGenerateContentStream).not.toHaveBeenCalled();
       expect(result.text).toBe('fast stream');

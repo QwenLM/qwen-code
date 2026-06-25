@@ -429,7 +429,9 @@ export class BaseLlmClient {
 
       await reportError(
         error,
-        'Error generating text content via API.',
+        // Mark streaming failures so an oncall can tell a mid-stream error
+        // apart from the original non-streaming gateway timeout (#5861).
+        `Error generating text content via API${stream ? ' [streaming]' : ''}.`,
         contents,
         'generateText-api',
       );
