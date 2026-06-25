@@ -86,8 +86,23 @@ The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
-`GET /session/:id/context`, `GET /session/:id/supported-commands`, and
+`GET /session/:id/status`, `GET /session/:id/context`,
+`GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`, and `GET /session/:id/lsp`.
+
+`GET /session/:id/status` returns the live status summary for a single
+session — the same item shape that `GET /workspace/:id/sessions` lists
+(`sessionId`, `workspaceCwd`, `createdAt`, `displayName?`, `clientCount`,
+`hasActivePrompt`). It answers `200` with the summary when the daemon holds a
+live session with that id, and `404 session_not_found` otherwise. Use it to
+poll whether one known session is still running (`hasActivePrompt`) or how many
+clients are attached (`clientCount`) without fetching and scanning the whole
+paginated session list:
+
+```bash
+curl http://127.0.0.1:4170/session/$SESSION_ID/status
+# → {"sessionId":"…","workspaceCwd":"…","createdAt":"…","clientCount":1,"hasActivePrompt":false}
+```
 
 `GET /session/:id/lsp` returns structured per-session LSP status. Start the
 daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
