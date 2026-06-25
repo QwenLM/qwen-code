@@ -3,6 +3,7 @@ import {
   memo,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ErrorInfo,
   type ReactNode,
@@ -13,7 +14,7 @@ import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { codeToHtml, type BundledLanguage } from 'shiki';
+import { highlightToHtml, highlightToHtmlSync } from './codeHighlighter';
 import { useI18n } from '../../i18n';
 import {
   useWebShellCustomization,
@@ -21,11 +22,17 @@ import {
 } from '../../customization';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import styles from './Markdown.module.css';
+import { StreamingCodeBlock } from './StreamingCodeBlock';
 
 interface MarkdownProps {
   content: string;
   source?: MarkdownContentSource;
-  deferMermaid?: boolean;
+  /**
+   * True while the message is still streaming in. Used to defer expensive,
+   * per-chunk rendering (Mermaid diagrams and Shiki syntax highlighting) until
+   * the content settles, avoiding flicker and wasted re-tokenization.
+   */
+  isStreaming?: boolean;
   enhanceTables?: boolean;
 }
 
@@ -77,6 +84,45 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
+// Common fence aliases → Shiki's canonical language id. Without this, blocks
+// tagged ```ts / ```js / ```py fall through to the unhighlighted "text" path
+// even though Shiki supports them under their full names.
+const LANGUAGE_ALIASES: Record<string, string> = {
+  ts: 'typescript',
+  js: 'javascript',
+  py: 'python',
+  rb: 'ruby',
+  rs: 'rust',
+  kt: 'kotlin',
+  cs: 'csharp',
+  sh: 'bash',
+  zsh: 'bash',
+  shell: 'bash',
+  yml: 'yaml',
+  md: 'markdown',
+  golang: 'go',
+  ps1: 'powershell',
+  docker: 'dockerfile',
+};
+
+export interface ResolvedFenceLanguage {
+  /** What the user typed (lowercased), shown in the code-block header. */
+  label: string;
+  /** Canonical language id (aliases resolved); also used to detect mermaid. */
+  lang: string;
+  /** A supported Shiki language id, or 'text' when unsupported (no highlight). */
+  resolvedLang: string;
+}
+
+export function resolveFenceLanguage(
+  rawLang: string | undefined,
+): ResolvedFenceLanguage {
+  const normalized = (rawLang || '').toLowerCase();
+  const lang = LANGUAGE_ALIASES[normalized] ?? normalized;
+  const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
+  return { label: normalized || 'text', lang, resolvedLang };
+}
+
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
 const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
 
@@ -102,23 +148,28 @@ export function isSafeImageSrc(url: string | undefined): boolean {
 const SHIKI_CACHE_MAX = 128;
 const shikiCache = new Map<string, string>();
 
+function shikiCacheKey(code: string, lang: string, theme: string): string {
+  return `${lang}\0${theme}\0${code}`;
+}
+
+function setShikiCache(key: string, html: string): void {
+  if (shikiCache.size >= SHIKI_CACHE_MAX) {
+    const first = shikiCache.keys().next().value;
+    if (first !== undefined) shikiCache.delete(first);
+  }
+  shikiCache.set(key, html);
+}
+
 function cachedCodeToHtml(
   code: string,
   lang: string,
   theme: string,
 ): Promise<string> {
-  const key = `${lang}\0${theme}\0${code}`;
+  const key = shikiCacheKey(code, lang, theme);
   const cached = shikiCache.get(key);
   if (cached !== undefined) return Promise.resolve(cached);
-  return codeToHtml(code, {
-    lang: lang as BundledLanguage,
-    theme,
-  }).then((html) => {
-    if (shikiCache.size >= SHIKI_CACHE_MAX) {
-      const first = shikiCache.keys().next().value;
-      if (first !== undefined) shikiCache.delete(first);
-    }
-    shikiCache.set(key, html);
+  return highlightToHtml(code, lang, theme).then((html) => {
+    setShikiCache(key, html);
     return html;
   });
 }
@@ -244,21 +295,23 @@ function MermaidBlock({ code }: { code: string }) {
 function CodeBlock({
   className,
   children,
-  deferMermaid,
+  isStreaming,
 }: {
   className?: string;
   children: string;
-  deferMermaid?: boolean;
+  isStreaming?: boolean;
 }) {
   const { t } = useI18n();
   const appTheme = useTheme();
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // True once this block has streamed at least once, so the settle hand-off can
+  // hold the colored streaming render until the static highlight is ready.
+  const hasStreamedRef = useRef(false);
 
   const match = className?.match(/language-(\w+)/);
-  const lang = match?.[1] || '';
+  const { label, lang, resolvedLang } = resolveFenceLanguage(match?.[1]);
   const code = String(children).replace(/\n$/, '');
-  const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
   const shikiTheme =
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
@@ -268,14 +321,32 @@ function CodeBlock({
       return;
     }
 
-    const cacheKey = `${resolvedLang}\0${shikiTheme}\0${code}`;
+    // Streaming is painted live by <StreamingCodeBlock>; the static path only
+    // renders the settled content, so do nothing while the turn streams.
+    if (isStreaming) {
+      return;
+    }
+
+    const cacheKey = shikiCacheKey(code, resolvedLang, shikiTheme);
     if (shikiCache.has(cacheKey)) {
       setHtml(shikiCache.get(cacheKey)!);
       return;
     }
 
+    // Fast path: if the highlighter is already warm for this language (e.g. the
+    // block just finished streaming), highlight synchronously so the hand-off
+    // from the streaming renderer is instant — no grey flash, no debounce delay.
+    const warmHtml = highlightToHtmlSync(code, resolvedLang, shikiTheme);
+    if (warmHtml !== null) {
+      setShikiCache(cacheKey, warmHtml);
+      setHtml(warmHtml);
+      return;
+    }
+
+    // Cold path: keep any previously-rendered HTML in place (don't clear to
+    // plain) and swap only once the new highlight is ready, avoiding a grey
+    // flash on recompute (e.g. theme change). Debounced to coalesce changes.
     let cancelled = false;
-    setHtml(null);
     const timer = setTimeout(() => {
       cachedCodeToHtml(code, resolvedLang, shikiTheme)
         .then((result) => {
@@ -290,7 +361,15 @@ function CodeBlock({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code, lang, resolvedLang, shikiTheme]);
+  }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
+
+  // Remember once this block has streamed, so the settle hand-off can hold the
+  // colored streaming render until the static highlight is ready.
+  useEffect(() => {
+    if (isStreaming && lang !== 'mermaid' && resolvedLang !== 'text') {
+      hasStreamedRef.current = true;
+    }
+  }, [isStreaming, lang, resolvedLang]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code).then(
@@ -302,19 +381,38 @@ function CodeBlock({
     );
   };
 
-  if (lang === 'mermaid' && !deferMermaid) {
+  if (lang === 'mermaid' && !isStreaming) {
     return <MermaidBlock code={code} />;
   }
+
+  // While streaming a highlightable fence, paint it live via @shikijs/stream
+  // instead of waiting for the turn to settle. Plain/unknown languages and the
+  // settled (post-stream) render fall through to the static Shiki path below.
+  const highlightable = lang !== 'mermaid' && resolvedLang !== 'text';
+  const streamingHighlight = isStreaming && highlightable;
+
+  // After the turn settles, keep the (already-colored) streaming renderer
+  // mounted until the static highlight is ready, so the hand-off never flashes
+  // through a plain grey frame.
+  const showStreaming =
+    streamingHighlight ||
+    (hasStreamedRef.current && html === null && highlightable);
 
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>{lang || 'text'}</span>
+        <span className={styles.codeBlockLang}>{label}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {html ? (
+      {showStreaming ? (
+        <StreamingCodeBlock
+          code={code}
+          lang={resolvedLang}
+          theme={shikiTheme}
+        />
+      ) : html ? (
         <div
           className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}
@@ -374,7 +472,7 @@ class EnhancedMarkdownTableBoundary extends Component<
 }
 
 function createComponents(
-  deferMermaid?: boolean,
+  isStreaming?: boolean,
   enhanceTables?: boolean,
   tableResetKey = '',
 ): Components {
@@ -392,7 +490,7 @@ function createComponents(
 
       if (isBlock) {
         return (
-          <CodeBlock className={className} deferMermaid={deferMermaid}>
+          <CodeBlock className={className} isStreaming={isStreaming}>
             {String(children)}
           </CodeBlock>
         );
@@ -439,12 +537,12 @@ function createComponents(
 }
 
 const COMPONENTS_DEFAULT = createComponents();
-const COMPONENTS_DEFER_MERMAID = createComponents(true);
+const COMPONENTS_STREAMING = createComponents(true);
 
 export const Markdown = memo(function Markdown({
   content,
   source,
-  deferMermaid,
+  isStreaming,
   enhanceTables,
 }: MarkdownProps) {
   const { markdown } = useWebShellCustomization();
@@ -455,10 +553,10 @@ export const Markdown = memo(function Markdown({
       : content;
   const components = useMemo(() => {
     if (enhanceTables) {
-      return createComponents(deferMermaid, true, renderedContent);
+      return createComponents(isStreaming, true, renderedContent);
     }
-    return deferMermaid ? COMPONENTS_DEFER_MERMAID : COMPONENTS_DEFAULT;
-  }, [deferMermaid, enhanceTables, renderedContent]);
+    return isStreaming ? COMPONENTS_STREAMING : COMPONENTS_DEFAULT;
+  }, [isStreaming, enhanceTables, renderedContent]);
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;

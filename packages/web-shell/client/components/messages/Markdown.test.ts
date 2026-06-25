@@ -7,7 +7,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
-import { isSafeHref, isSafeImageSrc, Markdown } from './Markdown';
+import {
+  isSafeHref,
+  isSafeImageSrc,
+  Markdown,
+  resolveFenceLanguage,
+} from './Markdown';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -245,8 +250,44 @@ describe('Markdown enhanced tables', () => {
   });
 });
 
+describe('resolveFenceLanguage', () => {
+  it('resolves common aliases to Shiki language ids', () => {
+    expect(resolveFenceLanguage('ts').resolvedLang).toBe('typescript');
+    expect(resolveFenceLanguage('js').resolvedLang).toBe('javascript');
+    expect(resolveFenceLanguage('py').resolvedLang).toBe('python');
+    expect(resolveFenceLanguage('sh').resolvedLang).toBe('bash');
+    expect(resolveFenceLanguage('yml').resolvedLang).toBe('yaml');
+    expect(resolveFenceLanguage('golang').resolvedLang).toBe('go');
+  });
+
+  it('passes through already-canonical languages', () => {
+    expect(resolveFenceLanguage('typescript').resolvedLang).toBe('typescript');
+    expect(resolveFenceLanguage('sql').resolvedLang).toBe('sql');
+  });
+
+  it('is case-insensitive', () => {
+    expect(resolveFenceLanguage('SQL').resolvedLang).toBe('sql');
+    expect(resolveFenceLanguage('TS').resolvedLang).toBe('typescript');
+  });
+
+  it('falls back to "text" for unknown languages', () => {
+    expect(resolveFenceLanguage('made-up').resolvedLang).toBe('text');
+    expect(resolveFenceLanguage('').resolvedLang).toBe('text');
+    expect(resolveFenceLanguage(undefined).resolvedLang).toBe('text');
+  });
+
+  it('keeps the user-typed label for the header', () => {
+    expect(resolveFenceLanguage('ts').label).toBe('ts');
+    expect(resolveFenceLanguage(undefined).label).toBe('text');
+  });
+
+  it('detects mermaid as its own language', () => {
+    expect(resolveFenceLanguage('mermaid').lang).toBe('mermaid');
+  });
+});
+
 describe('Markdown mermaid rendering', () => {
-  it('keeps mermaid code blocks unrendered while deferred', async () => {
+  it('keeps mermaid code blocks unrendered while streaming', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -255,7 +296,7 @@ describe('Markdown mermaid rendering', () => {
       root.render(
         createElement(Markdown, {
           content: '```mermaid\ngraph TD\nA --> B\n```',
-          deferMermaid: true,
+          isStreaming: true,
         }),
       );
     });
@@ -263,6 +304,32 @@ describe('Markdown mermaid rendering', () => {
     expect(container.textContent).toContain('mermaid');
     expect(container.textContent).toContain('graph TD');
     expect(container.textContent).not.toContain('mermaid.rendering');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+});
+
+describe('Markdown code highlighting while streaming', () => {
+  it('keeps streamed code content visible while streaming', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst x: number = 1;\n```',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    // The streamed code stays visible throughout (highlighting is applied live
+    // on top via @shikijs/stream without ever hiding the content).
+    expect(container.textContent).toContain('const x: number = 1;');
 
     await act(async () => {
       root.unmount();
