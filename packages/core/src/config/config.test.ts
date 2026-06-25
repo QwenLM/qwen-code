@@ -1937,7 +1937,7 @@ describe('Server Config (config.ts)', () => {
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
     const config = new Config({
       ...baseParams,
-      enableManagedAutoMemory: false,
+      bareMode: true,
       generationConfig: { contextWindowSize: 1000 },
     });
 
@@ -2345,6 +2345,27 @@ describe('Server Config (config.ts)', () => {
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
+  });
+
+  describe('isManagedMemoryAvailable', () => {
+    it('returns true when bareMode is false', () => {
+      const config = new Config({ ...baseParams, bareMode: false });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+
+    it('returns false when bareMode is true', () => {
+      const config = new Config({ ...baseParams, bareMode: true });
+      expect(config.isManagedMemoryAvailable()).toBe(false);
+    });
+
+    it('returns true even when enableManagedAutoMemory is false', () => {
+      const config = new Config({
+        ...baseParams,
+        enableManagedAutoMemory: false,
+        bareMode: false,
+      });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
   });
 
   it('refreshHierarchicalMemory should exclude implicit cwd from bare include-directories', async () => {
