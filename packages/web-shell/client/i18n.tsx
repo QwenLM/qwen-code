@@ -1119,7 +1119,7 @@ const EN: Messages = {
   'thinking.collapse': 'Collapse thinking',
   'thinking.running': (v) => `Thinking${v?.duration ? ` ${v.duration}` : ''}`,
   'thinking.done': (v) =>
-    `Finished thinking${v?.duration ? ` ${v.duration}` : ''}`,
+    v?.duration ? `Thought for ${v.duration}` : 'Done thinking',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -2227,7 +2227,7 @@ const ZH: Messages = {
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
-  'thinking.done': (v) => `已完成思考${v?.duration ? ` ${v.duration}` : ''}`,
+  'thinking.done': (v) => (v?.duration ? `已思考 ${v.duration}` : '思考完成'),
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
   'settings.title': '设置',
