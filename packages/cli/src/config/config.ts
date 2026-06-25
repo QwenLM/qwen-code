@@ -1809,6 +1809,7 @@ export async function loadCliConfig(
   }
 
   const modelProvidersConfig = settings.modelProviders;
+  const providerProtocolConfig = settings.providerProtocol;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -1956,6 +1957,7 @@ export async function loadCliConfig(
     outputFormat,
     includePartialMessages,
     modelProvidersConfig,
+    providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
