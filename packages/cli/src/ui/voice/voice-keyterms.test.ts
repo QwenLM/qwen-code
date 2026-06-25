@@ -115,6 +115,22 @@ describe('buildVoiceKeyterms', () => {
       expect(terms).not.toContain('Auto');
     });
 
+    it('honors a user-scoped absolute keytermsFile outside the workspace', () => {
+      const outsideDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'voice-keyterms-outside-'),
+      );
+      const explicit = path.join(outsideDir, 'glossary.txt');
+      fs.writeFileSync(explicit, 'OutsideUserTerm\n');
+      try {
+        const terms = buildVoiceKeyterms(
+          makeSettings(workspaceDir, { keytermsFile: explicit }),
+        );
+        expect(terms).toContain('OutsideUserTerm');
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
     it('honors an explicit relative keytermsFile over auto-discovery', () => {
       fs.writeFileSync(path.join(qwenDir, 'voice-keyterms.txt'), 'Auto\n');
       fs.writeFileSync(path.join(workspaceDir, 'rel.txt'), 'RelativeWins\n');
@@ -215,9 +231,9 @@ describe('buildVoiceKeyterms', () => {
       expect(terms.join(' ').length).toBeLessThanOrEqual(2000);
     });
 
-    it('caps by total length for a file of few long terms', () => {
+    it('caps by total byte length for a file of few long terms', () => {
       // 40 × 80-char terms blow the 2000-char budget long before the 200-term
-      // count cap, so the char budget must bind.
+      // count cap, so the byte budget must bind.
       const long = Array.from(
         { length: 40 },
         (_, i) => `t${i}_${'x'.repeat(76)}`,
@@ -230,7 +246,20 @@ describe('buildVoiceKeyterms', () => {
       expect(userTerms.length).toBeGreaterThan(0); // some user terms past globals
     });
 
-    it('skips over a term that exceeds the remaining char budget', () => {
+    it('caps non-ASCII keyterms by UTF-8 byte length', () => {
+      const cjkTerms = Array.from(
+        { length: 80 },
+        (_, i) => `术语${i}_${'测'.repeat(10)}`,
+      ).join('\n');
+      fs.writeFileSync(path.join(qwenDir, 'voice-keyterms.txt'), cjkTerms);
+      const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+      const joined = terms.join(' ');
+      expect(Buffer.byteLength(joined, 'utf8')).toBeLessThanOrEqual(2000);
+      expect(joined.length).toBeLessThanOrEqual(2000);
+      expect(terms.some((term) => term.startsWith('术语'))).toBe(true);
+    });
+
+    it('skips over a term that exceeds the remaining byte budget', () => {
       fs.writeFileSync(
         path.join(qwenDir, 'voice-keyterms.txt'),
         `${'x'.repeat(2200)}\nShortTerm\n`,

@@ -56,11 +56,11 @@ const GLOBAL_KEYTERMS = [
 const DEFAULT_KEYTERMS_FILENAME = 'voice-keyterms.txt';
 
 // The merged list is sent on every request (corpus_text / system message), which
-// has a finite length budget; cap term count and total chars so a large user file
+// has a finite length budget; cap term count and total bytes so a large user file
 // degrades gracefully. The static globals always fit, leaving the rest for user
 // terms.
 const MAX_KEYTERMS = 200;
-const MAX_KEYTERMS_CHARS = 2000;
+const MAX_KEYTERMS_BYTES = 2000;
 
 // Upper bound on the keyterms file itself: anything larger than a plausible term
 // list is ignored rather than read into memory and shipped to the provider.
@@ -94,20 +94,21 @@ function dedupeKeyterms(terms: string[]): string[] {
   return out;
 }
 
-/** Bound the list by term count and total joined length (see caps above). */
+/** Bound the list by term count and total joined UTF-8 bytes (see caps above). */
 function capKeyterms(terms: string[]): string[] {
   const out: string[] = [];
-  let chars = 0;
+  let bytes = 0;
   for (const term of terms) {
     if (out.length >= MAX_KEYTERMS) {
       break;
     }
-    const next = chars + term.length + (out.length > 0 ? 1 : 0);
-    if (next > MAX_KEYTERMS_CHARS) {
+    const next =
+      bytes + Buffer.byteLength(term, 'utf8') + (out.length > 0 ? 1 : 0);
+    if (next > MAX_KEYTERMS_BYTES) {
       continue;
     }
     out.push(term);
-    chars = next;
+    bytes = next;
   }
   return out;
 }

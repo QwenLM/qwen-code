@@ -15,6 +15,7 @@ const raceState = vi.hoisted(() => ({
   replacementText: '',
   enabled: false,
   swapped: false,
+  mode: 'recreate' as 'recreate' | 'overwrite',
 }));
 
 vi.mock('node:fs', async () => {
@@ -33,7 +34,9 @@ vi.mock('node:fs', async () => {
           file === raceState.target
         ) {
           raceState.swapped = true;
-          actual.rmSync(raceState.target);
+          if (raceState.mode === 'recreate') {
+            actual.rmSync(raceState.target);
+          }
           actual.writeFileSync(raceState.target, raceState.replacementText);
         }
         return mode === undefined
@@ -63,6 +66,7 @@ describe('buildVoiceKeyterms race checks', () => {
     raceState.replacementText = '';
     raceState.enabled = false;
     raceState.swapped = false;
+    raceState.mode = 'recreate';
     fs.rmSync(workspaceDir, { recursive: true, force: true });
     workspaceDir = '';
   });
@@ -83,6 +87,27 @@ describe('buildVoiceKeyterms race checks', () => {
 
     expect(raceState.swapped).toBe(true);
     expect(terms).not.toContain('SwapSecret');
+    expect(terms).toContain('TypeScript'); // globals only
+  });
+
+  it('does not read a keyterms file rewritten in place before open', async () => {
+    workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
+    const qwenDir = path.join(workspaceDir, '.qwen');
+    fs.mkdirSync(qwenDir, { recursive: true });
+    const target = path.join(qwenDir, 'voice-keyterms.txt');
+    fs.writeFileSync(target, 'SafeTerm\n');
+    fs.utimesSync(target, new Date(0), new Date(0));
+
+    raceState.target = fs.realpathSync(target);
+    raceState.replacementText = 'EvilTerm\n';
+    raceState.enabled = true;
+    raceState.mode = 'overwrite';
+
+    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
+    const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+
+    expect(raceState.swapped).toBe(true);
+    expect(terms).not.toContain('EvilTerm');
     expect(terms).toContain('TypeScript'); // globals only
   });
 });
