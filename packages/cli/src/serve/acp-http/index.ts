@@ -840,7 +840,7 @@ export function mountAcpHttp(
                   )
                 : opts.clientMcpProvider;
               clientMcp = new ClientMcpWsConnection(
-                (frame) => ws.send(JSON.stringify(frame)),
+                (frame) => safeWsSend(ws, JSON.stringify(frame)),
                 provider,
               );
             }
@@ -852,7 +852,8 @@ export function mountAcpHttp(
               // ack frame (the awaiting agent request resolves directly).
               // `ignored` is silent. Everything else gets a structured ack.
               if (result.kind === 'registered') {
-                ws.send(
+                safeWsSend(
+                  ws,
                   JSON.stringify({
                     type: 'mcp_registered',
                     server: result.server,
@@ -860,14 +861,16 @@ export function mountAcpHttp(
                   }),
                 );
               } else if (result.kind === 'unregistered') {
-                ws.send(
+                safeWsSend(
+                  ws,
                   JSON.stringify({
                     type: 'mcp_unregistered',
                     server: result.server,
                   }),
                 );
               } else if (result.kind === 'error') {
-                ws.send(
+                safeWsSend(
+                  ws,
                   JSON.stringify({
                     type: 'mcp_error',
                     code: result.code,
@@ -1018,7 +1021,7 @@ export function mountAcpHttp(
               cdpEndpoint = {
                 connectionId: conn.connectionId,
                 send: (frame: CdpOutboundFrame) =>
-                  ws.send(JSON.stringify(frame)),
+                  safeWsSend(ws, JSON.stringify(frame)),
                 routeInbound: () => false,
               };
               cdpBridgeUnregister =
@@ -1153,6 +1156,18 @@ export function mountAcpHttp(
 function headerOf(req: Request, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * Send `payload` on `ws` only if the socket is still open. Post-async sends —
+ * client-MCP acks/requests that await a provider round-trip, and CDP frames
+ * pushed in from the `/cdp` glue — can race the extension disconnecting: a bare
+ * `ws.send()` on a CLOSED/CLOSING socket throws, and (unguarded, outside the
+ * message handler's try/catch) that rejection can take the daemon down. Match
+ * `WsStream`'s instance-level `OPEN` check so a late send is a silent no-op.
+ */
+function safeWsSend(ws: WebSocket, payload: string): void {
+  if (ws.readyState === ws.OPEN) ws.send(payload);
 }
 
 /**

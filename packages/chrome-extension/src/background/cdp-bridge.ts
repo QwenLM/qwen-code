@@ -230,7 +230,18 @@ async function handleAttach(
   }
 }
 
-/** Handle a `cdp_command` frame: run it on the attached tab and reply. */
+/**
+ * Handle a `cdp_command` frame: run it on the attached tab and reply.
+ *
+ * TRUST MODEL — deliberately NO method allowlist. This bridge is a dumb pipe:
+ * chrome-devtools-mcp (puppeteer) drives the tab over the FULL CDP surface
+ * (Runtime/Page/Network/DOM/Target…), so any allowlist would break its tools.
+ * Arbitrary-CDP exposure (incl. `Runtime.evaluate`) is bounded by the CHANNEL,
+ * not the payload: the daemon `/cdp` endpoint is loopback-only, the daemon only
+ * binds the reverse link to the `qwen-cdp-bridge` extension connection, and
+ * Chrome surfaces its own "started debugging this browser" banner for the
+ * user-attached tab. Keep this a transparent forwarder.
+ */
 async function handleCommand(
   frame: CdpCommandFrame,
   send: CdpSend,

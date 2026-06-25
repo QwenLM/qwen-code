@@ -47,7 +47,10 @@
 
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { ClientMcpMessageSender } from '@qwen-code/acp-bridge/bridgeOptions';
-import { CLIENT_MCP_OVER_WS_CONFIG_FLAG } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  type ClientMcpOverWsRuntimeConfig,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ClientMcpServerProvider } from './client-mcp-ws.js';
 
 /** The `sendSdkMcpMessage`-shaped callback a WS connection registers. */
@@ -67,18 +70,37 @@ export type WsClientMcpSender = (
  * the bridge's `addRuntimeMcpServer` reconciles a cross-connection collision by
  * replacing the runtime server. `set` therefore last-writer-wins; the matching
  * `addRuntimeMcpServer` already tore down the prior server's transport.
+ *
+ * Each entry remembers its OWNER (the registering connection's stable client
+ * id). `delete` is ownership-scoped: a disconnecting connection only removes
+ * the entry if it still owns it. Otherwise connection A's teardown could delete
+ * a same-named entry that connection B re-registered after A — silently
+ * breaking B's live tools.
  */
 export class ClientMcpSenderRegistry {
-  private readonly senders = new Map<string, WsClientMcpSender>();
+  private readonly senders = new Map<
+    string,
+    { sender: WsClientMcpSender; owner: string }
+  >();
 
-  /** Record a server's WS sender. Idempotent (last writer wins). */
-  set(serverName: string, sender: WsClientMcpSender): void {
-    this.senders.set(serverName, sender);
+  /**
+   * Record a server's WS sender, owned by `owner` (the registering
+   * connection's stable client id). Idempotent; last writer wins and takes
+   * ownership, so the new owner's `delete` is the one that takes effect.
+   */
+  set(serverName: string, sender: WsClientMcpSender, owner: string): void {
+    this.senders.set(serverName, { sender, owner });
   }
 
-  /** Forget a server's WS sender. Idempotent. */
-  delete(serverName: string): void {
-    this.senders.delete(serverName);
+  /**
+   * Forget a server's WS sender — but only when `owner` still owns the entry.
+   * Idempotent. The ownership guard stops a disconnecting connection from
+   * clobbering an entry a later connection re-registered under the same name.
+   */
+  delete(serverName: string, owner: string): void {
+    if (this.senders.get(serverName)?.owner === owner) {
+      this.senders.delete(serverName);
+    }
   }
 
   /** Currently-registered server names (tests / accounting). */
@@ -94,10 +116,10 @@ export class ClientMcpSenderRegistry {
    * SDK-free contract.
    */
   readonly lookup: ClientMcpMessageSender = (serverName: string) => {
-    const sender = this.senders.get(serverName);
-    if (!sender) return undefined;
+    const entry = this.senders.get(serverName);
+    if (!entry) return undefined;
     return (payload: unknown) =>
-      sender(serverName, payload as JSONRPCMessage) as Promise<unknown>;
+      entry.sender(serverName, payload as JSONRPCMessage) as Promise<unknown>;
   };
 }
 
@@ -142,22 +164,24 @@ export function createClientMcpServerProvider(
     async registerClientMcpServer(serverName, sendSdkMcpMessage) {
       // Record the sender FIRST so the child's discovery handshake — which the
       // bridge add triggers synchronously — can route `client_mcp/message`
-      // frames back to this WS.
-      registry.set(serverName, sendSdkMcpMessage);
+      // frames back to this WS. Owned by this connection's client id so a peer
+      // re-registering the same name can't be deleted by our teardown.
+      registry.set(serverName, sendSdkMcpMessage, originatorClientId);
       try {
+        const runtimeConfig: ClientMcpOverWsRuntimeConfig = {
+          // SDK-type so the child binds `SdkControlClientTransport`
+          // (`isSdkMcpServerConfig`); the flag tells the child to KEEP the
+          // type and bind `sendSdkMcpMessage` to the reverse ext-method.
+          type: 'sdk',
+          [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+        };
         const result = await bridge.addRuntimeMcpServer(
           serverName,
-          {
-            // SDK-type so the child binds `SdkControlClientTransport`
-            // (`isSdkMcpServerConfig`); the flag tells the child to KEEP the
-            // type and bind `sendSdkMcpMessage` to the reverse ext-method.
-            type: 'sdk',
-            [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
-          },
+          runtimeConfig,
           originatorClientId,
         );
         if ((result as { skipped?: boolean }).skipped) {
-          registry.delete(serverName);
+          registry.delete(serverName, originatorClientId);
           throw new Error(
             `runtime MCP add skipped: ${(result as { reason?: string }).reason ?? 'unknown'}`,
           );
@@ -166,12 +190,12 @@ export function createClientMcpServerProvider(
       } catch (err) {
         // Roll back the sender on any failure so a half-registered name can't
         // leak a dangling route.
-        registry.delete(serverName);
+        registry.delete(serverName, originatorClientId);
         throw err;
       }
     },
     async unregisterClientMcpServer(serverName) {
-      registry.delete(serverName);
+      registry.delete(serverName, originatorClientId);
       // Best-effort: drop the child-side runtime server too. Idempotent on the
       // bridge (`not_present` skip).
       await bridge

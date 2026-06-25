@@ -220,7 +220,10 @@ import {
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '../serve/status.js';
-import { CLIENT_MCP_OVER_WS_CONFIG_FLAG } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  type ClientMcpOverWsRuntimeConfig,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   collectContextData,
   formatContextUsageText,
@@ -6103,7 +6106,7 @@ class QwenAgent implements Agent {
             // server's runtime config; it never reaches the transport itself.
             [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: clientMcpOverWs,
             ...safeConfig
-          } = config as Record<string, unknown>;
+          } = config as ClientMcpOverWsRuntimeConfig;
           // Client-hosted MCP servers (#5626) MUST keep `type: 'sdk'` so the
           // manager binds an `SdkControlClientTransport` whose `sendMcpMessage`
           // routes back over the daemon WS via `sendSdkMcpMessage` — which the

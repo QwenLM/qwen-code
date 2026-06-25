@@ -218,6 +218,18 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 export const CLIENT_MCP_OVER_WS_CONFIG_FLAG = '__clientMcpOverWs';
 
 /**
+ * Typed carrier for the reverse tool channel's runtime-MCP-add config: the
+ * plain `Record<string, unknown>` shape `addRuntimeMcpServer` accepts, plus the
+ * optional {@link CLIENT_MCP_OVER_WS_CONFIG_FLAG} marker declared as a real
+ * (boolean) property. Lets the parent provider stamp the flag and the child
+ * handler read it through one shared, type-checked shape instead of an untyped
+ * string-keyed access on a bare `Record`.
+ */
+export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
+  [CLIENT_MCP_OVER_WS_CONFIG_FLAG]?: boolean;
+};
+
+/**
  * One queued mid-turn message. `originatorClientId` is the trusted client id
  * that pushed it (from `resolveTrustedClientId`), carried so the drain's SSE
  * echo can be routed/filtered to that client only — a peer attached to the
