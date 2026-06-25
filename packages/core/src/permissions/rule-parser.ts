@@ -88,8 +88,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ListFilesTool: 'list_directory',
   ReadFolder: 'list_directory', // legacy display name
 
-  // TodoWrite tool
+  // TodoList tool (wire name todo_write; class TodoWriteTool)
   todo_write: 'todo_write',
+  TodoList: 'todo_write',
+  // Legacy display name (renamed from "TodoWrite")
   TodoWrite: 'todo_write',
   TodoWriteTool: 'todo_write',
 
@@ -97,6 +99,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   web_fetch: 'web_fetch',
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
+
+  // ReadMcpResource tool
+  read_mcp_resource: 'read_mcp_resource',
+  ReadMcpResource: 'read_mcp_resource',
+  ReadMcpResourceTool: 'read_mcp_resource',
 
   // Agent (subagent) tool
   agent: 'agent',
@@ -336,12 +343,13 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
+  read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
   skill: 'Skill',
   // Others
   save_memory: 'SaveMemory',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   lsp: 'Lsp',
   exit_plan_mode: 'ExitPlanMode',
   enter_plan_mode: 'EnterPlanMode',
@@ -459,7 +467,7 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
-  TodoWrite: 'write todos',
+  TodoList: 'write todos',
   Lsp: 'use LSP',
   ExitPlanMode: 'exit plan mode',
   EnterPlanMode: 'enter plan mode',

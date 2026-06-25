@@ -10,6 +10,7 @@ import {
   expect,
   vi,
   beforeEach,
+  afterEach,
   type MockedFunction,
 } from 'vitest';
 import OpenAI from 'openai';
@@ -37,12 +38,16 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
 }));
 
 describe('DefaultOpenAICompatibleProvider', () => {
+  const MAX_OUTPUT_TOKENS_ENV = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
   let provider: DefaultOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
   let mockCliConfig: Config;
+  let savedMaxOutputTokensEnv: string | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
+    delete process.env[MAX_OUTPUT_TOKENS_ENV];
     const mockedBuildRuntimeFetchOptions =
       buildRuntimeFetchOptions as unknown as MockedFunction<
         (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
@@ -68,6 +73,14 @@ describe('DefaultOpenAICompatibleProvider', () => {
       mockContentGeneratorConfig,
       mockCliConfig,
     );
+  });
+
+  afterEach(() => {
+    if (savedMaxOutputTokensEnv === undefined) {
+      delete process.env[MAX_OUTPUT_TOKENS_ENV];
+    } else {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = savedMaxOutputTokensEnv;
+    }
   });
 
   describe('constructor', () => {
@@ -207,6 +220,33 @@ describe('DefaultOpenAICompatibleProvider', () => {
       // Should set capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS)
       // GPT-4 has 16K output limit, so min(16K, 8K) = 8K
       expect(result.max_tokens).toBe(8000);
+    });
+
+    it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      for (const envValue of ['1.5', '2k', 'abc']) {
+        process.env[MAX_OUTPUT_TOKENS_ENV] = envValue;
+
+        const result = provider.buildRequest(request, 'prompt-id');
+
+        expect(result.max_tokens).toBe(8000);
+      }
+    });
+
+    it('should respect a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', () => {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = '9000';
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(request, 'prompt-id');
+
+      expect(result.max_tokens).toBe(9000);
     });
 
     it('should respect user max_tokens for unknown models (deployment aliases, self-hosted)', () => {

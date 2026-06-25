@@ -22,8 +22,21 @@ import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage, isAbortError } from '../utils/errors.js';
+import { getMCPServerStatus, MCPServerStatus } from './mcp-status.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
+
+const MCP_CONNECTION_ERROR_PATTERNS = [
+  /ECONNREFUSED/i,
+  /ENOTFOUND/i,
+  /ECONNRESET/i,
+  /ETIMEDOUT/i,
+  /connection (closed|lost)/i,
+  /not connected/i,
+  /disconnected/i,
+  /transport closed/i,
+];
 
 type ToolParams = Record<string, unknown>;
 
@@ -231,6 +244,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<ToolResult> {
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
+    if (!this.shouldAttemptReconnect(error)) {
+      throw error;
+    }
+
     if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
       debugLogger.info(
         `Reconnection attempt ${this.retryCount + 1}/${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES} for MCP server '${this.serverName}'`,
@@ -261,6 +278,21 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     throw error;
+  }
+
+  private shouldAttemptReconnect(error: unknown): boolean {
+    if (isAbortError(error)) {
+      return false;
+    }
+
+    if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
+      return true;
+    }
+
+    const message = getErrorMessage(error);
+    return MCP_CONNECTION_ERROR_PATTERNS.some((pattern) =>
+      pattern.test(message),
+    );
   }
 
   async execute(

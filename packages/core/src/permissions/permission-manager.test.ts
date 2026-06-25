@@ -63,6 +63,16 @@ describe('resolveToolName', () => {
     expect(resolveToolName('TaskTool')).toBe('agent');
   });
 
+  it('resolves TodoList aliases (incl. legacy TodoWrite) to todo_write', async () => {
+    expect(resolveToolName('todo_write')).toBe('todo_write');
+    // The display name shown in the UI; a user writing allow: ["TodoList"]
+    // must resolve to the tool, not be silently dropped.
+    expect(resolveToolName('TodoList')).toBe('todo_write');
+    // Legacy display name (renamed from TodoWrite) keeps resolving.
+    expect(resolveToolName('TodoWrite')).toBe('todo_write');
+    expect(resolveToolName('TodoWriteTool')).toBe('todo_write');
+  });
+
   it('returns unknown names unchanged', async () => {
     expect(resolveToolName('my_mcp_tool')).toBe('my_mcp_tool');
     expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
@@ -1643,6 +1653,16 @@ describe('PermissionManager', () => {
       pm.initialize();
       expect(await pm.isToolEnabled('notebook_edit')).toBe(true);
       expect(await pm.isToolEnabled('edit')).toBe(false);
+    });
+
+    it('coreTools allowlist gates loop_wakeup as a core scheduling tool', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(false);
+
+      pm = new PermissionManager(makeConfig({ coreTools: ['loop_wakeup'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(true);
     });
 
     it('coreTools with specifier: tool-level check strips specifier', async () => {

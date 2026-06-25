@@ -11,15 +11,18 @@ import {
   uiTelemetryService,
   type Config,
   createDebugLogger,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
 import { McpPromptLoader } from './services/McpPromptLoader.js';
 import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
+  CommandKind,
   type SlashCommand,
   type SlashCommandActionReturn,
   type ExecutionMode,
@@ -36,6 +39,12 @@ import {
 } from './utils/userPromptExpansionHook.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
+
+type CommandServiceInstance = Awaited<ReturnType<typeof CommandService.create>>;
+
+function getSkillCommandName(command: SlashCommand): string {
+  return command.skillDetail?.name ?? command.name;
+}
 
 /**
  * Result of handling a slash command in non-interactive mode.
@@ -233,6 +242,72 @@ async function fireUserPromptExpansionHook(
   };
 }
 
+async function registerModelInvocableCommands(
+  commandService: CommandServiceInstance,
+  config: Config,
+  executionMode: ExecutionMode,
+  settings?: LoadedSettings,
+): Promise<void> {
+  if (!settings) {
+    return;
+  }
+
+  config.setModelInvocableCommandsProvider(() =>
+    commandService.getModelInvocableCommands().map((cmd) => ({
+      name: cmd.name,
+      description: cmd.modelDescription ?? cmd.description,
+    })),
+  );
+
+  config.setModelInvocableCommandsExecutor(
+    async (name: string, args: string = '') => {
+      const commands = commandService.getModelInvocableCommands();
+      const cmd = commands.find((c) => c.name === name);
+      if (!cmd?.action) return null;
+      const minimalContext = {
+        executionMode,
+        invocation: {
+          raw: args ? `/${name} ${args}` : `/${name}`,
+          name,
+          args,
+        },
+        services: { config, settings, logger: null },
+      } as unknown as CommandContext;
+      const result = await cmd.action(minimalContext, args);
+      if (!result || result.type !== 'submit_prompt') return null;
+      const hookSignal = new AbortController().signal;
+      const hookResult = await fireUserPromptExpansionHook(
+        config,
+        name,
+        args,
+        result.content,
+        hookSignal,
+      );
+      if (hookResult.blockedResult) {
+        return hookResult.blockedResult.type === 'message'
+          ? { error: hookResult.blockedResult.content }
+          : null;
+      }
+      const content = hookResult.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content
+          .map((p) =>
+            typeof p === 'string' ? p : ((p as { text?: string }).text ?? ''),
+          )
+          .join('');
+      }
+      return null;
+    },
+  );
+
+  const skillManager =
+    typeof config.getSkillManager === 'function'
+      ? config.getSkillManager()
+      : null;
+  await skillManager?.notifyConfigChanged();
+}
+
 /**
  * Processes a slash command in a non-interactive environment.
  *
@@ -269,6 +344,7 @@ export const handleSlashCommand = async (
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
     new SkillCommandLoader(config),
+    new SavedWorkflowLoader(config),
     new FileCommandLoader(config),
   ];
 
@@ -287,61 +363,25 @@ export const handleSlashCommand = async (
   // fallback existence check below can distinguish a disabled command from a
   // truly unknown one. Without this, a disabled command would fall through to
   // `no_command` and be forwarded to the model as plain prompt text.
-  const commandService = await CommandService.create(
+  const allCommandService = await CommandService.create(
     allLoaders,
     abortController.signal,
   );
-  // Register model-invocable commands provider so the startup snapshot and
-  // per-turn drain include these in non-interactive / ACP mode.
-  config.setModelInvocableCommandsProvider(() =>
-    commandService.getModelInvocableCommands().map((cmd) => ({
-      name: cmd.name,
-      description: cmd.modelDescription ?? cmd.description,
-    })),
+  const commandService =
+    disabledNameSet.size > 0
+      ? await CommandService.create(
+          allLoaders,
+          abortController.signal,
+          disabledNameSet,
+        )
+      : allCommandService;
+  await registerModelInvocableCommands(
+    commandService,
+    config,
+    executionMode,
+    settings,
   );
-  // Register executor so SkillTool can invoke model-invocable commands
-  // (e.g. MCP prompts) that are not file-based skills.
-  config.setModelInvocableCommandsExecutor(
-    async (name: string, args: string = '') => {
-      const commands = commandService.getModelInvocableCommands();
-      const cmd = commands.find((c) => c.name === name);
-      if (!cmd?.action) return null;
-      const minimalContext = {
-        executionMode,
-        invocation: {
-          raw: args ? `/${name} ${args}` : `/${name}`,
-          name,
-          args,
-        },
-        services: { config, settings, logger: null },
-      } as unknown as CommandContext;
-      const result = await cmd.action(minimalContext, args);
-      if (!result || result.type !== 'submit_prompt') return null;
-      const hookResult = await fireUserPromptExpansionHook(
-        config,
-        name,
-        args,
-        result.content,
-        abortController.signal,
-      );
-      if (hookResult.blockedResult) {
-        return hookResult.blockedResult.type === 'message'
-          ? { error: hookResult.blockedResult.content }
-          : null;
-      }
-      const content = hookResult.content;
-      if (typeof content === 'string') return content;
-      if (Array.isArray(content)) {
-        return content
-          .map((p) =>
-            typeof p === 'string' ? p : ((p as { text?: string }).text ?? ''),
-          )
-          .join('');
-      }
-      return null;
-    },
-  );
-  const allCommands = commandService.getCommands();
+  const allCommands = allCommandService.getCommands();
   const filteredCommands = commandService
     .getCommandsForMode(executionMode)
     .filter((cmd) => !isDisabled(cmd));
@@ -431,7 +471,26 @@ export const handleSlashCommand = async (
     },
   };
 
-  const result = await commandToExecute.action(context, args);
+  const isSkillCommand = commandToExecute.kind === CommandKind.SKILL;
+  let skillInvocationRecorded = false;
+  const recordSkillCommandInvocation = (success: boolean) => {
+    if (!isSkillCommand || skillInvocationRecorded) {
+      return;
+    }
+    recordSkillInvocation(config, {
+      skillName: getSkillCommandName(commandToExecute),
+      success,
+    });
+    skillInvocationRecorded = true;
+  };
+
+  let result: SlashCommandActionReturn | void;
+  try {
+    result = await commandToExecute.action(context, args);
+  } catch (error) {
+    recordSkillCommandInvocation(false);
+    throw error;
+  }
 
   if (!result) {
     // Command executed but returned no result (e.g., void return)
@@ -443,16 +502,24 @@ export const handleSlashCommand = async (
   }
 
   if (result.type === 'submit_prompt') {
-    const hookResult = await fireUserPromptExpansionHook(
-      config,
-      commandToExecute.name,
-      args,
-      result.content,
-      abortController.signal,
-    );
+    let hookResult: Awaited<ReturnType<typeof fireUserPromptExpansionHook>>;
+    try {
+      hookResult = await fireUserPromptExpansionHook(
+        config,
+        commandToExecute.name,
+        args,
+        result.content,
+        abortController.signal,
+      );
+    } catch (error) {
+      recordSkillCommandInvocation(false);
+      throw error;
+    }
     if (hookResult.blockedResult) {
+      recordSkillCommandInvocation(false);
       return hookResult.blockedResult;
     }
+    recordSkillCommandInvocation(true);
     return handleCommandResult(
       { ...result, content: hookResult.content },
       outputHistoryItems,
@@ -475,6 +542,7 @@ export const getAvailableCommands = async (
   config: Config,
   abortSignal: AbortSignal,
   mode: ExecutionMode = 'acp',
+  settings?: LoadedSettings,
 ): Promise<SlashCommand[]> => {
   try {
     const loaders = [
@@ -482,6 +550,7 @@ export const getAvailableCommands = async (
       new BuiltinCommandLoader(config),
       new BundledSkillLoader(config),
       new SkillCommandLoader(config),
+      new SavedWorkflowLoader(config),
       new FileCommandLoader(config),
     ];
 
@@ -492,6 +561,12 @@ export const getAvailableCommands = async (
       disabledSlashCommands.length > 0
         ? new Set(disabledSlashCommands)
         : undefined,
+    );
+    await registerModelInvocableCommands(
+      commandService,
+      config,
+      mode,
+      settings,
     );
     return commandService.getCommandsForMode(mode) as SlashCommand[];
   } catch (error) {

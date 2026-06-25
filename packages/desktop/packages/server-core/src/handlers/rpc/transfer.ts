@@ -98,10 +98,10 @@ export function registerTransferHandlers(server: RpcServer): void {
     largeArgIndex: number
     checksum?: string
   }) => {
-    if (!opts || typeof opts.chunkCount !== 'number' || opts.chunkCount < 1) {
+    if (!opts || !Number.isInteger(opts.chunkCount) || opts.chunkCount < 1) {
       throw new Error('Invalid chunkCount')
     }
-    if (typeof opts.totalBytes !== 'number' || opts.totalBytes < 0) {
+    if (!Number.isInteger(opts.totalBytes) || opts.totalBytes < 0) {
       throw new Error('Invalid totalBytes')
     }
     if (!opts.channel || typeof opts.channel !== 'string') {

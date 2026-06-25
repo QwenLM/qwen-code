@@ -31,6 +31,9 @@ const debugLogger = createDebugLogger('SHELL_EXECUTION');
 const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
 const SIGKILL_TIMEOUT_MS = 200;
+// Live PTY rendering only needs a short scrollback for interactive tailing.
+// The full transcript is preserved separately in raw output and final replay.
+const MAX_LIVE_TERMINAL_SCROLLBACK_LINES = 200;
 /**
  * Bound on how long the background-promote drain waits for in-flight
  * processingChain callbacks to finish writing into the headless terminal
@@ -359,11 +362,14 @@ const replayTerminalOutput = async (
     convertEol: true,
   });
 
-  await new Promise<void>((resolve) => {
-    replayTerminal.write(output, () => resolve());
-  });
-
-  return serializeTerminalToText(replayTerminal);
+  try {
+    await new Promise<void>((resolve) => {
+      replayTerminal.write(output, () => resolve());
+    });
+    return serializeTerminalToText(replayTerminal);
+  } finally {
+    replayTerminal.dispose();
+  }
 };
 
 const getLastNonEmptyAnsiLineIndex = (output: AnsiOutput): number => {
@@ -507,6 +513,11 @@ export class ShellExecutionService {
     for (const [pid, pty] of this.activePtys) {
       try {
         strategy.killPty(pid, pty);
+      } catch {
+        // ignore
+      }
+      try {
+        pty.headlessTerminal.dispose();
       } catch {
         // ignore
       }
@@ -1281,6 +1292,7 @@ export class ShellExecutionService {
           allowProposedApi: true,
           cols,
           rows,
+          scrollback: MAX_LIVE_TERMINAL_SCROLLBACK_LINES,
         });
         headlessTerminal.scrollToTop();
 
@@ -1539,61 +1551,109 @@ export class ShellExecutionService {
         };
         ptyProcess.on('error', ptyErrorHandler);
 
+        const disposeForegroundPtyResources = () => {
+          listenersDetached = true;
+          if (renderTimeout) {
+            clearTimeout(renderTimeout);
+            renderTimeout = null;
+          }
+          try {
+            dataDisposable.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `dataDisposable.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            exitDisposable.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `exitDisposable.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            ptyProcess.removeListener('error', ptyErrorHandler);
+          } catch (e) {
+            debugLogger.warn(
+              `ptyProcess.removeListener('error') threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            headlessTerminal.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `headlessTerminal.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          this.activePtys.delete(ptyProcess.pid);
+        };
+
         const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
-            this.activePtys.delete(ptyProcess.pid);
 
             const finalize = async () => {
-              render(true);
               const finalBuffer = Buffer.concat(outputChunks);
               let fullOutput = '';
 
               try {
-                if (isStreamingRawContent) {
-                  // Re-decode the captured buffer with proper encoding detection.
-                  // The streaming decoder used the first-chunk heuristic which
-                  // can misdetect when early output is ASCII-only but later
-                  // output is in a different encoding (e.g. GBK).
-                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
-                  const decodedOutput = new TextDecoder(finalEncoding).decode(
-                    finalBuffer,
-                  );
-                  fullOutput = await replayTerminalOutput(
-                    decodedOutput,
-                    cols,
-                    rows,
-                  );
-                } else {
-                  fullOutput = serializeTerminalToText(headlessTerminal);
-                }
-              } catch {
                 try {
-                  fullOutput = decodeBufferedOutput(finalBuffer);
-                } catch {
-                  // Ignore fallback rendering errors and resolve with empty text.
+                  render(true);
+                } catch (e) {
+                  debugLogger.warn(
+                    `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
+                  );
                 }
-              }
-              fullOutput = appendOutputCaptureLimitNotice(
-                fullOutput,
-                outputCaptureLimitExceeded,
-                totalBytesReceived,
-                maxBufferedOutputBytes,
-              );
 
-              resolve({
-                rawOutput: finalBuffer,
-                output: fullOutput,
-                exitCode,
-                signal: signal ?? null,
-                error,
-                aborted: abortSignal.aborted,
-                pid: ptyProcess.pid,
-                executionMethod:
-                  (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
-                  'node-pty',
-              });
+                try {
+                  if (isStreamingRawContent) {
+                    // Re-decode the captured buffer with proper encoding detection.
+                    // The streaming decoder used the first-chunk heuristic which
+                    // can misdetect when early output is ASCII-only but later
+                    // output is in a different encoding (e.g. GBK).
+                    const finalEncoding =
+                      getCachedEncodingForBuffer(finalBuffer);
+                    const decodedOutput = new TextDecoder(finalEncoding).decode(
+                      finalBuffer,
+                    );
+                    fullOutput = await replayTerminalOutput(
+                      decodedOutput,
+                      cols,
+                      rows,
+                    );
+                  } else {
+                    fullOutput = serializeTerminalToText(headlessTerminal);
+                  }
+                } catch {
+                  try {
+                    fullOutput = decodeBufferedOutput(finalBuffer);
+                  } catch {
+                    // Ignore fallback rendering errors and resolve with empty text.
+                  }
+                }
+                fullOutput = appendOutputCaptureLimitNotice(
+                  fullOutput,
+                  outputCaptureLimitExceeded,
+                  totalBytesReceived,
+                  maxBufferedOutputBytes,
+                );
+
+                resolve({
+                  rawOutput: finalBuffer,
+                  output: fullOutput,
+                  exitCode,
+                  signal: signal ?? null,
+                  error,
+                  aborted: abortSignal.aborted,
+                  pid: ptyProcess.pid,
+                  executionMethod:
+                    (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
+                    'node-pty',
+                });
+              } finally {
+                disposeForegroundPtyResources();
+              }
             };
 
             // Give any last onData callbacks a chance to run before finalizing.
@@ -1925,21 +1985,31 @@ export class ShellExecutionService {
             totalBytesReceived,
             maxBufferedOutputBytes,
           );
-          resolve({
-            rawOutput: finalBuffer,
-            output: snapshot,
-            exitCode: null,
-            signal: null,
-            error,
-            // See childProcessFallback for the full rationale — promoted
-            // results are NOT user-cancellations, so callers' `if
-            // (result.aborted)` branches must NOT trigger.
-            aborted: false,
-            promoted: true,
-            pid: ptyProcess.pid,
-            executionMethod:
-              (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
-          });
+          try {
+            resolve({
+              rawOutput: finalBuffer,
+              output: snapshot,
+              exitCode: null,
+              signal: null,
+              error,
+              // See childProcessFallback for the full rationale — promoted
+              // results are NOT user-cancellations, so callers' `if
+              // (result.aborted)` branches must NOT trigger.
+              aborted: false,
+              promoted: true,
+              pid: ptyProcess.pid,
+              executionMethod:
+                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+            });
+          } finally {
+            try {
+              headlessTerminal.dispose();
+            } catch (e) {
+              debugLogger.warn(
+                `headlessTerminal.dispose() threw during background-promote cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
         };
 
         const performCancelKill = async (): Promise<void> => {

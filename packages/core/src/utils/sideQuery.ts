@@ -50,6 +50,11 @@ export interface SideQueryJsonOptions<TResponse> {
    * pass `1` to avoid burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  /**
+   * Skip appending the user's `output-language.md` rule. Defaults to false so
+   * new user-visible side queries honor the preference automatically.
+   */
+  skipOutputLanguagePreference?: boolean;
   validate?: (response: TResponse) => string | null;
 }
 
@@ -89,6 +94,11 @@ export interface SideQueryTextOptions {
    * burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  /**
+   * Skip appending the user's `output-language.md` rule. Defaults to false so
+   * new user-visible side queries honor the preference automatically.
+   */
+  skipOutputLanguagePreference?: boolean;
   validate?: (text: string) => string | null;
 }
 
@@ -136,6 +146,7 @@ async function getOutputLanguageInstruction(
 
     return [
       'Follow the user-visible output language preference below for this side query.',
+      'This preference overrides any earlier language-selection rule in this system instruction.',
       preference,
     ].join('\n\n');
   } catch {
@@ -192,9 +203,12 @@ export async function runSideQuery<TResponse>(
   const model = resolveDefaultModel(config, options.model);
   const promptId = options.promptId ?? buildDefaultPromptId(options.purpose);
   const requestConfig = applyThinkingDefault(options.config);
+  const outputLanguageInstruction = options.skipOutputLanguagePreference
+    ? undefined
+    : await getOutputLanguageInstruction(config);
   const systemInstruction = appendSystemInstruction(
     options.systemInstruction,
-    await getOutputLanguageInstruction(config),
+    outputLanguageInstruction,
   );
 
   if (isJsonOptions(options)) {

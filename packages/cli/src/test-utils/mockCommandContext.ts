@@ -49,6 +49,7 @@ export const createMockCommandContext = (
       } as any, // Cast because Logger is a class.
     },
     ui: {
+      history: [],
       addItem: vi.fn(),
       clear: vi.fn(),
       setDebugMessage: vi.fn(),
@@ -60,6 +61,7 @@ export const createMockCommandContext = (
       btwAbortControllerRef: { current: null },
       isIdleRef: { current: true },
       loadHistory: vi.fn(),
+      refreshStatic: vi.fn(),
       toggleVimEnabled: vi.fn(),
       extensionsUpdateState: new Map(),
       setExtensionsUpdateState: vi.fn(),
@@ -90,6 +92,12 @@ export const createMockCommandContext = (
             byName: {},
           },
           files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+          skills: {
+            totalCalls: 0,
+            totalSuccess: 0,
+            totalFail: 0,
+            byName: {},
+          },
         },
         promptCount: 0,
       } as SessionStatsState,

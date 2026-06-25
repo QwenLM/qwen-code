@@ -73,6 +73,7 @@ function makeConfig(opts: {
   shells: () => unknown[];
   monitors: () => unknown[];
   dreams?: () => unknown[];
+  workflows?: () => unknown[];
 }) {
   const agentReg = makeFakeRegistry();
   const shellReg = makeFakeRegistry();
@@ -92,6 +93,10 @@ function makeConfig(opts: {
     getMonitorRegistry: () => ({
       ...monitorReg,
       getAll: opts.monitors,
+    }),
+    getWorkflowRunRegistry: () => ({
+      list: () => opts.workflows?.() ?? [],
+      setStatusChangeCallback: () => {},
     }),
     getMemoryManager: () => ({
       subscribe: memoryMgr.subscribe,
@@ -395,7 +400,7 @@ describe('useBackgroundTaskView', () => {
           timestamp: Date.now(),
         },
       ],
-    } as typeof agents[number];
+    } as (typeof agents)[number];
 
     act(() => agentReg.fireApproval());
 

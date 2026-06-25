@@ -39,7 +39,7 @@ import {
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
-  resolveOwnsModel,
+  findExistingProviderModels,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -58,12 +58,14 @@ import {
   redactUrlCredentials,
   computeUniqueBranchTitle,
   unregisterGoalHook,
+  ToolNames,
+  FORK_SUBAGENT_TYPE,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
+  AgentParams,
   ApprovalMode,
   Config,
-  ConversationRecord,
   DeviceAuthorizationData,
   HookConfig,
   McpBudgetEvent,
@@ -72,6 +74,7 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
+  ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -129,6 +132,14 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import {
+  buildPermissionSettings,
+  normalizePermissionRules,
+  PermissionRulesValidationError,
+  PERMISSION_RULE_TYPES,
+  readPermissionRuleSet,
+  type PermissionRuleSet,
+} from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
 import { z } from 'zod';
@@ -143,6 +154,7 @@ import { HistoryReplayer } from './session/HistoryReplayer.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
+  sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import {
   updateOutputLanguageFile,
@@ -180,6 +192,7 @@ import {
   type ServePreflightKind,
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
+  type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
@@ -215,24 +228,31 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 
-function sanitizeProviderBaseUrl(baseUrl: string): string {
-  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
-  if (!scheme) {
-    return baseUrl;
-  }
-
-  const authorityStart = scheme[0].length;
-  const rest = baseUrl.slice(authorityStart);
-  const authorityEnd = rest.search(/[/?#]/);
-  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
-  const at = authority.lastIndexOf('@');
-  if (at === -1) {
-    return baseUrl;
-  }
-
-  return `${baseUrl.slice(0, authorityStart)}${authority.slice(at + 1)}${rest.slice(authority.length)}`;
+function collapseForkDirective(directive: string, maxLength: number): string {
+  const oneLine = directive.replace(/\s+/g, ' ').trim();
+  return oneLine.length > maxLength
+    ? `${oneLine.slice(0, maxLength - 3)}…`
+    : oneLine;
 }
 
+function deriveForkDescription(directive: string): string {
+  return collapseForkDirective(directive, 60);
+}
+
+function truncateForkDirectiveForHistory(directive: string): string {
+  return collapseForkDirective(directive, 200);
+}
+
+function hasFailedDisplayStatus(
+  display: unknown,
+): display is { status: 'failed' } {
+  return (
+    display !== null &&
+    typeof display === 'object' &&
+    'status' in display &&
+    (display as { status?: unknown }).status === 'failed'
+  );
+}
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
  * a side-effect-free presence check. Mirrors `AUTH_ENV_MAPPINGS` from
@@ -266,75 +286,11 @@ export const AUTH_PREFLIGHT_WAIVED_AUTH_TYPES: ReadonlySet<string> = new Set([
   'qwen-oauth',
 ]);
 
-type PermissionRuleType = 'allow' | 'ask' | 'deny';
-
-interface PermissionRuleSet {
-  allow: string[];
-  ask: string[];
-  deny: string[];
-}
-
-interface PermissionSettingsScopeState {
-  path: string;
-  rules: PermissionRuleSet;
-}
-
-interface QwenPermissionSettings {
-  user: PermissionSettingsScopeState;
-  workspace: PermissionSettingsScopeState;
-  merged: PermissionRuleSet;
-  isTrusted: boolean;
-}
-
-const PERMISSION_RULE_TYPES: PermissionRuleType[] = ['allow', 'ask', 'deny'];
-
-function readPermissionRuleSet(settings: unknown): PermissionRuleSet {
-  const permissions =
-    settings && typeof settings === 'object'
-      ? (
-          settings as {
-            permissions?: Partial<Record<PermissionRuleType, unknown>>;
-          }
-        ).permissions
-      : undefined;
-
-  const readRules = (type: PermissionRuleType): string[] => {
-    const value = permissions?.[type];
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === 'string')
-      : [];
-  };
-
-  return {
-    allow: readRules('allow'),
-    ask: readRules('ask'),
-    deny: readRules('deny'),
-  };
-}
-
-function normalizePermissionRules(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    throw RequestError.invalidParams(undefined, 'rules must be an array');
-  }
-  return Array.from(
-    new Set(
-      value.map((item) => {
-        if (typeof item !== 'string' || !item.trim()) {
-          throw RequestError.invalidParams(
-            undefined,
-            'rules must contain only non-empty strings',
-          );
-        }
-        return item.trim();
-      }),
-    ),
-  );
-}
-
 type QwenMemorySettings = {
   enableManagedAutoMemory: boolean;
   enableManagedAutoDream: boolean;
   enableAutoSkill: boolean;
+  autoSkillConfirm: boolean;
 };
 
 type QwenMemoryPaths = {
@@ -414,6 +370,7 @@ type QwenCoreSettingKey =
   | 'memory.enableManagedAutoMemory'
   | 'memory.enableManagedAutoDream'
   | 'memory.enableAutoSkill'
+  | 'memory.autoSkillConfirm'
   | 'disableAllHooks';
 
 type QwenMcpServerConfig = {
@@ -481,6 +438,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'memory.enableManagedAutoMemory': { type: 'boolean' },
   'memory.enableManagedAutoDream': { type: 'boolean' },
   'memory.enableAutoSkill': { type: 'boolean' },
+  'memory.autoSkillConfirm': { type: 'boolean' },
   disableAllHooks: { type: 'boolean' },
 } as const satisfies Record<
   QwenCoreSettingKey,
@@ -501,12 +459,14 @@ const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: true,
   enableAutoSkill: true,
+  autoSkillConfirm: true,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
   'enableManagedAutoMemory',
   'enableManagedAutoDream',
   'enableAutoSkill',
+  'autoSkillConfirm',
 ] as const satisfies ReadonlyArray<keyof QwenMemorySettings>;
 
 function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
@@ -528,6 +488,10 @@ function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
       typeof record['enableAutoSkill'] === 'boolean'
         ? record['enableAutoSkill']
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableAutoSkill,
+    autoSkillConfirm:
+      typeof record['autoSkillConfirm'] === 'boolean'
+        ? record['autoSkillConfirm']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
   };
 }
 
@@ -1402,11 +1366,6 @@ function resolveProviderDocumentationUrl(
   return undefined;
 }
 
-function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
-  const record = toRecord(value);
-  return typeof record['id'] === 'string';
-}
-
 function readSettingsEnv(
   settings: LoadedSettings,
   envKey: string | undefined,
@@ -1415,35 +1374,6 @@ function readSettingsEnv(
   const env = toRecord((settings.merged as Record<string, unknown>)['env']);
   const value = env[envKey];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function readProviderModels(
-  settings: LoadedSettings,
-  protocol: string,
-): ProviderModelConfig[] {
-  const modelProviders = toRecord(
-    (settings.merged as Record<string, unknown>)['modelProviders'],
-  );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
-}
-
-function findExistingProviderModels(
-  config: ProviderConfig,
-  settings: LoadedSettings,
-):
-  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
-  | undefined {
-  const ownsModel = resolveOwnsModel(config);
-  if (!ownsModel) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
-  for (const protocol of protocols) {
-    const models = readProviderModels(settings, protocol).filter(ownsModel);
-    if (models.length > 0) return { protocol, models };
-  }
-  return undefined;
 }
 
 function resolveProviderEnvKey(
@@ -1479,7 +1409,12 @@ function readExistingProviderConfig(
   config: ProviderConfig,
   settings: LoadedSettings,
 ): Record<string, unknown> | undefined {
-  const existing = findExistingProviderModels(config, settings);
+  const existing = findExistingProviderModels(
+    config,
+    (settings.merged as Record<string, unknown>)['modelProviders'] as
+      | Record<string, unknown>
+      | undefined,
+  );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
   const baseUrl =
@@ -1514,18 +1449,10 @@ function readExistingProviderConfig(
 function resolveExistingProviderApiKey(
   config: ProviderConfig,
   settings: LoadedSettings,
+  protocol: ProviderConfig['protocol'],
+  baseUrl: string,
 ): string | undefined {
-  const existing = findExistingProviderModels(config, settings);
-  const firstModel = existing?.models[0];
-  const protocol = existing?.protocol ?? config.protocol;
-  const baseUrl =
-    typeof firstModel?.baseUrl === 'string'
-      ? firstModel.baseUrl
-      : resolveBaseUrl(config);
-  const envKey =
-    typeof firstModel?.envKey === 'string'
-      ? firstModel.envKey
-      : resolveProviderEnvKey(config, protocol, baseUrl);
+  const envKey = resolveProviderEnvKey(config, protocol, baseUrl);
   return readSettingsEnv(settings, envKey);
 }
 
@@ -1564,7 +1491,10 @@ function serializeProviderConfig(
 function readProviderSetupInputs(
   config: ProviderConfig,
   params: Record<string, unknown>,
-  existingApiKey?: string,
+  resolveExistingApiKey?: (
+    protocol: ProviderConfig['protocol'],
+    baseUrl: string,
+  ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
@@ -1597,7 +1527,8 @@ function readProviderSetupInputs(
   // `apiKey` is optional on update: when the client omits it (e.g. it only
   // received `hasApiKey` from the list response), fall back to the stored key.
   const apiKey =
-    readOptionalString(params['apiKey'], 'apiKey') ?? existingApiKey;
+    readOptionalString(params['apiKey'], 'apiKey') ??
+    resolveExistingApiKey?.(protocol ?? config.protocol, baseUrl);
   if (!apiKey) {
     throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
   }
@@ -1757,10 +1688,17 @@ function normalizeStringRecord(
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  const numberValue =
-    typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(numberValue) || numberValue <= 0) {
-    throw RequestError.invalidParams(undefined, 'Expected a positive number');
+  let numberValue: number;
+  if (typeof value === 'number') {
+    numberValue = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    numberValue = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  } else {
+    numberValue = Number.NaN;
+  }
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    throw RequestError.invalidParams(undefined, 'Expected a positive integer');
   }
   return numberValue;
 }
@@ -2466,34 +2404,37 @@ function parsePoolDrainMs(envValue: string | undefined): number {
  * invokes `tryReserve`/`release`; this helper produces the controller
  * and wires the event callback.
  */
-function createWorkspaceMcpBudget(
+export function createWorkspaceMcpBudget(
   onEvent: (event: McpBudgetEvent) => void,
 ): WorkspaceMcpBudget | undefined {
   const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
-  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly.
-  // Use `Number(...)` + `Number.isInteger` so the pool and the manager
+  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly: only plain
+  // decimal digits set a budget. A loose `Number(...)` would silently accept
+  // `0x10`=16, `1e2`=100, and `1.0`=1 (all pass `isInteger`); the strict
+  // `/^\d+$/` + `isSafeInteger` check rejects them so the pool and the manager
   // honor the same env values.
-  const budget =
-    rawBudget !== undefined && rawBudget !== '' ? Number(rawBudget) : undefined;
+  let budget: number | undefined;
+  if (rawBudget !== undefined && rawBudget !== '') {
+    const trimmed = rawBudget.trim();
+    const parsed = Number(trimmed);
+    if (/^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) && parsed > 0) {
+      budget = parsed;
+    } else {
+      process.stderr.write(
+        `qwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=` +
+          `'${rawBudget}' (expected positive integer); ` +
+          `MCP budget enforcement disabled for this child.\n`,
+      );
+    }
+  }
   const mode: McpBudgetMode = (() => {
     if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
       return rawMode;
     }
-    return budget !== undefined &&
-      Number.isFinite(budget) &&
-      Number.isInteger(budget) &&
-      budget > 0
-      ? 'warn'
-      : 'off';
+    return budget !== undefined ? 'warn' : 'off';
   })();
-  if (
-    mode === 'off' ||
-    budget === undefined ||
-    !Number.isFinite(budget) ||
-    !Number.isInteger(budget) ||
-    budget <= 0
-  ) {
+  if (mode === 'off' || budget === undefined) {
     return undefined;
   }
   return new WorkspaceMcpBudget({
@@ -2501,6 +2442,36 @@ function createWorkspaceMcpBudget(
     mode,
     onEvent,
   });
+}
+
+const MAX_ACP_SESSION_PAGE_SIZE = 100;
+
+function normalizeAcpSessionListSize(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    return undefined;
+  }
+  return Math.min(Math.max(value, 1), MAX_ACP_SESSION_PAGE_SIZE);
+}
+
+function parseAcpSessionListCursor(
+  value: string | null | undefined,
+): number | undefined {
+  if (value == null || value === '') return undefined;
+  const trimmed = value.trim();
+  const parsedCursor = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isFinite(parsedCursor) ||
+    parsedCursor < 0 ||
+    parsedCursor > Number.MAX_SAFE_INTEGER
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid cursor: "${value}" is not a valid numeric cursor`,
+    );
+  }
+  return parsedCursor;
 }
 
 class QwenAgent implements Agent {
@@ -2596,7 +2567,7 @@ class QwenAgent implements Agent {
     private connection: AgentSideConnection,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
-    // roll back without rebuilding. `runQwenServe.ts` sets this when
+    // roll back without rebuilding. `run-qwen-serve.ts` sets this when
     // `--no-mcp-pool` is passed at daemon startup.
     if (process.env['QWEN_SERVE_NO_MCP_POOL'] === '1') {
       this.mcpPool = undefined;
@@ -2778,10 +2749,7 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    const session = await this.createAndStoreSession(
-      config,
-      sessionData?.conversation,
-    );
+    const session = await this.createAndStoreSession(config, sessionData);
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2820,7 +2788,11 @@ class QwenAgent implements Agent {
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    const session = await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(
+      config,
+      config.getResumedSessionData(),
+      { replayHistory: false },
+    );
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2862,22 +2834,18 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    const numericCursor = params.cursor ? Number(params.cursor) : undefined;
+    const numericCursor = parseAcpSessionListCursor(params.cursor);
 
     // The ACP spec's ListSessionsRequest doesn't include a page-size field,
     // so the SDK's zod validator strips any top-level `size` the client sends
     // before it reaches this handler. Carry page size through `_meta.size`
     // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
-    const metaSize = params._meta?.['size'];
-    const size =
-      typeof metaSize === 'number' && metaSize > 0
-        ? Math.floor(metaSize)
-        : undefined;
+    const size = normalizeAcpSessionListSize(params._meta?.['size']);
 
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
-        cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+        cursor: numericCursor,
         size,
       });
     });
@@ -2993,23 +2961,6 @@ class QwenAgent implements Agent {
     return this.settings;
   }
 
-  private buildPermissionSettings(
-    settings: LoadedSettings,
-  ): QwenPermissionSettings {
-    return {
-      user: {
-        path: settings.user.path,
-        rules: readPermissionRuleSet(settings.user.settings),
-      },
-      workspace: {
-        path: settings.workspace.path,
-        rules: readPermissionRuleSet(settings.workspace.settings),
-      },
-      merged: readPermissionRuleSet(settings.merged),
-      isTrusted: settings.isTrusted,
-    };
-  }
-
   private async buildCoreSettings(
     settings: LoadedSettings,
     cwd: string,
@@ -3026,6 +2977,7 @@ class QwenAgent implements Agent {
       const extensionManager = new ExtensionManager({
         workspaceDir: cwd,
         isWorkspaceTrusted: settings.isTrusted,
+        locale: getCurrentLanguage(),
       });
       await extensionManager.refreshCache();
       extensions = extensionManager.getLoadedExtensions();
@@ -3052,6 +3004,7 @@ class QwenAgent implements Agent {
         return {
           id: extension.id,
           name: extension.name,
+          displayName: extension.displayName,
           version: extension.version,
           isActive: extension.isActive,
           path: extension.path,
@@ -3097,11 +3050,18 @@ class QwenAgent implements Agent {
         'extension',
       ).map((entry) => ({
         ...entry,
-        server: { ...entry.server, extensionName: extension.name },
+        server: {
+          ...entry.server,
+          extensionName: extension.displayName ?? extension.name,
+        },
       })),
     );
     const extensionHooks = activeExtensions.flatMap((extension) =>
-      readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
+      readHooks(
+        { hooks: extension.hooks ?? {} },
+        'extension',
+        extension.displayName ?? extension.name,
+      ),
     );
 
     // Build the merged MCP/hook lists from the user and workspace settings
@@ -4244,6 +4204,35 @@ class QwenAgent implements Agent {
     return buildSessionTasksStatus(sessionId, session.getConfig());
   }
 
+  private buildSessionLspStatus(sessionId: string): ServeSessionLspStatus {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const snapshot = config.getLspStatusSnapshot();
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      enabled: snapshot.enabled,
+      configuredServers: snapshot.configuredServers,
+      readyServers: snapshot.readyServers,
+      failedServers: snapshot.failedServers,
+      inProgressServers: snapshot.inProgressServers,
+      notStartedServers: snapshot.notStartedServers,
+      ...(snapshot.statusUnavailable ? { statusUnavailable: true } : {}),
+      ...(snapshot.initializationError
+        ? { initializationError: snapshot.initializationError }
+        : {}),
+      servers: snapshot.servers.map((server) => ({
+        name: server.name,
+        status: server.status,
+        languages: server.languages,
+        ...(server.transport ? { transport: server.transport } : {}),
+        ...(server.command ? { command: server.command } : {}),
+        ...(server.error ? { error: server.error } : {}),
+      })),
+    };
+  }
+
   private buildSessionStatsStatus(sessionId: string): ServeSessionStatsStatus {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
@@ -4275,6 +4264,26 @@ class QwenAgent implements Agent {
       };
     }
 
+    const skillMetrics = metrics.skills ?? {
+      totalCalls: 0,
+      totalSuccess: 0,
+      totalFail: 0,
+      byName: {},
+    };
+    const skillsByName: ServeSessionStatsStatus['skills']['byName'] = {};
+    for (const [name, skill] of Object.entries(skillMetrics.byName)) {
+      Object.defineProperty(skillsByName, name, {
+        value: {
+          count: skill.count,
+          success: skill.success,
+          fail: skill.fail,
+        },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
@@ -4293,6 +4302,12 @@ class QwenAgent implements Agent {
       files: {
         totalLinesAdded: metrics.files.totalLinesAdded,
         totalLinesRemoved: metrics.files.totalLinesRemoved,
+      },
+      skills: {
+        totalCalls: skillMetrics.totalCalls,
+        totalSuccess: skillMetrics.totalSuccess,
+        totalFail: skillMetrics.totalFail,
+        byName: skillsByName,
       },
     };
   }
@@ -4513,6 +4528,7 @@ class QwenAgent implements Agent {
             kind: 'extension',
             id: ext.id,
             name: ext.name,
+            displayName: ext.displayName,
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -4532,6 +4548,16 @@ class QwenAgent implements Agent {
               ? { autoUpdate: ext.installMetadata.autoUpdate }
               : {}),
             capabilities,
+            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
+            details: {
+              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
+              commands: ext.commands ?? [],
+              skills: ext.skills?.map((skill) => skill.name) ?? [],
+              agents: ext.agents?.map((agent) => agent.name) ?? [],
+              contextFiles: ext.contextFiles,
+              settings:
+                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
+            },
           };
         },
       );
@@ -4836,7 +4862,13 @@ class QwenAgent implements Agent {
         const inputs = readProviderSetupInputs(
           providerConfig,
           params,
-          resolveExistingProviderApiKey(providerConfig, this.settings),
+          (protocol, baseUrl) =>
+            resolveExistingProviderApiKey(
+              providerConfig,
+              this.settings,
+              protocol,
+              baseUrl,
+            ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
@@ -4844,10 +4876,10 @@ class QwenAgent implements Agent {
           settings: createLoadedSettingsAdapter(this.settings, persistScope),
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
-          syncAuthState: (authType, modelId) =>
+          syncAuthState: (authType, modelId, baseUrl) =>
             this.config
               .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId),
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => this.config.refreshAuth(authType),
         });
 
@@ -4857,6 +4889,9 @@ class QwenAgent implements Agent {
           providerLabel: providerConfig.label,
           authType: plan.authType,
           modelId: plan.modelSelection?.modelId,
+          ...(plan.modelSelection?.baseUrl
+            ? { baseUrl: plan.modelSelection.baseUrl }
+            : {}),
         };
       }
       case 'qwen/skills/install': {
@@ -4996,6 +5031,19 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return this.buildSessionLspStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
       case SERVE_STATUS_EXT_METHODS.sessionStats: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -5026,6 +5074,7 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
+        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -5035,6 +5084,7 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
+            .filter(({ idx }) => idx < rewindableTurnCount)
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
               return {
@@ -5417,6 +5467,39 @@ class QwenAgent implements Agent {
           AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
+        const sessionId = params['sessionId'];
+        const displayName = params['displayName'];
+        const titleSource = params['titleSource'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof displayName !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing displayName',
+          );
+        }
+        if (displayName.length > SESSION_TITLE_MAX_LENGTH) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const source =
+          titleSource === 'auto' ? ('auto' as const) : ('manual' as const);
+        const recording = session.getConfig().getChatRecordingService();
+        let ok = false;
+        if (recording) {
+          ok = recording.recordCustomTitle(displayName, source);
+          await recording.flush();
+        }
+        return { sessionId, displayName, titleSource: source, persisted: ok };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -5667,6 +5750,90 @@ class QwenAgent implements Agent {
           throw err;
         }
         return { sessionId, answer: result.text || null };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const directive =
+          typeof params['directive'] === 'string' ? params['directive'] : '';
+        const trimmed = directive.trim();
+        if (!trimmed) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing directive',
+          );
+        }
+
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        if (!config.getModel()) {
+          throw RequestError.invalidParams(undefined, 'No model configured.');
+        }
+
+        let hasHistory = false;
+        try {
+          hasHistory =
+            (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
+        } catch (error) {
+          debugLogger.debug('Failed to read history before /fork:', error);
+        }
+        if (!hasHistory) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Cannot fork before the first conversation turn.',
+          );
+        }
+
+        const agentTool = config.getToolRegistry().getTool(ToolNames.AGENT);
+        if (!agentTool) {
+          throw RequestError.invalidParams(
+            undefined,
+            'The agent tool is unavailable; cannot fork.',
+          );
+        }
+
+        const description = deriveForkDescription(trimmed);
+        const agentParams: AgentParams = {
+          description,
+          prompt: trimmed,
+          subagent_type: FORK_SUBAGENT_TYPE,
+          run_in_background: true,
+        };
+        const result = await agentTool
+          .build(agentParams)
+          .execute(new AbortController().signal);
+        if (hasFailedDisplayStatus(result?.returnDisplay)) {
+          const reason =
+            typeof result.llmContent === 'string' && result.llmContent.trim()
+              ? result.llmContent.trim()
+              : 'the background agent could not be started.';
+          throw RequestError.invalidParams(
+            undefined,
+            `Failed to launch fork: ${reason}`,
+          );
+        }
+
+        try {
+          config.getGeminiClient().addHistory({
+            role: 'user',
+            parts: [
+              {
+                text: `User launched a background fork via /fork. Directive (truncated): ${truncateForkDirectiveForHistory(
+                  trimmed,
+                )}`,
+              },
+            ],
+          });
+        } catch (error) {
+          debugLogger.debug('Failed to record fork event in history:', error);
+        }
+
+        return { sessionId, description, launched: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];
@@ -5949,6 +6116,23 @@ class QwenAgent implements Agent {
         );
         return result as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
+        const sessionId = params['sessionId'] as string;
+        const session = this.sessionOrThrow(sessionId);
+        const extensionManager = session.getConfig().getExtensionManager();
+        await extensionManager.refreshCache();
+        try {
+          await extensionManager.refreshTools();
+        } catch (err) {
+          debugLogger.warn(
+            `Extension tool refresh failed for session ${sessionId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        await session.sendAvailableCommandsUpdate();
+        return { ok: true };
+      }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
@@ -6078,10 +6262,13 @@ class QwenAgent implements Agent {
           );
         }
 
+        const rewindFiles = params['rewindFiles'] !== false;
         const historyBeforeRewind = session.captureHistorySnapshot();
         let rewindResult;
         try {
-          rewindResult = session.rewindToTurn(turnIndex as number);
+          rewindResult = session.rewindToTurn(turnIndex as number, {
+            rewindFiles,
+          });
         } catch (err) {
           if (err instanceof RequestError) {
             const msg = err.message;
@@ -6101,7 +6288,6 @@ class QwenAgent implements Agent {
 
         let filesChanged: string[] = [];
         let filesFailed: string[] = [];
-        const rewindFiles = params['rewindFiles'] !== false;
         if (rewindFiles && promptId) {
           const fhs = session.getConfig().getFileHistoryService();
           try {
@@ -6307,7 +6493,7 @@ class QwenAgent implements Agent {
               throw err;
             }
 
-            return { newSessionId, title };
+            return { newSessionId, title, displayName: title };
           },
         );
       }
@@ -6335,6 +6521,13 @@ class QwenAgent implements Agent {
         );
         const scope = toSettingsScope(params['scope']);
         settings.setValue(scope, key, normalizedValue);
+        if (settingKey === 'model.name') {
+          // Selecting a model by id here can't disambiguate providers that
+          // share that id, so clear the paired baseUrl disambiguator left by a
+          // previous model-picker selection. Empty-string tombstone overrides a
+          // lower-scope value on merge (undefined would be dropped from JSON).
+          settings.setValue(scope, 'model.baseUrl', '');
+        }
         if (
           settingKey === 'general.outputLanguage' &&
           typeof normalizedValue === 'string' &&
@@ -6504,7 +6697,9 @@ class QwenAgent implements Agent {
         const settings = loadSettings(cwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: cwd,
-          isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+          isWorkspaceTrusted:
+            isWorkspaceTrusted(settings.merged).isTrusted ?? true,
+          locale: getCurrentLanguage(),
         });
         await extensionManager.refreshCache();
         const extension = extensionManager
@@ -6533,7 +6728,7 @@ class QwenAgent implements Agent {
       }
       case 'qwen/permissions/getSettings': {
         const settings = this.loadPermissionSettings(cwd);
-        return this.buildPermissionSettings(settings) as unknown as Record<
+        return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;
@@ -6556,9 +6751,24 @@ class QwenAgent implements Agent {
 
         const settings = this.loadPermissionSettings(cwd);
         const before = readPermissionRuleSet(settings.merged);
-        const rules = normalizePermissionRules(params['rules']);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
+        const scopeSettings =
+          scope === 'workspace'
+            ? settings.workspace.settings
+            : settings.user.settings;
+        const existingRules = readPermissionRuleSet(scopeSettings)[ruleType];
+        let rules: string[];
+        try {
+          rules = normalizePermissionRules(params['rules'], {
+            existingRules,
+          });
+        } catch (error) {
+          if (error instanceof PermissionRulesValidationError) {
+            throw RequestError.invalidParams(undefined, error.message);
+          }
+          throw error;
+        }
 
         settings.setValue(settingScope, `permissions.${ruleType}`, rules);
         // `setValue` already recomputed the in-memory merged view, so read the
@@ -6567,7 +6777,7 @@ class QwenAgent implements Agent {
         // could mutate settings between the two loads).
         const after = readPermissionRuleSet(settings.merged);
         this.syncLivePermissionManagers(before, after);
-        return this.buildPermissionSettings(settings) as unknown as Record<
+        return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;
@@ -6597,10 +6807,19 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
+            const providersChanged =
+              changed.has('modelProviders') || changed.has('providerProtocol');
 
-            if (changed.has('modelProviders')) {
+            // Long-lived ACP sessions never restart, so honor providerProtocol
+            // changes here too (its requiresRestart only gates the TUI path) and
+            // always pass the current map so a modelProviders-only reload doesn't
+            // re-register against a stale protocol mapping.
+            if (providersChanged) {
               try {
-                config.reloadModelProvidersConfig(newMerged.modelProviders);
+                config.reloadModelProvidersConfig(
+                  newMerged.modelProviders,
+                  newMerged.providerProtocol ?? {},
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
@@ -6622,10 +6841,7 @@ class QwenAgent implements Agent {
                   `reload: switchModel failed for session ${id}: ${err}`,
                 );
               }
-            } else if (
-              (changed.has('modelProviders') || envChanged) &&
-              authType
-            ) {
+            } else if ((providersChanged || envChanged) && authType) {
               try {
                 await config.refreshAuth(authType);
               } catch (err) {
@@ -6777,7 +6993,10 @@ class QwenAgent implements Agent {
       settings,
       argvForSession,
       cwd,
-      [],
+      // ACP sessions do not provide an extension override. Passing [] is a
+      // truthy override and prevents default/argv extension commands from
+      // loading, so leave it unset to preserve normal CLI behavior.
+      undefined,
       // Pass separated hooks for proper source attribution
       {
         userHooks: this.settings.getUserHooks(),
@@ -6900,7 +7119,8 @@ class QwenAgent implements Agent {
 
   private async createAndStoreSession(
     config: Config,
-    conversation?: ConversationRecord,
+    sessionData?: ResumedSessionData,
+    options: { replayHistory?: boolean } = {},
   ): Promise<Session> {
     const sessionId = config.getSessionId();
     const geminiClient = config.getGeminiClient();
@@ -6924,8 +7144,14 @@ class QwenAgent implements Agent {
       await session.sendAvailableCommandsUpdate();
     }, 0);
 
-    if (conversation && conversation.messages) {
-      await session.replayHistory(conversation.messages);
+    if (sessionData?.fileHistorySnapshots?.length) {
+      config
+        .getFileHistoryService()
+        .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+    }
+
+    if (options.replayHistory !== false && sessionData?.conversation.messages) {
+      await session.replayHistory(sessionData.conversation.messages);
     }
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages

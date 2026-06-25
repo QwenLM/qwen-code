@@ -24,6 +24,20 @@ import type {
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
+import type { WorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import type {
+  PermissionRuleType,
+  PermissionSettingsScope,
+  QwenPermissionSettings,
+} from '../../config/permission-settings.js';
+import type {
+  SettingScope,
+  EnvReloadResult,
+  LoadedSettings,
+} from '../../config/settings.js';
+import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
+import type { VoiceMode } from '../../services/voice-settings.js';
+import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -76,6 +90,11 @@ export type InvokeWorkspaceCommandFn = <T>(
   opts?: { timeoutMs?: number },
 ) => Promise<T>;
 
+export type RefreshExtensionsForAllSessionsFn = () => Promise<{
+  refreshed: number;
+  failed: number;
+}>;
+
 /**
  * The unified facade for workspace-scoped daemon operations. Routes
  * delegate here instead of reaching into the bridge for workspace
@@ -119,7 +138,40 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceExtensionsStatus>;
 
+  /** Trust status for the bound workspace. */
+  getWorkspaceTrustStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceTrustStatus>;
+
+  /** Permission settings for the bound workspace. */
+  getWorkspacePermissionsStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<QwenPermissionSettings>;
+
+  /** Voice settings and selectable transcription models for the workspace. */
+  getWorkspaceVoiceStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceVoiceStatus>;
+
   // -- Workspace mutations --
+
+  /** Request that the local operator change workspace trust. */
+  requestWorkspaceTrustChange(
+    ctx: WorkspaceRequestContext,
+    request: WorkspaceTrustChangeRequest,
+  ): Promise<WorkspaceTrustChangeResult>;
+
+  /** Replace one permission rule list. */
+  setWorkspacePermissionRules(
+    ctx: WorkspaceRequestContext,
+    request: WorkspacePermissionRulesUpdate,
+  ): Promise<QwenPermissionSettings>;
+
+  /** Persist workspace voice settings. */
+  setWorkspaceVoiceSettings(
+    ctx: WorkspaceRequestContext,
+    request: WorkspaceVoiceSettingsUpdate,
+  ): Promise<WorkspaceVoiceStatus>;
 
   /** Toggle a tool enabled/disabled in workspace settings. */
   setWorkspaceToolEnabled(
@@ -143,11 +195,16 @@ export interface DaemonWorkspaceService {
 
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
+
+  /** Broadcast extension refresh to all active sessions (fire-and-forget). */
+  refreshExtensionsForAllSessions(): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
 }
 
 // -- Result types for workspace mutations --
 
-import type { EnvReloadResult } from '../../config/settings.js';
 export type { EnvReloadResult };
 
 export interface ReloadResponse {
@@ -157,6 +214,63 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+}
+
+export type WorkspaceTrustDesiredState = 'trusted' | 'untrusted';
+
+export interface WorkspaceTrustChangeRequest {
+  desiredState: WorkspaceTrustDesiredState;
+  reason?: string;
+}
+
+export interface WorkspaceTrustChangeResult {
+  accepted: boolean;
+  desiredState: WorkspaceTrustDesiredState;
+  requiresOperatorAction: true;
+}
+
+export interface WorkspaceSettingsWrite {
+  scope: SettingScope;
+  key: string;
+  value: unknown;
+}
+
+export class WorkspaceSettingsPartialPersistError extends Error {
+  readonly committedWrites: WorkspaceSettingsWrite[];
+  override readonly cause: unknown;
+
+  constructor(
+    message: string,
+    committedWrites: WorkspaceSettingsWrite[],
+    cause: unknown,
+  ) {
+    super(message);
+    this.name = 'WorkspaceSettingsPartialPersistError';
+    this.committedWrites = committedWrites;
+    this.cause = cause;
+  }
+}
+
+export interface WorkspacePermissionRulesUpdate {
+  scope: PermissionSettingsScope;
+  ruleType: PermissionRuleType;
+  rules: string[];
+}
+
+export class WorkspacePermissionRulesSessionRequiredError extends Error {
+  constructor() {
+    super(
+      'setWorkspacePermissionRules requires a live ACP session to update active permission rules',
+    );
+    this.name = 'WorkspacePermissionRulesSessionRequiredError';
+  }
+}
+
+export interface WorkspaceVoiceSettingsUpdate {
+  enabled?: boolean;
+  mode?: VoiceMode;
+  language?: string;
+  voiceModel?: string;
 }
 
 /** Discriminated union for MCP server restart outcomes. */
@@ -204,6 +318,13 @@ export interface DaemonWorkspaceServiceDeps {
   statusProvider?: DaemonStatusProvider;
 
   /**
+   * Daemon-local provider catalog/default-model snapshot. When present,
+   * `/workspace/providers` is answered from fresh workspace settings/env
+   * instead of querying the ACP child.
+   */
+  workspaceProvidersStatusProvider?: WorkspaceProvidersStatusProvider;
+
+  /**
    * Returns whether the ACP channel is currently live. Used by
    * `getWorkspaceEnvStatus` to populate the `acpChannelLive` field
    * without requiring an ACP round-trip.
@@ -215,6 +336,18 @@ export interface DaemonWorkspaceServiceDeps {
     workspace: string,
     toolName: string,
     enabled: boolean,
+  ) => Promise<void>;
+
+  persistSetting?: (
+    workspace: string,
+    scope: SettingScope,
+    key: string,
+    value: unknown,
+  ) => Promise<void | LoadedSettings>;
+
+  persistSettings?: (
+    workspace: string,
+    writes: WorkspaceSettingsWrite[],
   ) => Promise<void>;
 
   /** Reload daemon-side process.env from .env / settings.env. */
@@ -231,6 +364,12 @@ export interface DaemonWorkspaceServiceDeps {
    * For commands like tool-toggle, MCP restart, init-workspace.
    */
   invokeWorkspaceCommand: InvokeWorkspaceCommandFn;
+
+  /**
+   * Broadcast an extension refresh to every live session. This must not
+   * delegate to `invokeWorkspaceCommand`, which targets only one live channel.
+   */
+  refreshExtensionsForAllSessions?: RefreshExtensionsForAllSessionsFn;
 
   /**
    * Publish a workspace-wide event to all sessions' SSE buses.

@@ -157,6 +157,14 @@ describe('SessionRouter', () => {
       expect(router.hasSession('ch', 'alice')).toBe(true);
       expect(router.hasSession('ch', 'bob')).toBe(false);
     });
+
+    it('does not match a different sender that shares an id prefix', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      await router.resolve('ch', 'bobby', 'chat1');
+      // 'bob' is a prefix of 'bobby' but is a distinct sender with no session.
+      expect(router.hasSession('ch', 'bob')).toBe(false);
+      expect(router.hasSession('ch', 'bobby')).toBe(true);
+    });
   });
 
   describe('removeSession', () => {
@@ -180,6 +188,15 @@ describe('SessionRouter', () => {
       const removed = router.removeSession('ch', 'alice');
       expect(removed).toHaveLength(2);
       expect(router.hasSession('ch', 'alice')).toBe(false);
+    });
+
+    it('does not remove a different sender that shares an id prefix', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const bobby = await router.resolve('ch', 'bobby', 'chat1');
+      // Removing 'bob' (a prefix of 'bobby') must not tear down 'bobby'.
+      expect(router.removeSession('ch', 'bob')).toEqual([]);
+      expect(router.hasSession('ch', 'bobby')).toBe(true);
+      expect(router.getTarget(bobby)).toBeDefined();
     });
 
     it('cleans up target mapping after removal', async () => {

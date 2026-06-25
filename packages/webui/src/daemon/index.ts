@@ -95,6 +95,8 @@ export {
   type UseDaemonFollowupSuggestionReturn,
 } from './useDaemonFollowupSuggestion.js';
 
+export { useDaemonMidTurnInjected } from './useDaemonMidTurnInjected.js';
+
 // ── Re-exported SDK types/constants for UI consumers ──────────────
 // These allow web-shell and other UI packages to depend only on
 // @qwen-code/webui without importing @qwen-code/sdk/daemon directly.

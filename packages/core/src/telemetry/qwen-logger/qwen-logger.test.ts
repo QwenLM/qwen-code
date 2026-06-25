@@ -138,6 +138,17 @@ describe('QwenLogger', () => {
     });
   });
 
+  describe('getProxyAgent', () => {
+    it('accepts uppercase proxy URL schemes', () => {
+      const config = makeFakeConfig({
+        getProxy: () => 'HTTPS://proxy.example.com:8080',
+      });
+      const logger = QwenLogger.getInstance(config)!;
+
+      expect(logger.getProxyAgent()).toBeDefined();
+    });
+  });
+
   describe('createRumPayload', () => {
     it('includes os metadata in payload', async () => {
       const logger = QwenLogger.getInstance(mockConfig)!;

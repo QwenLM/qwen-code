@@ -202,10 +202,28 @@ export const Footer: React.FC = () => {
               {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
             </Text>
           )}
+        {/* P7-trigger: the current turn was steered toward the Workflow tool
+            by the `workflow` keyword. Hidden during ctrl-quit warnings so they
+            take precedence (matches the worktree indicator above). */}
+        {uiState.workflowKeywordActive &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text color={theme.text.accent} wrap="truncate">
+              {`⚙ ${t('workflow active')}`}
+            </Text>
+          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {!uiState.isSkillReviewDialogOpen &&
+            (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
+              <Text color={theme.status.warning}>
+                {` ⚠ ${t('{{count}} skill(s) pending review', {
+                  count: String(uiState.skillReviewPending!.skills.length),
+                })}`}
+              </Text>
+            )}
         </Box>
       </Box>
 

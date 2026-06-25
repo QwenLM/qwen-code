@@ -114,6 +114,12 @@ describe('parseAllowedTerminalSequences', () => {
     it('rejects OSC with no numeric code', () => {
       expect(parseAllowedTerminalSequences('\x1b];hello\x07')).toBeNull();
     });
+
+    it('rejects OSC when the code is not followed by a separator', () => {
+      expect(parseAllowedTerminalSequences('\x1b]9oops\x07')).toBeNull();
+      expect(parseAllowedTerminalSequences('\x1b]9\x07')).toBeNull();
+      expect(parseAllowedTerminalSequences('\x1b]9\x1b\\')).toBeNull();
+    });
   });
 });
 

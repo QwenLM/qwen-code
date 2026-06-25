@@ -105,17 +105,14 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/JSON array/);
     });
 
-    it('filters out invalid entries', async () => {
+    it('throws for invalid task entries', async () => {
       const data = [
         makeTask(),
         { id: 'bad', missing: 'fields' },
         makeTask({ id: 'good2' }),
       ];
       await seedTasksFile(tmpDir, JSON.stringify(data));
-      const result = await readCronTasks(tmpDir);
-      expect(result).toHaveLength(2);
-      expect(result[0]!.id).toBe('test001');
-      expect(result[1]!.id).toBe('good2');
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
     it('reads valid tasks', async () => {
@@ -271,6 +268,20 @@ describe('cronTasksFile', () => {
       ).rejects.toThrow(/Malformed JSON/);
       // The corrupted (hand-recoverable) content survives untouched.
       expect(await fs.readFile(filePath, 'utf-8')).toBe('NOT JSON{{{');
+    });
+
+    it('refuses to clobber a file with invalid task entries', async () => {
+      const filePath = getCronFilePath(tmpDir);
+      const raw = JSON.stringify([makeTask(), { id: 'bad' }]);
+      await seedTasksFile(tmpDir, raw);
+
+      await expect(
+        updateCronTasks(tmpDir, (tasks) => [
+          ...tasks,
+          makeTask({ id: 'new-task' }),
+        ]),
+      ).rejects.toThrow(/Invalid task entry/);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe(raw);
     });
 
     it('does not displace a fresh lock created after the stale inspection', async () => {

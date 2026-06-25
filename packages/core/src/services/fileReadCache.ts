@@ -5,6 +5,7 @@
  */
 
 import type { Stats } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 
 /**
  * Session-scoped cache that tracks which files the model has Read or
@@ -294,9 +295,10 @@ export class FileReadCache {
    * Returns `true` if a matching entry was found and disarmed; `false`
    * if there is no entry for `stats` (never tracked, or `stats`
    * resolved to a different inode than recorded — file replaced /
-   * symlink retargeted since the read). A `false` is NOT harmless: the
-   * stale entry stays armed, so the caller must fall back to
-   * {@link clear} just as it does for an unstattable path.
+   * symlink retargeted since the read). A `false` can still leave a
+   * stale entry armed, so callers that know the original path should
+   * fall back to {@link invalidateByPath}; callers without a path must
+   * fall back to {@link clear}.
    */
   markReadEvictedFromHistory(stats: Stats): boolean {
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
@@ -310,6 +312,29 @@ export class FileReadCache {
   /** Remove the entry for the given Stats, if any. */
   invalidate(stats: Stats): void {
     this.byInode.delete(FileReadCache.inodeKey(stats));
+  }
+
+  /**
+   * Best-effort targeted fallback when a caller cannot resolve a path to the
+   * inode it previously read (for example the file was deleted or replaced).
+   * Prefer {@link invalidate} / {@link markReadEvictedFromHistory} when Stats
+   * are available; this only matches the last observed path string.
+   *
+   * @returns true when at least one entry was removed.
+   */
+  invalidateByPath(absPath: string): boolean {
+    const target = resolvePath(absPath);
+    let removed = false;
+    for (const [key, entry] of this.byInode) {
+      if (
+        entry.realPath === absPath ||
+        resolvePath(entry.realPath) === target
+      ) {
+        this.byInode.delete(key);
+        removed = true;
+      }
+    }
+    return removed;
   }
 
   /** Drop every entry. Used by tests and on Config shutdown. */

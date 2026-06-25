@@ -6,7 +6,7 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { isLoopbackBind } from './loopbackBinds.js';
+import { isLoopbackBind } from './loopback-binds.js';
 
 /**
  * Reject any request that carries an `Origin` header. CLI/SDK clients never
@@ -428,7 +428,7 @@ export function createMutationGate(
   // cache is visible.
   const strictDenier: RequestHandler = (_req: Request, res: Response) => {
     // Only list remediations that work standalone. `--require-auth` is
-    // paired-required-with-a-token at boot (`runQwenServe.ts` refuses
+    // paired-required-with-a-token at boot (`run-qwen-serve.ts` refuses
     // to start with the flag set but no token), so naming it as a
     // third standalone option here would loop the operator into a
     // different boot error. Configuring a token via `QWEN_SERVER_TOKEN`

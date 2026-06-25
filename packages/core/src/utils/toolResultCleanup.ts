@@ -60,9 +60,7 @@ export async function cleanupOldToolResults(
     );
   }
   if (result.errors > 0) {
-    debugLogger.warn(
-      `${result.errors} errors during tool result cleanup`,
-    );
+    debugLogger.warn(`${result.errors} errors during tool result cleanup`);
   }
 
   return result;

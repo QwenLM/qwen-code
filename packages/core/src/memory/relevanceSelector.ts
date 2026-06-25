@@ -100,6 +100,7 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
+    skipOutputLanguagePreference: true,
     // Caller (`GeminiClient.MemoryPrefetchHandle`) owns lifecycle and aborts
     // via its controller on cleanup paths. The 30 s ceiling is a generous
     // safety net that only fires if the model API hangs (network partition,

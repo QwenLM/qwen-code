@@ -460,6 +460,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
+              --label 'skip-changelog' \
               --title "chore(release): sdk-python ${RELEASE_TAG}" \
               --body "Automated release PR for sdk-python ${RELEASE_TAG}.")"
           fi
@@ -474,7 +475,10 @@ jobs:
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
         run: |
           set -euo pipefail
-          gh pr merge "${PR_URL}" --merge --auto --delete-branch
+          # No --delete-branch: main has a merge queue and gh rejects the flag
+          # when one is enabled (the queue owns the merge; head-branch deletion
+          # follows the repo's "Automatically delete head branches" setting).
+          gh pr merge "${PR_URL}" --squash --auto
 
       - name: 'Create issue on failure'
         if: |-

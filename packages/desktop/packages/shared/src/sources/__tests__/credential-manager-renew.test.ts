@@ -176,6 +176,24 @@ describe('refreshApiRenew via refresh()', () => {
     expect(fetchCalls[0]!.url).toBe('https://auth.example.com/oauth/token');
   });
 
+  test('handles absolute renew URL with uppercase scheme', async () => {
+    mockGet.mockImplementationOnce(() => Promise.resolve({
+      value: 'old-token', expiresAt: Date.now() - 60_000,
+    }));
+    mockFetch({ access_token: 'new-token', expires_in: 3600 });
+
+    const source = createRenewSource({
+      api: {
+        baseUrl: 'https://api.example.com',
+        authType: 'bearer',
+        renewEndpoint: { path: 'HTTPS://auth.example.com/oauth/token' },
+      },
+    });
+
+    await credManager.refresh(source);
+    expect(fetchCalls[0]!.url).toBe('HTTPS://auth.example.com/oauth/token');
+  });
+
   test('returns null on 401 response', async () => {
     mockGet.mockImplementationOnce(() => Promise.resolve({
       value: 'old-token', expiresAt: Date.now() - 60_000,

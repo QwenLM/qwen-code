@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { promisify } from 'node:util'
+import { isPathWithinDirectoryForCreation } from '@craft-agent/session-tools-core'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId, addWorkspace, setActiveWorkspace, updateWorkspaceRemoteServer } from '@craft-agent/shared/config'
 import { loadWorkspaceConfig } from '@craft-agent/shared/workspaces'
@@ -297,8 +298,8 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     // Resolve path relative to workspace root
     const absolutePath = normalize(join(workspace.rootPath, relativePath))
 
-    // Double-check the resolved path is still within workspace
-    if (!absolutePath.startsWith(workspace.rootPath)) {
+    // Double-check the resolved path is still within workspace, including symlink targets.
+    if (!isPathWithinDirectoryForCreation(absolutePath, workspace.rootPath)) {
       throw new Error('Invalid path: outside workspace directory')
     }
 
@@ -351,8 +352,8 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     // Resolve path relative to workspace root
     const absolutePath = normalize(join(workspace.rootPath, relativePath))
 
-    // Double-check the resolved path is still within workspace
-    if (!absolutePath.startsWith(workspace.rootPath)) {
+    // Double-check the resolved path is still within workspace, including symlink targets.
+    if (!isPathWithinDirectoryForCreation(absolutePath, workspace.rootPath)) {
       throw new Error('Invalid path: outside workspace directory')
     }
 

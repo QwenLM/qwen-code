@@ -384,7 +384,8 @@ Hook output supports three categories of fields:
   "permission_mode": "default | plan | auto_edit | yolo",
   "tool_name": "name of the tool being executed",
   "tool_input": "object containing the tool's input parameters",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -422,7 +423,8 @@ Hook output supports three categories of fields:
   "tool_name": "name of the tool that was executed",
   "tool_input": "object containing the tool's input parameters",
   "tool_response": "object containing the tool's response",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -453,7 +455,8 @@ Hook output supports three categories of fields:
 ```json
 {
   "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_use_id": "unique identifier for the tool use",
+  "tool_use_id": "unique identifier for the tool use (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)",
   "tool_name": "name of the tool that failed",
   "tool_input": "object containing the tool's input parameters",
   "error": "error message describing the failure",

@@ -20,9 +20,53 @@
   border-radius: 3px;
 }
 
+.list > * {
+  width: min(
+    100%,
+    var(--chat-content-width, var(--chat-regular-content-width, 1000px))
+  );
+  margin-right: auto;
+  margin-left: auto;
+  transition: width 320ms ease;
+}
+
 .rowFlash {
   border-radius: 8px;
   animation: row-flash 1.6s ease-out;
+}
+
+.turnStatusRow,
+.turnAnswerRow {
+  max-width: 100%;
+}
+
+.turnStatusRow {
+  margin-bottom: 12px;
+}
+
+.turnAnswerRow {
+  margin-top: 2px;
+}
+
+.turnContentRow {
+  min-width: 0;
+}
+
+.turnContentClip {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 180ms ease;
+}
+
+.turnContentCollapsed {
+  grid-template-rows: 0fr;
+}
+
+.turnContentInner {
+  min-height: 0;
+  overflow: hidden;
 }
 
 @keyframes row-flash {

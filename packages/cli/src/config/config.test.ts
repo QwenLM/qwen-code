@@ -974,6 +974,21 @@ describe('loadCliConfig', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
+  it('should propagate artifact auto-open setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        artifact: {
+          autoOpen: false,
+        },
+      },
+      argv,
+    );
+
+    expect(config.shouldAutoOpenArtifact()).toBe(false);
+  });
+
   it('places session-injected (ACP/IDE) MCP servers at the top precedence tier', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1549,6 +1564,26 @@ describe('loadCliConfig telemetry', () => {
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
+  });
+
+  it('should use sensitiveSpanAttributeMaxLength from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+  });
+
+  it('should default sensitiveSpanAttributeMaxLength to 1MiB', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(
+      1024 * 1024,
+    );
   });
 
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
@@ -2275,7 +2310,36 @@ describe('loadCliConfig with --mcp-config', () => {
 });
 
 describe('loadCliConfig model selection', () => {
-  it.skip('selects a model from settings.json if provided', async () => {
+  const originalArgv = process.argv;
+  const authEnvKeys = [
+    'QWEN_OAUTH',
+    'OPENAI_API_KEY',
+    'OPENAI_MODEL',
+    'OPENAI_BASE_URL',
+    'QWEN_MODEL',
+    'GEMINI_API_KEY',
+    'GEMINI_MODEL',
+    'GOOGLE_API_KEY',
+    'GOOGLE_MODEL',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_BASE_URL',
+  ] as const;
+
+  beforeEach(() => {
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    for (const key of authEnvKeys) {
+      vi.stubEnv(key, undefined);
+    }
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('selects a model from settings.json if provided', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
@@ -2292,7 +2356,7 @@ describe('loadCliConfig model selection', () => {
     expect(config.getModel()).toBe('qwen3-coder-plus');
   });
 
-  it.skip('uses the default gemini model if nothing is set', async () => {
+  it('uses the default Qwen model if nothing is set', async () => {
     process.argv = ['node', 'script.js']; // No model set.
     const argv = await parseArguments();
     const config = await loadCliConfig(
@@ -2496,6 +2560,27 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getAutoSkillEnabled()).toBe(true);
   });
 
+  it('autoSkillConfirm: defaults to true when unset', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+  });
+
+  it('autoSkillConfirm: passes memory.autoSkillConfirm: false through to config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      memory: {
+        autoSkillConfirm: false,
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
@@ -2590,12 +2675,14 @@ describe('loadCliConfig chatCompression', () => {
       model: {
         chatCompression: {
           imageTokenEstimate: 1234,
+          maxRecentFilesToRetain: 7,
         },
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getChatCompression()).toEqual({
       imageTokenEstimate: 1234,
+      maxRecentFilesToRetain: 7,
     });
   });
 
@@ -3131,6 +3218,23 @@ describe('loadCliConfig fileFiltering', () => {
       expect(getter(config)).toBe(value);
     },
   );
+
+  it('should pass customIgnoreFiles from settings to config', async () => {
+    const settings: Settings = {
+      context: {
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore, .cursorignore',
+    );
+  });
 });
 
 describe('Output format', () => {
@@ -3301,6 +3405,17 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should prioritize QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH', '131072');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(131_072);
   });
 
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {

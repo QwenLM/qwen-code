@@ -53,6 +53,7 @@ import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { SkillReviewDialog } from './SkillReviewDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
@@ -170,7 +171,13 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.confirmUpdateExtensionRequests.length > 0) {
+  // Extension install/update requests (consent, setting input, plugin choice)
+  // are rendered inside the ExtensionsManagerDialog when it is open, so the
+  // dialog keeps its tab/list state instead of being unmounted.
+  if (
+    uiState.confirmUpdateExtensionRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.confirmUpdateExtensionRequests[0];
     return (
       <ConsentPrompt
@@ -189,7 +196,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.settingInputRequests.length > 0) {
+  if (
+    uiState.settingInputRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.settingInputRequests[0];
     // Use settingName as key to force re-mount when switching between different settings
     return (
@@ -204,7 +214,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.pluginChoiceRequests.length > 0) {
+  if (
+    uiState.pluginChoiceRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.pluginChoiceRequests[0];
     return (
       <PluginChoicePrompt
@@ -256,6 +269,7 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isVoiceModelMode={uiState.isVoiceModelMode}
       />
     );
   }
@@ -528,6 +542,19 @@ export const DialogManager = ({
         fileHistoryService={config.getFileHistoryService()}
         fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
         onClose={uiActions.closeDiffDialog}
+      />
+    );
+  }
+
+  if (uiState.isSkillReviewDialogOpen && uiState.skillReviewPending) {
+    return (
+      <SkillReviewDialog
+        key={uiState.skillReviewPending.taskId}
+        skills={uiState.skillReviewPending.skills}
+        onAccept={uiActions.acceptPendingSkill}
+        onReject={uiActions.rejectPendingSkill}
+        onClose={uiActions.closeSkillReviewDialog}
+        onDismiss={uiActions.dismissSkillReviewDialog}
       />
     );
   }

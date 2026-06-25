@@ -97,7 +97,7 @@ export function WelcomeHeader({
           </div>
 
           <div className={styles.metaLine}>
-            <span className={styles.terminalLabel}>Web terminal</span>
+            <span className={styles.shellLabel}>Web chat</span>
             <span className={styles.sep}>|</span>
             <span className={styles.model}>{model}</span>
             <span className={styles.modelHint}>{t('welcome.changeModel')}</span>

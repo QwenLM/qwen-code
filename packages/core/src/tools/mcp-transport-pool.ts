@@ -28,6 +28,7 @@ import {
 } from './mcp-pool-key.js';
 import { SessionMcpView } from './session-mcp-view.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import type { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
@@ -204,6 +205,7 @@ export class McpTransportPool {
    *   passed to `SessionMcpView` so filtered tool snapshots register
    *   into THIS session, not the pool's shared state.
    * @param sessionPromptRegistry Same for prompts.
+   * @param sessionResourceRegistry Same for resources.
    */
   async acquire(
     serverName: string,
@@ -211,6 +213,7 @@ export class McpTransportPool {
     sessionId: string,
     sessionToolRegistry: ToolRegistry,
     sessionPromptRegistry: PromptRegistry,
+    sessionResourceRegistry: ResourceRegistry,
   ): Promise<PooledConnection> {
     if (this.draining) {
       throw new Error(
@@ -257,6 +260,7 @@ export class McpTransportPool {
             sessionId,
             sessionToolRegistry,
             sessionPromptRegistry,
+            sessionResourceRegistry,
           );
           this.indexAttach(sessionId, id);
           return conn;
@@ -355,6 +359,7 @@ export class McpTransportPool {
           sessionId,
           sessionToolRegistry,
           sessionPromptRegistry,
+          sessionResourceRegistry,
         );
       } catch (err) {
         // Only release if THIS acquire actually reserved a new slot.
@@ -454,6 +459,7 @@ export class McpTransportPool {
         sessionId,
         sessionToolRegistry,
         sessionPromptRegistry,
+        sessionResourceRegistry,
       );
       // re-index
       // AFTER attach succeeds. Pre-fix the early `indexAttach` at the
@@ -852,10 +858,12 @@ export class McpTransportPool {
     sessionId: string,
     sessionToolRegistry: ToolRegistry,
     sessionPromptRegistry: PromptRegistry,
+    sessionResourceRegistry: ResourceRegistry,
   ): PooledConnection {
     const view = new SessionMcpView(
       sessionToolRegistry,
       sessionPromptRegistry,
+      sessionResourceRegistry,
       sessionId,
       serverName,
       cfg,
@@ -1060,7 +1068,7 @@ export class McpTransportPool {
       // had just set. Setting first means the aggregator sees the
       // entry mid-`active` transition and returns CONNECTED.
       this.entries.set(id, entry);
-      entry.markActive(snap.tools, snap.prompts);
+      entry.markActive(snap.tools, snap.prompts, snap.resources);
       debugLogger.info(
         `Spawned pool entry ${id} (entryIndex=${entryIndex}, transport=${transport})`,
       );
@@ -1142,6 +1150,7 @@ export class McpTransportPool {
     sessionId: string,
     sessionToolRegistry: ToolRegistry,
     sessionPromptRegistry: PromptRegistry,
+    sessionResourceRegistry: ResourceRegistry,
   ): Promise<PooledConnection> {
     const entryIndex = this.allocateEntryIndex(serverName);
     const id: ConnectionId =
@@ -1172,6 +1181,7 @@ export class McpTransportPool {
     const view = new SessionMcpView(
       sessionToolRegistry,
       sessionPromptRegistry,
+      sessionResourceRegistry,
       sessionId,
       serverName,
       cfg,
@@ -1293,7 +1303,7 @@ export class McpTransportPool {
           `McpTransportPool is draining or unpooled ${id} was cancelled`,
         );
       }
-      entry.markActive(snap.tools, snap.prompts);
+      entry.markActive(snap.tools, snap.prompts, snap.resources);
       // Unpooled handle: snapshot replay through `view.applyTools` /
       // `applyPrompts` applies per-session `includeTools` / `excludeTools`
       // filtering and the per-session trust copy (fix). Release

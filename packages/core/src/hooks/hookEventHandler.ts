@@ -263,6 +263,7 @@ export class HookEventHandler {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PreToolUseInput = {
       ...this.createBaseInput(HookEventName.PreToolUse),
@@ -270,6 +271,7 @@ export class HookEventHandler {
       tool_name: toolName,
       tool_input: toolInput,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -294,6 +296,7 @@ export class HookEventHandler {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseInput = {
       ...this.createBaseInput(HookEventName.PostToolUse),
@@ -302,6 +305,7 @@ export class HookEventHandler {
       tool_input: toolInput,
       tool_response: toolResponse,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -327,11 +331,13 @@ export class HookEventHandler {
     isInterrupt?: boolean,
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseFailureInput = {
       ...this.createBaseInput(HookEventName.PostToolUseFailure),
       permission_mode: permissionMode ?? PermissionMode.Default,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
       tool_name: toolName,
       tool_input: toolInput,
       error: errorMessage,
@@ -467,12 +473,14 @@ export class HookEventHandler {
     toolUseId: string,
     reason: PermissionDeniedReason,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PermissionDeniedInput = {
       ...this.createBaseInput(HookEventName.PermissionDenied),
       tool_name: toolName,
       tool_input: toolInput,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
       reason,
     };
 

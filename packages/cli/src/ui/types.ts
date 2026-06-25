@@ -91,6 +91,20 @@ export interface SummaryProps {
 
 export interface HistoryItemBase {
   text?: string; // Text content for user/gemini/info/error messages
+  /** Display-only flags that do not affect canonical history semantics. */
+  display?: {
+    /**
+     * If true, the item is kept in history for turn mapping but not
+     * rendered in the restored transcript. Set by ui.history.collapseOnResume
+     * when resuming a session.
+     */
+    suppressOnRestore?: boolean;
+    /**
+     * Identifies special display-only items, like the summary row added
+     * when history is collapsed.
+     */
+    kind?: 'collapse-summary';
+  };
 }
 
 export type HistoryItemUser = HistoryItemBase & {
@@ -112,6 +126,7 @@ export type HistoryItemUser = HistoryItemBase & {
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
@@ -122,6 +137,7 @@ export type HistoryItemGeminiContent = HistoryItemBase & {
 export type HistoryItemGeminiThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
+  durationMs?: number;
 };
 
 export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
@@ -229,6 +245,10 @@ export type HistoryItemModelStats = HistoryItemBase & {
 
 export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
+};
+
+export type HistoryItemSkillStats = HistoryItemBase & {
+  type: 'skill_stats';
 };
 
 export type HistoryItemQuit = HistoryItemBase & {
@@ -593,6 +613,7 @@ export type HistoryItemWithoutId =
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemSkillStats
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -629,6 +650,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  SKILL_STATS = 'skill_stats',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',
@@ -706,6 +728,11 @@ export type Message =
     }
   | {
       type: MessageType.TOOL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
+      type: MessageType.SKILL_STATS;
       timestamp: Date;
       content?: string;
     }

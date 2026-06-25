@@ -299,6 +299,7 @@ export class MonitorRegistry {
 
     if (options.notify === false) {
       this.settle(entry, 'cancelled');
+      entry.notified = true;
       debugLogger.info(`Monitor cancelled: ${monitorId}`);
       entry.abortController.abort();
       this.dispatchOwnerLifecycleWake(entry);
@@ -530,6 +531,9 @@ export class MonitorRegistry {
 
   /** Emit a terminal notification (completed/failed/cancelled). */
   private emitTerminalNotification(entry: MonitorTask, detail?: string): void {
+    if (entry.notified) return;
+    entry.notified = true;
+
     const statusText =
       entry.status === 'completed'
         ? 'completed'

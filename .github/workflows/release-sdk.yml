@@ -399,6 +399,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
+              --label 'skip-changelog' \
               --title "chore(release): sdk-typescript ${RELEASE_TAG}" \
               --body "Automated release PR for sdk-typescript ${RELEASE_TAG}.")"
           fi
@@ -417,10 +418,14 @@ jobs:
           # Keep [skip ci] only on the squash commit that lands on main. The
           # release branch commit and PR title intentionally omit it so tag-push
           # workflows and PR metadata stay unaffected.
+          #
+          # No --delete-branch: main has a merge queue, and gh rejects
+          # --delete-branch when one is enabled (the queue owns the merge, so
+          # head-branch deletion is governed by the repo's
+          # "Automatically delete head branches" setting instead).
           gh pr merge "${PR_URL}" \
             --squash \
             --auto \
-            --delete-branch \
             --subject "chore(release): sdk-typescript ${RELEASE_TAG} [skip ci]"
 
       - name: 'Create Issue on Failure'

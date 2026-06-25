@@ -146,7 +146,7 @@ export function isUnattendedMode(): boolean {
  * @param signal Optional signal used to abort the delay.
  * @returns A promise that resolves after the delay.
  */
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
+export function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       return reject(new Error('Retry aborted by signal'));

@@ -1,157 +1,181 @@
 .dialog {
-  min-height: 0;
+  display: flex;
+  min-height: 460px;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 8px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
-.body {
-  flex: 1;
-  min-height: 0;
+.toolbar {
   display: flex;
-  flex-direction: column;
-  padding: 10px 12px;
-  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .tabs {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.brand {
-  color: var(--accent-color);
-  font-weight: 700;
+  gap: 4px;
+  min-width: 0;
 }
 
 .tab {
-  color: var(--text-primary);
+  min-height: 30px;
+  padding: 5px 12px;
   border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 1px 7px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+}
+
+.tab:hover,
+.tabActive {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 .tabActive {
-  color: var(--bg-primary);
-  background: var(--accent-color);
+  border-color: transparent;
+}
+
+.search {
+  width: min(240px, 42vw);
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
 }
 
 .general {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   gap: 12px;
-  min-height: 0;
-}
-
-.intro {
-  color: var(--text-primary);
-  max-width: 780px;
-}
-
-.sectionTitle {
-  color: var(--text-primary);
-  font-weight: 700;
 }
 
 .shortcuts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .shortcut {
   display: grid;
-  grid-template-columns: minmax(92px, 140px) minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
   min-width: 0;
-  line-height: 1.35;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.shortcut:hover {
+  background: var(--bg-tertiary);
 }
 
 .shortcutKey {
-  color: var(--accent-color);
   min-width: 0;
+  color: var(--accent-color);
+  text-align: right;
   overflow-wrap: anywhere;
-  white-space: normal;
+  white-space: nowrap;
 }
 
 .shortcutDesc {
-  color: var(--text-primary);
   min-width: 0;
+  color: var(--text-primary);
   overflow-wrap: anywhere;
 }
 
 .commandList {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.commandListIntro {
-  color: var(--text-primary);
-  margin-bottom: 8px;
-}
-
-.commandGroup {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   gap: 6px;
-  margin-bottom: 14px;
 }
 
-.commandGroupTitle {
-  color: var(--text-primary);
-  font-weight: 700;
-}
-
-.commandGroupTitle span {
-  color: var(--text-secondary);
-  font-weight: 400;
-  margin-left: 6px;
-}
-
-.command {
+.commandCard {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding-left: 12px;
+  border-radius: 8px;
+}
+
+.commandCard:hover,
+.commandCardExpanded {
+  background: var(--bg-tertiary);
 }
 
 .commandRow {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
+  width: 100%;
+  min-height: 32px;
   min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
 }
 
 .commandName {
-  color: var(--accent-color);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 48%;
-}
-
-.commandMeta {
-  color: var(--text-secondary);
-  font-size: 12px;
+  flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.commandDescription {
-  color: var(--text-primary);
-  font-size: 12px;
-  padding-left: 12px;
+  color: var(--accent-color);
   overflow-wrap: anywhere;
 }
 
+.commandTag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+  transition: transform 120ms ease;
+}
+
+.chevronExpanded {
+  transform: rotate(90deg);
+}
+
+.commandDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 8px 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.commandDescription,
 .commandSubcommands {
   color: var(--text-secondary);
   font-size: 12px;
-  padding-left: 12px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
@@ -161,20 +185,28 @@
 }
 
 @media (max-width: 720px) {
-  .shortcuts {
-    grid-template-columns: minmax(0, 1fr);
+  .dialog {
+    min-height: 0;
   }
 
-  .shortcut {
-    grid-template-columns: minmax(82px, 110px) minmax(0, 1fr);
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tabs {
+    overflow-x: auto;
+  }
+
+  .tab {
+    flex: 0 0 auto;
+  }
+
+  .search {
+    width: 100%;
   }
 
   .commandRow {
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .commandName {
-    max-width: 100%;
+    align-items: center;
   }
 }

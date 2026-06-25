@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { useMcpApproval } from './useMcpApproval.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 import {
   loadMcpApprovals,
   resetMcpApprovalsForTesting,
@@ -141,6 +142,39 @@ describe('useMcpApproval', () => {
     expect(stateOf('a', a)).toBe('approved');
     expect(stateOf('b', b)).toBe('approved');
     expect(discoverSpy).toHaveBeenCalledTimes(2);
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+  });
+
+  it('opens the dialog mid-session when a hot-reload pends a new gated server', () => {
+    // Starts with no servers — dialog closed.
+    const servers: Record<string, MCPServerConfig> = {};
+    const config = makeConfig(servers);
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+
+    // A hot-reload adds a gated, unapproved server and signals the change.
+    servers['c'] = { httpUrl: 'https://c.test', scope: 'project' };
+    act(() => {
+      appEvents.emit(AppEvent.McpPendingApprovalChanged);
+    });
+
+    expect(result.current.isMcpApprovalDialogOpen).toBe(true);
+    expect(result.current.currentMcpApproval?.name).toBe('c');
+  });
+
+  it('does not re-prompt mid-session for an already-approved server', async () => {
+    const a: MCPServerConfig = { command: 'a', scope: 'project' };
+    await loadMcpApprovals().setState(dir, 'a', a, 'approved');
+    resetMcpApprovalsForTesting();
+
+    const config = makeConfig({ a });
+    const { result } = renderHook(() => useMcpApproval(config));
+    expect(result.current.isMcpApprovalDialogOpen).toBe(false);
+
+    act(() => {
+      appEvents.emit(AppEvent.McpPendingApprovalChanged);
+    });
+
     expect(result.current.isMcpApprovalDialogOpen).toBe(false);
   });
 

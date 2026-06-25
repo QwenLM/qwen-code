@@ -9,13 +9,28 @@ import {
   asKnownDaemonEvent,
   createDaemonAuthState,
   createDaemonSessionViewState,
+  DAEMON_KNOWN_EVENT_TYPE_VALUES,
   isDaemonEventType,
+  MID_TURN_MESSAGE_INJECTED_EVENT,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
+import type { DaemonGithubSetupCompletedData } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
+
+describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
+  it('is the wire literal and a registered known event type', () => {
+    // The same const is imported by the daemon publisher (acp-bridge) and the
+    // browser consumer (webui), so this also pins THEIR matching. Changing the
+    // wire string is a deliberate protocol change and must update this literal.
+    expect(MID_TURN_MESSAGE_INJECTED_EVENT).toBe('mid_turn_message_injected');
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      MID_TURN_MESSAGE_INJECTED_EVENT,
+    );
+  });
+});
 
 describe('daemon event schema', () => {
   it('narrows known daemon events by discriminator', () => {
@@ -37,6 +52,26 @@ describe('daemon event schema', () => {
     }
     expect(isDaemonEventType(event, 'model_switched')).toBe(true);
     expect(isDaemonEventType(event, 'permission_request')).toBe(false);
+  });
+
+  it('recognizes trust_change_requested as known daemon event', () => {
+    const event: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'trust_change_requested',
+      data: {
+        workspaceCwd: '/work',
+        desiredState: 'untrusted',
+        reason: 'remote user request',
+      },
+      originatorClientId: 'client-1',
+    };
+
+    const known = asKnownDaemonEvent(event);
+
+    expect(known).toBe(event);
+    expect(known?.type).toBe('trust_change_requested');
+    expect(isDaemonEventType(event, 'trust_change_requested')).toBe(true);
   });
 
   it('leaves malformed or unknown events on the raw DaemonEvent path', () => {
@@ -584,6 +619,53 @@ describe('daemon event schema', () => {
         v: 1,
         type: 'session_metadata_updated',
         data: {},
+      }),
+    ).toBeUndefined();
+  });
+
+  it('validates mid_turn_message_injected events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: ['check the tests too'] },
+      }),
+    ).toBeDefined();
+
+    // Empty array is structurally valid (the guard only requires a string[]).
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: [] },
+      }),
+    ).toBeDefined();
+
+    // Missing messages, non-string entries, and missing sessionId are rejected.
+    expect(
+      asKnownDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 4,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: ['ok', 42] },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 5,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: { messages: ['x'] },
       }),
     ).toBeUndefined();
   });
@@ -1630,6 +1712,41 @@ describe('PR 21 — auth device-flow events', () => {
         data: { path: '/work/QWEN.md', action: 'replaced' },
       };
       expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+    });
+
+    it('github_setup_completed: accepts workflow summary and gitignore warning', () => {
+      const known = asKnownDaemonEvent({
+        id: 11,
+        v: 1,
+        type: 'github_setup_completed',
+        data: {
+          releaseTag: 'v1.2.3',
+          readmeUrl:
+            'https://github.com/QwenLM/qwen-code-action/blob/v1.2.3/README.md#quick-start',
+          workflows: [
+            {
+              path: '.github/workflows/qwen-dispatch.yml',
+              status: 'written',
+              sizeBytes: 12,
+            },
+          ],
+          gitignore: { path: '.gitignore', status: 'failed' },
+          warnings: ['Could not update .gitignore'],
+        },
+      });
+
+      expect(known?.type).toBe('github_setup_completed');
+      expect(
+        (known?.data as DaemonGithubSetupCompletedData).gitignore.status,
+      ).toBe('failed');
+      expect(
+        asKnownDaemonEvent({
+          id: 12,
+          v: 1,
+          type: 'github_setup_completed',
+          data: { releaseTag: 'v1.2.3' },
+        }),
+      ).toBeUndefined();
     });
 
     it('mcp_server_restarted: counter + last snapshot + envelope originator merge', () => {

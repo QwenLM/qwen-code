@@ -8,6 +8,7 @@
 import type { SessionToolContext } from '../context.ts';
 import type { ToolResult } from '../types.ts';
 import { successResponse, errorResponse } from '../response.ts';
+import { isPathWithinDirectory } from '../runtime/path-security.ts';
 
 export interface SubmitPlanArgs {
   planPath: string;
@@ -26,6 +27,12 @@ export async function handleSubmitPlan(
   args: SubmitPlanArgs
 ): Promise<ToolResult> {
   const { planPath } = args;
+
+  if (!isPathWithinDirectory(planPath, ctx.plansFolderPath)) {
+    return errorResponse(
+      `Plan file must be inside the session plans directory: ${ctx.plansFolderPath}`
+    );
+  }
 
   // Verify the file exists
   if (!ctx.fs.exists(planPath)) {

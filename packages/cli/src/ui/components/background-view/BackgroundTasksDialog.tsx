@@ -31,8 +31,10 @@ import {
   type BackgroundApproval,
   type MonitorTask,
   type ToolCallConfirmationDetails,
+  type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
+import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 import {
@@ -41,7 +43,7 @@ import {
   type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
-import { t } from '../../../i18n/index.js';
+import { localizeToolDisplayName, t } from '../../../i18n/index.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -56,7 +58,7 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 );
 
 function formatActivityLabel(name: string, description: string | undefined) {
-  const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
+  const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
   const singleLineDesc = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
@@ -192,6 +194,15 @@ function rowLabel(entry: DialogEntry): string {
       return `${SHELL_ROW_PREFIX} ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'workflow': {
+      const label = entry.meta?.name ?? entry.runId;
+      const phase = entry.currentPhase ? ` · ${entry.currentPhase}` : '';
+      const counts =
+        entry.agentsDispatched > 0
+          ? ` (${entry.agentsCompleted}/${entry.agentsDispatched})`
+          : '';
+      return `[workflow] ${label}${phase}${counts}`;
+    }
     case 'dream':
       return formatDreamRowLabel(entry);
     default: {
@@ -357,6 +368,14 @@ const DetailBody: React.FC<{
     case 'monitor':
       return (
         <MonitorDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'workflow':
+      return (
+        <WorkflowDetailBody
           entry={entry}
           maxHeight={maxHeight}
           maxWidth={maxWidth}
@@ -874,6 +893,189 @@ const MonitorDetailBody: React.FC<{
   );
 };
 
+// ─── Workflow detail body ──────────────────────────────────
+//
+// Shows the workflow's declared meta (name + description + whenToUse),
+// the phase tree with truncation, per-phase dispatch counts, and the
+// log tail. Phase tree is capped at MAX_VISIBLE_PHASES with a "+N more
+// above" header so deeply nested fan-outs don't blow the dialog body.
+// Logs are the most recent tail; the registry caps at 100 lines but
+// the body further truncates to fit the available height.
+
+const MAX_VISIBLE_PHASES = 20;
+const MAX_VISIBLE_LOG_LINES = 10;
+
+const WorkflowDetailBody: React.FC<{
+  entry: WorkflowTask;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.agentsDispatched > 0) {
+    dimSubtitleParts.push(
+      `${entry.agentsCompleted}/${entry.agentsDispatched} ${t('agents')}`,
+    );
+  }
+  dimSubtitleParts.push(
+    `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
+  );
+  // P5: surface the per-run token usage when there's anything to report
+  // (cap set OR tokens spent). Skipped when both are absent so legacy
+  // / test runs don't show a noisy `0 tokens` chip.
+  // P5 R1 (#7): apply `formatTokenCount` for consistency with
+  // `statusLinePresets` and other token-bearing UI surfaces.
+  if (entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null) {
+    dimSubtitleParts.push(
+      entry.tokenBudgetTotal !== null
+        ? `${formatTokenCount(entry.tokensSpent)}/${formatTokenCount(entry.tokenBudgetTotal)} ${t('tokens')}`
+        : `${formatTokenCount(entry.tokensSpent)} ${t('tokens')}`,
+    );
+  }
+
+  // Phase tree: collapse the head when over the visible cap, keeping
+  // the most recent N entries (the user almost always wants to see the
+  // current state, not the launch sequence).
+  const phaseOverflow = Math.max(0, entry.phases.length - MAX_VISIBLE_PHASES);
+  const visiblePhases = entry.phases.slice(-MAX_VISIBLE_PHASES);
+
+  // Log tail: similar truncation logic; show "+N more above" header if
+  // the registry has more than the visible window.
+  const logOverflow = Math.max(
+    0,
+    entry.recentLogs.length - MAX_VISIBLE_LOG_LINES,
+  );
+  const visibleLogs = entry.recentLogs.slice(-MAX_VISIBLE_LOG_LINES);
+
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.meta?.description && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text wrap="wrap">{entry.meta.description}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          {t('Phases')}
+        </Text>
+      </Box>
+      {entry.phases.length === 0 ? (
+        <Box>
+          <Text dimColor>{t('(no phase recorded yet)')}</Text>
+        </Box>
+      ) : (
+        <Fragment>
+          {phaseOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${phaseOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visiblePhases.map((phaseTitle, i) => {
+            const isCurrent =
+              entry.status === 'running' &&
+              i === visiblePhases.length - 1 &&
+              entry.currentPhase === phaseTitle;
+            const marker = isCurrent ? '▸' : '·';
+            // P5: per-phase token tally appended to the phase row.
+            // Skipped when no tokens attributed yet so empty phases
+            // (early register, schema-mode-pending) don't render a
+            // misleading `· 0` chip.
+            // P5 R1 (#7): apply `formatTokenCount` for consistency.
+            const phaseTokens = entry.perPhaseTokens.get(phaseTitle) ?? 0;
+            const tokenChip =
+              phaseTokens > 0 ? ` · ${formatTokenCount(phaseTokens)}t` : '';
+            return (
+              <Box key={`${phaseTitle}-${i}`}>
+                <Text color={isCurrent ? theme.status.success : undefined}>
+                  {`  ${marker} ${phaseTitle}${tokenChip}`}
+                </Text>
+              </Box>
+            );
+          })}
+          {/* P5 R1 (#6): surface null-sentinel attribution — tokens
+              spent BEFORE the first `phase()` call accumulate under the
+              `null` key. Without this row the entire pre-phase spend is
+              hidden in the UI. */}
+          {(entry.perPhaseTokens.get(null) ?? 0) > 0 && (
+            <Box>
+              <Text dimColor>
+                {`  · ${t('(no phase)')} · ${formatTokenCount(
+                  entry.perPhaseTokens.get(null) ?? 0,
+                )}t`}
+              </Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {entry.recentLogs.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Logs')}
+            </Text>
+          </Box>
+          {logOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${logOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visibleLogs.map((line, i) => (
+            <Box key={`log-${i}`}>
+              <Text wrap="truncate-end" dimColor>
+                {line}
+              </Text>
+            </Box>
+          ))}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              {t('Error')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
+};
+
 // ─── Dialog shell ──────────────────────────────────────────
 
 interface BackgroundTasksDialogProps {
@@ -931,6 +1133,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const [pendingCancelEntryId, setPendingCancelEntryId] = useState<
     string | null
   >(null);
+
+  // P7b-A3: when true, the workflow save overlay owns the keyboard (the main
+  // dialog handler yields). Reset whenever we leave detail mode so an armed
+  // save can't bleed into the list view.
+  const [saveActive, setSaveActive] = useState(false);
+  useEffect(() => {
+    if (!isDetailMode) setSaveActive(false);
+  }, [isDetailMode]);
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
@@ -1123,6 +1333,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useKeypress(
     (key) => {
       if (!dialogOpen) return;
+      // P7b-A3: the save overlay owns the keyboard while open — yield every
+      // key to it (its own `useKeypress` handles name input / scope / save).
+      if (saveActive) return;
       // While a parked approval is shown, the embedded ToolConfirmationMessage
       // owns the selection keys (↑/↓/numbers/Enter, Esc = deny this call).
       // Keep two escape hatches for compact approvals that don't have their
@@ -1188,6 +1401,21 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
 
       // detail mode
+      // P7b-A3: `s` opens the save overlay for a completed workflow run that
+      // still carries its script source. Gated to terminal workflow entries
+      // so it never collides with a live run's controls.
+      if (
+        key.sequence === 's' &&
+        !key.ctrl &&
+        !key.meta &&
+        config &&
+        selectedEntry?.kind === 'workflow' &&
+        selectedEntry.status !== 'running' &&
+        !!selectedEntry.script
+      ) {
+        setSaveActive(true);
+        return;
+      }
       if (key.name === 'left') {
         // Reset the foreground confirm-step before leaving detail so the
         // armed state can't carry into list mode and turn a stray `x` into
@@ -1227,6 +1455,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntry.status === 'paused' &&
     !selectedEntry.resumeBlockedReason;
 
+  // P7b-A3: a completed workflow run that still carries its script source can
+  // be saved to `.qwen/workflows/<name>.js` from the detail view.
+  const workflowSaveTarget =
+    config &&
+    selectedEntry?.kind === 'workflow' &&
+    selectedEntry.status !== 'running' &&
+    selectedEntry.script
+      ? selectedEntry
+      : null;
+
   // Hint footer — context-sensitive.
   const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
   const showCancelConfirmHint =
@@ -1265,6 +1503,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
     }
+    if (workflowSaveTarget) hints.push('s save');
   }
 
   return (
@@ -1325,9 +1564,19 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           </Box>
         )}
       </Box>
-      <Box marginTop={1} paddingX={1}>
-        <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
-      </Box>
+      {saveActive && workflowSaveTarget && config ? (
+        <WorkflowSaveOverlay
+          script={workflowSaveTarget.script}
+          initialName={workflowSaveTarget.meta?.name ?? ''}
+          config={config}
+          isActive={saveActive}
+          onClose={() => setSaveActive(false)}
+        />
+      ) : (
+        <Box marginTop={1} paddingX={1}>
+          <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+        </Box>
+      )}
     </Box>
   );
 };

@@ -126,6 +126,19 @@ describe('<Footer />', () => {
     expect(lastFrame()).toBeDefined();
   });
 
+  it('shows the "workflow active" indicator when the keyword trigger is armed', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({ workflowKeywordActive: true }),
+    );
+    expect(lastFrame()).toContain('workflow active');
+  });
+
+  it('hides the "workflow active" indicator by default', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
+    expect(lastFrame()).not.toContain('workflow active');
+  });
+
   it('does not display the working directory or branch name', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).not.toMatch(/\(.*\*\)/);

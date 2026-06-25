@@ -17,6 +17,7 @@ import {
   detectSystemLanguage,
   getLanguageNameFromLocale,
 } from '../i18n/index.js';
+import { SUPPORTED_LANGUAGES } from '../i18n/languages.js';
 
 const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
 const LLM_OUTPUT_LANGUAGE_MARKER_PREFIX = 'qwen-code:llm-output-language:';
@@ -37,14 +38,34 @@ export function isAutoLanguage(value: string | undefined | null): boolean {
  * Unknown inputs are returned as-is to support any language name.
  */
 export function normalizeOutputLanguage(language: string): string {
-  const lowered = language.toLowerCase();
-  const fullName = getLanguageNameFromLocale(lowered);
-  // getLanguageNameFromLocale returns 'English' as default for unknown codes.
-  // Only use the result if it's a known code or explicitly 'en'.
-  if (fullName !== 'English' || lowered === 'en') {
-    return fullName;
+  const normalized = language.trim().replace(/_/g, '-').toLowerCase();
+  const knownLanguageName = SUPPORTED_LANGUAGES.find(
+    (supportedLanguage) =>
+      supportedLanguage.fullName.toLowerCase() === normalized,
+  );
+  if (knownLanguageName) {
+    return knownLanguageName.fullName;
   }
-  return language;
+
+  const knownLocaleCode = SUPPORTED_LANGUAGES.some((supportedLanguage) => {
+    const code = supportedLanguage.code.toLowerCase();
+    const id = supportedLanguage.id.toLowerCase();
+    return (
+      normalized === code ||
+      normalized === id ||
+      normalized.startsWith(`${code}-`) ||
+      normalized.startsWith(`${id}-`) ||
+      normalized.startsWith(`${code}.`) ||
+      normalized.startsWith(`${id}.`) ||
+      normalized.startsWith(`${code}@`) ||
+      normalized.startsWith(`${id}@`)
+    );
+  });
+  if (!knownLocaleCode) {
+    return language;
+  }
+
+  return getLanguageNameFromLocale(normalized);
 }
 
 /**

@@ -326,13 +326,11 @@ describe('FileService', () => {
   describe('read', () => {
     it('calls fsFactory.forRequest with context and delegates to readFile', async () => {
       const mockFs = {
-        readFile: vi
-          .fn()
-          .mockResolvedValue({
-            content: 'hello',
-            truncated: false,
-            bytesRead: 5,
-          }),
+        readFile: vi.fn().mockResolvedValue({
+          content: 'hello',
+          truncated: false,
+          bytesRead: 5,
+        }),
       };
       const fsFactory = { forRequest: vi.fn().mockReturnValue(mockFs) };
       const service = createFileService({
@@ -461,13 +459,11 @@ Add to the test file:
 describe('write', () => {
   it('passes originatorClientId to forRequest for audit', async () => {
     const mockFs = {
-      writeFile: vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          filePath: '/workspace/f.ts',
-          bytesWritten: 3,
-        }),
+      writeFile: vi.fn().mockResolvedValue({
+        ok: true,
+        filePath: '/workspace/f.ts',
+        bytesWritten: 3,
+      }),
     };
     const fsFactory = { forRequest: vi.fn().mockReturnValue(mockFs) };
     const service = createFileService({
@@ -531,13 +527,11 @@ const ctx: WorkspaceRequestContext = {
 describe('AuthService', () => {
   it('startFlow delegates to registry.start and returns flowId + verificationUri + userCode', async () => {
     const registry = {
-      start: vi
-        .fn()
-        .mockReturnValue({
-          id: 'flow-1',
-          verificationUri: 'https://auth.example/device',
-          userCode: 'ABCD-1234',
-        }),
+      start: vi.fn().mockReturnValue({
+        id: 'flow-1',
+        verificationUri: 'https://auth.example/device',
+        userCode: 'ABCD-1234',
+      }),
     };
     const service = createAuthService({ deviceFlowRegistry: registry as any });
 

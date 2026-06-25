@@ -17,6 +17,7 @@ import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 import { ModelRegistry } from './modelRegistry.js';
 import {
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type ResolvedModelConfig,
   type AvailableModel,
   type ModelSwitchMetadata,
@@ -51,6 +52,8 @@ export interface ModelsConfigOptions {
   initialAuthType?: AuthType;
   /** Model providers configuration */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Maps custom provider ids to their SDK protocol (AuthType). */
+  providerProtocolConfig?: ProviderProtocolConfig;
   /** Generation config from CLI/settings */
   generationConfig?: Partial<ContentGeneratorConfig>;
   /** Source tracking for generation config */
@@ -144,7 +147,10 @@ export class ModelsConfig {
   }
 
   constructor(options: ModelsConfigOptions = {}) {
-    this.modelRegistry = new ModelRegistry(options.modelProvidersConfig);
+    this.modelRegistry = new ModelRegistry(
+      options.modelProvidersConfig,
+      options.providerProtocolConfig,
+    );
     this.onModelChange = options.onModelChange;
 
     // Initialize generation config
@@ -321,7 +327,12 @@ export class ModelsConfig {
    */
   getModelDisplayName(modelId: string): string {
     if (!this.currentAuthType) return modelId;
-    const resolved = this.modelRegistry.getModel(this.currentAuthType, modelId);
+    const resolved =
+      this.modelRegistry.getModel(
+        this.currentAuthType,
+        modelId,
+        this._generationConfig.baseUrl || undefined,
+      ) ?? this.modelRegistry.getModel(this.currentAuthType, modelId);
     return resolved?.name ?? modelId;
   }
 
@@ -955,7 +966,11 @@ export class ModelsConfig {
    * 4. If no default is available, leave the generationConfig incomplete and let
    *    resolveContentGeneratorConfigWithSources throw exceptions as expected.
    */
-  syncAfterAuthRefresh(authType: AuthType, modelId?: string): void {
+  syncAfterAuthRefresh(
+    authType: AuthType,
+    modelId?: string,
+    providerBaseUrlOverride?: string,
+  ): void {
     this.strictModelProviderSelection = false;
     const previousAuthType = this.currentAuthType;
     this.currentAuthType = authType;
@@ -967,9 +982,10 @@ export class ModelsConfig {
     // Prefer exact match (id+baseUrl) when the current baseUrl was set by a
     // model provider switch; fall back to any model with the same id.
     const providerBaseUrl =
-      this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
+      providerBaseUrlOverride ??
+      (this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
         ? this._generationConfig.baseUrl
-        : undefined;
+        : undefined);
     const resolved = modelId
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
@@ -1363,10 +1379,16 @@ export class ModelsConfig {
    * This enables hot-reloading of modelProviders settings without restarting the CLI.
    *
    * @param modelProvidersConfig - The updated model providers configuration
+   * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
+   *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    this.modelRegistry.reloadModels(modelProvidersConfig);
+    this.modelRegistry.reloadModels(
+      modelProvidersConfig,
+      providerProtocolConfig,
+    );
   }
 }

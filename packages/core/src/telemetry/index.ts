@@ -14,6 +14,11 @@ const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4317';
 
 export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
+} from './constants.js';
+export {
   initializeTelemetry,
   shutdownTelemetry,
   forceFlushMetrics,
@@ -49,6 +54,7 @@ export {
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
+  recordSkillInvocation,
   logUserFeedback,
   logArenaSessionStarted,
   logArenaAgentCompleted,
@@ -213,6 +219,7 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  areSensitiveSpanAttributesEnabled,
   truncateContent,
 } from './detailed-span-attributes.js';
 export { getTraceContext, formatTraceparent } from './trace-context.js';

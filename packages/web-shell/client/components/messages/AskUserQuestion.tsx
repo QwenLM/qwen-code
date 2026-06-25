@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
 
 interface Question {
@@ -17,9 +18,14 @@ interface AskUserQuestionProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  variant?: 'inline' | 'floating';
 }
 
-export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
+export function AskUserQuestion({
+  request,
+  onConfirm,
+  variant = 'inline',
+}: AskUserQuestionProps) {
   const { t } = useI18n();
   const questions = useMemo(
     () =>
@@ -387,11 +393,17 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
   };
 
   return (
-    <div className={styles.question}>
+    <div
+      className={`${styles.question} ${
+        variant === 'floating' ? styles.floating : ''
+      }`}
+    >
       {/* Header line like CLI */}
       <div className={styles.titleLine}>
         <span className={styles.icon}>?</span>
-        <span className={styles.toolName}>AskUserQuestion</span>
+        <span className={styles.toolName}>
+          {localizeToolDisplayName('ask_user_question', t)}
+        </span>
         <span className={styles.toolDesc}>
           {t('askUser.title', { count: questions.length })}
         </span>
@@ -587,11 +599,6 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
           </div>
         </>
       ) : null}
-
-      {/* Footer hint */}
-      <div className={styles.footer}>
-        {isMulti ? t('askUser.footerMulti') : t('askUser.footer')}
-      </div>
     </div>
   );
 }

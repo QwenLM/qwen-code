@@ -24,6 +24,7 @@ import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
@@ -529,6 +530,255 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('MCP hot-reload (sub-task 3)', () => {
+    const srvA: MCPServerConfig = { command: 'a' };
+    const srvB: MCPServerConfig = { command: 'b' };
+
+    it('setMcpServers REPLACES (not merges) and works post-init', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA },
+      });
+      await config.initialize();
+
+      // addMcpServers would throw post-init; setMcpServers must not.
+      config.setMcpServers({ b: srvB });
+
+      const settingsLayer = config.getSettingsMcpServers();
+      expect(settingsLayer).toEqual({ b: srvB });
+      expect(settingsLayer).not.toHaveProperty('a');
+    });
+
+    it('reinitializeMcpServers is a safe no-op before initialize()', async () => {
+      const config = new Config({ ...baseParams });
+      // No tool registry yet — must not throw and must not connect.
+      await expect(
+        config.reinitializeMcpServers({ a: srvA }),
+      ).resolves.toBeUndefined();
+      expect(config.getSettingsMcpServers()).toEqual({ a: srvA });
+    });
+
+    it('records MCP servers removed by a reconcile and self-heals on re-add', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+
+      // Drop `a` → tracked as recently removed.
+      await config.reinitializeMcpServers({ b: srvB });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['a']);
+
+      // Drop `b` too → both tracked.
+      await config.reinitializeMcpServers({});
+      expect(config.getRecentlyRemovedMcpServers().sort()).toEqual(['a', 'b']);
+
+      // Re-add `a` → it self-heals out of the set; `b` stays removed.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['b']);
+    });
+
+    it('classifies a server filtered by a narrowed allow-list as not_allowed (not removed)', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB });
+
+      // Narrow the allow-list to just `a` (mirrors editing mcp.allowed). `b` is
+      // still configured (merged map) but filtered out of the effective map.
+      config.setAllowedMcpServers(['a']);
+
+      // `b` is NOT "removed" — it's still in config, just not allowed. The
+      // tool-not-found path can still explain it precisely, with the right
+      // recovery action (adjust mcp.allowed, not "re-add the server").
+      expect(config.getRecentlyRemovedMcpServers()).not.toContain('b');
+      expect(config.getMcpServerUnavailableReason('b')).toBe('not_allowed');
+      expect(config.getMcpServerUnavailableReason('a')).toBeUndefined();
+    });
+
+    it('classifies excluded / pending / removed servers with the right reason', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB, c: srvA },
+      });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB, c: srvA });
+
+      config.setExcludedMcpServers(['b']);
+      config.setPendingMcpServers(['c']);
+      expect(config.getMcpServerUnavailableReason('b')).toBe('excluded');
+      expect(config.getMcpServerUnavailableReason('c')).toBe(
+        'pending_approval',
+      );
+
+      // Delete `a` from config → removed this session.
+      await config.reinitializeMcpServers({ b: srvB, c: srvA });
+      expect(config.getMcpServerUnavailableReason('a')).toBe('removed');
+      // A never-configured name has no reason (falls through to generic).
+      expect(config.getMcpServerUnavailableReason('ghost')).toBeUndefined();
+    });
+
+    it('reinitializeMcpServers replaces config then drives incremental reconcile', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      await config.reinitializeMcpServers({ b: srvB });
+
+      expect(config.getSettingsMcpServers()).toEqual({ b: srvB });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(
+        config,
+      );
+    });
+
+    it('coalesces a reconcile request that arrives mid-flight into one extra pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Make the first pass hang until we release it, so the second call
+      // arrives while the first is in flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      const first = config.reinitializeMcpServers({ b: srvB });
+      // Second call lands mid-flight → coalesced, not a third pass.
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      release();
+      await Promise.all([first, second]);
+
+      // One in-flight pass + one drained follow-up = exactly 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('rethrows a failed reconcile and resets the in-progress guard so the next call still runs', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // First pass fails — reinitialize must surface the error.
+      manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+        new Error('reconcile boom'),
+      );
+      await expect(config.reinitializeMcpServers({ b: srvB })).rejects.toThrow(
+        'reconcile boom',
+      );
+
+      // Guard must have been reset in `finally`; a subsequent call must not be
+      // silently coalesced/dropped — it runs a fresh pass.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the coalesce flag when a reconcile throws, so the next call runs exactly one pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until we reject it; while it is in flight a second call
+      // arrives and is coalesced (sets the pending flag).
+      let reject!: (e: Error) => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((_, rej) => {
+            reject = rej;
+          }),
+      );
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      reject(new Error('reconcile boom'));
+      await expect(first).rejects.toThrow('reconcile boom');
+      // The coalesced caller awaits the shared in-flight pass, so it observes
+      // the SAME failure rather than resolving before its change was applied.
+      await expect(second).rejects.toThrow('reconcile boom');
+
+      // The throw must have cleared the pending flag too. A subsequent
+      // unrelated reconcile must run EXACTLY ONE pass — not an extra stale
+      // drain pass left over from the coalesced-then-aborted request.
+      manager.discoverAllMcpToolsIncremental.mockClear();
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+    });
+
+    it('a coalesced reconcile awaits the in-flight pass + its drain (does not resolve early)', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until released; the second call lands mid-flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      let secondResolved = false;
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config
+        .reinitializeMcpServers({ a: srvA, b: srvB })
+        .then(() => {
+          secondResolved = true;
+        });
+
+      // While pass 1 is still in flight the coalesced caller must NOT have
+      // resolved — it is chained onto the shared in-flight reconcile, so its
+      // change has not been applied yet.
+      await Promise.resolve();
+      expect(secondResolved).toBe(false);
+
+      release();
+      await Promise.all([first, second]);
+      expect(secondResolved).toBe(true);
+      // pass 1 + exactly one drain (for the coalesced change) = 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('admission-list setters and getMcpGating round-trip', () => {
+      const config = new Config({ ...baseParams });
+      config.setExcludedMcpServers(['x']);
+      config.setAllowedMcpServers(['y']);
+      config.setPendingMcpServers(['z']);
+      expect(config.getMcpGating()).toEqual({
+        excluded: ['x'],
+        allowed: ['y'],
+        pending: ['z'],
+      });
+      expect(config.getAllowedMcpServers()).toEqual(['y']);
+    });
+  });
+
   describe('MemoryPressureMonitor isolation', () => {
     it('returns a distinct monitor for child Configs created via Object.create', async () => {
       const parent = new Config(baseParams);
@@ -923,6 +1173,199 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers loop_wakeup when cron is enabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: true });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.LOOP_WAKEUP);
+    });
+
+    it('does not register loop_wakeup when cron is disabled', async () => {
+      const config = new Config({ ...baseParams, cronEnabled: false });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
+    });
+
+    it('registers read_mcp_resource so the model can read MCP resources', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
+    });
+
+    describe('isArtifactEnabled', () => {
+      const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+      const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+
+      beforeEach(() => {
+        delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+        delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+      });
+
+      afterEach(() => {
+        if (originalForceEnable === undefined) {
+          delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+        } else {
+          process.env['QWEN_CODE_ENABLE_ARTIFACT'] = originalForceEnable;
+        }
+        if (originalDisable === undefined) {
+          delete process.env['QWEN_CODE_DISABLE_ARTIFACT'];
+        } else {
+          process.env['QWEN_CODE_DISABLE_ARTIFACT'] = originalDisable;
+        }
+      });
+
+      it('is disabled by default', () => {
+        const config = new Config(baseParams);
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('honors settings when interactive and not in SDK mode', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: true,
+          sdkMode: false,
+        });
+        expect(config.isArtifactEnabled()).toBe(true);
+      });
+
+      it('lets QWEN_CODE_DISABLE_ARTIFACT override settings and env enablement', () => {
+        process.env['QWEN_CODE_DISABLE_ARTIFACT'] = '1';
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: true,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('stays disabled in SDK mode even when force-enabled', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          interactive: true,
+          sdkMode: true,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('stays disabled outside interactive mode even when force-enabled', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+      });
+
+      it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {
+        process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: false,
+          interactive: true,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(true);
+      });
+    });
+
+    describe('shouldAutoOpenArtifact', () => {
+      const browserEnvKeys = [
+        'QWEN_ARTIFACT_NO_AUTO_OPEN',
+        'BROWSER',
+        'CI',
+        'DEBIAN_FRONTEND',
+        'SSH_CONNECTION',
+        'DISPLAY',
+        'WAYLAND_DISPLAY',
+        'MIR_SOCKET',
+      ] as const;
+      const originalEnv: Partial<
+        Record<(typeof browserEnvKeys)[number], string>
+      > = {};
+
+      beforeEach(() => {
+        for (const key of browserEnvKeys) {
+          originalEnv[key] = process.env[key];
+          delete process.env[key];
+        }
+        process.env['DISPLAY'] = ':0';
+      });
+
+      afterEach(() => {
+        for (const key of browserEnvKeys) {
+          if (originalEnv[key] === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = originalEnv[key];
+          }
+        }
+      });
+
+      it('auto-opens artifacts by default', () => {
+        const config = new Config(baseParams);
+        expect(config.shouldAutoOpenArtifact()).toBe(true);
+      });
+
+      it('honors artifact.autoOpen=false from settings', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: false,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('lets QWEN_ARTIFACT_NO_AUTO_OPEN override settings', () => {
+        process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] = '1';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('honors global browser launch suppression', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+          noBrowser: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+
+      it('honors CI browser launch suppression', () => {
+        process.env['CI'] = 'true';
+        const config = new Config({
+          ...baseParams,
+          artifactAutoOpen: true,
+        });
+        expect(config.shouldAutoOpenArtifact()).toBe(false);
+      });
+    });
+
     it('skips inline MCP discovery by default (progressive availability)', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
@@ -983,6 +1426,38 @@ describe('Server Config (config.ts)', () => {
         excludedMcpServers: ['off'],
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('isMcpServerDisabled consults extension preferences only for the contributing extension', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        // baseParams pins overrideExtensions to []; lift it so the mocked
+        // loaded extension is visible to getActiveExtensions().
+        overrideExtensions: undefined,
+        // A user-configured server that shadows the extension's same-named one.
+        mcpServers: { foo: new MCPServerConfig() },
+      } as ConfigParameters);
+      const manager = config.getExtensionManager();
+      vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([
+        {
+          name: 'my-ext',
+          isActive: true,
+          config: { name: 'my-ext', mcpServers: { bar: {}, foo: {} } },
+        } as unknown as ReturnType<typeof manager.getLoadedExtensions>[number],
+      ]);
+      vi.spyOn(manager, 'getDisabledMcpServers').mockImplementation(
+        (extensionName: string) =>
+          extensionName === 'my-ext' ? ['bar', 'foo'] : [],
+      );
+      // `bar` is contributed by the extension and disabled in its preferences.
+      expect(config.isMcpServerDisabled('bar')).toBe(true);
+      // `foo` is shadowed by the user config (no extensionName on the merged
+      // entry), so the extension's disable record must not affect it.
+      expect(config.isMcpServerDisabled('foo')).toBe(false);
+      // The global exclusion list still applies to anything.
+      config.setExcludedMcpServers(['foo']);
+      expect(config.isMcpServerDisabled('foo')).toBe(true);
     });
 
     it('getFailedMcpServerNames skips pending approval servers', () => {
@@ -1238,34 +1713,57 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getEffectiveInputModalities', () => {
+    type MutableConfigInternals = {
+      contentGeneratorConfig: ContentGeneratorConfig;
+    };
+
+    // Mirrors exactly what fileUtils uses to decide media support, so the file
+    // reader's strip decision and the vision-bridge gate can never disagree.
+    it('returns the resolved modalities from the content generator config', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-model',
+        modalities: { image: true },
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({ image: true });
+    });
+
+    it('treats a model with no resolved modalities as text-only', () => {
+      const config = new Config(baseParams);
+      const internals = config as unknown as MutableConfigInternals;
+      internals.contentGeneratorConfig = {
+        model: 'custom-unknown-model',
+      } as ContentGeneratorConfig;
+
+      expect(config.getEffectiveInputModalities()).toEqual({});
+    });
+  });
+
   describe('model switching with different credentials (OpenAI)', () => {
-    it('returns a bare fast model selector when the model is configured under another auth type', () => {
+    it('returns undefined for bare Qwen OAuth fast models under active OpenAI auth', async () => {
       const config = new Config({
         ...baseParams,
-        authType: AuthType.USE_ANTHROPIC,
-        model: 'claude-opus-4-7',
-        fastModel: 'deepseek-v4-flash',
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'coder-model',
         modelProvidersConfig: {
           [AuthType.USE_OPENAI]: [
             {
-              id: 'deepseek-v4-flash',
-              name: 'deepseek-v4-flash',
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
               baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
               envKey: 'DASHSCOPE_API_KEY',
-            },
-          ],
-          [AuthType.USE_ANTHROPIC]: [
-            {
-              id: 'claude-opus-4-7',
-              name: 'claude-opus-4-7',
-              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
-              envKey: 'IDEALAB_OPUS_API_KEY',
             },
           ],
         },
       });
 
-      expect(config.getFastModel()).toBe('deepseek-v4-flash');
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getFastModel()).toBeUndefined();
     });
 
     it('returns an authType-qualified fast model selector', () => {
@@ -1295,6 +1793,56 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBe('openai:shared-model');
+    });
+
+    it('preserves authType-qualified fast model selectors across auth types', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'qwen-oauth:coder-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe('qwen-oauth:coder-model');
+    });
+
+    it('resolves a bare fast model under the current auth type', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'fast-model',
+              name: 'fast-model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getFastModel()).toBe('fast-model');
     });
 
     it('keeps authType-qualified selectors when the auth type matches the current auth type', () => {
@@ -1349,7 +1897,7 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:runtime-fast-model');
     });
 
-    it('returns undefined when the fast model is not configured for any auth type', () => {
+    it('returns undefined when no active auth type is available for a bare fast model', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -1366,6 +1914,29 @@ describe('Server Config (config.ts)', () => {
           ],
         },
       });
+
+      expect(config.getFastModel()).toBeUndefined();
+    });
+
+    it('returns undefined when the fast model is not configured for the current auth type', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'missing-fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(AuthType.USE_ANTHROPIC);
 
       expect(config.getFastModel()).toBeUndefined();
     });
@@ -1536,6 +2107,108 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: 'short project rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
+      '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'a'.repeat(800),
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 1,000 token context window"),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('more than 15%'),
+    );
+  });
+
+  it('getWarnings should include oversized context before initialize refresh runs', () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800),
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('getWarnings should use the model token limit when no contextWindowSize is configured', () => {
+    const config = new Config({
+      ...baseParams,
+      model: 'unknown-model-for-context-warning-test',
+      userMemory: 'a'.repeat(100_000),
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 131,072 token context window"),
+    );
+  });
+
+  it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
+    const config = new Config({
+      ...baseParams,
+      bareMode: true,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'short project context',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .some((warning) =>
+          warning.includes('Loaded QWEN.md/context instructions'),
+        ),
+    ).toBe(false);
   });
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
@@ -1924,6 +2597,27 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).not.toContain('# auto memory');
   });
 
+  describe('isManagedMemoryAvailable', () => {
+    it('returns true when bareMode is false', () => {
+      const config = new Config({ ...baseParams, bareMode: false });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+
+    it('returns false when bareMode is true', () => {
+      const config = new Config({ ...baseParams, bareMode: true });
+      expect(config.isManagedMemoryAvailable()).toBe(false);
+    });
+
+    it('returns true even when enableManagedAutoMemory is false', () => {
+      const config = new Config({
+        ...baseParams,
+        enableManagedAutoMemory: false,
+        bareMode: false,
+      });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+  });
+
   it('refreshHierarchicalMemory should exclude implicit cwd from bare include-directories', async () => {
     const explicitDir = '/tmp/explicit';
     const config = new Config({
@@ -2008,6 +2702,10 @@ describe('Server Config (config.ts)', () => {
   it('should set default file filtering settings when not provided', () => {
     const config = new Config(baseParams);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(true);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.agentignore',
+      '.aiignore',
+    ]);
   });
 
   it('should set custom file filtering settings when provided', () => {
@@ -2015,10 +2713,17 @@ describe('Server Config (config.ts)', () => {
       ...baseParams,
       fileFiltering: {
         respectGitIgnore: false,
+        customIgnoreFiles: ['.cursorignore'],
       },
     };
     const config = new Config(paramsWithFileFiltering);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore, .cursorignore',
+    );
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {
@@ -2296,6 +3001,62 @@ describe('Server Config (config.ts)', () => {
       ).toBe(false);
     });
 
+    it('should return provided sensitiveSpanAttributeMaxLength setting', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          sensitiveSpanAttributeMaxLength: 65_536,
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+    });
+
+    it('should default sensitiveSpanAttributeMaxLength to 1MiB', () => {
+      const configWithTelemetry = new Config({
+        ...baseParams,
+        telemetry: { enabled: true },
+      });
+      expect(
+        configWithTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+
+      const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
+      delete paramsWithoutTelemetry.telemetry;
+      const configWithoutTelemetry = new Config(paramsWithoutTelemetry);
+      expect(
+        configWithoutTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+    });
+
+    it('should reject invalid sensitiveSpanAttributeMaxLength values', () => {
+      for (const [value, label] of [
+        [0, '0'],
+        [Number.NaN, 'NaN'],
+        [Number.POSITIVE_INFINITY, 'Infinity'],
+        [
+          SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1,
+          String(SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1),
+        ],
+      ] as const) {
+        expect(
+          () =>
+            new Config({
+              ...baseParams,
+              telemetry: {
+                enabled: true,
+                sensitiveSpanAttributeMaxLength: value,
+              },
+            }),
+        ).toThrow(
+          new RegExp(
+            `Invalid telemetry\\.sensitiveSpanAttributeMaxLength.*got ${label}`,
+          ),
+        );
+      }
+    });
+
     it('should return default telemetry target if telemetry object is not provided', () => {
       const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
       delete paramsWithoutTelemetry.telemetry;
@@ -2467,6 +3228,21 @@ describe('Server Config (config.ts)', () => {
       };
       const config = new Config(paramsWithUndefinedBuiltinRipgrep);
       expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+  });
+
+  describe('Response tokens/sec display configuration', () => {
+    it('should default to false when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getShowResponseTokensPerSecond()).toBe(false);
+    });
+
+    it('should set showResponseTokensPerSecond when provided as true', () => {
+      const config = new Config({
+        ...baseParams,
+        showResponseTokensPerSecond: true,
+      });
+      expect(config.getShowResponseTokensPerSecond()).toBe(true);
     });
   });
 
@@ -3148,6 +3924,41 @@ describe('setApprovalMode with folder trust', () => {
       // Setting PLAN again should not overwrite prePlanMode
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+
+    // Regression for #5574: the gate state records whether the model or the
+    // user entered plan mode, so exit_plan_mode can decide whether to gate.
+    it('marks the plan gate entry as user-initiated by default', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+    });
+
+    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Simulate the Shift+Tab cycle order:
+      // default → auto-edit → auto → yolo → plan
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      // prePlanMode is yolo purely because it precedes plan in the cycle —
+      // it does NOT mean the user wants autonomous execution.
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
     });
   });
 
@@ -3969,6 +4780,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['toolResultContentFormat']: 'string',
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -3978,6 +4790,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        toolResultContentFormat: { kind: 'settings' },
       },
     });
 
@@ -3997,6 +4810,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['toolResultContentFormat']).toBe('string');
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -4006,6 +4820,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['toolResultContentFormat']?.kind).toBe('settings');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
@@ -4377,6 +5192,27 @@ describe('Model Switching and Config Updates', () => {
       // getModel() returns 'some-model', getModelDisplayName returns it as-is
       // because currentAuthType is falsy
       expect(config.getModelDisplayName()).toBe('some-model');
+    });
+  });
+
+  describe('getAutoSkillConfirmEnabled', () => {
+    it('defaults to true when autoSkillConfirm is unset', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+    });
+
+    it('returns false when autoSkillConfirm is explicitly disabled', () => {
+      const config = new Config({ ...baseParams, autoSkillConfirm: false });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+
+    it('is forced false in bare mode even when autoSkillConfirm is true', () => {
+      const config = new Config({
+        ...baseParams,
+        autoSkillConfirm: true,
+        bareMode: true,
+      });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
     });
   });
 });

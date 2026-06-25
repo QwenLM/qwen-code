@@ -12,6 +12,7 @@ import { MCPServerConfig, type Config } from '../config/config.js';
 import type { PoolEntry } from './mcp-pool-entry.js';
 import { connectionIdOf } from './mcp-pool-key.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   McpTransportPool,
@@ -79,6 +80,10 @@ function mkSessionRegistries() {
       registerPrompt: vi.fn(),
       removePromptsByServer: vi.fn(),
     } as unknown as PromptRegistry,
+    resources: {
+      registerResource: vi.fn(),
+      removeResourcesByServer: vi.fn(),
+    } as unknown as ResourceRegistry,
   };
 }
 
@@ -91,10 +96,12 @@ function mockMcpSuccess(
   opts: {
     toolNames?: string[];
     promptNames?: string[];
+    resourceNames?: string[];
   } = {},
 ) {
   const tools = opts.toolNames ?? ['t1'];
   const prompts = opts.promptNames ?? [];
+  const resources = opts.resourceNames ?? [];
   const mockedClient = {
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
@@ -104,8 +111,17 @@ function mockMcpSuccess(
     getServerCapabilities: vi
       .fn()
       .mockReturnValue(prompts.length > 0 ? { prompts: {} } : {}),
-    request: vi.fn().mockResolvedValue({
-      prompts: prompts.map((name) => ({ name, description: 'p' })),
+    // Method-aware so `prompts/list` and `resources/list` each get a
+    // correctly-shaped payload (discoverAndReturn issues both).
+    request: vi.fn().mockImplementation((req: { method?: string }) => {
+      if (req?.method === 'resources/list') {
+        return Promise.resolve({
+          resources: resources.map((uri) => ({ uri, name: uri })),
+        });
+      }
+      return Promise.resolve({
+        prompts: prompts.map((name) => ({ name, description: 'p' })),
+      });
     }),
     listTools: vi.fn().mockResolvedValue({ tools: [] }),
     getInstructions: vi.fn(),
@@ -150,11 +166,32 @@ describe('McpTransportPool', () => {
       const cfg = new MCPServerConfig('node');
 
       const r1 = mkSessionRegistries();
-      const c1 = await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      const c1 = await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        r1.tools,
+        r1.prompts,
+        r1.resources,
+      );
       const r2 = mkSessionRegistries();
-      const c2 = await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+      const c2 = await pool.acquire(
+        'srv',
+        cfg,
+        's2',
+        r2.tools,
+        r2.prompts,
+        r2.resources,
+      );
       const r3 = mkSessionRegistries();
-      const c3 = await pool.acquire('srv', cfg, 's3', r3.tools, r3.prompts);
+      const c3 = await pool.acquire(
+        'srv',
+        cfg,
+        's3',
+        r3.tools,
+        r3.prompts,
+        r3.resources,
+      );
 
       expect(mocked.connect).toHaveBeenCalledTimes(1);
       expect(c1.id).toBe(c2.id);
@@ -163,6 +200,22 @@ describe('McpTransportPool', () => {
       const snap = pool.getSnapshot();
       expect(snap.byName['srv'].entryCount).toBe(1);
       expect(snap.byName['srv'].entrySummary[0].refs).toBe(3);
+    });
+
+    it('resources discovered via the pool reach the session resource registry', async () => {
+      mockMcpSuccess({ toolNames: ['t1'], resourceNames: ['file:///doc.txt'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+
+      const r = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
+
+      // discoverAndReturn → markActive → attach replay → applyResources
+      // registers the snapshot into THIS session's resource registry,
+      // tagged with the originating serverName.
+      expect(r.resources.registerResource).toHaveBeenCalledWith(
+        expect.objectContaining({ uri: 'file:///doc.txt', serverName: 'srv' }),
+      );
     });
 
     it('different env between two sessions creates 2 distinct entries (credential isolation)', async () => {
@@ -204,8 +257,22 @@ describe('McpTransportPool', () => {
           >,
         }),
       );
-      const cA = await pool2.acquire('srv', cfgA, 's1', r1.tools, r1.prompts);
-      const cB = await pool2.acquire('srv', cfgB, 's2', r2.tools, r2.prompts);
+      const cA = await pool2.acquire(
+        'srv',
+        cfgA,
+        's1',
+        r1.tools,
+        r1.prompts,
+        r1.resources,
+      );
+      const cB = await pool2.acquire(
+        'srv',
+        cfgB,
+        's2',
+        r2.tools,
+        r2.prompts,
+        r2.resources,
+      );
       expect(cA.id).not.toBe(cB.id);
       expect(mocked.connect).toHaveBeenCalledTimes(2);
       const snap = pool2.getSnapshot();
@@ -217,13 +284,20 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
       pool.release(`srv::${'a'.repeat(16)}` as never, 'unknown'); // unknown id no-op
       pool.releaseSession('s1');
       // Drain timer started; reacquire within 1s cancels.
       await vi.advanceTimersByTimeAsync(500);
       const r2 = mkSessionRegistries();
-      const c2 = await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+      const c2 = await pool.acquire(
+        'srv',
+        cfg,
+        's2',
+        r2.tools,
+        r2.prompts,
+        r2.resources,
+      );
       expect(c2).toBeDefined();
       const snap = pool.getSnapshot();
       expect(snap.byName['srv'].entrySummary[0].refs).toBe(1);
@@ -237,7 +311,7 @@ describe('McpTransportPool', () => {
       );
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
       pool.releaseSession('s1');
       await vi.advanceTimersByTimeAsync(150);
       const snap = pool.getSnapshot();
@@ -258,7 +332,7 @@ describe('McpTransportPool', () => {
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
 
-      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
       expect(pool.getSnapshot().byName['srv'].entryCount).toBe(1);
 
       pool.releaseSession('s1');
@@ -295,7 +369,7 @@ describe('McpTransportPool', () => {
         ['denied'], // excludeTools
       );
       const r = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
       const registerTool = (
         r.tools as unknown as { registerTool: ReturnType<typeof vi.fn> }
       ).registerTool;
@@ -340,7 +414,14 @@ describe('McpTransportPool', () => {
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
 
-      const acquirePromise = pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      const acquirePromise = pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
 
       // Yield so `createUnpooledConnection` enters the await on connect.
       await Promise.resolve();
@@ -397,7 +478,14 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      const conn1 = await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      const conn1 = await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        r1.tools,
+        r1.prompts,
+        r1.resources,
+      );
       let failedEventReceived = false;
       conn1.on('event', (e) => {
         if (e.kind === 'failed') failedEventReceived = true;
@@ -429,7 +517,14 @@ describe('McpTransportPool', () => {
       // acquire for the same (name, cfg) misses the fast-path
       // entirely and spawns a new entry — pool self-heals.
       const r2 = mkSessionRegistries();
-      const conn2 = await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+      const conn2 = await pool.acquire(
+        'srv',
+        cfg,
+        's2',
+        r2.tools,
+        r2.prompts,
+        r2.resources,
+      );
       // Different entryIndex confirms a NEW entry was spawned, not a
       // reuse of the zombie (which would have entryIndex 0).
       expect(conn2.entryIndex).toBe(1);
@@ -460,7 +555,7 @@ describe('McpTransportPool', () => {
       );
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
       // Detach: refs=0 → state='draining', drain timer running.
       pool.releaseSession('s1');
 
@@ -479,6 +574,7 @@ describe('McpTransportPool', () => {
         's-listen',
         r2.tools,
         r2.prompts,
+        r2.resources,
       );
       conn2.on('event', (e) => {
         if (e.kind === 'failed') failedEventReceived = true;
@@ -529,7 +625,7 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
       expect(budget.getReservedSlots()).toEqual(['srv']);
       const targetId = connectionIdOf('srv', cfg);
       const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
@@ -550,7 +646,14 @@ describe('McpTransportPool', () => {
       // else-if path: existing && existing.isTerminated() → evictEntry
       // → fall through to spawn → fresh entry.
       const r2 = mkSessionRegistries();
-      const conn2 = await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+      const conn2 = await pool.acquire(
+        'srv',
+        cfg,
+        's2',
+        r2.tools,
+        r2.prompts,
+        r2.resources,
+      );
       // Fresh entry: different object, different entryIndex.
       const newEntry = entries.get(targetId)!;
       expect(newEntry).not.toBe(oldEntry);
@@ -594,7 +697,7 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
       const targetId = connectionIdOf('srv', cfg);
       const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
         .entries;
@@ -608,6 +711,7 @@ describe('McpTransportPool', () => {
       const view = new SessionMcpView(
         mkSessionRegistries().tools,
         mkSessionRegistries().prompts,
+        mkSessionRegistries().resources,
         's2',
         'srv',
         cfg,
@@ -642,7 +746,14 @@ describe('McpTransportPool', () => {
       );
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
-      const acquirePromise = pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      const acquirePromise = pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
       // Yield so s1 enters await inFlight (after the W90 early index).
       await Promise.resolve();
       // Fire releaseSession during the await window. Pre-W111 this
@@ -681,10 +792,24 @@ describe('McpTransportPool', () => {
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
       const r2 = mkSessionRegistries();
-      const first = pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      const first = pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        r1.tools,
+        r1.prompts,
+        r1.resources,
+      );
       // Yield so 's1' enters spawnInFlight; 's2' joins via in-flight.
       await Promise.resolve();
-      const second = pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts);
+      const second = pool.acquire(
+        'srv',
+        cfg,
+        's2',
+        r2.tools,
+        r2.prompts,
+        r2.resources,
+      );
 
       await expect(first).rejects.toThrow(/boom-connect/);
       await expect(second).rejects.toThrow(/boom-connect/);
@@ -700,7 +825,14 @@ describe('McpTransportPool', () => {
       // brand-new spawn (no leftover state).
       mocked.connect.mockResolvedValueOnce(undefined);
       const r3 = mkSessionRegistries();
-      const c = await pool.acquire('srv', cfg, 's3', r3.tools, r3.prompts);
+      const c = await pool.acquire(
+        'srv',
+        cfg,
+        's3',
+        r3.tools,
+        r3.prompts,
+        r3.resources,
+      );
       expect(c).toBeDefined();
     });
 
@@ -724,7 +856,14 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      const conn1 = await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      const conn1 = await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        r1.tools,
+        r1.prompts,
+        r1.resources,
+      );
       let failedEvent: { lastError?: string } | undefined;
       conn1.on('event', (e) => {
         if (e.kind === 'failed') failedEvent = e;
@@ -763,7 +902,14 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      const conn1 = await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      const conn1 = await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        r1.tools,
+        r1.prompts,
+        r1.resources,
+      );
       let failedEvent: { lastError?: string } | undefined;
       conn1.on('event', (e) => {
         if (e.kind === 'failed') failedEvent = e;
@@ -822,7 +968,7 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
 
       // Trigger the silent-drop path via the production onerror flow.
       type MockedSdkClient = { onerror?: (e: Error) => void };
@@ -892,7 +1038,7 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts);
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
 
       type MockedSdkClient = { onerror?: (e: Error) => void };
       (mocked as MockedSdkClient).onerror?.(new Error('upstream EPIPE'));
@@ -929,7 +1075,7 @@ describe('McpTransportPool', () => {
       const regs = Array.from({ length: 5 }, () => mkSessionRegistries());
       const results = await Promise.all(
         regs.map((r, i) =>
-          pool.acquire('srv', cfg, `s${i}`, r.tools, r.prompts),
+          pool.acquire('srv', cfg, `s${i}`, r.tools, r.prompts, r.resources),
         ),
       );
       expect(mocked.connect).toHaveBeenCalledTimes(1);
@@ -946,8 +1092,8 @@ describe('McpTransportPool', () => {
       const cfg1 = new MCPServerConfig('node');
       const cfg2 = new MCPServerConfig('node', ['-v']);
       const r = mkSessionRegistries();
-      await pool.acquire('srvA', cfg1, 's1', r.tools, r.prompts);
-      await pool.acquire('srvB', cfg2, 's1', r.tools, r.prompts);
+      await pool.acquire('srvA', cfg1, 's1', r.tools, r.prompts, r.resources);
+      await pool.acquire('srvB', cfg2, 's1', r.tools, r.prompts, r.resources);
       const beforeSnap = pool.getSnapshot();
       expect(beforeSnap.byName['srvA'].entrySummary[0].refs).toBe(1);
       expect(beforeSnap.byName['srvB'].entrySummary[0].refs).toBe(1);
@@ -965,7 +1111,7 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
       const results = await pool.restartByName('srv');
       expect(results).toHaveLength(1);
       expect(results[0].restarted).toBe(true);
@@ -987,7 +1133,7 @@ describe('McpTransportPool', () => {
       );
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
       // Detach: drain timer starts (refs=0).
       pool.releaseSession('s1');
       expect(pool.getSnapshot().byName['srv'].entryCount).toBe(1);
@@ -1034,8 +1180,8 @@ describe('McpTransportPool', () => {
       );
       const rA = mkSessionRegistries();
       const rB = mkSessionRegistries();
-      await pool.acquire('srv', cfgA, 'sA', rA.tools, rA.prompts);
-      await pool.acquire('srv', cfgB, 'sB', rB.tools, rB.prompts);
+      await pool.acquire('srv', cfgA, 'sA', rA.tools, rA.prompts, rA.resources);
+      await pool.acquire('srv', cfgB, 'sB', rB.tools, rB.prompts, rB.resources);
 
       const onlyOne = await pool.restartByName('srv', { entryIndex: 0 });
       expect(onlyOne).toHaveLength(1);
@@ -1063,26 +1209,59 @@ describe('McpTransportPool', () => {
       // Assert by counting `removeMcpToolsByServer` calls on the
       // session registry (SessionMcpView's `applyTools` removes
       // existing tools then re-registers).
-      mockMcpSuccess({ toolNames: ['original'] });
+      mockMcpSuccess({ toolNames: ['original'], resourceNames: ['res://r'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
-      // Initial attach calls applyTools once → one removeMcpToolsByServer.
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
+      // Initial attach calls applyTools / applyResources once each → one
+      // removeMcpToolsByServer + one removeResourcesByServer.
       const initialRemoveCalls = (
         r.tools.removeMcpToolsByServer as ReturnType<typeof vi.fn>
       ).mock.calls.length;
+      const initialResourceRemoveCalls = (
+        r.resources.removeResourcesByServer as ReturnType<typeof vi.fn>
+      ).mock.calls.length;
       expect(initialRemoveCalls).toBeGreaterThanOrEqual(1);
+      expect(initialResourceRemoveCalls).toBeGreaterThanOrEqual(1);
       const results = await pool.restartByName('srv');
       expect(results[0].restarted).toBe(true);
-      // Post-restart fan-out → additional applyTools call → one more
-      // removeMcpToolsByServer (R3 contract: subscribers see the new
-      // snapshot via direct `view.applyTools` invocation, not via
-      // event subscription).
+      // Post-restart fan-out → additional applyTools AND applyResources call
+      // → one more removeMcpToolsByServer + removeResourcesByServer (R3
+      // contract: subscribers see the new snapshot via direct
+      // `view.applyTools` / `view.applyResources`, not via event subscription).
       const finalRemoveCalls = (
         r.tools.removeMcpToolsByServer as ReturnType<typeof vi.fn>
       ).mock.calls.length;
+      const finalResourceRemoveCalls = (
+        r.resources.removeResourcesByServer as ReturnType<typeof vi.fn>
+      ).mock.calls.length;
       expect(finalRemoveCalls).toBeGreaterThan(initialRemoveCalls);
+      expect(finalResourceRemoveCalls).toBeGreaterThan(
+        initialResourceRemoveCalls,
+      );
+    });
+
+    it('a transiently-empty resources/list on restart keeps the snapshot for new sessions', async () => {
+      // Initial discovery exposes a resource.
+      mockMcpSuccess({ toolNames: ['t1'], resourceNames: ['res://keep'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const r1 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
+
+      // The restart's re-read returns NO resources (a transient resources/list
+      // failure swallowed to []). The next spawned client uses this mock.
+      mockMcpSuccess({ toolNames: ['t1'], resourceNames: [] });
+      await pool.restartByName('srv');
+
+      // A NEW session attaching after the restart must still receive the prior
+      // resource: the entry's snapshot was preserved, not overwritten with [].
+      const r2 = mkSessionRegistries();
+      await pool.acquire('srv', cfg, 's2', r2.tools, r2.prompts, r2.resources);
+      expect(r2.resources.registerResource).toHaveBeenCalledWith(
+        expect.objectContaining({ uri: 'res://keep', serverName: 'srv' }),
+      );
     });
   });
 
@@ -1092,7 +1271,7 @@ describe('McpTransportPool', () => {
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
       const snap = pool.getSnapshot();
       expect(snap.subprocessCount).toBe(1);
       expect(snap.total).toBe(1);
@@ -1106,8 +1285,8 @@ describe('McpTransportPool', () => {
       const cfg1 = new MCPServerConfig('node');
       const cfg2 = new MCPServerConfig('node', ['-v']);
       const r = mkSessionRegistries();
-      await pool.acquire('srvA', cfg1, 's1', r.tools, r.prompts);
-      await pool.acquire('srvB', cfg2, 's1', r.tools, r.prompts);
+      await pool.acquire('srvA', cfg1, 's1', r.tools, r.prompts, r.resources);
+      await pool.acquire('srvB', cfg2, 's1', r.tools, r.prompts, r.resources);
       const result = await pool.drainAll({ force: true });
       expect(result.drained).toBe(2);
       expect(result.errors).toEqual([]);
@@ -1131,7 +1310,7 @@ describe('McpTransportPool', () => {
       );
       const cfg = new MCPServerConfig('node');
       const r = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts);
+      await pool.acquire('srv', cfg, 's1', r.tools, r.prompts, r.resources);
 
       const result = await pool.drainAll({ force: true });
 
@@ -1156,11 +1335,11 @@ describe('McpTransportPool', () => {
       const cfgA = new MCPServerConfig('node', ['-a']);
       const cfgB = new MCPServerConfig('node', ['-b']);
       const cfgC = new MCPServerConfig('node', ['-c']);
-      await pool.acquire('srvA', cfgA, 's1', r.tools, r.prompts);
-      await pool.acquire('srvB', cfgB, 's1', r.tools, r.prompts);
+      await pool.acquire('srvA', cfgA, 's1', r.tools, r.prompts, r.resources);
+      await pool.acquire('srvB', cfgB, 's1', r.tools, r.prompts, r.resources);
       // Third name exceeds the cap → BudgetExhaustedError.
       await expect(
-        pool.acquire('srvC', cfgC, 's1', r.tools, r.prompts),
+        pool.acquire('srvC', cfgC, 's1', r.tools, r.prompts, r.resources),
       ).rejects.toThrow(/budget exhausted/i);
       // Pool's spawn dedup is keyed by id, so the refusal records a
       // refusal entry on the budget controller.
@@ -1180,7 +1359,14 @@ describe('McpTransportPool', () => {
       );
       const r = mkSessionRegistries();
       const cfg = new MCPServerConfig('node');
-      const conn = await pool.acquire('srvA', cfg, 's1', r.tools, r.prompts);
+      const conn = await pool.acquire(
+        'srvA',
+        cfg,
+        's1',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
       expect(budget.getReservedSlots()).toEqual(['srvA']);
       conn.release();
       // Drain timer (1ms) needs to fire to actually close the entry.
@@ -1209,12 +1395,26 @@ describe('McpTransportPool', () => {
       const cfgB = new MCPServerConfig('node', ['-b']);
       const cfgC = new MCPServerConfig('node', ['-c']);
       // Entry A spawns and is in `entries`.
-      const connA = await pool.acquire('srvA', cfgA, 's1', r.tools, r.prompts);
+      const connA = await pool.acquire(
+        'srvA',
+        cfgA,
+        's1',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
       // Entry B for same name (different fingerprint) — kick off
       // spawn but DON'T await. By calling synchronously the second
       // tryReserve resolves to 'already_held' because the slot was
       // taken by A's reservation.
-      const acquireB = pool.acquire('srvA', cfgB, 's1', r.tools, r.prompts);
+      const acquireB = pool.acquire(
+        'srvA',
+        cfgB,
+        's1',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
       // Force-close A while B is still in flight.
       connA.release();
       await vi.advanceTimersByTimeAsync(50);
@@ -1224,7 +1424,7 @@ describe('McpTransportPool', () => {
       // Now a name-different acquire should be REFUSED (B holds the
       // sole slot for 'srvA' but cap is 1, so 'srvC' overflows).
       await expect(
-        pool.acquire('srvC', cfgC, 's1', r.tools, r.prompts),
+        pool.acquire('srvC', cfgC, 's1', r.tools, r.prompts, r.resources),
       ).rejects.toThrow(/budget exhausted/i);
     });
 
@@ -1263,7 +1463,14 @@ describe('McpTransportPool', () => {
       const cfgA = new MCPServerConfig('node', ['-a']);
       const cfgB = new MCPServerConfig('node', ['-b']);
       // A: tryReserve → 'reserved', spawn succeeds.
-      await pool.acquire('srvA', cfgA, 's1', r1.tools, r1.prompts);
+      await pool.acquire(
+        'srvA',
+        cfgA,
+        's1',
+        r1.tools,
+        r1.prompts,
+        r1.resources,
+      );
       expect(budget.getReservedSlots()).toEqual(['srvA']);
 
       // B: same name, different fingerprint → tryReserve →
@@ -1271,7 +1478,7 @@ describe('McpTransportPool', () => {
       const releaseSpy = vi.spyOn(budget, 'release');
       const r2 = mkSessionRegistries();
       await expect(
-        pool.acquire('srvA', cfgB, 's2', r2.tools, r2.prompts),
+        pool.acquire('srvA', cfgB, 's2', r2.tools, r2.prompts, r2.resources),
       ).rejects.toThrow(/B spawn boom/);
 
       // Post-R24: B's catch must NOT call release because
@@ -1308,7 +1515,7 @@ describe('McpTransportPool', () => {
       const r = mkSessionRegistries();
       const cfg = new MCPServerConfig('node');
       await expect(
-        pool.acquire('srvA', cfg, 's1', r.tools, r.prompts),
+        pool.acquire('srvA', cfg, 's1', r.tools, r.prompts, r.resources),
       ).rejects.toThrow();
       // The slot was reserved pre-spawn, then released because spawn
       // failed and no other entry holds the name. A subsequent

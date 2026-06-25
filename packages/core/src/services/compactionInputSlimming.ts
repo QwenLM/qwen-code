@@ -80,19 +80,29 @@ function resolveNumber(
   envValue: string | undefined,
   settingsValue: number | undefined,
   defaultValue: number,
-  { minInclusive }: { minInclusive: number },
+  {
+    integer = false,
+    minInclusive,
+  }: { integer?: boolean; minInclusive: number },
 ): number {
+  const isValid = (value: number) =>
+    Number.isFinite(value) &&
+    (!integer || Number.isSafeInteger(value)) &&
+    value >= minInclusive;
+
   if (envValue !== undefined && envValue !== '') {
-    const parsed = Number(envValue);
-    if (Number.isFinite(parsed) && parsed >= minInclusive) {
+    const trimmed = envValue.trim();
+    if (integer && !/^\d+$/.test(trimmed)) {
+      return settingsValue !== undefined && isValid(settingsValue)
+        ? settingsValue
+        : defaultValue;
+    }
+    const parsed = Number(trimmed);
+    if (isValid(parsed)) {
       return parsed;
     }
   }
-  if (
-    settingsValue !== undefined &&
-    Number.isFinite(settingsValue) &&
-    settingsValue >= minInclusive
-  ) {
+  if (settingsValue !== undefined && isValid(settingsValue)) {
     return settingsValue;
   }
   return defaultValue;
@@ -116,8 +126,9 @@ export interface ResolvedCompactionTuning {
 
 /**
  * Resolves the post-compact retention + screenshot-trigger knobs in
- * priority order env > settings > default, reusing the same validation
- * rules as `resolveSlimmingConfig`.
+ * priority order env > settings > default. Count-like fields require
+ * integer values because downstream collectors compare against integer
+ * lengths.
  *
  * The screenshot trigger counts only images nested in
  * `functionResponse.parts` (tool results). Compaction replaces those with
@@ -134,13 +145,13 @@ export function resolveCompactionTuning(
       process.env['QWEN_COMPACT_MAX_RECENT_FILES'],
       settings?.maxRecentFilesToRetain,
       DEFAULT_MAX_RECENT_FILES,
-      { minInclusive: 0 },
+      { integer: true, minInclusive: 0 },
     ),
     maxRecentImages: resolveNumber(
       process.env['QWEN_COMPACT_MAX_RECENT_IMAGES'],
       settings?.maxRecentImagesToRetain,
       DEFAULT_MAX_RECENT_IMAGES,
-      { minInclusive: 0 },
+      { integer: true, minInclusive: 0 },
     ),
     enableScreenshotTrigger: resolveBoolean(
       process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'],
@@ -151,7 +162,7 @@ export function resolveCompactionTuning(
       process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'],
       settings?.screenshotTriggerThreshold,
       DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
-      { minInclusive: 1 },
+      { integer: true, minInclusive: 1 },
     ),
   };
 }

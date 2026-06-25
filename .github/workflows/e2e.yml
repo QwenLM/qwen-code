@@ -1,22 +1,40 @@
 name: 'E2E Tests'
 
 on:
+  # E2E is slow and currently flaky, so it is NOT in the merge queue (gating the
+  # serial queue on it would stall every merge). It runs post-merge on `main`,
+  # plus a nightly full regression and on-demand. Promote it to `merge_group` +
+  # required once a stable subset is carved out.
   push:
     branches:
       - 'main'
       - 'feat/e2e/**'
-  merge_group:
+  schedule:
+    - cron: '0 4 * * *' # nightly full regression (~04:00 UTC), guaranteed signal
+  workflow_dispatch:
 
 concurrency:
+  # Scope the group by event so back-to-back pushes to `main` cancel superseded
+  # runs (no pile-up when PRs merge in quick succession), without ever cancelling
+  # the nightly schedule or a manual dispatch — they share the ref but not the
+  # event. feat/e2e/** pushes still cancel their own superseded runs.
   group: |-
-    ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  # Cancel superseded pushes (main included now — only the latest tree matters,
+  # and it covers every merged change). The nightly run always finishes, so a
+  # busy merge window that keeps cancelling the push run still gets a signal.
   cancel-in-progress: |-
-    ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    ${{ github.event_name == 'push' }}
 
 jobs:
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }}'
     runs-on: 'ubuntu-latest'
+    # Skip on fork PRs: forks have no access to repository secrets
+    # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
+    # and show misleading red status. Same-repo PRs run normally.
+    if: |-
+      ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     strategy:
       matrix:
         sandbox:
@@ -86,6 +104,9 @@ jobs:
   e2e-test-macos:
     name: 'E2E Test - macOS'
     runs-on: 'macos-latest'
+    # Skip on fork PRs (no secrets) — see e2e-test-linux above.
+    if: |-
+      ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3

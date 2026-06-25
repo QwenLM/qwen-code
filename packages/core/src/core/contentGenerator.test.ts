@@ -122,6 +122,46 @@ describe('createContentGenerator', () => {
     });
     expect(generator).toBeInstanceOf(LoggingContentGenerator);
   });
+
+  it('should throw when the config has no authType', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => true,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    await expect(
+      createContentGenerator(
+        { model: 'test-model', apiKey: 'test-key' } as Parameters<
+          typeof createContentGenerator
+        >[0],
+        mockConfig,
+      ),
+    ).rejects.toThrow('must have an authType');
+  });
+
+  it('should throw on an unsupported authType', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => true,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    await expect(
+      createContentGenerator(
+        {
+          model: 'test-model',
+          apiKey: 'test-key',
+          authType: 'bogus',
+        } as unknown as Parameters<typeof createContentGenerator>[0],
+        mockConfig,
+      ),
+    ).rejects.toThrow('Unsupported authType');
+  });
 });
 
 describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
