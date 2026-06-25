@@ -1422,7 +1422,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return setApprovalModeImpl(sessionId, mode, o, context);
     },
-    async setSessionRuntimeContext(sessionId, entries, context) {
+    async setSessionRuntimeContext(sessionId, entries, _context) {
       return {
         sessionId,
         keys: Object.keys(entries).filter((k) => typeof entries[k] === 'string'),
