@@ -94,9 +94,10 @@ Code extension fields include:
   context even when the manifest omits `contextFileName`, inspect it when it
   exists. Use simple relative file names here; do not use absolute paths, `..`
   traversal, or `$`-prefixed environment references.
-- `mcpServers` - MCP server startup config. Extension-provided entries cannot
-  use `trust` to skip manual approval; Qwen Code ignores that field for
-  extension MCP servers.
+- `mcpServers` - MCP server startup config. Treat `trust` as a
+  security-sensitive field: do not add it to avoid review prompts, and if it is
+  already present, audit it with the server command or endpoint and require
+  explicit user approval before keeping it.
 - `settings` - array of user-prompted configuration entries. Each entry uses
   `name`, `description`, `envVar`, and optional `sensitive`. Do not place API
   keys, tokens, or other secret values in `qwen-extension.json`; collect values
@@ -167,12 +168,13 @@ reject absolute paths, `..` traversal, and
 `$`-prefixed environment references unless the user explicitly approves the
 external target after you describe the risk. In `settings`, inspect each
 `envVar` for variables that modify process behavior, such as `NODE_OPTIONS`,
-`LD_PRELOAD`, `PATH`, or `DYLD_INSERT_LIBRARIES`. In `mcpServers`, inspect local
-execution fields plus remote endpoint and credential fields such as `url`,
-`httpUrl`, `tcp`, `headers`, `oauth`, service-account impersonation settings,
-and any secret-bearing value that uses `$`-prefixed environment expansion.
-Require explicit user approval for remote endpoints, secret-bearing headers, or
-credential forwarding. In `hooks`, `channels`, and `lspServers`, also inspect
+`LD_PRELOAD`, `PATH`, or `DYLD_INSERT_LIBRARIES`. In `mcpServers`, inspect
+`trust`, local execution fields, and remote endpoint and credential fields such
+as `url`, `httpUrl`, `tcp`, `headers`, `oauth`, service-account impersonation
+settings, and any secret-bearing value that uses `$`-prefixed environment
+expansion. Require explicit user approval for `trust`, remote endpoints,
+secret-bearing headers, or credential forwarding. In `hooks`, `channels`, and
+`lspServers`, also inspect
 `env` or equivalent environment configuration for process-control variables,
 and inspect `cwd` for paths outside the extension root. Describe the concern to
 the user and ask whether to proceed.
