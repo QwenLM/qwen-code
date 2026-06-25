@@ -23,7 +23,7 @@
  * See `packages/mcp-chrome-integration/docs/06-plan-c-cdp-tunnel.md`.
  */
 
-/* global chrome, console */
+/* global chrome, console, setInterval, clearInterval */
 
 const LOG_PREFIX = '[CdpBridge]';
 
@@ -69,6 +69,36 @@ type CdpSend = (frame: CdpOutbound) => void;
 let attachedTabId: number | null = null;
 /** The active outbound sink while a `/cdp` puppeteer client is connected. */
 let activeSend: CdpSend | null = null;
+/** While set, keeps the MV3 worker awake during an attachment (see startAttachKeepalive). */
+let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Keep the MV3 service worker alive while the debugger is attached. The worker
+ * idles out after ~30s with no activity; between CDP commands the agent can
+ * pause to think for tens of seconds, and if the worker sleeps `chrome.debugger`
+ * detaches — the next command then hangs and the tunnel appears frozen. A
+ * sub-30s extension-API call resets the idle timer; the 30s `chrome.alarms`
+ * backstop in the service worker only covers idle reconnects, not an in-flight
+ * attachment.
+ */
+// ponytail: 20s poll while attached. Coarser than ideal but well under the 30s
+// idle floor; drop it if Chrome ever exposes an explicit "stay awake" for an
+// active debuggee.
+function startAttachKeepalive(): void {
+  if (keepaliveTimer !== null) return;
+  keepaliveTimer = setInterval(() => {
+    chrome.runtime.getPlatformInfo(() => {
+      void chrome.runtime.lastError; // ignore; the call itself is the keepalive
+    });
+  }, 20_000);
+}
+
+function stopAttachKeepalive(): void {
+  if (keepaliveTimer !== null) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
+}
 
 /** Whether a frame `type` is one this bridge owns (daemon → extension). */
 export function isCdpBridgeFrame(type: unknown): boolean {
@@ -113,6 +143,7 @@ function onDebuggerDetach(
 /** Remove our debugger listeners and forget the attached tab. */
 function teardownAttachment(): void {
   if (attachedTabId === null) return;
+  stopAttachKeepalive();
   try {
     chrome.debugger.onEvent.removeListener(onDebuggerEvent);
     chrome.debugger.onDetach.removeListener(onDebuggerDetach);
@@ -177,6 +208,7 @@ async function handleAttach(
     attachedTabId = tabId;
     chrome.debugger.onEvent.addListener(onDebuggerEvent);
     chrome.debugger.onDetach.addListener(onDebuggerDetach);
+    startAttachKeepalive();
 
     // Best-effort tab metadata for the daemon's synthetic targetInfo.
     let url: string | undefined;

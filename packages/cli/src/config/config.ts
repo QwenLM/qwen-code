@@ -1943,7 +1943,15 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
-    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
+    // CDP tunnel (Plan C, #5626): when the daemon runs with the tunnel on,
+    // browser automation goes through chrome-devtools-mcp over the tunnel — far
+    // lighter than the OS-level computer-use driver (cua-driver). Disable
+    // computer-use in that case so the agent doesn't pick that path for browser
+    // tasks and spin up a heavyweight screenshot/click loop.
+    computerUseEnabled:
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1'
+        ? false
+        : (settings.tools?.computerUse?.enabled ?? true),
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
