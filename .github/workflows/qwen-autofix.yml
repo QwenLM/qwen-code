@@ -215,8 +215,11 @@ jobs:
               echo "::warning::Tier-1 issue scan failed; proceeding with tier-2 candidates only."
               jq -n -c '[]' > "${WORKDIR}/tier1.json"
             else
-              jq -c '.[0:10] | map(. + {autofixTier: 1})' \
-                "${WORKDIR}/scan.json" > "${WORKDIR}/tier1.json"
+              if ! jq -c '.[0:10] | map(. + {autofixTier: 1})' \
+                "${WORKDIR}/scan.json" > "${WORKDIR}/tier1.json"; then
+                echo "::warning::Tier-1 result processing failed; proceeding with tier-2 candidates only."
+                jq -n -c '[]' > "${WORKDIR}/tier1.json"
+              fi
             fi
 
             # Tier 2: recent, unattended bugs. Always gathered (not only when tier 1
@@ -229,16 +232,23 @@ jobs:
               echo "::warning::Tier-2 issue scan failed; proceeding with tier-1 candidates only."
               jq -n -c '[]' > "${WORKDIR}/tier2.with-tier.json"
             else
-              filter_unattended_candidates "${WORKDIR}/tier2-scan.json" "${WORKDIR}/tier2.json"
-              jq -c 'map(. + {autofixTier: 2})' \
-                "${WORKDIR}/tier2.json" > "${WORKDIR}/tier2.with-tier.json"
+              if ! filter_unattended_candidates "${WORKDIR}/tier2-scan.json" "${WORKDIR}/tier2.json"; then
+                echo "::warning::Tier-2 unattended filtering failed; proceeding with tier-1 candidates only."
+                jq -n -c '[]' > "${WORKDIR}/tier2.with-tier.json"
+              elif ! jq -c 'map(. + {autofixTier: 2})' \
+                "${WORKDIR}/tier2.json" > "${WORKDIR}/tier2.with-tier.json"; then
+                echo "::warning::Tier-2 result processing failed; proceeding with tier-1 candidates only."
+                jq -n -c '[]' > "${WORKDIR}/tier2.with-tier.json"
+              fi
             fi
 
-            # Tier 1 first (priority), then tier 2; reserve a small tier-2
-            # slice so a full tier-1 slate cannot starve recent unattended bugs.
+            # Tier 1 first (priority), then fill unused capacity from tier 2.
             jq -c -s \
-              '(.[0][0:7] + .[1][0:3])
-               | reduce .[] as $x ([]; if any(.[]; .number == $x.number) then . else . + [$x] end)
+              '.[0] as $tier1 | .[1] as $tier2
+               | ($tier1[0:10]) as $selected
+               | ($selected + ($tier2
+                   | map(select(.number as $n | ($selected | map(.number) | index($n) | not)))
+                   | .[0:(10 - ($selected | length))]))
                | .[0:10] | map(del(.comments))' \
               "${WORKDIR}/tier1.json" "${WORKDIR}/tier2.with-tier.json" > "${WORKDIR}/candidates.json"
           fi
