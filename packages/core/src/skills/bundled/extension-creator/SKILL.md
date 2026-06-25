@@ -43,17 +43,14 @@ folders by hand.
 
 ## Extension Shape
 
-Keep `qwen-extension.json` at the extension root. Common Qwen Code extension
-fields include:
+Keep `qwen-extension.json` at the extension root. Common runtime-relevant Qwen
+Code extension fields include:
 
 - `name`
 - `version`
 - `displayName`
 - `description`
 - `contextFileName`
-- `commands`
-- `skills`
-- `agents`
 - `mcpServers`
 - `settings`
 - `hooks`
@@ -71,6 +68,9 @@ Use these companion locations when needed:
 - `hooks` in `qwen-extension.json` for lifecycle hooks.
 - `channels` in `qwen-extension.json` for custom channel adapters.
 - `lspServers` in `qwen-extension.json` for LSP server configuration.
+
+Qwen Code discovers command, skill, and agent resources from the corresponding
+folders, so prefer the folder structure for those resources.
 
 ## Local Test Flow
 
@@ -100,6 +100,6 @@ visible in the current session.
 
 - Confirm `qwen-extension.json` exists at the extension root.
 - Confirm referenced folders or files exist when `contextFileName`, `commands`,
-  `skills`, `agents`, or `mcpServers` are configured.
+  `skills`, `agents`, `mcpServers`, `hooks`, or `channels` are configured.
 - Keep the scaffold focused on the requested capability; do not add unused
   folders or build tooling.
