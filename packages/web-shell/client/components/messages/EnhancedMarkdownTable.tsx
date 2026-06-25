@@ -19,7 +19,10 @@ import {
 import { useI18n } from '../../i18n';
 import styles from './EnhancedMarkdownTable.module.css';
 
-type TableElement = ReactElement<{ children?: ReactNode }>;
+type TableElement = ReactElement<{
+  children?: ReactNode;
+  style?: CSSProperties;
+}>;
 type TextFilterOperator =
   | 'contains'
   | 'equals'
@@ -33,6 +36,7 @@ interface CellData {
   content: ReactNode;
   text: string;
   isHeader: boolean;
+  textAlign?: CSSProperties['textAlign'];
 }
 
 interface RowData {
@@ -171,6 +175,7 @@ function parseRow(rowNode: TableElement, rowKey: string): RowData {
       content: cellNode.props.children,
       text: normalizeText(getTextContent(cellNode.props.children)),
       isHeader: cellNode.type === 'th',
+      textAlign: cellNode.props.style?.textAlign,
     })),
   };
 }
@@ -1373,6 +1378,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     if (event.button !== 0 || isInteractiveSelectionTarget(event.target))
       return;
     event.preventDefault();
+    containerRef.current?.focus({ preventScroll: true });
     startSelectionAtCell(rowIndex, columnIndex);
   };
 
@@ -1578,11 +1584,15 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                     : 'descending'
                   : 'none';
                 const filterMenuId = `${tableId}-filter-${columnIndex}`;
+                const headerAlignStyle = header.textAlign
+                  ? { textAlign: header.textAlign }
+                  : undefined;
                 return (
                   <th
                     key={header.key}
                     className={styles.headerCell}
                     aria-sort={ariaSort}
+                    style={headerAlignStyle}
                   >
                     <div className={styles.headerControls}>
                       <button
@@ -1590,8 +1600,12 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                         type="button"
                         onClick={() => toggleSort(columnIndex)}
                         aria-label={sortAriaLabel}
+                        style={headerAlignStyle}
                       >
-                        <span className={styles.headerText}>
+                        <span
+                          className={styles.headerText}
+                          style={headerAlignStyle}
+                        >
                           {header.content}
                         </span>
                         <span className={styles.sortIcon} aria-hidden="true">
@@ -1649,6 +1663,9 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                     {visibleColumnIndexes.map((columnIndex) => {
                       const cell = row.cells[columnIndex];
                       if (!cell) return null;
+                      const cellAlignStyle = cell.textAlign
+                        ? { textAlign: cell.textAlign }
+                        : undefined;
                       return (
                         <td
                           key={cell.key}
@@ -1657,6 +1674,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                               ? styles.selectedCell
                               : ''
                           }`}
+                          style={cellAlignStyle}
                           data-row-index={rowIndex}
                           data-column-index={columnIndex}
                           onMouseDown={(event) =>
@@ -1691,15 +1709,27 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
                             const header = table.headers[columnIndex];
                             const cell = row.cells[columnIndex];
                             if (!header || !cell) return null;
+                            const headerAlignStyle = header.textAlign
+                              ? { textAlign: header.textAlign }
+                              : undefined;
+                            const cellAlignStyle = cell.textAlign
+                              ? { textAlign: cell.textAlign }
+                              : undefined;
                             return (
                               <div
                                 key={`${row.key}-detail-${columnIndex}`}
                                 className={styles.detailItem}
                               >
-                                <div className={styles.detailLabel}>
+                                <div
+                                  className={styles.detailLabel}
+                                  style={headerAlignStyle}
+                                >
                                   {header.content}
                                 </div>
-                                <div className={styles.detailValue}>
+                                <div
+                                  className={styles.detailValue}
+                                  style={cellAlignStyle}
+                                >
                                   {cell.content}
                                 </div>
                               </div>

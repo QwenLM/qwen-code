@@ -503,6 +503,47 @@ describe('EnhancedMarkdownTable', () => {
     expect(rowTexts(container)).toEqual(['0.5', '75%']);
   });
 
+  it('preserves markdown table cell alignment', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th style={{ textAlign: 'right' }}>Amount</th>
+          <th style={{ textAlign: 'center' }}>Status</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td style={{ textAlign: 'right' }}>$10</td>
+          <td style={{ textAlign: 'center' }}>Done</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    const headerCells = [
+      ...container.querySelectorAll<HTMLTableCellElement>('thead th'),
+    ].slice(1);
+    expect(headerCells[0]?.style.textAlign).toBe('right');
+    expect(headerCells[1]?.style.textAlign).toBe('center');
+    expect(dataCell(container, 0, 0).style.textAlign).toBe('right');
+    expect(dataCell(container, 0, 1).style.textAlign).toBe('center');
+
+    click(button(container, 'View details for row 1'));
+    const detailElements = [...container.querySelectorAll<HTMLElement>('div')];
+    expect(
+      detailElements.find(
+        (element) =>
+          element.textContent === '$10' && element.style.textAlign === 'right',
+      ),
+    ).toBeDefined();
+    expect(
+      detailElements.find(
+        (element) =>
+          element.textContent === 'Done' &&
+          element.style.textAlign === 'center',
+      ),
+    ).toBeDefined();
+  });
+
   it('quick copies the visible sorted table', () => {
     const writeText = mockClipboard();
     const container = renderTable();
@@ -667,19 +708,24 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
   });
 
-  it('copies selected cells from the keyboard copy event', () => {
+  it('copies selected cells from the focused keyboard copy event', () => {
     const container = renderTable();
+    const outsideButton = document.createElement('button');
+    document.body.appendChild(outsideButton);
+    outsideButton.focus();
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
     const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
     expect(scroller).not.toBeNull();
-    const { event, setData } = dispatchCopy(scroller!);
+    expect(document.activeElement).toBe(scroller);
+    const { event, setData } = dispatchCopy(document.activeElement!);
 
     expect(event.defaultPrevented).toBe(true);
     expect(setData).toHaveBeenCalledWith(
       'text/plain',
       ['Alpha\t10', 'Beta\t2'].join('\n'),
     );
+    outsideButton.remove();
   });
 
   it('keeps native text selection copy behavior', () => {
