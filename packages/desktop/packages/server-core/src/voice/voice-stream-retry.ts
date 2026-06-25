@@ -8,7 +8,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isRetryable(error: unknown): boolean {
+export function isRetryableVoiceStreamError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   if (
     /\b(400|401|403|404|410|422|429)\b|unauthori[sz]ed|forbidden|model_not_supported|rate.?limit/i.test(
@@ -26,7 +26,7 @@ export async function openVoiceStreamWithRetry(
   try {
     return await open();
   } catch (error) {
-    if (!isRetryable(error)) {
+    if (!isRetryableVoiceStreamError(error)) {
       throw error;
     }
     debugLogger.debug('[voice] stream open failed, retrying:', error);

@@ -17,7 +17,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { getVoiceModel } from '@craft-agent/shared/config';
 import { isLoopbackHost } from './net-guard';
 import type { VoiceConfig } from './transcribe';
 
@@ -29,6 +28,13 @@ const NO_CREDENTIALS_ERROR =
 interface ResolvedCredentials {
   baseUrl: string;
   apiKey: string;
+}
+
+interface ResolveDesktopVoiceConfigDeps {
+  readQwenJson?: <T>(file: string) => Promise<T | undefined>;
+  getVoiceModel?: () => string;
+  env?: NodeJS.ProcessEnv;
+  now?: () => number;
 }
 
 /**
@@ -44,7 +50,7 @@ export function normalizeBaseUrl(raw: string): string {
   return withProto.endsWith('/v1') ? withProto : `${withProto}/v1`;
 }
 
-async function readQwenJson<T>(file: string): Promise<T | undefined> {
+async function readQwenJsonFromDisk<T>(file: string): Promise<T | undefined> {
   try {
     return JSON.parse(
       await readFile(join(homedir(), '.qwen', file), 'utf-8'),
@@ -54,9 +60,16 @@ async function readQwenJson<T>(file: string): Promise<T | undefined> {
   }
 }
 
+async function getStoredVoiceModel(): Promise<string> {
+  const { getVoiceModel } = await import('@craft-agent/shared/config');
+  return getVoiceModel();
+}
+
 /** 1) Qwen OAuth device-flow credentials. */
-async function fromOAuth(): Promise<ResolvedCredentials | undefined> {
-  const creds = await readQwenJson<{
+async function fromOAuth(
+  deps: Required<Pick<ResolveDesktopVoiceConfigDeps, 'readQwenJson' | 'now'>>,
+): Promise<ResolvedCredentials | undefined> {
+  const creds = await deps.readQwenJson<{
     access_token?: string;
     resource_url?: string;
     expiry_date?: number;
@@ -67,7 +80,7 @@ async function fromOAuth(): Promise<ResolvedCredentials | undefined> {
   // instead of selecting a stale OAuth token that will 401.
   if (
     typeof creds?.expiry_date === 'number' &&
-    creds.expiry_date <= Date.now() + 30_000
+    creds.expiry_date <= deps.now() + 30_000
   ) {
     return undefined;
   }
@@ -102,13 +115,15 @@ export function isDashscopeCompatible(url: string): boolean {
 }
 
 /** 2) API-key login: a DashScope compatible-mode provider in settings.json. */
-async function fromQwenSettings(): Promise<ResolvedCredentials | undefined> {
-  const settings = await readQwenJson<QwenSettings>('settings.json');
+async function fromQwenSettings(
+  deps: Required<Pick<ResolveDesktopVoiceConfigDeps, 'readQwenJson' | 'env'>>,
+): Promise<ResolvedCredentials | undefined> {
+  const settings = await deps.readQwenJson<QwenSettings>('settings.json');
   if (!settings) return undefined;
   const env = settings.env ?? {};
   const keyFor = (p: QwenProvider): string | undefined => {
     if (!p.envKey) return undefined;
-    return process.env[p.envKey]?.trim() || env[p.envKey]?.trim() || undefined;
+    return deps.env[p.envKey]?.trim() || env[p.envKey]?.trim() || undefined;
   };
   const providers = Object.values(settings.modelProviders ?? {}).flat();
   for (const provider of providers) {
@@ -121,21 +136,30 @@ async function fromQwenSettings(): Promise<ResolvedCredentials | undefined> {
 }
 
 /** 3) Explicit environment override. */
-function fromEnv(): ResolvedCredentials | undefined {
+function fromEnv(env: NodeJS.ProcessEnv): ResolvedCredentials | undefined {
   const apiKey =
-    process.env['DASHSCOPE_API_KEY']?.trim() ||
-    process.env['OPENAI_API_KEY']?.trim();
+    env['DASHSCOPE_API_KEY']?.trim() || env['OPENAI_API_KEY']?.trim();
   if (!apiKey) return undefined;
   return {
     apiKey,
     baseUrl: normalizeBaseUrl(
-      process.env['OPENAI_BASE_URL']?.trim() || DEFAULT_DASHSCOPE_BASE_URL,
+      env['OPENAI_BASE_URL']?.trim() || DEFAULT_DASHSCOPE_BASE_URL,
     ),
   };
 }
 
-export async function resolveDesktopVoiceConfig(): Promise<VoiceConfig> {
-  const creds = (await fromOAuth()) ?? (await fromQwenSettings()) ?? fromEnv();
+export async function resolveDesktopVoiceConfig(
+  deps: ResolveDesktopVoiceConfigDeps = {},
+): Promise<VoiceConfig> {
+  const resolvedDeps = {
+    readQwenJson: deps.readQwenJson ?? readQwenJsonFromDisk,
+    env: deps.env ?? process.env,
+    now: deps.now ?? Date.now,
+  };
+  const creds =
+    (await fromOAuth(resolvedDeps)) ??
+    (await fromQwenSettings(resolvedDeps)) ??
+    fromEnv(resolvedDeps.env);
   if (!creds) {
     throw new Error(NO_CREDENTIALS_ERROR);
   }
@@ -144,5 +168,9 @@ export async function resolveDesktopVoiceConfig(): Promise<VoiceConfig> {
   if (parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname)) {
     throw new Error('Voice endpoint must use an https baseUrl.');
   }
-  return { model: getVoiceModel(), baseUrl: creds.baseUrl, apiKey: creds.apiKey };
+  return {
+    model: deps.getVoiceModel ? deps.getVoiceModel() : await getStoredVoiceModel(),
+    baseUrl: creds.baseUrl,
+    apiKey: creds.apiKey,
+  };
 }

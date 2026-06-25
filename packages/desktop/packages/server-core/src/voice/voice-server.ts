@@ -30,7 +30,10 @@ export interface VoiceServer {
 }
 
 /** Constant-time token comparison (loopback, but cheap to do right). */
-function tokenMatches(provided: string | null, expected: string): boolean {
+export function tokenMatches(
+  provided: string | null,
+  expected: string,
+): boolean {
   if (provided == null) return false;
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);

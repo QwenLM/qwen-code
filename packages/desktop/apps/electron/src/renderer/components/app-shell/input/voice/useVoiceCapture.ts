@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { sendVoicePcmFrame } from './voice-frame-sender';
 
 export type VoiceCaptureStatus =
   | 'idle'
@@ -267,6 +268,7 @@ export function useVoiceCapture(
         resourcesRef.current.ws = ws;
 
         let lastLevelUpdate = 0;
+        let droppedFrames = 0;
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
           const { pcm, level } = floatToPcm16(
             event.inputBuffer.getChannelData(0),
@@ -276,7 +278,9 @@ export function useVoiceCapture(
             lastLevelUpdate = now;
             setAudioLevel(level);
           }
-          if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+          droppedFrames = sendVoicePcmFrame(ws, pcm, droppedFrames, () =>
+            fail('Voice connection lost. Audio is not being sent.', generation),
+          );
         };
 
         ws.onopen = () => {
