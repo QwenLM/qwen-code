@@ -58,6 +58,25 @@ export function matchExtensionByRef(
 }
 
 /**
+ * Regex matching Unicode bidi override/isolate/mark characters that
+ * `stripTerminalControlSequences` leaves intact.
+ */
+const BIDI_CONTROL_RE = /[‎‏؜⁦⁧⁨⁩‪‫‬‭‮]/g;
+
+/**
+ * Normalizes an untrusted display string for safe UI rendering. Strips
+ * terminal control sequences and bidi overrides, collapses/trims whitespace,
+ * and returns `null` when no safe text remains.
+ */
+export function sanitizeDisplayText(raw: string): string | null {
+  const stripped = stripTerminalControlSequences(raw)
+    .replace(BIDI_CONTROL_RE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped.length > 0 ? stripped : null;
+}
+
+/**
  * Returns autocomplete suggestions for extensions matching the given pattern.
  * Unlike MCP server suggestions (which require a non-empty pattern to avoid
  * flooding), extensions show on bare `@` because their count is typically small.
@@ -73,25 +92,29 @@ export function getExtensionSuggestions(
 
   const query = pattern.toLowerCase();
   return extensions
-    .filter((ext) => {
-      const displayName = (ext.displayName || ext.name).toLowerCase();
+    .map((ext) => ({
+      ext,
+      safeLabel: sanitizeDisplayText(ext.displayName || ext.name) || ext.name,
+    }))
+    .filter(({ safeLabel, ext }) => {
+      const label = safeLabel.toLowerCase();
       const name = ext.name.toLowerCase();
-      return displayName.includes(query) || name.includes(query);
+      return label.includes(query) || name.includes(query);
     })
     .sort((a, b) => {
-      const aName = (a.displayName || a.name).toLowerCase();
-      const bName = (b.displayName || b.name).toLowerCase();
+      const aName = a.safeLabel.toLowerCase();
+      const bName = b.safeLabel.toLowerCase();
       const aPrefix = aName.startsWith(query) ? 0 : 1;
       const bPrefix = bName.startsWith(query) ? 0 : 1;
       if (aPrefix !== bPrefix) return aPrefix - bPrefix;
       return aName.localeCompare(bName);
     })
     .slice(0, MAX_SUGGESTIONS_TO_SHOW)
-    .map((ext) => ({
-      label: stripTerminalControlSequences(ext.displayName || ext.name),
+    .map(({ ext, safeLabel }) => ({
+      label: safeLabel,
       value: buildExtensionRef(ext.name),
       description: ext.config.description
-        ? stripTerminalControlSequences(ext.config.description)
+        ? (sanitizeDisplayText(ext.config.description) ?? undefined)
         : undefined,
       sourceBadge: t('Extension'),
       isDirectory: false,
@@ -104,38 +127,41 @@ export function getExtensionSuggestions(
  * knows about the extension's capabilities.
  */
 export function buildExtensionContextText(extension: Extension): string {
-  const displayName = stripTerminalControlSequences(
-    extension.displayName || extension.name,
-  );
+  const displayName =
+    sanitizeDisplayText(extension.displayName || extension.name) ||
+    extension.name;
   const lines: string[] = [];
 
   lines.push(
     `--- Extension: ${displayName} (untrusted third-party content) ---`,
   );
   if (extension.config.description) {
-    lines.push(stripTerminalControlSequences(extension.config.description));
-    lines.push('');
+    const desc = sanitizeDisplayText(extension.config.description);
+    if (desc) {
+      lines.push(desc);
+      lines.push('');
+    }
   }
 
   const capabilities: string[] = [];
 
   if (extension.skills && extension.skills.length > 0) {
     const skillNames = extension.skills
-      .map((s) => stripTerminalControlSequences(s.name))
+      .map((s) => sanitizeDisplayText(s.name) || s.name)
       .join(', ');
     capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
   }
 
   if (extension.mcpServers && Object.keys(extension.mcpServers).length > 0) {
     const serverNames = Object.keys(extension.mcpServers)
-      .map((n) => stripTerminalControlSequences(n))
+      .map((n) => sanitizeDisplayText(n) || n)
       .join(', ');
     capabilities.push(`- MCP Servers: ${serverNames}`);
   }
 
   if (extension.agents && extension.agents.length > 0) {
     const agentNames = extension.agents
-      .map((a) => stripTerminalControlSequences(a.name))
+      .map((a) => sanitizeDisplayText(a.name) || a.name)
       .join(', ');
     capabilities.push(`- Agents: ${agentNames}`);
   }

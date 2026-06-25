@@ -19,7 +19,6 @@ import {
   emptyMcpResourceText,
   formatMcpResourceContents,
   summarizeMcpResource,
-  stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemToolGroup,
@@ -32,6 +31,7 @@ import {
   parseExtensionRef,
   matchExtensionByRef,
   buildExtensionContextText,
+  sanitizeDisplayText,
 } from './extension-mention-ref.js';
 
 export interface ResolveAtCommandParams {
@@ -514,9 +514,9 @@ export async function resolveAtCommandQuery({
   const extensionLabels: string[] = [];
   for (let i = 0; i < extensionMentions.length; i++) {
     const { extension } = extensionMentions[i];
-    const displayName = stripTerminalControlSequences(
-      extension.displayName || extension.name,
-    );
+    const displayName =
+      sanitizeDisplayText(extension.displayName || extension.name) ||
+      extension.name;
     const callId = `client-extension-${userMessageTimestamp}-${i}`;
 
     let contextText = buildExtensionContextText(extension);
