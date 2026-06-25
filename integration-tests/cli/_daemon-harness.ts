@@ -41,6 +41,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DaemonClient, type SubscribeOptions } from '@qwen-code/sdk';
+import {
+  hashMcpServerConfig,
+  type MCPServerConfig,
+} from '@qwen-code/qwen-code-core';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -232,6 +236,41 @@ export function writeWorkspaceSettings(
   const settingsPath = path.join(settingsDir, 'settings.json');
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   return settingsPath;
+}
+
+/**
+ * Pre-approve gated (workspace / project scope, #4615) MCP servers for
+ * `workspaceCwd` so the daemon's `qwen --acp` child connects them instead of
+ * skipping them as pending-approval. Servers declared in `.qwen/settings.json`
+ * are workspace-scoped and therefore gated: absent a stored approval, discovery
+ * skips them BEFORE any spawn, which makes the MCP-amplification suite time out
+ * waiting for grandchildren that never appear.
+ *
+ * Writes a standalone approvals file (NOT the developer's global
+ * `~/.qwen/mcpApprovals.json`) under the workspace and returns the env that
+ * points the daemon — and, by inheritance, its acp child — at it. Pass the
+ * returned env to `spawnDaemon({ env })`. The approval hash binds to the same
+ * behavioral fields the child hashes (`scope` is provenance-only and excluded),
+ * so the plain settings config is sufficient. Mirrors the pre-approval pattern
+ * in `simple-mcp-server.test.ts`.
+ */
+export function approveWorkspaceMcpServers(
+  workspaceCwd: string,
+  servers: Record<string, MCPServerConfig>,
+): Record<string, string> {
+  const approvalsPath = path.join(workspaceCwd, '.qwen', 'mcpApprovals.json');
+  const project: Record<string, { hash: string; status: 'approved' }> = {};
+  for (const [name, config] of Object.entries(servers)) {
+    project[name] = { hash: hashMcpServerConfig(config), status: 'approved' };
+  }
+  // Key by the canonical (realpath) workspace, NOT `path.resolve`: the daemon
+  // canonicalizes `--workspace` (e.g. macOS `/var` → `/private/var`) and the
+  // acp child looks approvals up under that resolved path. Keying by the
+  // un-resolved temp path would miss, leaving the servers pending.
+  const root = fs.realpathSync(workspaceCwd);
+  fs.mkdirSync(path.dirname(approvalsPath), { recursive: true });
+  fs.writeFileSync(approvalsPath, JSON.stringify({ [root]: project }, null, 2));
+  return { QWEN_CODE_MCP_APPROVALS_PATH: approvalsPath };
 }
 
 /**
