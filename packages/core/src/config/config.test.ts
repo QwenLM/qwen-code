@@ -24,6 +24,7 @@ import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
@@ -1937,7 +1938,7 @@ describe('Server Config (config.ts)', () => {
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
     const config = new Config({
       ...baseParams,
-      enableManagedAutoMemory: false,
+      bareMode: true,
       generationConfig: { contextWindowSize: 1000 },
     });
 
@@ -2347,6 +2348,27 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).not.toContain('# auto memory');
   });
 
+  describe('isManagedMemoryAvailable', () => {
+    it('returns true when bareMode is false', () => {
+      const config = new Config({ ...baseParams, bareMode: false });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+
+    it('returns false when bareMode is true', () => {
+      const config = new Config({ ...baseParams, bareMode: true });
+      expect(config.isManagedMemoryAvailable()).toBe(false);
+    });
+
+    it('returns true even when enableManagedAutoMemory is false', () => {
+      const config = new Config({
+        ...baseParams,
+        enableManagedAutoMemory: false,
+        bareMode: false,
+      });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+  });
+
   it('refreshHierarchicalMemory should exclude implicit cwd from bare include-directories', async () => {
     const explicitDir = '/tmp/explicit';
     const config = new Config({
@@ -2728,6 +2750,62 @@ describe('Server Config (config.ts)', () => {
       expect(
         configWithoutTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
       ).toBe(false);
+    });
+
+    it('should return provided sensitiveSpanAttributeMaxLength setting', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          sensitiveSpanAttributeMaxLength: 65_536,
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+    });
+
+    it('should default sensitiveSpanAttributeMaxLength to 1MiB', () => {
+      const configWithTelemetry = new Config({
+        ...baseParams,
+        telemetry: { enabled: true },
+      });
+      expect(
+        configWithTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+
+      const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
+      delete paramsWithoutTelemetry.telemetry;
+      const configWithoutTelemetry = new Config(paramsWithoutTelemetry);
+      expect(
+        configWithoutTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+    });
+
+    it('should reject invalid sensitiveSpanAttributeMaxLength values', () => {
+      for (const [value, label] of [
+        [0, '0'],
+        [Number.NaN, 'NaN'],
+        [Number.POSITIVE_INFINITY, 'Infinity'],
+        [
+          SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1,
+          String(SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1),
+        ],
+      ] as const) {
+        expect(
+          () =>
+            new Config({
+              ...baseParams,
+              telemetry: {
+                enabled: true,
+                sensitiveSpanAttributeMaxLength: value,
+              },
+            }),
+        ).toThrow(
+          new RegExp(
+            `Invalid telemetry\\.sensitiveSpanAttributeMaxLength.*got ${label}`,
+          ),
+        );
+      }
     });
 
     it('should return default telemetry target if telemetry object is not provided', () => {
@@ -4865,6 +4943,27 @@ describe('Model Switching and Config Updates', () => {
       // getModel() returns 'some-model', getModelDisplayName returns it as-is
       // because currentAuthType is falsy
       expect(config.getModelDisplayName()).toBe('some-model');
+    });
+  });
+
+  describe('getAutoSkillConfirmEnabled', () => {
+    it('defaults to true when autoSkillConfirm is unset', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+    });
+
+    it('returns false when autoSkillConfirm is explicitly disabled', () => {
+      const config = new Config({ ...baseParams, autoSkillConfirm: false });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+
+    it('is forced false in bare mode even when autoSkillConfirm is true', () => {
+      const config = new Config({
+        ...baseParams,
+        autoSkillConfirm: true,
+        bareMode: true,
+      });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
     });
   });
 });

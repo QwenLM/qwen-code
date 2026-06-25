@@ -18,6 +18,15 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
+// Global compact mode was removed (#5666). Type-based tool rendering no longer
+// consumes a compact-mode context, so these tests use a local no-op provider
+// (its `value` is ignored) to keep the existing render scaffolding intact.
+const CompactModeProvider = ({
+  children,
+}: {
+  children?: React.ReactNode;
+  value?: unknown;
+}) => <>{children}</>;
 
 // Mock child components to isolate ToolGroupMessage behavior
 vi.mock('./ToolMessage.js', () => ({
@@ -69,6 +78,7 @@ vi.mock('./ToolMessage.js', () => ({
     return (
       <Text>
         MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
+        {forceShowResult ? ' [forceShow]' : ''}
       </Text>
     );
   },
@@ -154,7 +164,7 @@ describe('<ToolGroupMessage />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
-    it('renders completed tool group as compact overview', () => {
+    it('renders non-collapsible tools individually', () => {
       const toolCalls = [
         createToolCall({ callId: 'tool-1', name: 'first-tool' }),
         createToolCall({ callId: 'tool-2', name: 'second-tool' }),
@@ -167,8 +177,173 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // All-complete groups now show CompactToolGroupDisplay summary
-      expect(frame).toContain('Used 2 tools');
+      // Non-collapsible tools (unknown → 'other') render individually
+      expect(frame).toContain('MockTool[tool-1]');
+      expect(frame).toContain('MockTool[tool-2]');
+    });
+
+    it('renders collapsible tools as summary via CompactToolGroupDisplay', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
+        createToolCall({ callId: 'r2', name: 'ReadFile', description: 'b.ts' }),
+        createToolCall({ callId: 'g1', name: 'Grep', description: 'pattern' }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // CATEGORY_ORDER: search first (capitalized), then read (lowercased)
+      expect(frame).toContain('Searched 1 pattern');
+      expect(frame).toContain('read 2 files');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('renders mixed group with summary + individual tools', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
+        createToolCall({
+          callId: 's1',
+          name: 'Shell',
+          description: 'npm test',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // Collapsible → summary line
+      expect(frame).toContain('Read 1 file');
+      // Non-collapsible → individual ToolMessage
+      expect(frame).toContain('MockTool[s1]');
+    });
+
+    it('forceExpandAll bypasses partition when group has error', () => {
+      const toolCalls = [
+        createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
+        createToolCall({
+          callId: 'e1',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Error,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // All tools render individually — no summary line
+      expect(frame).toContain('MockTool[r1]');
+      expect(frame).toContain('MockTool[e1]');
+      expect(frame).not.toContain('Read 1 file');
+    });
+
+    it('forceExpandAll passes forceShowResult to Success siblings in error group', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'ok1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'err1',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Error,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // forceShowResult is per-tool: only the errored tool gets it
+      expect(frame).toContain('MockTool[ok1]');
+      expect(frame).toContain('MockTool[err1]');
+      // Only the Error tool has [forceShow]
+      const forceShowCount = (frame.match(/\[forceShow\]/g) || []).length;
+      expect(forceShowCount).toBe(1);
+    });
+
+    it('canceled collapsible tool renders individually (not absorbed into summary)', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'r2',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Canceled,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+      const frame = lastFrame() ?? '';
+      // Successful ReadFile → summary line
+      expect(frame).toContain('Read 1 file');
+      // Canceled ReadFile → individual ToolMessage (partial output visible)
+      expect(frame).toContain('MockTool[r2]');
+    });
+
+    it('mixed group with memory counts renders memory badge', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'config.yaml',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 's1',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={2}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Recalled 2 memories');
+      // Collapsible tool still summarized
+      expect(frame).toContain('Read 1 file');
+      // Non-collapsible tool rendered individually
+      expect(frame).toContain('MockTool[s1]');
+    });
+
+    it('all-collapsible group with memory counts renders memory badge', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'r2',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Success,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Read 2 files');
+      expect(frame).toContain('Recalled 1 memory');
     });
 
     it('renders tool call awaiting confirmation', () => {
@@ -295,6 +470,123 @@ describe('<ToolGroupMessage />', () => {
         <ToolGroupMessage {...baseProps} toolCalls={[]} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+    });
+  });
+
+  describe('Memory-only group', () => {
+    it('renders read/write counts for completed memory-only groups', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+        }),
+        createToolCall({
+          callId: 'm2',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+        }),
+        createToolCall({
+          callId: 'm3',
+          name: 'SaveMemory',
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={2}
+          memoryWriteCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Recalled 2 memories');
+      expect(frame).toContain('Wrote 1 memory');
+    });
+
+    it('renders singular form for single memory op', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={1}
+          memoryWriteCount={0}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Recalled 1 memory');
+      expect(frame).not.toContain('Wrote');
+    });
+  });
+
+  describe('isUserInitiated', () => {
+    it('user-initiated group renders all collapsible tools individually', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'r2',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Success,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          isUserInitiated={true}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // All tools render individually, no summary line
+      expect(frame).toContain('MockTool[r1]');
+      expect(frame).toContain('MockTool[r2]');
+      expect(frame).not.toContain('Read 2 files');
+    });
+  });
+
+  describe('Memory-only group with error', () => {
+    it('memory-only group with errored tool falls through to expanded path', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          isMemoryOp: 'read',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'm2',
+          name: 'SaveMemory',
+          isMemoryOp: 'write',
+          status: ToolCallStatus.Error,
+          resultDisplay: 'Memory write failed',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={1}
+          memoryWriteCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // Should NOT show compact memory badge — error forces expanded path
+      expect(frame).toContain('MockTool[m1]');
+      expect(frame).toContain('MockTool[m2]');
     });
   });
 
@@ -561,17 +853,20 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
-  describe('Completed-group + terminal subagent expansion', () => {
-    // Verifies the safety net that forces a completed tool_group to expand
-    // when it carries a committed terminal subagent — without it,
-    // `CompactToolGroupDisplay` would skip the ToolMessage path and
-    // `SubagentScrollbackSummary` would never surface in scrollback. The
-    // committed-summary handoff promised by the LiveAgentPanel design
-    // depends on this.
-    const renderCompact = (component: React.ReactElement) =>
+  describe('Compact mode + terminal subagent expansion', () => {
+    // Helper that wraps the group with `compactMode: true` so the
+    // `showCompact` branch is exercised. Verifies the safety net that
+    // forces the group to expand when it carries a committed terminal
+    // subagent — without it, `CompactToolGroupDisplay` would skip the
+    // ToolMessage path and `SubagentScrollbackSummary` would never
+    // surface in scrollback. The committed-summary handoff promised
+    // by the LiveAgentPanel design depends on this.
+    const renderCompact = (component: React.ReactElement, compactMode = true) =>
       render(
         <ConfigContext.Provider value={mockConfig}>
-          {component}
+          <CompactModeProvider value={{ compactMode, compactInline: false }}>
+            {component}
+          </CompactModeProvider>
         </ConfigContext.Provider>,
       );
 
@@ -640,8 +935,9 @@ describe('<ToolGroupMessage />', () => {
       // until the parent commits. Force-expand here so
       // `SubagentScrollbackSummary` lands inline immediately and
       // bridges the gap. Mirrors `SubagentExecutionRenderer`'s
-      // ungated terminal-summary path and `MainContent.isForceExpandGroup`'s
-      // no-isPending-gate committed-history rule.
+      // ungated terminal-summary path and
+      // `mergeCompactToolGroups.isForceExpandGroup`'s no-isPending-gate
+      // committed-history rule.
       const { lastFrame } = renderCompact(
         <ToolGroupMessage
           {...baseProps}
@@ -689,8 +985,9 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // Sibling shown.
-      expect(frame).toContain('read_file');
+      // Sibling shown — read_file maps to 'other' (non-collapsible),
+      // renders individually via ToolMessage.
+      expect(frame).toContain('read config.yaml');
       // Subagent hidden — panel owns the live row.
       expect(frame).not.toContain('MockSubagent[task-running]');
     });
@@ -847,8 +1144,8 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // Sibling is the only inline survivor → compact overview shows
-      // its description, not the subagent's.
+      // Sibling is the only inline survivor — read_file maps to 'other'
+      // (non-collapsible), renders individually via ToolMessage.
       expect(frame).toContain('read config.yaml');
       expect(frame).not.toMatch(/× 2/);
       expect(frame).not.toContain('Delegate task to subagent');

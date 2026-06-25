@@ -494,6 +494,43 @@ export class LoadedSettings {
     saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
   }
 
+  setValues(
+    writes: ReadonlyArray<{
+      scope: SettingScope;
+      key: string;
+      value: unknown;
+    }>,
+    onScopeCommitted?: (scope: SettingScope) => void,
+  ): void {
+    const scopes = new Set<SettingScope>();
+    for (const write of writes) {
+      const value =
+        write.key === 'model.name' && typeof write.value === 'string'
+          ? stripRuntimeSnapshotPrefix(write.value)
+          : write.value;
+      const settingsFile = this.forScope(write.scope);
+      setNestedPropertySafe(settingsFile.settings, write.key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, write.key, value);
+      scopes.add(write.scope);
+    }
+    this._merged = this.computeMergedSettings();
+    const scopeList = Array.from(scopes);
+    for (let i = 0; i < scopeList.length; i++) {
+      const scope = scopeList[i]!;
+      try {
+        saveSettings(this.forScope(scope), undefined, undefined, {
+          throwOnWriteFailure: true,
+        });
+      } catch (err) {
+        for (const uncommittedScope of scopeList.slice(i)) {
+          this.reloadScopeFromDisk(uncommittedScope);
+        }
+        throw err;
+      }
+      onScopeCommitted?.(scope);
+    }
+  }
+
   recomputeMerged(): void {
     this._merged = this.computeMergedSettings();
   }
@@ -1027,6 +1064,7 @@ export function saveSettings(
     unknown
   >,
   replacePath: readonly string[] = [],
+  opts: { throwOnWriteFailure?: boolean } = {},
 ): void {
   try {
     // Ensure the directory exists
@@ -1043,9 +1081,11 @@ export function saveSettings(
       replacePath,
     );
     if (!written) {
-      debugLogger.error(
-        `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`,
-      );
+      const message = `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`;
+      if (opts.throwOnWriteFailure) {
+        throw new Error(message);
+      }
+      debugLogger.error(message);
     }
   } catch (error) {
     debugLogger.error('Error saving user settings file.');

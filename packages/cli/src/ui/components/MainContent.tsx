@@ -7,7 +7,6 @@
 import { Box, Static, type DOMElement, useBoxMetrics } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
-import { ToolCallStatus } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -83,77 +82,6 @@ function initialReplayCount(length: number): number {
 // stable completed items when unrelated UIState fields change during streaming.
 const VirtualHistoryItem = memo(HistoryItemDisplay);
 
-// Stable empty Set used by `absorbedCallIds` when compact mode is off so the
-// memo returns a referentially-stable value across renders. Without this, every
-// re-render where compactMode is false produced a brand-new empty Set, which
-// invalidated `isSummaryAbsorbed`, then `renderVirtualItem`, then forced
-// `VirtualizedList.renderedItems` to recompute and call renderItem for every
-// item — defeating the static-item memo.
-const EMPTY_ABSORBED_CALL_IDS = new Set<string>();
-
-// A tool_group renders through the full ToolGroupMessage path (and therefore
-// ignores `compactLabel`) when any of these force-expand conditions hold.
-// Mirrors `ToolGroupMessage.showCompact`'s exclusion list so MainContent can
-// decide which callIds get their `tool_use_summary` label absorbed by the
-// compact partition header vs. which need the standalone `● <label>` line.
-function isForceExpandGroup(
-  item: HistoryItem,
-  embeddedShellFocused: boolean,
-  activeShellPtyId: number | undefined,
-): boolean {
-  if (item.type !== 'tool_group') return false;
-
-  // User-initiated groups stay distinct as visual boundaries.
-  if (item.isUserInitiated) return true;
-
-  const tools = item.tools;
-
-  // Authorization prompts must show.
-  if (tools.some((t) => t.status === ToolCallStatus.Confirming)) return true;
-
-  // Errors must be visible.
-  if (tools.some((t) => t.status === ToolCallStatus.Error)) return true;
-
-  // Subagent pending confirmations / terminal subagent runs must show — the
-  // inline summary is the only surface carrying the run's outcome.
-  if (
-    tools.some((t) => {
-      const rd = t.resultDisplay;
-      if (
-        !rd ||
-        typeof rd !== 'object' ||
-        !('type' in rd) ||
-        (rd as { type?: string }).type !== 'task_execution'
-      ) {
-        return false;
-      }
-      const typed = rd as { pendingConfirmation?: unknown; status?: string };
-      if (typed.pendingConfirmation !== undefined) return true;
-      return (
-        typed.status === 'completed' ||
-        typed.status === 'failed' ||
-        typed.status === 'cancelled'
-      );
-    })
-  ) {
-    return true;
-  }
-
-  // Active focused shell must be visible.
-  if (
-    embeddedShellFocused &&
-    activeShellPtyId !== undefined &&
-    tools.some(
-      (t) =>
-        t.ptyId === activeShellPtyId && t.status === ToolCallStatus.Executing,
-    )
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
 const virtualEstimatedItemHeight = () => 3;
@@ -179,124 +107,7 @@ export const MainContent = () => {
     [uiState.history],
   );
 
-  // Set of callIds whose label is absorbed by a compact-mode tool_group header.
-  // Computed from RAW history (not merged) — force-expand status depends only
-  // on the tool_group's own state, and mergeable groups don't change force-
-  // expand status when merged. Iterating raw history avoids a circular
-  // dependency with mergedHistory (which receives absorbedCallIds).
-  //
-  // In compact mode, non-force-expanded tool_groups render via
-  // CompactToolGroupDisplay and consume the label as their header replacement.
-  // Force-expanded groups (errors, confirmations, user-initiated, focused
-  // shell) render through the full ToolGroupMessage path and ignore
-  // compactLabel — their callIds are intentionally NOT in this set so the
-  // standalone `● <label>` line in HistoryItemDisplay is the label's only
-  // path to the screen.
-  // Content-stable absorbedCallIds: when the recomputed Set has identical
-  // membership to the previous render, return the previous reference. Avoids
-  // the cascade where activePtyId/embeddedShellFocused flips while a shell
-  // tool runs produce a fresh empty-or-same Set per tick, invalidating
-  // `isSummaryAbsorbed` → `renderVirtualItem` → every static item re-renders.
-  const prevAbsorbedCallIdsRef = useRef<Set<string>>(EMPTY_ABSORBED_CALL_IDS);
-  const absorbedCallIds = useMemo(() => {
-    // In Static (append-only) mode, don't mark summaries as absorbed so the
-    // standalone `● <label>` line in HistoryItemDisplay can render — <Static>
-    // can't repaint committed items, so the standalone line is the label's
-    // only path to the screen (getCompactLabel also returns undefined there).
-    if (!uiState.useTerminalBuffer) return EMPTY_ABSORBED_CALL_IDS;
-    const absorbed = new Set<string>();
-    for (const item of visibleHistory) {
-      if (item.type !== 'tool_group') continue;
-      if (
-        isForceExpandGroup(
-          item,
-          uiState.embeddedShellFocused ?? false,
-          uiState.activePtyId,
-        )
-      ) {
-        continue;
-      }
-      // Only completed groups render via CompactToolGroupDisplay (partition
-      // mode). Active groups still expand inline, so their summaries should
-      // NOT be absorbed.
-      const groupComplete = item.tools.every(
-        (t) =>
-          t.status === ToolCallStatus.Success ||
-          t.status === ToolCallStatus.Error ||
-          t.status === ToolCallStatus.Canceled,
-      );
-      if (!groupComplete) continue;
-      for (const tool of item.tools) absorbed.add(tool.callId);
-    }
-    const prev = prevAbsorbedCallIdsRef.current;
-    if (prev.size === absorbed.size) {
-      let allMatch = true;
-      for (const id of absorbed) {
-        if (!prev.has(id)) {
-          allMatch = false;
-          break;
-        }
-      }
-      if (allMatch) return prev;
-    }
-    prevAbsorbedCallIdsRef.current = absorbed;
-    return absorbed;
-  }, [
-    visibleHistory,
-    uiState.embeddedShellFocused,
-    uiState.activePtyId,
-    uiState.useTerminalBuffer,
-  ]);
-
-  // History renders 1:1 — there is no cross-group merge layer. Tool grouping
-  // is handled per-group by the partition renderer (CompactToolGroupDisplay).
-  const mergedHistory = visibleHistory;
-
-  // Build a callId → summary lookup from `tool_use_summary` history items so
-  // completed tool groups can render a semantic label instead of a generic
-  // "Tool × N" line. A summary is indexed under every callId it covers; the
-  // first summary covering a callId wins (see below).
-  const summaryByCallId = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const item of visibleHistory) {
-      if (item.type === 'tool_use_summary') {
-        for (const callId of item.precedingToolUseIds) {
-          // First summary wins — earlier summaries represent the opening
-          // intent of a batch streak, later ones would override it otherwise.
-          if (!map.has(callId)) {
-            map.set(callId, item.summary);
-          }
-        }
-      }
-    }
-    return map;
-  }, [visibleHistory]);
-
-  const isSummaryAbsorbed = useCallback(
-    (item: HistoryItem | HistoryItemWithoutId): boolean => {
-      if (item.type !== 'tool_use_summary') return false;
-      return item.precedingToolUseIds.some((id) => absorbedCallIds.has(id));
-    },
-    [absorbedCallIds],
-  );
-
-  const getCompactLabel = useCallback(
-    (item: HistoryItem | HistoryItemWithoutId): string | undefined => {
-      if (item.type !== 'tool_group' || item.tools.length === 0)
-        return undefined;
-      // In Static (append-only) mode tool_groups render via the full
-      // ToolGroupMessage path which ignores compactLabel; the standalone
-      // `● <label>` line in HistoryItemDisplay is the label's only path to
-      // the screen. Suppress the header label to avoid double-display.
-      if (!uiState.useTerminalBuffer) return undefined;
-      // Look up ONLY the first tool's callId so the label is stable regardless
-      // of async summary resolution order ("leading batch governs"). If the
-      // first tool's summary never resolves, the header stays blank (the
-      // fallback is the default "Tool × N" rendering once the lookup misses).
-      return summaryByCallId.get(item.tools[0].callId);
-    },
-    [summaryByCallId, uiState.useTerminalBuffer],
-  );
+  // History is rendered as-is (no cross-group merging).
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay
@@ -308,7 +119,7 @@ export const MainContent = () => {
     useMemo(() => {
       let runningOffsets = createEmptySourceCopyOffsets();
 
-      const items = mergedHistory.map((item) => {
+      const items = visibleHistory.map((item) => {
         if (item.type === 'gemini') {
           runningOffsets = createEmptySourceCopyOffsets();
           const offsets = cloneSourceCopyOffsets(runningOffsets);
@@ -333,7 +144,7 @@ export const MainContent = () => {
         historyItemsWithSourceCopyOffsets: items,
         pendingStartSourceCopyOffsets: cloneSourceCopyOffsets(runningOffsets),
       };
-    }, [mergedHistory]);
+    }, [visibleHistory]);
 
   const pendingHistoryItemsWithSourceCopyOffsets = useMemo(() => {
     let runningOffsets = cloneSourceCopyOffsets(pendingStartSourceCopyOffsets);
@@ -362,18 +173,18 @@ export const MainContent = () => {
 
   // Progressive Static replay (issue #3899). `replayCount` is the number of
   // history items currently passed to <Static>. It catches up to
-  // mergedHistory.length either in one shot (small lag) or chunk-by-chunk
+  // visibleHistory.length either in one shot (small lag) or chunk-by-chunk
   // through setImmediate (large lag, e.g., post-Ctrl+O remount of a 500-item
   // session).
   //
-  // Note: source-copy offsets are computed across the FULL mergedHistory
+  // Note: source-copy offsets are computed across the FULL visibleHistory
   // above so each code block keeps its stable copy index even when only a
   // prefix is visible; we slice the post-offset array here.
   const [replayCount, setReplayCount] = useState(() =>
-    initialReplayCount(mergedHistory.length),
+    initialReplayCount(visibleHistory.length),
   );
-  const mergedLengthRef = useRef(mergedHistory.length);
-  mergedLengthRef.current = mergedHistory.length;
+  const visibleHistoryLengthRef = useRef(visibleHistory.length);
+  visibleHistoryLengthRef.current = visibleHistory.length;
 
   // The reset MUST happen during render (not in an effect): historyRemountKey
   // also drives the <Static> key below, and Ink remounts Static synchronously
@@ -391,27 +202,30 @@ export const MainContent = () => {
     // `replayCount` / `visibleHistoryItemsWithSourceCopyOffsets`. Skip the
     // chunked-replay reset for VP users so a Ctrl+O / model-change bump
     // doesn't trigger ~M/CHUNK_SIZE extra setImmediate-scheduled
-    // re-renders (M = mergedHistory.length) that the VP path discards.
+    // re-renders (M = visibleHistory.length) that the VP path discards.
     if (!useVirtualScroll) {
-      setReplayCount(initialReplayCount(mergedLengthRef.current));
+      setReplayCount(initialReplayCount(visibleHistoryLengthRef.current));
     }
   }
 
   useEffect(() => {
     if (useVirtualScroll) return;
-    if (replayCount >= mergedHistory.length) return;
-    const remaining = mergedHistory.length - replayCount;
+    if (replayCount >= visibleHistory.length) return;
+    const remaining = visibleHistory.length - replayCount;
     if (remaining <= PROGRESSIVE_REPLAY_CHUNK_SIZE) {
-      setReplayCount(mergedHistory.length);
+      setReplayCount(visibleHistory.length);
       return;
     }
     const handle = setImmediate(() => {
       setReplayCount((c) =>
-        Math.min(c + PROGRESSIVE_REPLAY_CHUNK_SIZE, mergedLengthRef.current),
+        Math.min(
+          c + PROGRESSIVE_REPLAY_CHUNK_SIZE,
+          visibleHistoryLengthRef.current,
+        ),
       );
     });
     return () => clearImmediate(handle);
-  }, [useVirtualScroll, replayCount, mergedHistory.length]);
+  }, [useVirtualScroll, replayCount, visibleHistory.length]);
 
   // Render the full list when the tail gap is small (≤ CHUNK_SIZE). This
   // covers the normal append path: a pending item finalizes, replayCount is
@@ -430,10 +244,10 @@ export const MainContent = () => {
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
   const allVirtualItems = useMemo(
     (): HistoryItem[] => [
-      ...mergedHistory,
+      ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
     ],
-    [mergedHistory, pendingHistoryItems],
+    [visibleHistory, pendingHistoryItems],
   );
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
@@ -441,7 +255,7 @@ export const MainContent = () => {
   // diagram stay stable across continuation messages. Build lookup tables so
   // the VP renderItem can attach the same offsets without changing the
   // VirtualizedList API.
-  //   - Static items: look up by HistoryItem reference (mergedHistory items
+  //   - Static items: look up by HistoryItem reference (visibleHistory items
   //     are passed by ref, so identity-keyed lookup is stable).
   //   - Pending items: look up by pending-array index (the spread
   //     `{...item, id: -(i+1)}` creates a new object every render, so the
@@ -463,8 +277,8 @@ export const MainContent = () => {
   }, [historyItemsWithSourceCopyOffsets]);
 
   const thinkingFullTextByItem = useMemo(
-    () => buildThinkingFullTextMap(mergedHistory),
-    [mergedHistory],
+    () => buildThinkingFullTextMap(visibleHistory),
+    [visibleHistory],
   );
   const thinkingFullTextByItemRef = useRef(thinkingFullTextByItem);
   thinkingFullTextByItemRef.current = thinkingFullTextByItem;
@@ -507,7 +321,7 @@ export const MainContent = () => {
 
   // Stable renderItem: deps shrink to inputs that legitimately change the
   // render output for a given item identity (terminalWidth, slashCommands,
-  // compactLabel, summary absorption, static-history source-copy offsets).
+  // static-history source-copy offsets).
   // Streaming-only state — including pending source-copy offsets — is read
   // from refs so callback identity is stable.
   const renderVirtualItem = useCallback(
@@ -531,8 +345,6 @@ export const MainContent = () => {
             activeShellPtyId={ps.activePtyId}
             embeddedShellFocused={ps.embeddedShellFocused}
             commands={uiState.slashCommands}
-            compactLabel={getCompactLabel(item)}
-            summaryAbsorbed={isSummaryAbsorbed(item)}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           />
         );
@@ -546,8 +358,6 @@ export const MainContent = () => {
           item={item}
           isPending={false}
           commands={uiState.slashCommands}
-          compactLabel={getCompactLabel(item)}
-          summaryAbsorbed={isSummaryAbsorbed(item)}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thinkingFullText={thinkingFullTextByItemRef.current.get(item)}
         />
@@ -558,8 +368,6 @@ export const MainContent = () => {
       mainAreaWidth,
       staticAreaMaxItemHeight,
       uiState.slashCommands,
-      getCompactLabel,
-      isSummaryAbsorbed,
       sourceCopyOffsetsByHistoryItem,
     ],
   );
@@ -621,8 +429,6 @@ export const MainContent = () => {
                 item={h}
                 isPending={false}
                 commands={uiState.slashCommands}
-                compactLabel={getCompactLabel(h)}
-                summaryAbsorbed={isSummaryAbsorbed(h)}
                 sourceCopyIndexOffsets={sourceCopyIndexOffsets}
                 thinkingFullText={thinkingFullTextByItem.get(h)}
               />
@@ -648,8 +454,6 @@ export const MainContent = () => {
                 isFocused={!uiState.isEditorDialogOpen}
                 activeShellPtyId={uiState.activePtyId}
                 embeddedShellFocused={uiState.embeddedShellFocused}
-                compactLabel={getCompactLabel(item)}
-                summaryAbsorbed={isSummaryAbsorbed(item)}
                 sourceCopyIndexOffsets={sourceCopyIndexOffsets}
               />
             ),

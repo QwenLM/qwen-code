@@ -1809,6 +1809,7 @@ export async function loadCliConfig(
   }
 
   const modelProvidersConfig = settings.modelProviders;
+  const providerProtocolConfig = settings.providerProtocol;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -1956,6 +1957,7 @@ export async function loadCliConfig(
     outputFormat,
     includePartialMessages,
     modelProvidersConfig,
+    providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
@@ -1994,6 +1996,9 @@ export async function loadCliConfig(
     enableAutoSkill: bareMode
       ? false
       : (settings.memory?.enableAutoSkill ?? true),
+    autoSkillConfirm: bareMode
+      ? false
+      : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode

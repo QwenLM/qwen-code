@@ -89,7 +89,8 @@ export interface SpawnedDaemon {
   dispose: () => Promise<void>;
 }
 
-const LISTENING_RE = /listening on http:\/\/127\.0\.0\.1:(\d+)/;
+export const LISTENING_LINE_RE =
+  /^(?<line>.*listening on http:\/\/127\.0\.0\.1:(?<port>\d+).*)$/m;
 const DISPOSE_GRACE_MS = 5_000;
 const MATCHED_DESCENDANT_DEPTH = 4;
 
@@ -160,13 +161,11 @@ export async function spawnDaemon(
       );
     }, bootTimeoutMs);
     const onData = (_chunk: Buffer) => {
-      const m = stdoutBuf.value.match(LISTENING_RE);
-      if (m) {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(Number(m[1]));
-      }
+      const port = stdoutBuf.value.match(LISTENING_LINE_RE)?.groups?.['port'];
+      if (!port || settled) return;
+      settled = true;
+      cleanup();
+      resolve(Number(port));
     };
     const onExit = (code: number | null) => {
       fail(

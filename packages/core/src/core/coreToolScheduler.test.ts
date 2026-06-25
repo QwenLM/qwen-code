@@ -102,6 +102,7 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
+const mockTelemetrySdkState = vi.hoisted(() => ({ initialized: false }));
 
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   const actual =
@@ -137,6 +138,14 @@ vi.mock('../services/sleepInhibitor.js', () => ({
 vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
 }));
+
+vi.mock('../telemetry/sdk.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../telemetry/sdk.js')>();
+  return {
+    ...actual,
+    isTelemetrySdkInitialized: () => mockTelemetrySdkState.initialized,
+  };
+});
 
 function createMockToolSpan(
   name: string,
@@ -5833,6 +5842,7 @@ describe('CoreToolScheduler telemetry spans', () => {
   afterEach(() => {
     shouldThrowToolSpanSetAttribute.value = false;
     shouldThrowToolSpanSetStatus.value = false;
+    mockTelemetrySdkState.initialized = false;
   });
 
   function getLastToolSpan(): ToolSpanRecord {
@@ -5849,6 +5859,8 @@ describe('CoreToolScheduler telemetry spans', () => {
     execute?: () => Promise<ToolResult>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
+    includeSensitiveSpanAttributes?: boolean;
+    sensitiveSpanAttributeMaxLength?: number;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -5901,6 +5913,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(options.messageBus),
       getDisableAllHooks: vi.fn().mockReturnValue(options.disableHooks ?? true),
+      getTelemetryIncludeSensitiveSpanAttributes: () =>
+        options.includeSensitiveSpanAttributes ?? false,
+      getTelemetrySensitiveSpanAttributeMaxLength: () =>
+        options.sensitiveSpanAttributeMaxLength ?? 1024 * 1024,
     } as unknown as Config;
 
     const onAllToolCallsComplete = vi.fn();
@@ -5922,6 +5938,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       abortController?: AbortController;
       throwSpanSetAttribute?: boolean;
       throwSpanSetStatus?: boolean;
+      includeSensitiveSpanAttributes?: boolean;
+      sensitiveSpanAttributeMaxLength?: number;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -6346,6 +6364,27 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('does not fail tool execution when sensitive tool span attributes fail', async () => {
+    mockTelemetrySdkState.initialized = true;
+    debugLoggerWarnSpy.mockClear();
+
+    const { spanRecord, completedCalls } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+      sensitiveSpanAttributeMaxLength: 0,
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(spanRecord.ended).toBe(true);
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      'Failed to add tool input span attributes:',
+      expect.any(TypeError),
+    );
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      'Failed to add tool result span attributes:',
+      expect.any(TypeError),
+    );
   });
 
   it('marks successful tool calls with OK status via endToolSpan', async () => {
@@ -7590,8 +7629,8 @@ describe('CoreToolScheduler telemetry spans', () => {
   });
 
   it('prelude throw in _executeToolCallBody transitions tool from scheduled to error (#4321)', async () => {
-    // _executeToolCallBody's prelude (addToolInputAttributes,
-    // getMessageBus, startToolExecutionSpan, etc.) runs BEFORE the
+    // _executeToolCallBody's prelude (getMessageBus,
+    // startToolExecutionSpan, etc.) runs BEFORE the
     // `scheduled → executing` transition. If a synchronous throw escapes
     // the prelude, the catch in executeSingleToolCall must finalize the
     // tool span with failure_kind=tool_exception AND transition the

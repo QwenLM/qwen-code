@@ -729,6 +729,8 @@ export default {
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'Show skill-specific usage statistics.':
+    'Show skill-specific usage statistics.',
   'Show daily token usage statistics.': 'Show daily token usage statistics.',
   'Show monthly token usage statistics.':
     'Show monthly token usage statistics.',

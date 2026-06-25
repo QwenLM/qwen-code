@@ -10,7 +10,6 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
-import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
@@ -18,13 +17,6 @@ import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
   contentWidth: number;
-  /**
-   * Optional LLM-generated label (~30 chars, git-commit-subject style) that
-   * replaces the semantic summary when present. Falls back to
-   * `buildToolSummary()` while the label is still being generated or if
-   * generation was skipped/failed.
-   */
-  compactLabel?: string;
 }
 
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
@@ -95,6 +87,12 @@ const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
   'Read File': 'read',
   'Read File(s)': 'read',
   'Read Directory': 'list',
+  // Legacy display names (keys from ToolDisplayNamesMigration)
+  SearchFiles: 'search',
+  FindFiles: 'search',
+  ReadFolder: 'list',
+  Task: 'agent',
+  TodoWrite: 'other',
 };
 
 type CategoryTemplate = {
@@ -156,24 +154,45 @@ const CATEGORY_TEMPLATES: Record<ToolCategory, CategoryTemplate> = {
 };
 
 const CATEGORY_ORDER: ToolCategory[] = [
-  'command',
+  'search',
   'read',
+  'list',
+  'command',
   'edit',
   'write',
-  'search',
-  'list',
   'agent',
   'other',
 ];
+
+const COLLAPSIBLE_CATEGORIES: ReadonlySet<ToolCategory> = new Set([
+  'read',
+  'search',
+  'list',
+]);
 
 function getToolCategory(toolName: string): ToolCategory {
   return TOOL_NAME_TO_CATEGORY[toolName] ?? 'other';
 }
 
 /**
+ * Whether a tool is information-gathering (read/search/list) vs mutation/action.
+ *
+ * Used at two decision points:
+ * 1. ToolGroupMessage — partitions collapsible tools into a summary line
+ * 2. ToolMessage.shouldCollapseResult — hides completed text/ANSI output
+ *
+ * Adding a category here suppresses individual rendering AND result output
+ * for completed tools of that type. Only add categories whose results are
+ * disposable (file contents, search hits) — never agent/command results.
+ */
+export function isCollapsibleTool(toolName: string): boolean {
+  return COLLAPSIBLE_CATEGORIES.has(getToolCategory(toolName));
+}
+
+/**
  * Build a semantic summary line from a batch of tool calls.
  *
- * Single tool  → "Read package.json" / "Ran npm test"
+ * Single tool  → "Read 1 file" / "Ran 1 command"
  * Multi  same  → "Read 3 files"
  * Multi mixed  → "Read 3 files, edited 2 files, ran 1 command"
  *
@@ -185,34 +204,12 @@ export function buildToolSummary(
 ): string {
   if (toolCalls.length === 0) return '';
 
-  // Single tool: use description directly for richer context
-  if (toolCalls.length === 1) {
-    const tool = toolCalls[0]!;
-    const category = getToolCategory(tool.name);
-    const template = CATEGORY_TEMPLATES[category];
-    const verb = isActive ? template.activeVerb : template.pastVerb;
-    const desc = tool.description?.split('\n')[0];
-    if (desc) {
-      return `${verb} ${desc}`;
-    }
-    return `${verb} 1 ${template.singular}`;
-  }
-
   // Group by category and count
   const counts = new Map<ToolCategory, number>();
-  // For categories with exactly 1 tool, keep the description for richer output
-  const singleDescs = new Map<ToolCategory, string>();
 
   for (const tool of toolCalls) {
     const cat = getToolCategory(tool.name);
-    const prev = counts.get(cat) ?? 0;
-    counts.set(cat, prev + 1);
-    if (prev === 0) {
-      const desc = tool.description?.split('\n')[0];
-      if (desc) singleDescs.set(cat, desc);
-    } else {
-      singleDescs.delete(cat);
-    }
+    counts.set(cat, (counts.get(cat) ?? 0) + 1);
   }
 
   const parts: string[] = [];
@@ -226,12 +223,7 @@ export function buildToolSummary(
     const v = lower ? verb.toLowerCase() : verb;
 
     if (count === 1) {
-      const desc = singleDescs.get(cat);
-      if (desc) {
-        parts.push(`${v} ${desc}`);
-      } else {
-        parts.push(`${v} 1 ${template.singular}`);
-      }
+      parts.push(`${v} 1 ${template.singular}`);
     } else {
       parts.push(`${v} ${count} ${template.plural}`);
     }
@@ -240,23 +232,9 @@ export function buildToolSummary(
   return parts.join(', ');
 }
 
-function renderSummaryHeader(label: string, count: number) {
-  return (
-    <>
-      <Text bold>{label}</Text>
-      {count > 1 ? (
-        <Text color={theme.text.secondary}>
-          {'  · '}
-          {count} tools
-        </Text>
-      ) : null}
-    </>
-  );
-}
-
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
-> = ({ toolCalls, contentWidth, compactLabel }) => {
+> = ({ toolCalls, contentWidth }) => {
   if (toolCalls.length === 0) return null;
 
   const overallStatus = getOverallStatus(toolCalls);
@@ -271,12 +249,9 @@ export const CompactToolGroupDisplay: React.FC<
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
-          <Text wrap="truncate-end">
-            {compactLabel ? (
-              renderSummaryHeader(compactLabel, toolCalls.length)
-            ) : (
-              <Text>{buildToolSummary(toolCalls, isActive)}</Text>
-            )}
+          <Text wrap="truncate-end" bold>
+            {buildToolSummary(toolCalls, isActive)}
+            {isActive && <Text key="ellipsis">…</Text>}
           </Text>
         </Box>
         <ToolElapsedTime

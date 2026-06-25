@@ -28,6 +28,7 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
@@ -667,14 +668,18 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  // Use the custom hook to determine the display type
-  const displayRenderer = useResultDisplayRenderer(resultDisplay);
+  const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
 
-  const isCompleted = status === ToolCallStatus.Success;
-  const shouldCollapse = isCompleted && !forceShowResult;
-  const effectiveDisplayRenderer = shouldCollapse
-    ? { type: 'none' as const }
-    : displayRenderer;
+  // Collapse text/ANSI output for completed collapsible tools (read/search/list)
+  // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)
+  // always show results — their output IS the answer. Canceled tools keep partial
+  // output visible. Diff, plan, todo, task results always render regardless.
+  const shouldCollapseResult =
+    !forceShowResult &&
+    status === ToolCallStatus.Success &&
+    isCollapsibleTool(name) &&
+    (effectiveDisplayRenderer.type === 'string' ||
+      effectiveDisplayRenderer.type === 'ansi');
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -700,7 +705,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
-      {effectiveDisplayRenderer.type !== 'none' && (
+      {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">
             {effectiveDisplayRenderer.type === 'todo' && (
@@ -795,15 +800,13 @@ const ToolInfo: React.FC<ToolInfo> = ({
       }
     }
   }, [emphasis]);
-  const isDim = status === ToolCallStatus.Success;
   return (
     <Box flexGrow={1}>
       <Text
         wrap="truncate-end"
         strikethrough={status === ToolCallStatus.Canceled}
-        dimColor={isDim}
       >
-        <Text color={nameColor} bold={!isDim}>
+        <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
         </Text>{' '}
         <Text color={theme.text.secondary}>{description}</Text>

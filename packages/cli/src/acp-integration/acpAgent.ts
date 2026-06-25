@@ -290,6 +290,7 @@ type QwenMemorySettings = {
   enableManagedAutoMemory: boolean;
   enableManagedAutoDream: boolean;
   enableAutoSkill: boolean;
+  autoSkillConfirm: boolean;
 };
 
 type QwenMemoryPaths = {
@@ -369,6 +370,7 @@ type QwenCoreSettingKey =
   | 'memory.enableManagedAutoMemory'
   | 'memory.enableManagedAutoDream'
   | 'memory.enableAutoSkill'
+  | 'memory.autoSkillConfirm'
   | 'disableAllHooks';
 
 type QwenMcpServerConfig = {
@@ -436,6 +438,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'memory.enableManagedAutoMemory': { type: 'boolean' },
   'memory.enableManagedAutoDream': { type: 'boolean' },
   'memory.enableAutoSkill': { type: 'boolean' },
+  'memory.autoSkillConfirm': { type: 'boolean' },
   disableAllHooks: { type: 'boolean' },
 } as const satisfies Record<
   QwenCoreSettingKey,
@@ -456,12 +459,14 @@ const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: true,
   enableAutoSkill: true,
+  autoSkillConfirm: true,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
   'enableManagedAutoMemory',
   'enableManagedAutoDream',
   'enableAutoSkill',
+  'autoSkillConfirm',
 ] as const satisfies ReadonlyArray<keyof QwenMemorySettings>;
 
 function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
@@ -483,6 +488,10 @@ function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
       typeof record['enableAutoSkill'] === 'boolean'
         ? record['enableAutoSkill']
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableAutoSkill,
+    autoSkillConfirm:
+      typeof record['autoSkillConfirm'] === 'boolean'
+        ? record['autoSkillConfirm']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
   };
 }
 
@@ -4255,6 +4264,26 @@ class QwenAgent implements Agent {
       };
     }
 
+    const skillMetrics = metrics.skills ?? {
+      totalCalls: 0,
+      totalSuccess: 0,
+      totalFail: 0,
+      byName: {},
+    };
+    const skillsByName: ServeSessionStatsStatus['skills']['byName'] = {};
+    for (const [name, skill] of Object.entries(skillMetrics.byName)) {
+      Object.defineProperty(skillsByName, name, {
+        value: {
+          count: skill.count,
+          success: skill.success,
+          fail: skill.fail,
+        },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
@@ -4273,6 +4302,12 @@ class QwenAgent implements Agent {
       files: {
         totalLinesAdded: metrics.files.totalLinesAdded,
         totalLinesRemoved: metrics.files.totalLinesRemoved,
+      },
+      skills: {
+        totalCalls: skillMetrics.totalCalls,
+        totalSuccess: skillMetrics.totalSuccess,
+        totalFail: skillMetrics.totalFail,
+        byName: skillsByName,
       },
     };
   }
@@ -6772,10 +6807,19 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
+            const providersChanged =
+              changed.has('modelProviders') || changed.has('providerProtocol');
 
-            if (changed.has('modelProviders')) {
+            // Long-lived ACP sessions never restart, so honor providerProtocol
+            // changes here too (its requiresRestart only gates the TUI path) and
+            // always pass the current map so a modelProviders-only reload doesn't
+            // re-register against a stale protocol mapping.
+            if (providersChanged) {
               try {
-                config.reloadModelProvidersConfig(newMerged.modelProviders);
+                config.reloadModelProvidersConfig(
+                  newMerged.modelProviders,
+                  newMerged.providerProtocol ?? {},
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
@@ -6797,10 +6841,7 @@ class QwenAgent implements Agent {
                   `reload: switchModel failed for session ${id}: ${err}`,
                 );
               }
-            } else if (
-              (changed.has('modelProviders') || envChanged) &&
-              authType
-            ) {
+            } else if ((providersChanged || envChanged) && authType) {
               try {
                 await config.refreshAuth(authType);
               } catch (err) {
