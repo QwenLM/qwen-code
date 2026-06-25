@@ -4872,8 +4872,9 @@ class QwenAgent implements Agent {
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
+        const adapter = createLoadedSettingsAdapter(this.settings, persistScope);
         await applyProviderInstallPlan(plan, {
-          settings: createLoadedSettingsAdapter(this.settings, persistScope),
+          settings: adapter,
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
           syncAuthState: (authType, modelId, baseUrl) =>
@@ -4882,13 +4883,15 @@ class QwenAgent implements Agent {
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => this.config.refreshAuth(authType),
         });
-
+        const effectiveModelId =
+          (adapter.getValue('model.name') as string | undefined) ??
+          plan.modelSelection?.modelId;
         return {
           success: true,
           providerId: providerConfig.id,
           providerLabel: providerConfig.label,
           authType: plan.authType,
-          modelId: plan.modelSelection?.modelId,
+          ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
           ...(plan.modelSelection?.baseUrl
             ? { baseUrl: plan.modelSelection.baseUrl }
             : {}),

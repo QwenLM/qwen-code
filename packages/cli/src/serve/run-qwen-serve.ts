@@ -1777,28 +1777,23 @@ export async function runQwenServe(
             });
             const plan = core.buildInstallPlan(provider, inputs);
             const fresh = settingsRuntime.settings.loadSettings(boundWorkspace);
-            await core.applyProviderInstallPlan(plan, {
-              settings:
-                settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
-                  fresh,
-                ),
-              doRefreshAuth: false,
-            });
-            core.emitDaemonLog('Auth provider installed.', {
-              'qwen-code.daemon.auth.provider_id': provider.id,
-              'qwen-code.daemon.auth.auth_type': plan.authType,
-            });
-            return {
-              v: 1,
-              providerId: provider.id,
-              providerLabel: provider.label,
-              authType: plan.authType,
-              ...(plan.modelSelection?.modelId
-                ? { modelId: plan.modelSelection.modelId }
-                : {}),
-              ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
-              message: `Successfully configured ${provider.label}. Use /model to switch models.`,
-            };
+            const adapter = settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(fresh);
+          await core.applyProviderInstallPlan(plan, {
+            settings: adapter,
+            doRefreshAuth: false,
+          });
+          const effectiveModelId =
+            (adapter.getValue('model.name') as string | undefined) ??
+            plan.modelSelection?.modelId;
+          return {
+            v: 1,
+            providerId: provider.id,
+            providerLabel: provider.label,
+            authType: plan.authType,
+            ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
+            ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
+            message: `Successfully configured ${provider.label}. Use /model to switch models.`,
+          };
           },
         ),
     });

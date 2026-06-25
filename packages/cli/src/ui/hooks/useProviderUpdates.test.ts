@@ -19,20 +19,15 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { useProviderUpdates } from './useProviderUpdates.js';
 
-vi.mock('../../utils/settingsUtils.js', () => ({
-  backupSettingsFile: vi.fn(),
-  restoreSettingsFromBackup: vi.fn(),
-  cleanupSettingsBackup: vi.fn(),
-  getNestedProperty: vi.fn((obj, key) => {
-    if (!obj || !key) return undefined;
-    return String(key)
-      .split('.')
-      .reduce((acc, part) => {
-        if (acc === null || acc === undefined) return undefined;
-        return acc[part];
-      }, obj);
-  }),
-}));
+vi.mock('../../utils/settingsUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../utils/settingsUtils.js')>();
+  return {
+    ...actual,
+    backupSettingsFile: vi.fn(),
+    restoreSettingsFromBackup: vi.fn(),
+    cleanupSettingsBackup: vi.fn(),
+  };
+});
 
 const chinaTemplate = buildProviderTemplate(
   codingPlanProvider,

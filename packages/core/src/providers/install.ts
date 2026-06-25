@@ -226,6 +226,11 @@ export async function applyProviderInstallPlan(
           patch.models.some((model) => model.id === currentModelId),
         );
       if (planOffersCurrentModel) {
+        if (plan.modelSelection?.baseUrl) {
+          settings.setValue('model.baseUrl', plan.modelSelection.baseUrl);
+        } else {
+          settings.setValue('model.baseUrl', '');
+        }
         effectiveModelSelection = undefined;
       }
     }
