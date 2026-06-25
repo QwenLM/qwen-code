@@ -64,6 +64,34 @@ describe('loadProjectMcpServers', () => {
     });
   });
 
+  it('normalizes Claude-style type-based transports (.mcp.json is a Claude convention)', () => {
+    write(
+      JSON.stringify({
+        mcpServers: {
+          httpServer: { type: 'http', url: 'https://example.test/mcp' },
+          sseServer: { type: 'sse', url: 'https://example.test/sse' },
+          stdioServer: { type: 'stdio', command: 'node', args: ['s.js'] },
+        },
+      }),
+    );
+    const { servers, errors } = loadProjectMcpServers(dir);
+    expect(errors).toEqual([]);
+
+    expect(servers['httpServer']).toEqual({
+      httpUrl: 'https://example.test/mcp',
+      scope: 'project',
+    });
+    expect(servers['sseServer']).toEqual({
+      url: 'https://example.test/sse',
+      scope: 'project',
+    });
+    expect(servers['stdioServer']).toEqual({
+      command: 'node',
+      args: ['s.js'],
+      scope: 'project',
+    });
+  });
+
   it('forces .mcp.json server scope to project', () => {
     write(
       JSON.stringify({

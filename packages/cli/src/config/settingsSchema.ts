@@ -408,6 +408,16 @@ const SETTINGS_SCHEMA = {
               'Preferred spoken language for voice transcription (e.g. "english", "chinese"). Leave empty to auto-detect.',
             showInDialog: false,
           },
+          refineTranscript: {
+            type: 'boolean',
+            label: 'Refine Voice Transcript',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Clean up voice transcripts with the fast model before inserting them — removes filler words and fixes recognition errors while preserving meaning. Falls back to the raw transcript on failure, and is skipped when no fast model is configured.',
+            showInDialog: false,
+          },
         },
       },
       enableAutoUpdate: {
@@ -1543,7 +1553,13 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: 5 as number,
             description:
-              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+              'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            jsonSchemaOverride: {
+              type: 'integer',
+              default: 5,
+              description:
+                'Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1.',
+            },
             showInDialog: false,
           },
           toolResultsTotalCharsThreshold: {
@@ -2589,6 +2605,11 @@ const SETTINGS_SCHEMA = {
     // This is an advanced safety valve for runaway hook loops, not a common
     // interactive preference.
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'integer',
+      minimum: 1,
+      default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    },
   },
 
   hooks: {

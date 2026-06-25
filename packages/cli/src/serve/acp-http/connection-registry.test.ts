@@ -90,4 +90,20 @@ describe('ConnectionRegistry.getSnapshot', () => {
       registry.dispose();
     }
   });
+
+  it('aborts the connection signal when the connection is deleted', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(false);
+      expect(conn).toBeDefined();
+      if (!conn) return;
+
+      expect(conn.abortSignal.aborted).toBe(false);
+      registry.delete(conn.connectionId);
+
+      expect(conn.abortSignal.aborted).toBe(true);
+    } finally {
+      registry.dispose();
+    }
+  });
 });

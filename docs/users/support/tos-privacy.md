@@ -122,4 +122,4 @@ You can switch between Qwen OAuth, Alibaba Cloud Coding Plan, your own API key, 
 2. **Within the CLI**: Use the `/auth` command to reconfigure your authentication method
 3. **Environment variables**: Set up `.env` files for automatic API key authentication
 
-For detailed instructions, see the [Authentication Setup](../configuration/settings#environment-variables-for-api-access) documentation.
+For detailed instructions, see the [Authentication Setup](../configuration/auth.md) documentation.

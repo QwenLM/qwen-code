@@ -110,3 +110,4 @@ tmp/
 .venv
 .codegraph
 .qwen/computer-use/installed.json
+.playwright-mcp/
