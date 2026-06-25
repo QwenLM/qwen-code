@@ -2098,6 +2098,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     '更新已下載。將在結束目前工作階段後套用。',
   'Update failed: {{error}}': '更新失敗：{{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:': '執行以下命令進行更新：',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     '無法自動更新此獨立安裝。請從以下位址重新安裝：',

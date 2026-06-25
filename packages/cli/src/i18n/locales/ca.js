@@ -2066,6 +2066,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     "Actualització descarregada. S'aplicarà després de sortir d'aquesta sessió.",
   'Update failed: {{error}}': 'Actualització fallida: {{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:': 'Executeu el següent per actualitzar:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'No es pot actualitzar automàticament aquesta instal·lació autònoma. Reinstal·leu des de:',

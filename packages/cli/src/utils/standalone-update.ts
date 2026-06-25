@@ -454,7 +454,7 @@ function cleanupEmptyStandaloneDir(standaloneDir: string): void {
 const UNSAFE_SHELL_CHARS = /[\0\n\r]/;
 const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
 
-function assertSafeForShellEmbed(p: string, context: string): void {
+function assertSafeForSingleQuotedShellPath(p: string, context: string): void {
   if (UNSAFE_SHELL_CHARS.test(p)) {
     throw new Error(
       `${context} contains characters unsafe for shell embedding: ${p}`,
@@ -607,7 +607,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
         }
       }
     } else {
-      assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
+      assertSafeForSingleQuotedShellPath(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
       try {
         // Match install-qwen-standalone.sh's write_unix_wrapper:
@@ -634,7 +634,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
  * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
  */
 export function ensurePathInShellRc(binDir: string): void {
-  assertSafeForShellEmbed(binDir, 'binDir');
+  assertSafeForSingleQuotedShellPath(binDir, 'binDir');
 
   const shell = process.env['SHELL'] || '';
   let rcFile: string | null = null;
@@ -749,7 +749,12 @@ export async function performStandaloneUpdate(
   }
 
   if (isFirstTimeMigration) {
-    fs.mkdirSync(standaloneDir, { recursive: true });
+    try {
+      fs.mkdirSync(standaloneDir, { recursive: true });
+    } catch (err) {
+      releaseLock(lockPath);
+      throw err;
+    }
   }
 
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir

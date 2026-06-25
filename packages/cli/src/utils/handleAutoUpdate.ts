@@ -15,6 +15,7 @@ import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
 import { performStandaloneUpdate } from './standalone-update.js';
+import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
 
@@ -62,13 +63,20 @@ export function handleAutoUpdate(
       .then((result) => {
         const message =
           result === 'deferred'
-            ? 'Update downloaded. It will be applied after you exit this session.'
-            : 'Update successful! The new version will be used on your next run.';
+            ? t(
+                'Update downloaded. It will be applied after you exit this session.',
+              )
+            : t(
+                'Update successful! The new version will be used on your next run.',
+              );
         updateEventEmitter.emit('update-success', { message });
       })
       .catch((err: Error) => {
         updateEventEmitter.emit('update-failed', {
-          message: `Automatic update failed: ${err.message}. Re-run the installer to update manually.`,
+          message: t(
+            'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+            { error: err.message },
+          ),
         });
       });
     return;

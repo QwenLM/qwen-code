@@ -2504,6 +2504,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Update downloaded. It will be applied after you exit this session.',
   'Update failed: {{error}}': 'Update failed: {{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:': 'Run the following to update:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'Unable to auto-update this standalone installation. Please reinstall from:',

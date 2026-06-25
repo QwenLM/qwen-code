@@ -2084,6 +2084,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
   'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:': 'Выполните следующую команду для обновления:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'Невозможно автоматически обновить эту автономную установку. Переустановите с:',

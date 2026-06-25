@@ -2110,6 +2110,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Update heruntergeladen. Es wird nach dem Beenden dieser Sitzung angewendet.',
   'Update failed: {{error}}': 'Update fehlgeschlagen: {{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:': 'Führen Sie Folgendes zum Aktualisieren aus:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'Diese Standalone-Installation kann nicht automatisch aktualisiert werden. Bitte neu installieren von:',

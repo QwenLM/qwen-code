@@ -1870,6 +1870,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
   'Update failed: {{error}}': 'アップデート失敗：{{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:':
     '以下のコマンドを実行してアップデートしてください：',
   'Unable to auto-update this standalone installation. Please reinstall from:':

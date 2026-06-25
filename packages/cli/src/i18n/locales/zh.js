@@ -2300,6 +2300,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     '更新已下载。将在退出当前会话后应用。',
   'Update failed: {{error}}': '更新失败：{{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:': '运行以下命令进行更新：',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     '无法自动更新此独立安装。请从以下地址重新安装：',

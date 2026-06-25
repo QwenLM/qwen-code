@@ -2107,6 +2107,8 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Mise à jour téléchargée. Elle sera appliquée après avoir quitté cette session.',
   'Update failed: {{error}}': 'Échec de la mise à jour : {{error}}',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Run the following to update:':
     'Exécutez la commande suivante pour mettre à jour :',
   'Unable to auto-update this standalone installation. Please reinstall from:':
