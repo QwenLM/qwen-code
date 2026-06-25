@@ -540,10 +540,11 @@ jobs:
           # Keep [skip ci] only on the squash commit that lands on main. The
           # release branch commit and PR title intentionally omit it so tag-push
           # workflows and PR metadata stay unaffected.
+          # Omit --delete-branch: it is rejected when a merge queue is enabled;
+          # the repo's "automatically delete head branches" setting handles it.
           gh pr merge "${PR_URL}" \
             --squash \
             --auto \
-            --delete-branch \
             --subject "chore(release): ${RELEASE_TAG} [skip ci]"
 
   notify_failure:

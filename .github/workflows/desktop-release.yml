@@ -681,10 +681,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Omit --delete-branch: it is rejected when a merge queue is enabled;
+          # the repo's "automatically delete head branches" setting handles it.
           gh pr merge "$PR_URL" \
             --squash \
             --auto \
-            --delete-branch \
             --subject "chore(release): desktop ${RELEASE_TAG} [skip ci]"
 
   dry-run-summary:

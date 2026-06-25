@@ -474,7 +474,9 @@ jobs:
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
         run: |
           set -euo pipefail
-          gh pr merge "${PR_URL}" --merge --auto --delete-branch
+          # Omit --delete-branch: it is rejected when a merge queue is enabled;
+          # the repo's "automatically delete head branches" setting handles it.
+          gh pr merge "${PR_URL}" --merge --auto
 
       - name: 'Create issue on failure'
         if: |-
