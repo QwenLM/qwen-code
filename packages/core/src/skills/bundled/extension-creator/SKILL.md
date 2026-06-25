@@ -49,8 +49,9 @@ scaffold command and bundled templates.
 8. Run the Before Handoff checklist below. If any check fails, fix the issue
    and re-check before proceeding.
 9. Link the extension locally with `qwen extensions link "$extension_path"`.
-   Present the trust prompt output to the user and wait for their explicit
-   approval. Do not auto-approve.
+   The trust prompt does not show `hooks`, `channels`, or `lspServers`, so
+   summarize those entries to the user before linking. Present the trust prompt
+   output to the user and wait for their explicit approval. Do not auto-approve.
 
 ## Template Selection
 
@@ -95,16 +96,17 @@ Code extension fields include:
 - `channels` - map of channel adapters. Each value uses `entry` for the
   compiled JavaScript entry point and optional `displayName`.
   `channels.<type>.entry` must import a module exporting `plugin` with a
-  matching `channelType`.
+  matching `channelType` and a `createChannel` function.
 - `lspServers` - inline `.lsp.json`-style object or JSON path. It only applies
   when LSP support is enabled.
 
-Qwen Code hydrates portable path variables in string fields throughout
-`qwen-extension.json`. Only the four patterns listed below are substituted; any
-other `${...}` reference is left as a literal string, so verify variable names
-carefully. Use `${extensionPath}` for the extension root, `${workspacePath}` for
-the active workspace root, and `${/}` or `${pathSeparator}` for the platform path
-separator, for example
+Qwen Code hydrates path variables in string fields throughout
+`qwen-extension.json`. Use `${extensionPath}` for the extension root,
+`${workspacePath}` for the active workspace root, and `${/}` or
+`${pathSeparator}` for the platform path separator. `${CLAUDE_PLUGIN_ROOT}` is
+also substituted as a legacy alias for `${extensionPath}`. Environment variables
+such as `${HOME}` are also resolved by the runtime, so avoid unintended
+`${...}` references in string fields. For example:
 `"args": ["${extensionPath}${/}dist${/}server.js"]`.
 
 Use these resource locations when needed:
@@ -127,10 +129,11 @@ command or linking the extension. Pay special attention to `install`,
 `preinstall`, `postinstall`, `build`, `hooks`, `mcpServers`, `channels`, and
 `lspServers`. These fields can execute arbitrary code. Flag suspicious command
 values such as network downloads, piped shells, or encoded payloads. In
-`mcpServers`, `hooks`, and `lspServers`, also inspect `env` for variables that
-modify runtime behavior, such as `NODE_OPTIONS`, `LD_PRELOAD`, `PATH`, or
-`DYLD_INSERT_LIBRARIES`, and inspect `cwd` for paths outside the extension root.
-Describe the concern to the user and ask whether to proceed.
+`mcpServers`, `hooks`, `channels`, and `lspServers`, also inspect `env` or
+equivalent environment configuration for variables that modify runtime behavior,
+such as `NODE_OPTIONS`, `LD_PRELOAD`, `PATH`, or `DYLD_INSERT_LIBRARIES`, and
+inspect `cwd` for paths outside the extension root. Describe the concern to the
+user and ask whether to proceed.
 
 For the `mcp-server` and `starter` templates, which include TypeScript code:
 
@@ -171,11 +174,15 @@ visible in the current session.
   duplicate, and re-check referenced files from the Before Handoff checklist.
   Also inspect debug logging for `Warning: Skipping extension in <path>`, which
   contains the specific load failure reason.
-- When iterating on a linked extension, make the file changes, run the relevant
-  build or validation again, then run `qwen extensions uninstall <name>`, where
-  `<name>` is the `name` field from `qwen-extension.json` and not the directory
-  path, followed by `qwen extensions link "$extension_path"` if Qwen Code does
-  not pick up the updated linked state.
+- When iterating on a linked extension, make the file changes, re-run the Before
+  Handoff checklist and the Local Test Flow trust review on all modified files,
+  run the relevant build or validation again, then run
+  `qwen extensions uninstall <name>`, where `<name>` is the `name` field from
+  `qwen-extension.json` and not the directory path, followed by
+  `qwen extensions link "$extension_path"` if Qwen Code does not pick up the
+  updated linked state. Summarize `hooks`, `channels`, and `lspServers`, present
+  the trust prompt output to the user, and wait for their explicit approval
+  before re-linking.
 
 ## Before Handoff
 
