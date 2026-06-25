@@ -368,6 +368,7 @@ import { getWorkspaceSourcesPath } from '../workspaces/storage.ts';
 // --- sources/{slug}/config.json ---
 
 const SourceTypeSchema = z.enum(['mcp', 'api', 'local']);
+// Keep in sync with session-tools-core/src/source-helpers.ts - shared cannot depend on that package.
 export const SOURCE_SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function assertValidSourceSlug(sourceSlug: string): void {

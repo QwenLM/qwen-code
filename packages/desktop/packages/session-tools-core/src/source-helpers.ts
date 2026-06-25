@@ -10,6 +10,7 @@ import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, cl
 import { join } from 'node:path';
 import type { SourceConfig } from './types.ts';
 
+// Keep in sync with shared/src/config/validators.ts - session-tools-core cannot import from shared.
 export const SOURCE_SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function assertValidSourceSlug(sourceSlug: string): void {

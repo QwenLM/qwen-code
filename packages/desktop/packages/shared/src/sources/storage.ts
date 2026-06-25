@@ -64,10 +64,10 @@ export function loadSourceConfig(
   workspaceRootPath: string,
   sourceSlug: string
 ): FolderSourceConfig | null {
-  const configPath = join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json');
-  if (!existsSync(configPath)) return null;
-
   try {
+    const configPath = join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json');
+    if (!existsSync(configPath)) return null;
+
     const config = readJsonFileSync<FolderSourceConfig>(configPath);
 
     // Expand path variables in local source paths for portability
@@ -191,10 +191,10 @@ function parseGuideMarkdown(raw: string): SourceGuide {
  * Load and parse guide.md with frontmatter cache
  */
 export function loadSourceGuide(workspaceRootPath: string, sourceSlug: string): SourceGuide | null {
-  const guidePath = join(getSourcePath(workspaceRootPath, sourceSlug), 'guide.md');
-  if (!existsSync(guidePath)) return null;
-
   try {
+    const guidePath = join(getSourcePath(workspaceRootPath, sourceSlug), 'guide.md');
+    if (!existsSync(guidePath)) return null;
+
     const raw = readFileSync(guidePath, 'utf-8');
     return parseGuideMarkdown(raw);
   } catch {
@@ -301,9 +301,9 @@ export { isIconUrl } from '../utils/icon.ts';
  * @param sourceSlug - Source folder name
  */
 export function loadSource(workspaceRootPath: string, sourceSlug: string): LoadedSource | null {
-  const folderPath = getSourcePath(workspaceRootPath, sourceSlug);
   const config = loadSourceConfig(workspaceRootPath, sourceSlug);
   if (!config) return null;
+  const folderPath = getSourcePath(workspaceRootPath, sourceSlug);
 
   // Extract workspace folder name for credential lookup
   // Credentials are keyed by folder name (e.g., "046a02d0-..."), not full path
@@ -340,6 +340,8 @@ export function loadWorkspaceSources(workspaceRootPath: string): LoadedSource[] 
       const source = loadSource(workspaceRootPath, entry.name);
       if (source) {
         sources.push(source);
+      } else {
+        debug(`[loadWorkspaceSources] Skipping invalid or unreadable source directory: ${entry.name}`);
       }
     }
   }
