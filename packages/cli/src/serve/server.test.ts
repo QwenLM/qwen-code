@@ -258,6 +258,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'permission_mediation',
   'non_blocking_prompt',
   'session_language',
+  'session_runtime_context',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -298,6 +299,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
       f !== 'session_language' &&
+      f !== 'session_runtime_context' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
@@ -326,6 +328,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'writer_idle_timeout',
   'non_blocking_prompt',
   'session_language',
+  'session_runtime_context',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
