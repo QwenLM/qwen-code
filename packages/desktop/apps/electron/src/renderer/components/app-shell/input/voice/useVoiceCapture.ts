@@ -201,6 +201,21 @@ export function useVoiceCapture(
     [cleanup, applyStatus],
   );
 
+  const armTranscribeTimeout = useCallback(
+    (generation: number) => {
+      clearTranscribeTimeout();
+      resourcesRef.current.transcribeTimeout = setTimeout(() => {
+        if (statusRef.current === 'recording') {
+          fail(
+            'No response from server. Check that the voice model is running.',
+            generation,
+          );
+        }
+      }, TRANSCRIPTION_TIMEOUT_MS);
+    },
+    [clearTranscribeTimeout, fail],
+  );
+
   const start = useCallback(() => {
     if (statusRef.current !== 'idle' && statusRef.current !== 'error') return;
     if (!wsUrl) {
@@ -315,25 +330,11 @@ export function useVoiceCapture(
           source.connect(processor);
           processor.connect(sink);
           sink.connect(context.destination);
-          clearTranscribeTimeout();
-          resourcesRef.current.transcribeTimeout = setTimeout(() => {
-            if (statusRef.current === 'recording') {
-              fail(
-                'No response from server. Check that the voice model is running.',
-                generation,
-              );
-            }
-          }, TRANSCRIPTION_TIMEOUT_MS);
+          armTranscribeTimeout(generation);
           if (mountedRef.current) applyStatus('recording');
         };
 
         ws.onmessage = (event: MessageEvent) => {
-          if (
-            statusRef.current === 'connecting' ||
-            statusRef.current === 'recording'
-          ) {
-            clearTranscribeTimeout();
-          }
           let msg: { type?: string; text?: string; message?: string };
           try {
             msg = JSON.parse(String(event.data));
@@ -342,6 +343,9 @@ export function useVoiceCapture(
           }
           if (msg.type === 'interim') {
             if (mountedRef.current) setInterimText(msg.text ?? '');
+            if (statusRef.current === 'recording') {
+              armTranscribeTimeout(generation);
+            }
           } else if (msg.type === 'final') {
             finishWith(msg.text ?? '', generation);
           } else if (msg.type === 'error') {
@@ -377,7 +381,7 @@ export function useVoiceCapture(
         );
       }
     })();
-  }, [wsUrl, fail, finishWith, applyStatus, clearTranscribeTimeout]);
+  }, [wsUrl, fail, finishWith, applyStatus, armTranscribeTimeout]);
 
   const stop = useCallback(() => {
     const ws = resourcesRef.current.ws;

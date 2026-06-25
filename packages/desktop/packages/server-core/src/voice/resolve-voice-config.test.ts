@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { resolveDesktopVoiceConfig } from './resolve-voice-config'
+import {
+  normalizeBaseUrl,
+  resolveDesktopVoiceConfig,
+} from './resolve-voice-config'
 
 const future = 4_102_444_800_000
 
@@ -77,5 +80,35 @@ describe('resolveDesktopVoiceConfig', () => {
         readQwenJson: async () => undefined,
       }),
     ).rejects.toThrow('https baseUrl')
+  })
+
+  it('does not send OPENAI_API_KEY to the default DashScope endpoint', async () => {
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: { OPENAI_API_KEY: 'openai-key' },
+        readQwenJson: async () => undefined,
+      }),
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {
+        OPENAI_API_KEY: 'openai-key',
+        OPENAI_BASE_URL: 'https://proxy.example.com/openai',
+      },
+      readQwenJson: async () => undefined,
+    })
+
+    expect(config.apiKey).toBe('openai-key')
+    expect(config.baseUrl).toBe('https://proxy.example.com/openai/v1')
+  })
+})
+
+describe('normalizeBaseUrl', () => {
+  it('does not append a second /v1 when proxy paths already contain it', () => {
+    expect(normalizeBaseUrl('https://proxy.example.com/v1/dashscope')).toBe(
+      'https://proxy.example.com/v1/dashscope',
+    )
   })
 })

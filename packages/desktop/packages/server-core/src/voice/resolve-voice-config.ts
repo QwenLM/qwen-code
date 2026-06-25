@@ -7,7 +7,7 @@
  *   1. OAuth login        — `~/.qwen/oauth_creds.json` (access_token + resource_url)
  *   2. API-key login      — `~/.qwen/settings.json` (a DashScope compatible-mode
  *                           modelProvider, with its key from settings `env`)
- *   3. Environment        — DASHSCOPE_API_KEY / OPENAI_API_KEY (+ OPENAI_BASE_URL)
+ *   3. Environment        — DASHSCOPE_API_KEY, or OPENAI_API_KEY with OPENAI_BASE_URL
  *
  * The voice model is the user-selected one persisted in desktop settings
  * (defaults to qwen3-asr-flash); its transport (batch vs realtime) is derived
@@ -47,7 +47,15 @@ export function normalizeBaseUrl(raw: string): string {
   const withProto = /^https?:\/\//i.test(trimmed)
     ? trimmed
     : `https://${trimmed}`;
-  return withProto.endsWith('/v1') ? withProto : `${withProto}/v1`;
+  try {
+    const url = new URL(withProto);
+    if (!url.pathname.split('/').includes('v1')) {
+      url.pathname = `${url.pathname.replace(/\/$/, '')}/v1`;
+    }
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return withProto.includes('/v1') ? withProto : `${withProto}/v1`;
+  }
 }
 
 async function readQwenJsonFromDisk<T>(file: string): Promise<T | undefined> {
@@ -137,15 +145,21 @@ async function fromQwenSettings(
 
 /** 3) Explicit environment override. */
 function fromEnv(env: NodeJS.ProcessEnv): ResolvedCredentials | undefined {
-  const apiKey =
-    env['DASHSCOPE_API_KEY']?.trim() || env['OPENAI_API_KEY']?.trim();
-  if (!apiKey) return undefined;
-  return {
-    apiKey,
-    baseUrl: normalizeBaseUrl(
-      env['OPENAI_BASE_URL']?.trim() || DEFAULT_DASHSCOPE_BASE_URL,
-    ),
-  };
+  const dashscopeKey = env['DASHSCOPE_API_KEY']?.trim();
+  if (dashscopeKey) {
+    return {
+      apiKey: dashscopeKey,
+      baseUrl: normalizeBaseUrl(
+        env['OPENAI_BASE_URL']?.trim() || DEFAULT_DASHSCOPE_BASE_URL,
+      ),
+    };
+  }
+  const openaiKey = env['OPENAI_API_KEY']?.trim();
+  const openaiBaseUrl = env['OPENAI_BASE_URL']?.trim();
+  if (openaiKey && openaiBaseUrl) {
+    return { apiKey: openaiKey, baseUrl: normalizeBaseUrl(openaiBaseUrl) };
+  }
+  return undefined;
 }
 
 export async function resolveDesktopVoiceConfig(

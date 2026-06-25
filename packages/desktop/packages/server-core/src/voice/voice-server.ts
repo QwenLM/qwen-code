@@ -16,6 +16,9 @@ import {
   type VoiceHandlerDeps,
 } from './voice-ws-handler';
 
+const VOICE_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024;
+const CLOSE_TIMEOUT_MS = 3000;
+
 export interface VoiceServerOptions extends VoiceHandlerDeps {
   /** Voice-scoped token validated per upgrade. */
   token: string;
@@ -40,6 +43,48 @@ export function tokenMatches(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+interface ClosableClient {
+  terminate(): void;
+}
+
+interface ClosableWebSocketServer {
+  clients: Iterable<ClosableClient>;
+  close(): void;
+}
+
+interface ClosableHttpServer {
+  close(callback?: () => void): void;
+  closeAllConnections?: () => void;
+}
+
+export function closeVoiceServerResources(
+  httpServer: ClosableHttpServer,
+  wss: ClosableWebSocketServer,
+  timeoutMs = CLOSE_TIMEOUT_MS,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+
+    for (const client of wss.clients) {
+      try {
+        client.terminate();
+      } catch {
+        // ignore
+      }
+    }
+    httpServer.closeAllConnections?.();
+    wss.close();
+    httpServer.close(finish);
+  });
+}
+
 export async function startVoiceServer(
   options: VoiceServerOptions,
 ): Promise<VoiceServer> {
@@ -50,7 +95,10 @@ export async function startVoiceServer(
     res.writeHead(426, { 'Content-Type': 'text/plain' });
     res.end('Upgrade Required');
   });
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: VOICE_MAX_PAYLOAD_BYTES,
+  });
   const handle = createVoiceConnectionHandler(options);
 
   httpServer.on('upgrade', (req, socket, head) => {
@@ -82,6 +130,9 @@ export async function startVoiceServer(
     httpServer.once('error', onError);
     httpServer.listen(0, host, () => {
       httpServer.removeListener('error', onError);
+      httpServer.on('error', (err) => {
+        log?.warn('voice: server error after listen:', err);
+      });
       resolve();
     });
   });
@@ -98,17 +149,7 @@ export async function startVoiceServer(
     url: `ws://${host}:${port}/voice/stream`,
     close: () => {
       if (!closePromise) {
-        closePromise = new Promise<void>((resolve) => {
-          for (const client of wss.clients) {
-            try {
-              client.terminate();
-            } catch {
-              // ignore
-            }
-          }
-          wss.close();
-          httpServer.close(() => resolve());
-        });
+        closePromise = closeVoiceServerResources(httpServer, wss);
       }
       return closePromise;
     },
