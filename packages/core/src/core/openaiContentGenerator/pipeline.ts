@@ -70,21 +70,20 @@ export class StreamInactivityTimeoutError extends Error {
  * warning) rather than failing the request.
  */
 function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
-  // 1. Explicit config field (programmatic) wins, including `0` to disable.
-  //    Validate it too: a value above the JS timer ceiling would overflow
-  //    setTimeout to a ~immediate fire, so treat out-of-range as invalid.
+  // 1. Explicit config field (programmatic) wins):
+  //    - `<= 0` disables the watchdog (downstream `idleMs > 0` guard skips it).
+  //    - Values above the JS timer ceiling are rejected: setTimeout silently
+  //      compresses them to 1ms, which would fire near-immediately.
+  //    - NaN/Infinity/non-integer are invalid.
   const fromConfig = config.streamIdleTimeoutMs;
   if (typeof fromConfig === 'number') {
-    if (
-      Number.isInteger(fromConfig) &&
-      fromConfig >= 0 &&
-      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
-    ) {
+    if (Number.isInteger(fromConfig) && fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS) {
       return fromConfig;
     }
-    debugLogger.warn(
-      `Ignoring out-of-range streamIdleTimeoutMs=${fromConfig} ` +
-        `(expected an integer in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring out-of-range streamIdleTimeoutMs=${fromConfig} ` +
+        `(expected an integer in (-∞, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
         `falling back to ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}/default.`,
     );
   }
@@ -100,8 +99,9 @@ function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
         return parsed;
       }
     }
-    debugLogger.warn(
-      `Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
         `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
         `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,
     );

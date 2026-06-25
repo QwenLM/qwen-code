@@ -3586,5 +3586,57 @@ describe('ContentGenerationPipeline', () => {
       await consume;
       expect(settled).toBe(true); // trips at the default (config rejected)
     });
+
+    it('disables the watchdog when QWEN_STREAM_IDLE_TIMEOUT_MS=0', async () => {
+      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '0');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; env=0 → disabled
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // Well past the default — must NOT trip (watchdog disabled).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('disables the watchdog with a negative config value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(-1); // negative → disabled (idleMs > 0 guard)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
   });
 });
