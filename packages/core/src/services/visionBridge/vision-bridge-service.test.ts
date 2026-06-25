@@ -9,6 +9,7 @@ import type { Part } from '@google/genai';
 import {
   runVisionBridge,
   selectVisionBridgeModel,
+  isImageCapable,
   type VisionModelCandidate,
 } from './vision-bridge-service.js';
 import type { Config } from '../../config/config.js';
@@ -550,5 +551,25 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
       { baseUrl: dashscope },
     );
     expect(picked?.id).toBe('custom-text-name');
+  });
+});
+
+describe('isImageCapable', () => {
+  it('trusts an explicit isVision flag over a text-only name', () => {
+    expect(isImageCapable({ id: 'qwen-text-max', isVision: true })).toBe(true);
+  });
+
+  it('trusts resolved modalities over name-based detection', () => {
+    expect(
+      isImageCapable({ id: 'qwen-text-max', modalities: { image: true } }),
+    ).toBe(true);
+    expect(
+      isImageCapable({ id: 'qwen3-vl-plus', modalities: { image: false } }),
+    ).toBe(false);
+  });
+
+  it('falls back to name-based defaults when neither is set', () => {
+    expect(isImageCapable({ id: 'qwen3-vl-plus' })).toBe(true);
+    expect(isImageCapable({ id: 'qwen-text-max' })).toBe(false);
   });
 });

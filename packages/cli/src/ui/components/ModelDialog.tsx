@@ -88,7 +88,7 @@ function parseModelSelectionKey(key: string): {
  * across providers stay unambiguous. Handles the three selection-key shapes:
  * `authType::modelId[\0baseUrl]`, `$runtime|authType|modelId`, and a bare id.
  */
-function encodeAuxModelSelector(selected: string): string {
+export function encodeAuxModelSelector(selected: string): string {
   if (selected.includes('::')) {
     const parsed = parseModelSelectionKey(selected);
     return `${parsed.authType}:${parsed.modelId}`;

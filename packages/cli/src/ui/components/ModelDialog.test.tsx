@@ -7,7 +7,7 @@
 import { render, cleanup } from '@testing-library/react';
 import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ModelDialog } from './ModelDialog.js';
+import { ModelDialog, encodeAuxModelSelector } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
@@ -919,5 +919,25 @@ describe('<ModelDialog />', () => {
       (m) => m.id === DEFAULT_QWEN_MODEL,
     );
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
+  });
+});
+
+describe('encodeAuxModelSelector', () => {
+  it('encodes the "authType::modelId" key, dropping the baseUrl', () => {
+    expect(
+      encodeAuxModelSelector('openai::gpt-4o\0https://api.example.com'),
+    ).toBe('openai:gpt-4o');
+    expect(encodeAuxModelSelector('openai::gpt-4o')).toBe('openai:gpt-4o');
+  });
+
+  it('encodes the "$runtime|authType|modelId" key by positional split', () => {
+    expect(encodeAuxModelSelector('$runtime|openai|gpt-4o')).toBe(
+      'openai:gpt-4o',
+    );
+  });
+
+  it('passes a bare id (and a malformed runtime key) through unchanged', () => {
+    expect(encodeAuxModelSelector('gpt-4o')).toBe('gpt-4o');
+    expect(encodeAuxModelSelector('$runtime|openai')).toBe('$runtime|openai');
   });
 });
