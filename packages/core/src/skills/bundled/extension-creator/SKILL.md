@@ -96,6 +96,8 @@ Code extension fields include:
 - `hooks` - lifecycle hooks as inline hook config, `hooks/hooks.json`, or a
   JSON file path using event keys. When `hooks` is an inline object, it takes
   priority; file-based hooks are only loaded when no inline config is present.
+  In file-based hooks, use `${CLAUDE_PLUGIN_ROOT}` for the extension root;
+  other path variables are not substituted there.
 - `channels` - map of channel adapters. Each value uses `entry` for the
   compiled JavaScript entry point and optional `displayName`.
   `channels.<type>.entry` must import a module exporting `plugin` with a
@@ -113,6 +115,11 @@ also substituted as a legacy alias for `${extensionPath}`. Environment variables
 such as `${HOME}` and `$HOME` are also resolved by the runtime, so avoid
 unintended `$`-prefixed references in string fields. For example:
 `"args": ["${extensionPath}${/}dist${/}server.js"]`.
+
+For external hook files, use `${CLAUDE_PLUGIN_ROOT}` in hook commands because
+that is the only extension-root variable substituted after the hook file is
+loaded. External LSP JSON files support the same path variables as
+`qwen-extension.json`.
 
 Use these resource locations when needed:
 
@@ -139,6 +146,13 @@ equivalent environment configuration for variables that modify runtime behavior,
 such as `NODE_OPTIONS`, `LD_PRELOAD`, `PATH`, or `DYLD_INSERT_LIBRARIES`, and
 inspect `cwd` for paths outside the extension root. Describe the concern to the
 user and ask whether to proceed.
+
+If `hooks` is a file path, if `hooks/hooks.json` exists, or if `lspServers` is a
+JSON file path, resolve the file path inside the extension root, read the JSON
+file, and apply the same command, argument, environment, and `cwd` audit to the
+loaded content before running build commands or linking the extension. Treat a
+clean-looking manifest that points to an external executable config file as
+incomplete until that referenced file has also been reviewed.
 
 For the `mcp-server` and `starter` templates, which include TypeScript code:
 
