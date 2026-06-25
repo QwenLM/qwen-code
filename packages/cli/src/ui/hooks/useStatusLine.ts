@@ -17,6 +17,7 @@ import {
   aggregateModelTokens,
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
+  DEFAULT_STATUS_LINE_PRESET_CONFIG,
   normalizeStatusLinePresetConfig,
   type StatusLinePresetConfig,
 } from '../statusLinePresets.js';
@@ -118,8 +119,16 @@ function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
 ): StatusLineConfig | undefined {
   const raw = settings.merged.ui?.statusLine;
+  // `null` explicitly disables the status line; `undefined` (unset) falls
+  // through to the built-in default preset below so new users get useful
+  // context out-of-the-box (issue #5789).
+  if (raw === null) {
+    return undefined;
+  }
+  if (raw === undefined) {
+    return DEFAULT_STATUS_LINE_PRESET_CONFIG;
+  }
   if (
-    raw &&
     typeof raw === 'object' &&
     'type' in raw &&
     raw.type === 'command' &&
