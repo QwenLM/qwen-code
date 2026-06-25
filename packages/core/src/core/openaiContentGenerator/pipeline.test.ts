@@ -24,6 +24,7 @@ import type { OpenAICompatibleProvider } from './provider/index.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 
 // Mock dependencies
@@ -3081,7 +3082,7 @@ describe('ContentGenerationPipeline', () => {
       // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS from the
       // dev/CI shell so the default-timeout tests aren't silently overridden.
       // Env-specific tests re-stub it; afterEach unstubs everything.
-      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', undefined);
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
       vi.useFakeTimers();
     });
     afterEach(() => {
@@ -3432,7 +3433,7 @@ describe('ContentGenerationPipeline', () => {
     });
 
     it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
-      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '3000');
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -3456,7 +3457,7 @@ describe('ContentGenerationPipeline', () => {
     });
 
     it('lets an explicit streamIdleTimeoutMs config take precedence over the env', async () => {
-      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '1000');
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '1000');
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -3480,7 +3481,7 @@ describe('ContentGenerationPipeline', () => {
     });
 
     it('ignores a malformed QWEN_STREAM_IDLE_TIMEOUT_MS and falls back to the default', async () => {
-      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', 'not-a-number');
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, 'not-a-number');
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -3513,7 +3514,7 @@ describe('ContentGenerationPipeline', () => {
       // trip it — asserting it trips AT the default proves the value was
       // rejected. (In real Node such a delay is silently compressed to 1ms,
       // which would make the watchdog fire almost immediately.)
-      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '9999999999');
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '9999999999');
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -3539,7 +3540,7 @@ describe('ContentGenerationPipeline', () => {
     it('rejects a non-decimal QWEN_STREAM_IDLE_TIMEOUT_MS (hex/scientific) and uses the default', async () => {
       // Number('0x10') === 16; a strict decimal-integer check must reject it so
       // a typo can't silently become a 16ms timeout.
-      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '0x10');
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0x10');
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -3587,8 +3588,33 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(true); // trips at the default (config rejected)
     });
 
+    it('falls back from an invalid config to the env value (config→env cascade)', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '4000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // Config is oversized → rejected; env = 4000 → used (not default 120000).
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at 4000ms from the env (not 120000 default)
+    });
+
     it('disables the watchdog when QWEN_STREAM_IDLE_TIMEOUT_MS=0', async () => {
-      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '0');
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0');
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
