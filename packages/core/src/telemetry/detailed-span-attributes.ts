@@ -101,15 +101,16 @@ export function addUserPromptAttributes(
 ): void {
   if (!areSensitiveSpanAttributesEnabled(config) || !promptText) return;
 
-  const { content, truncated } = truncateContent(
+  const { content, truncated, originalLength } = truncatePrefixedContent(
+    `[USER PROMPT]\n`,
     promptText,
     getMaxContentSize(config),
   );
   span.setAttributes({
-    new_context: `[USER PROMPT]\n${content}`,
+    new_context: content,
     ...(truncated && {
       new_context_truncated: true,
-      new_context_original_length: promptText.length,
+      new_context_original_length: originalLength,
     }),
   });
 }

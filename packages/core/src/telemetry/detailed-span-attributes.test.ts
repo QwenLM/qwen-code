@@ -228,8 +228,13 @@ describe('detailed-span-attributes', () => {
       const largePrompt = 'x'.repeat(1024 * 1024 + 1);
       addUserPromptAttributes(config, span, largePrompt);
 
+      expect(String(span.attrs['new_context'])).toHaveLength(
+        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      );
       expect(span.attrs['new_context_truncated']).toBe(true);
-      expect(span.attrs['new_context_original_length']).toBe(1024 * 1024 + 1);
+      expect(span.attrs['new_context_original_length']).toBe(
+        '[USER PROMPT]\n'.length + 1024 * 1024 + 1,
+      );
     });
 
     it('uses configured max length for user prompt attributes', () => {
@@ -239,8 +244,11 @@ describe('detailed-span-attributes', () => {
       const prompt = 'x'.repeat(100);
       addUserPromptAttributes(config, span, prompt);
 
+      expect(String(span.attrs['new_context'])).toHaveLength(50);
       expect(span.attrs['new_context_truncated']).toBe(true);
-      expect(span.attrs['new_context_original_length']).toBe(100);
+      expect(span.attrs['new_context_original_length']).toBe(
+        '[USER PROMPT]\n'.length + 100,
+      );
     });
   });
 
@@ -250,8 +258,11 @@ describe('detailed-span-attributes', () => {
 
     const userSpan = createMockSpan();
     addUserPromptAttributes(config, userSpan, 'abcdef');
-    expect(userSpan.attrs['new_context']).toBe('[USER PROMPT]\nabc');
+    expect(userSpan.attrs['new_context']).toBe('[US');
     expect(userSpan.attrs['new_context_truncated']).toBe(true);
+    expect(userSpan.attrs['new_context_original_length']).toBe(
+      '[USER PROMPT]\nabcdef'.length,
+    );
 
     const systemSpan = createMockSpan();
     addSystemPromptAttributes(config, systemSpan, 'abcdef');
