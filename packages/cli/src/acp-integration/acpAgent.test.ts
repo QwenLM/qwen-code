@@ -8089,16 +8089,17 @@ describe('sessionRuntimeContext handler', () => {
       cfg as unknown as Config,
     );
 
-    vi.mocked(Session).mockImplementation(() => {
-      return {
-        getId: vi.fn().mockReturnValue('rt-sid'),
-        getConfig: vi.fn().mockReturnValue(cfg),
-        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
-        startCronScheduler: vi.fn(),
-        dispose: vi.fn(),
-      } as unknown as Session;
-    });
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('rt-sid'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as Session,
+    );
 
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
       availableCommands: [],
