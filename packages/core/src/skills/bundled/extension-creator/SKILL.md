@@ -76,9 +76,10 @@ folders, so prefer the folder structure for those resources.
 
 For templates with TypeScript or MCP server code:
 
-Only run `npm install` inside directories scaffolded by `qwen extensions new`
-in the current session. If the user provides a pre-existing path, review the
-`package.json` scripts before installing dependencies.
+Only run `npm install` and `npm run build` inside directories scaffolded by
+`qwen extensions new` in the current session. If the user provides a
+pre-existing path, review the `package.json` scripts before running any npm
+command, especially `install`, `preinstall`, `postinstall`, and `build`.
 
 ```bash
 cd <extension-path>
@@ -100,6 +101,7 @@ visible in the current session.
 
 - Confirm `qwen-extension.json` exists at the extension root.
 - Confirm referenced folders or files exist when `contextFileName`, `commands`,
-  `skills`, `agents`, `mcpServers`, `hooks`, or `channels` are configured.
+  `skills`, `agents`, `mcpServers`, `hooks`, `channels`, or `lspServers` are
+  configured.
 - Keep the scaffold focused on the requested capability; do not add unused
   folders or build tooling.
