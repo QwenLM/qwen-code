@@ -3,12 +3,10 @@
 name: 'Qwen Code CI'
 
 on:
-  push:
-    branches:
-      - 'main'
-      # No 'release/**' here: release.yml's commits to the release branch would
-      # fire a redundant full CI run that blocks the release PR's merge queue.
-      # Kept under pull_request below for backport PRs.
+  # No `push` trigger: every job here is gated to pull_request / merge_group, so
+  # a push to `main` ran nothing (CodeQL was the last push job and moved to its
+  # own scheduled codeql.yml). The merge queue validates the merged tree before
+  # it lands, so there is nothing left to run on the post-merge push.
   pull_request:
     branches:
       - 'main'
@@ -419,36 +417,6 @@ jobs:
           os: '${{ matrix.os }}'
           github_token: '${{ secrets.GITHUB_TOKEN }}'
 
-  codeql:
-    name: 'CodeQL'
-    needs: 'classify_pr'
-    # Security findings rarely change push-to-push, and a slow scan is poor value
-    # as a hard merge gate. Run CodeQL only on push to `main` (post-merge
-    # backstop) — not on PR pushes, and not in the merge queue where, being
-    # non-required, it would just burn a runner and lengthen the serial queue
-    # without blocking anything.
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
-    runs-on: 'ubuntu-latest'
-    # Analysis normally finishes in ~7-9 min (22 min worst case observed). Without
-    # an explicit cap, a hosted runner that drops its heartbeat mid-analysis leaves
-    # the job "in_progress" for the default 6h, holding a scarce hosted Linux slot
-    # the whole time. 30 min reaps such an orphan fast while clearing real runs.
-    timeout-minutes: 30
-    permissions:
-      actions: 'read'
-      contents: 'read'
-      security-events: 'write'
-    steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-
-      - name: 'Initialize CodeQL'
-        uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
-        with:
-          languages: 'javascript'
-
-      - name: 'Perform CodeQL Analysis'
-        uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
 
   # Integration tests run only in the merge queue, not on every PR push.
   # They are the suite that previously ran *only* in the nightly Release
