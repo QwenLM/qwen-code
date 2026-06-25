@@ -7967,5 +7967,214 @@ describe('deliverClientMcpMessage — reverse tool channel (#5626)', () => {
       server: 'srv',
       payload: message,
     });
+describe('sessionRuntimeContext handler', () => {
+  let capturedAgentFactory:
+    | ((conn: { closed: Promise<void> }) => {
+        initialize: (args: Record<string, unknown>) => Promise<unknown>;
+        newSession: (args: Record<string, unknown>) => Promise<unknown>;
+        extMethod: (
+          method: string,
+          args: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      })
+    | undefined;
+
+  let processExitSpy: MockInstance<typeof process.exit>;
+  let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
+  let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
+
+  const mockConnectionState = {
+    promise: undefined as unknown as Promise<void>,
+    resolve: undefined as unknown as () => void,
+    reset() {
+      this.promise = new Promise<void>((r) => {
+        this.resolve = r;
+      });
+    },
+  };
+
+  const runtimeCtxMap = new Map<string, string>();
+
+  function makeRuntimeCtxConfig(
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getModel: vi.fn().mockReturnValue('m'),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+        syncAfterAuthRefresh: vi.fn(),
+      }),
+      reloadModelProvidersConfig: vi.fn(),
+      refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getAvailableModels: vi.fn().mockReturnValue([]),
+      getModes: vi.fn().mockReturnValue([]),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getSessionId: vi.fn().mockReturnValue('rt-sid'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
+      }),
+      getFileSystemService: vi.fn().mockReturnValue(undefined),
+      setFileSystemService: vi.fn(),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getRuntimeContext: vi.fn().mockReturnValue(runtimeCtxMap),
+      setRuntimeContextEntry: vi.fn().mockImplementation((key: string, value: string) => {
+        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(key)) return false;
+        if (Buffer.byteLength(value, 'utf8') > 32 * 1024) return false;
+        if (!runtimeCtxMap.has(key) && runtimeCtxMap.size >= 16) return false;
+        runtimeCtxMap.set(key, value);
+        return true;
+      }),
+      removeRuntimeContextEntry: vi.fn().mockImplementation((key: string) => {
+        runtimeCtxMap.delete(key);
+      }),
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtimeCtxMap.clear();
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as InstanceType<typeof AgentSideConnection>;
+    });
+
+    processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    stdinDestroySpy = vi
+      .spyOn(process.stdin, 'destroy')
+      .mockImplementation(() => process.stdin);
+    stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockImplementation(() => process.stdout);
+  });
+
+  afterEach(() => {
+    processExitSpy.mockRestore();
+    stdinDestroySpy.mockRestore();
+    stdoutDestroySpy.mockRestore();
+  });
+
+  async function setupAgent() {
+    const cfg = makeRuntimeCtxConfig();
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      cfg as unknown as Config,
+    );
+
+    vi.mocked(Session).mockImplementation(() => {
+      return {
+        getId: vi.fn().mockReturnValue('rt-sid'),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as Session;
+    });
+
+    runAcpMode({} as CliArgs);
+    const agent = capturedAgentFactory!({
+      closed: mockConnectionState.promise,
+    });
+    await agent.initialize({});
+    await agent.newSession({});
+    return agent;
+  }
+
+  it('sets entries and returns applied keys', async () => {
+    const agent = await setupAgent();
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext,
+      {
+        sessionId: 'rt-sid',
+        entries: { operator: 'Alice', rules: 'no-prod' },
+      },
+    );
+    expect(result['keys']).toEqual(['operator', 'rules']);
+    expect(result['rejected']).toEqual([]);
+    expect(runtimeCtxMap.get('operator')).toBe('Alice');
+  });
+
+  it('removes entries with empty string values', async () => {
+    runtimeCtxMap.set('old-key', 'stale');
+    const agent = await setupAgent();
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext,
+      { sessionId: 'rt-sid', entries: { 'old-key': '' } },
+    );
+    expect(result['keys']).toEqual(['old-key']);
+    expect(runtimeCtxMap.has('old-key')).toBe(false);
+  });
+
+  it('rejects non-string values', async () => {
+    const agent = await setupAgent();
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext,
+      { sessionId: 'rt-sid', entries: { bad: 123 } },
+    );
+    expect(result['keys']).toEqual([]);
+    expect((result['rejected'] as Array<{ key: string; reason: string }>)[0]).toEqual({
+      key: 'bad',
+      reason: 'value_not_string',
+    });
+  });
+
+  it('rejects invalid keys', async () => {
+    const agent = await setupAgent();
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext,
+      { sessionId: 'rt-sid', entries: { 'invalid key!': 'value' } },
+    );
+    expect(result['keys']).toEqual([]);
+    expect((result['rejected'] as Array<{ key: string; reason: string }>)[0]?.reason).toBe(
+      'invalid_key',
+    );
+  });
+
+  it('throws on missing sessionId', async () => {
+    const agent = await setupAgent();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext, {
+        entries: { a: 'b' },
+      }),
+    ).rejects.toThrow(/sessionId/);
+  });
+
+  it('throws on invalid entries shape', async () => {
+    const agent = await setupAgent();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext, {
+        sessionId: 'rt-sid',
+        entries: 'not-an-object',
+      }),
+    ).rejects.toThrow(/entries/);
   });
 });
