@@ -103,7 +103,10 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_TELEMETRY_TARGET,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
   isTelemetrySdkInitialized,
   initializeTelemetry,
   shutdownTelemetry,
@@ -146,7 +149,7 @@ import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
@@ -193,6 +196,7 @@ const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 import {
   ModelsConfig,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type AvailableModel,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
@@ -404,6 +408,7 @@ export interface TelemetrySettings {
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
+  sensitiveSpanAttributeMaxLength?: number;
   outfile?: string;
   /**
    * Static resource attributes attached to every span/log/metric the SDK
@@ -426,6 +431,10 @@ export interface TelemetrySettings {
    */
   resourceAttributeWarnings?: string[];
 }
+
+export type ResolvedTelemetrySettings = TelemetrySettings & {
+  sensitiveSpanAttributeMaxLength: number;
+};
 
 export interface TelemetryMetricsSettings {
   /**
@@ -927,8 +936,10 @@ export interface ConfigParameters {
    * watches it to process messages as if the user typed them.
    */
   inputFile?: string;
-  /** Model providers configuration grouped by authType */
+  /** Model providers configuration grouped by provider id */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Maps custom provider ids to their SDK protocol (AuthType) */
+  providerProtocolConfig?: ProviderProtocolConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -1119,6 +1130,24 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
 
+function resolveSensitiveSpanAttributeMaxLength(
+  value: number | undefined,
+): number {
+  if (value === undefined) {
+    return DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
+  }
+
+  if (!isValidSensitiveSpanAttributeMaxLength(value)) {
+    throw new FatalConfigError(
+      `Invalid telemetry.sensitiveSpanAttributeMaxLength: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
+        value,
+      )}`,
+    );
+  }
+
+  return value;
+}
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -1188,6 +1217,7 @@ export class Config {
 
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
+  private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -1242,7 +1272,7 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
-  private readonly telemetrySettings: TelemetrySettings;
+  private readonly telemetrySettings: ResolvedTelemetrySettings;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
@@ -1446,6 +1476,9 @@ export class Config {
       logPrompts: params.telemetry?.logPrompts ?? true,
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
+      sensitiveSpanAttributeMaxLength: resolveSensitiveSpanAttributeMaxLength(
+        params.telemetry?.sensitiveSpanAttributeMaxLength,
+      ),
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
@@ -1518,6 +1551,7 @@ export class Config {
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
+    this.providerProtocolConfig = params.providerProtocolConfig;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -1582,6 +1616,7 @@ export class Config {
     this.modelsConfig = new ModelsConfig({
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
+      providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
@@ -2172,7 +2207,7 @@ export class Config {
           ),
         },
       );
-    if (this.getManagedAutoMemoryEnabled()) {
+    if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
       // section out of the system prompt. Project-level read still bubbles
@@ -2301,11 +2336,17 @@ export class Config {
    * Should be called before refreshAuth when settings.json has been updated.
    *
    * @param modelProvidersConfig - The updated model providers configuration
+   * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
+   *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    this.modelsConfig.reloadModelProvidersConfig(modelProvidersConfig);
+    this.modelsConfig.reloadModelProvidersConfig(
+      modelProvidersConfig,
+      providerProtocolConfig,
+    );
   }
 
   /**
@@ -3923,6 +3964,10 @@ export class Config {
     return this.telemetrySettings.includeSensitiveSpanAttributes ?? false;
   }
 
+  getTelemetrySensitiveSpanAttributeMaxLength(): number {
+    return this.telemetrySettings.sensitiveSpanAttributeMaxLength;
+  }
+
   getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
@@ -4263,6 +4308,10 @@ export class Config {
 
   getManagedAutoMemoryEnabled(): boolean {
     return this.enableManagedAutoMemory && !this.getBareMode();
+  }
+
+  isManagedMemoryAvailable(): boolean {
+    return !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {

@@ -107,6 +107,8 @@ export enum AgentTerminateMode {
   GOAL = 'GOAL',
   /** The agent's execution terminated because it exceeded the maximum number of turns. */
   MAX_TURNS = 'MAX_TURNS',
+  /** The agent's execution terminated after detecting a tool-call loop. */
+  LOOP_DETECTED = 'LOOP_DETECTED',
   /** The agent's execution was cancelled via an abort signal. */
   CANCELLED = 'CANCELLED',
   /** The agent was gracefully shut down (e.g., arena/team session ended). */
