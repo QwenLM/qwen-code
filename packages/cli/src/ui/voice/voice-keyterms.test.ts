@@ -200,6 +200,28 @@ describe('buildVoiceKeyterms', () => {
       }
     });
 
+    it('falls back to a user-scoped keytermsFile when the system path is rejected', () => {
+      const outsideDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'voice-keyterms-outside-'),
+      );
+      const systemSecret = path.join(outsideDir, 'secret.txt');
+      const userFile = path.join(workspaceDir, 'user-terms.txt');
+      fs.writeFileSync(systemSecret, 'SystemScopeSecret\n');
+      fs.writeFileSync(userFile, 'UserFallbackTerm\n');
+      try {
+        const terms = buildVoiceKeyterms(
+          makeSettings(workspaceDir, {
+            systemKeytermsFile: systemSecret,
+            keytermsFile: userFile,
+          }),
+        );
+        expect(terms).toContain('UserFallbackTerm');
+        expect(terms).not.toContain('SystemScopeSecret');
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
     it('dedupes case-insensitively and keeps the global casing', () => {
       fs.writeFileSync(
         path.join(qwenDir, 'voice-keyterms.txt'),

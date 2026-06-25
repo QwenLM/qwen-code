@@ -97,23 +97,22 @@ function readUserKeyterms(settings: LoadedSettings): string[] {
   if (!settings.isTrusted) {
     return [];
   }
-  try {
-    const resolved = resolveKeytermsFile(settings);
-    if (!resolved) {
-      return [];
+  for (const resolved of resolveKeytermsFiles(settings)) {
+    try {
+      const file = canonicalizeKeytermsFile(resolved);
+      if (!file) {
+        continue;
+      }
+      const content = readRegularFileNoFollow(file);
+      if (content === undefined) {
+        continue;
+      }
+      return parseKeyterms(content);
+    } catch {
+      // Try the next configured scope, if any.
     }
-    const file = canonicalizeKeytermsFile(resolved);
-    if (!file) {
-      return [];
-    }
-    const content = readRegularFileNoFollow(file);
-    if (content === undefined) {
-      return [];
-    }
-    return parseKeyterms(content);
-  } catch {
-    return [];
   }
+  return [];
 }
 
 interface ResolvedKeytermsFile {
@@ -132,30 +131,34 @@ interface ValidatedKeytermsFile {
   stat: fs.Stats;
 }
 
-function resolveKeytermsFile(
+function resolveKeytermsFiles(
   settings: LoadedSettings,
-): ResolvedKeytermsFile | undefined {
+): ResolvedKeytermsFile[] {
   const workspacePath = settings.workspace?.path;
   if (!workspacePath) {
-    return undefined;
+    return [];
   }
   const qwenDir = path.dirname(workspacePath);
   const workspaceRoot = path.dirname(qwenDir);
-  const configured = readKeytermsFileSetting(settings);
-  if (configured) {
-    const expanded = resolvePath(configured.path);
-    const isAbsolute = path.isAbsolute(expanded);
-    return {
-      filePath: isAbsolute ? expanded : path.resolve(workspaceRoot, expanded),
-      workspaceRoot,
-      mustBeInWorkspace: configured.scope === 'system' || !isAbsolute,
-    };
+  const configured = readKeytermsFileSettings(settings);
+  if (configured.length > 0) {
+    return configured.map(({ path: configuredPath, scope }) => {
+      const expanded = resolvePath(configuredPath);
+      const isAbsolute = path.isAbsolute(expanded);
+      return {
+        filePath: isAbsolute ? expanded : path.resolve(workspaceRoot, expanded),
+        workspaceRoot,
+        mustBeInWorkspace: scope === 'system' || !isAbsolute,
+      };
+    });
   }
-  return {
-    filePath: path.join(qwenDir, DEFAULT_KEYTERMS_FILENAME),
-    workspaceRoot,
-    mustBeInWorkspace: true,
-  };
+  return [
+    {
+      filePath: path.join(qwenDir, DEFAULT_KEYTERMS_FILENAME),
+      workspaceRoot,
+      mustBeInWorkspace: true,
+    },
+  ];
 }
 
 function canonicalizeKeytermsFile({
@@ -223,15 +226,19 @@ function parseKeyterms(content: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-function readKeytermsFileSetting(
+function readKeytermsFileSettings(
   settings: LoadedSettings,
-): KeytermsFileSetting | undefined {
+): KeytermsFileSetting[] {
+  const out: KeytermsFileSetting[] = [];
   const system = readKeytermsFileSettingFromScope(settings.system?.settings);
   if (system) {
-    return { path: system, scope: 'system' };
+    out.push({ path: system, scope: 'system' });
   }
   const user = readKeytermsFileSettingFromScope(settings.user?.settings);
-  return user ? { path: user, scope: 'user' } : undefined;
+  if (user) {
+    out.push({ path: user, scope: 'user' });
+  }
+  return out;
 }
 
 function readKeytermsFileSettingFromScope(
