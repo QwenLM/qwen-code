@@ -4,8 +4,8 @@
 
 /**
  * 将静态资源同步到目标扩展目录（默认 dist/extension 或通过 EXTENSION_OUT_DIR/--target 指定）。
- * - 复制 public 下的静态资源（排除 sidepanel/dist 旧构建）
- * - 背景/内容脚本由 esbuild 输出到目标目录，此脚本不再复制 src/ 下的 JS/TS。
+ * - 复制 public 下的静态资源（manifest、icons）
+ * - 背景脚本由 esbuild 输出到目标目录，此脚本不再复制 src/ 下的 JS/TS。
  * 支持 --watch 监听变更（不清空输出，便于与 esbuild --watch 共存）。
  */
 
@@ -35,13 +35,7 @@ async function copyStatic(clean = false) {
   }
   await fs.mkdir(targetDir, { recursive: true });
 
-  await fs.cp(staticSrcDir, targetDir, {
-    recursive: true,
-    filter: (src) => {
-      // 跳过旧的 sidepanel/dist 构建产物，交由 esbuild 重新生成
-      return !src.includes(`${path.sep}sidepanel${path.sep}dist${path.sep}`);
-    },
-  });
+  await fs.cp(staticSrcDir, targetDir, { recursive: true });
   console.log(
     `Static assets synced -> ${path.relative(projectRoot, targetDir)}`,
   );
@@ -52,9 +46,7 @@ async function syncAll({ clean } = { clean: false }) {
 }
 
 function startWatchers() {
-  const watchTargets = [
-    path.join(projectRoot, 'public'),
-  ];
+  const watchTargets = [path.join(projectRoot, 'public')];
 
   let syncing = false;
   let pending = false;
@@ -79,19 +71,12 @@ function startWatchers() {
 
   watchTargets.forEach((dir) => {
     watch(dir, { recursive: true }, (_, filename) => {
-      if (
-        filename &&
-        filename.includes(`${path.sep}sidepanel${path.sep}dist${path.sep}`)
-      ) {
-        // 让 esbuild 管理 sidepanel/dist 输出
-        return;
-      }
       triggerSync(`${path.relative(projectRoot, dir)}/${filename || ''}`);
     });
   });
 
   console.log(
-    `Watching extension sources -> ${path.relative(projectRoot, targetDir)} (sidepanel/dist excluded)`,
+    `Watching extension sources -> ${path.relative(projectRoot, targetDir)}`,
   );
 }
 

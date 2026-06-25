@@ -1,6 +1,6 @@
 /**
- * @file esbuild configuration for background + content scripts
- * Transpiles TS/JS entry points into MV3-ready JS while keeping file layout.
+ * @file esbuild configuration for the background service worker
+ * Transpiles the TS/JS entry point into MV3-ready JS while keeping file layout.
  */
 
 /* global process, console */
@@ -27,10 +27,7 @@ function resolveEntry(relativePathWithoutExt) {
   return path.join(projectRoot, `${relativePathWithoutExt}.js`);
 }
 
-const entryPoints = [
-  resolveEntry('src/background/service-worker'),
-  resolveEntry('src/content/content-script'),
-];
+const entryPoints = [resolveEntry('src/background/service-worker')];
 
 async function build() {
   const ctx = await esbuild.context({

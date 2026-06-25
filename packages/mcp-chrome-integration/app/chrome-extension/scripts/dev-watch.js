@@ -49,7 +49,7 @@ async function main() {
     });
   });
 
-  // 并行开启 watch：静态/脚本同步 + sidepanel esbuild
+  // 并行开启 watch：静态/脚本同步 + 背景脚本 esbuild
   const watchers = [
     startProcess('node', [
       'scripts/sync-extension.js',
@@ -57,7 +57,6 @@ async function main() {
       `--target=${outDir}`,
     ]),
     startProcess('node', ['config/esbuild.background.config.js', '--watch']),
-    startProcess('node', ['config/esbuild.config.js', '--watch']),
   ];
 
   // 优雅退出
