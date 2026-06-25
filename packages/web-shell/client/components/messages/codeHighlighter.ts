@@ -20,6 +20,7 @@ const THEMES = ['github-light-default', 'github-dark-default'];
 let highlighterPromise: Promise<Highlighter> | null = null;
 let highlighterInstance: Highlighter | null = null;
 const loadedLanguages = new Set<string>();
+const pendingLanguages = new Map<string, Promise<void>>();
 
 function getHighlighter(): Promise<Highlighter> {
   if (!highlighterPromise) {
@@ -47,8 +48,21 @@ function getHighlighter(): Promise<Highlighter> {
 export async function getCodeHighlighter(lang: string): Promise<Highlighter> {
   const highlighter = await getHighlighter();
   if (!loadedLanguages.has(lang)) {
-    await highlighter.loadLanguage(lang as BundledLanguage);
-    loadedLanguages.add(lang);
+    // Dedupe concurrent loads of the same language: without this, two callers
+    // can both pass the `has` check and call `loadLanguage` twice.
+    let pending = pendingLanguages.get(lang);
+    if (!pending) {
+      pending = highlighter
+        .loadLanguage(lang as BundledLanguage)
+        .then(() => {
+          loadedLanguages.add(lang);
+        })
+        .finally(() => {
+          pendingLanguages.delete(lang);
+        });
+      pendingLanguages.set(lang, pending);
+    }
+    await pending;
   }
   return highlighter;
 }
@@ -83,7 +97,12 @@ export function highlightToHtmlSync(
     loadedLanguages.has(lang) &&
     code.length <= SYNC_HIGHLIGHT_MAX_CHARS
   ) {
-    return highlighterInstance.codeToHtml(code, { lang, theme });
+    try {
+      return highlighterInstance.codeToHtml(code, { lang, theme });
+    } catch {
+      // Fall back to the async path rather than crashing the render tree.
+      return null;
+    }
   }
   return null;
 }
