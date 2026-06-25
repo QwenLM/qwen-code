@@ -70,22 +70,37 @@ export class StreamInactivityTimeoutError extends Error {
  * warning) rather than failing the request.
  */
 function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
-  if (typeof config.streamIdleTimeoutMs === 'number') {
-    return config.streamIdleTimeoutMs;
-  }
-  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
-  if (raw !== undefined && raw.trim() !== '') {
-    const parsed = Number(raw);
-    // Reject values above the JS timer ceiling: setTimeout silently compresses
-    // them to 1ms, which would make the watchdog fire almost immediately.
+  // 1. Explicit config field (programmatic) wins, including `0` to disable.
+  //    Validate it too: a value above the JS timer ceiling would overflow
+  //    setTimeout to a ~immediate fire, so treat out-of-range as invalid.
+  const fromConfig = config.streamIdleTimeoutMs;
+  if (typeof fromConfig === 'number') {
     if (
-      Number.isInteger(parsed) &&
-      parsed >= 0 &&
-      parsed <= MAX_STREAM_IDLE_TIMEOUT_MS
+      Number.isInteger(fromConfig) &&
+      fromConfig >= 0 &&
+      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
     ) {
-      return parsed;
+      return fromConfig;
     }
-    createDebugLogger('openai-pipeline').warn(
+    debugLogger.warn(
+      `Ignoring out-of-range streamIdleTimeoutMs=${fromConfig} ` +
+        `(expected an integer in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `falling back to ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}/default.`,
+    );
+  }
+  // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
+  //    notation/floats/signs so a typo can't silently become a surprising
+  //    timeout. `0` disables; values above the timer ceiling are rejected.
+  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (parsed <= MAX_STREAM_IDLE_TIMEOUT_MS) {
+        return parsed;
+      }
+    }
+    debugLogger.warn(
       `Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
         `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
         `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,

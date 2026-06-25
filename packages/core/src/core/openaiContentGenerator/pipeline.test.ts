@@ -21,7 +21,10 @@ import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
-import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './constants.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
+} from './constants.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -3075,6 +3078,10 @@ describe('ContentGenerationPipeline', () => {
           return r;
         },
       );
+      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS from the
+      // dev/CI shell so the default-timeout tests aren't silently overridden.
+      // Env-specific tests re-stub it; afterEach unstubs everything.
+      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', undefined);
       vi.useFakeTimers();
     });
     afterEach(() => {
@@ -3527,6 +3534,57 @@ describe('ContentGenerationPipeline', () => {
       await vi.advanceTimersByTimeAsync(1);
       await consume;
       expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects a non-decimal QWEN_STREAM_IDLE_TIMEOUT_MS (hex/scientific) and uses the default', async () => {
+      // Number('0x10') === 16; a strict decimal-integer check must reject it so
+      // a typo can't silently become a 16ms timeout.
+      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '0x10');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; non-decimal env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // would have tripped at 16ms if '0x10' parsed
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects an out-of-range config streamIdleTimeoutMs and falls back', async () => {
+      // A config value above the timer ceiling would overflow setTimeout; it
+      // must be rejected (fall back to env/default), not used verbatim.
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1); // oversized config
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default (config rejected)
     });
   });
 });
