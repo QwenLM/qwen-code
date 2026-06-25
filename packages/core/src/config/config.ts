@@ -2687,8 +2687,9 @@ export class Config {
    * resolve an `authType:modelId` selector; the endpoint is looked up for the
    * egress notice. Returns `undefined` (so the caller falls back to
    * same-provider auto-select) when no explicit model is set, the selector can't
-   * be parsed, or the pinned model isn't actually configured — that last guard
-   * keeps a stale/typo'd pin from firing the bridge at an unreachable model.
+   * be parsed, the pinned model isn't actually configured, or it points at the
+   * text-only primary itself — those guards keep a stale/typo'd pin from firing
+   * the bridge at an unreachable, or non-image-capable, model.
    */
   private resolveVisionModelSelection():
     | VisionBridgeModelSelection
@@ -2701,8 +2702,13 @@ export class Config {
       return undefined;
     }
     if (!selector) return undefined;
+    // Mirror selectVisionBridgeModel's guard: never route the bridge at the
+    // primary model itself, even when explicitly pinned — the primary is the
+    // text-only model the bridge exists to work around.
+    const primaryModelId = this.getModel();
     const match = this.getAllConfiguredModels().find(
       (m) =>
+        m.id !== primaryModelId &&
         m.id === selector.modelId &&
         (!selector.authType || m.authType === selector.authType),
     );
