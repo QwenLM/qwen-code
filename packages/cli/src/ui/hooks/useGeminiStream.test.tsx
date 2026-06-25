@@ -8370,6 +8370,79 @@ describe('useGeminiStream', () => {
       });
     });
   });
+
+  describe('timestamp attachment', () => {
+    it('attaches a numeric timestamp to gemini items via commitItem', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Hello world',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test');
+      });
+
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      const geminiCalls = mockAddItem.mock.calls.filter(
+        (call: any[]) => call[0]?.type === 'gemini',
+      );
+      expect(geminiCalls.length).toBeGreaterThanOrEqual(1);
+      const geminiItem = geminiCalls[0][0];
+      expect(typeof geminiItem.timestamp).toBe('number');
+      expect(geminiItem.timestamp).toBeGreaterThan(0);
+    });
+
+    it('does not attach timestamp to user items', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'response',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test');
+      });
+
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      const userCalls = mockAddItem.mock.calls.filter(
+        (call: any[]) => call[0]?.type === 'user',
+      );
+      expect(userCalls.length).toBeGreaterThanOrEqual(1);
+      const userItem = userCalls[0][0];
+      expect(userItem).not.toHaveProperty('timestamp');
+    });
+  });
 });
 
 describe('classifyApiError', () => {
