@@ -4001,7 +4001,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       (settings as Record<string, unknown>)['getValue'] = vi.fn((key: string) =>
         key === 'model.name' ? 'deepseek-flash' : undefined,
       );
-      return settings;
+      return settings as unknown as ReturnType<typeof createLoadedSettingsAdapter>;
     });
 
     const settings = makeSessionSettings();
