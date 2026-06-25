@@ -323,11 +323,7 @@ export class WorkflowRunRegistry {
    * race window is bounded but not zero. Tasks before the first
    * `phase()` call attribute to the sentinel `null` key.
    */
-  onBudgetUpdated(
-    runId: string,
-    spent: number,
-    total: number | null,
-  ): void {
+  onBudgetUpdated(runId: string, spent: number, total: number | null): void {
     const entry = this.entries.get(runId);
     if (!entry || entry.status !== 'running') return;
     const delta = spent - entry.tokensSpent;

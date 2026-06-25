@@ -14,7 +14,11 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
-import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
+import {
+  logSkillLaunch,
+  recordSkillInvocation,
+  SkillLaunchEvent,
+} from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
@@ -345,7 +349,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       .getDisabledSkillNames()
       .has(this.params.skill.toLowerCase());
     if (disabled) {
+      let disabledCommandFallbackAttempted = false;
       if (this.commandExecutor) {
+        disabledCommandFallbackAttempted = true;
         // Wrap in try/catch matching the non-disabled path's graceful
         // degradation: if the MCP server throws
         // (network error, timeout, protocol violation), fall through to
@@ -382,9 +388,17 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         this.config,
         new SkillLaunchEvent(this.params.skill, false, this.promptId),
       );
+      if (!disabledCommandFallbackAttempted) {
+        recordSkillInvocation(this.config, {
+          skillName: this.params.skill,
+          success: false,
+        });
+      }
       const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
       return { llmContent: msg, returnDisplay: msg };
     }
+
+    let commandFallbackAttempted = false;
 
     try {
       // Load the skill with runtime config (includes additional files)
@@ -395,6 +409,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
         if (this.commandExecutor) {
+          commandFallbackAttempted = true;
           const commandResult = await this.commandExecutor(
             this.params.skill,
             this.params.args ?? '',
@@ -431,6 +446,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
           this.config,
           new SkillLaunchEvent(this.params.skill, false, this.promptId),
         );
+        if (!commandFallbackAttempted) {
+          recordSkillInvocation(this.config, {
+            skillName: this.params.skill,
+            success: false,
+          });
+        }
 
         // Get parse errors if any
         const parseErrors = this.skillManager.getParseErrors();
@@ -504,6 +525,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
+      recordSkillInvocation(this.config, {
+        skillName: this.params.skill,
+        success: true,
+      });
 
       return {
         llmContent: [{ text: llmContent }],
@@ -520,6 +545,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         this.config,
         new SkillLaunchEvent(this.params.skill, false, this.promptId),
       );
+      if (!commandFallbackAttempted) {
+        recordSkillInvocation(this.config, {
+          skillName: this.params.skill,
+          success: false,
+        });
+      }
 
       return {
         llmContent: `Failed to load skill "${this.params.skill}": ${errorMessage}`,
