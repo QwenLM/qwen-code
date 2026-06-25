@@ -18,7 +18,6 @@ import {
   toolContainsCallId,
 } from '../toolFormatting';
 import { SubAgentPanel } from './SubAgentPanel';
-import { ToolApproval } from '../ToolApproval';
 import styles from './ParallelAgentsGroup.module.css';
 
 interface ParallelAgentsGroupProps {
@@ -94,7 +93,6 @@ function ToolGroupIcon() {
 export function ParallelAgentsGroup({
   agents,
   pendingApproval,
-  onConfirm,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
   const [groupExpanded, setGroupExpanded] = useState(false);
@@ -207,9 +205,6 @@ export function ParallelAgentsGroup({
               );
             })}
           </div>
-          {approvalAgent && pendingApproval && onConfirm && (
-            <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
-          )}
         </div>
       )}
     </div>

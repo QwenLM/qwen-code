@@ -31,7 +31,6 @@ import {
   extractText,
   formatTokenCount,
   getAgentCancellationReason,
-  getAgentCurrentToolHint,
   getAgentDescription,
   getAgentDisplayStatus,
   getAgentType,
@@ -379,6 +378,7 @@ function getAgentDisplayInfo(
   now?: number,
 ): {
   agentType: string;
+  explicitAgentType: string;
   description: string;
   subToolCount: number;
   elapsed: string;
@@ -390,6 +390,7 @@ function getAgentDisplayInfo(
   const reason = getAgentCancellationReason(tool);
   const status = getAgentDisplayStatus(tool);
   const agentType = getAgentType(tool);
+  const explicitAgentType = getExplicitAgentType(tool);
   const description = getAgentDescription(tool);
 
   const subToolCount =
@@ -423,6 +424,7 @@ function getAgentDisplayInfo(
 
   return {
     agentType,
+    explicitAgentType,
     description,
     subToolCount,
     elapsed,
@@ -430,6 +432,17 @@ function getAgentDisplayInfo(
     status,
     reason,
   };
+}
+
+function getExplicitAgentType(tool: ACPToolCall): string {
+  const taskExec = getTaskExecutionRecord(tool.rawOutput);
+  const name = taskExec?.['subagentName'];
+  if (typeof name === 'string' && name.trim()) return name.trim();
+  const subagentType = tool.args?.subagent_type;
+  if (typeof subagentType === 'string' && subagentType.trim()) {
+    return subagentType.trim();
+  }
+  return '';
 }
 
 export function shouldAutoExpand(tool: ACPToolCall): boolean {
@@ -572,25 +585,25 @@ function ToolGroupIcon() {
       aria-hidden="true"
     >
       <rect
-        x="1.25"
-        y="1.25"
-        width="11.5"
-        height="11.5"
-        rx="3"
+        x="2"
+        y="2"
+        width="10"
+        height="10"
+        rx="2.4"
         stroke="currentColor"
-        strokeWidth="1.4"
+        strokeWidth="1.2"
       />
       <path
-        d="M4.2 5.1 5.8 6.7 4.2 8.3"
+        d="M4.6 5.2 6 6.6 4.6 8"
         stroke="currentColor"
-        strokeWidth="1.15"
+        strokeWidth="1.05"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
-        d="M7.1 8.4h2.4"
+        d="M7.3 8.1h2.1"
         stroke="currentColor"
-        strokeWidth="1.15"
+        strokeWidth="1.05"
         strokeLinecap="round"
       />
     </svg>
@@ -848,27 +861,31 @@ export const ToolLine = memo(function ToolLine({
   }, [isAgent, tool.status]);
 
   if (isAgent) {
-    if (hasApproval && onConfirm) {
-      return (
-        <div className={styles.line}>
-          <ToolApproval request={approval} onConfirm={onConfirm} />
-        </div>
-      );
-    }
-
     const info = getAgentDisplayInfo(tool, now);
-    const displayName = t('agent.label');
+    const displayName = info.explicitAgentType
+      ? `${t('agent.label')}（${info.explicitAgentType}）`
+      : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
-    const toolHint = getAgentCurrentToolHint(tool, t);
     const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
-    const runningMeta = [toolHint, progressLabel, info.elapsed]
+    const runningMeta = [progressLabel, info.elapsed]
       .filter(Boolean)
       .join(' · ');
-    const showExpanded = expanded || !!hasSubToolApproval;
+    const completeMeta = [
+      info.subToolCount > 0 ? `${info.subToolCount} tools` : '',
+      info.elapsed,
+      info.tokens,
+      info.reason ? truncateText(info.reason, 80) : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const showExpanded = expanded || !!hasApproval || !!hasSubToolApproval;
     return (
       <div className={styles.line}>
-        <div className={styles.lineMain}>
-          <StatusIcon status={tool.status} />
+        <div
+          className={`${styles.lineMain} ${styles.lineExpandable}`}
+          onClick={() => setExpanded(!expanded)}
+        >
+          <StatusIcon status={isComplete ? info.status : tool.status} />
           <span className={styles.lineName}>{displayName}</span>
           <ToolHeaderExtra
             info={{
@@ -878,60 +895,11 @@ export const ToolLine = memo(function ToolLine({
               description: info.description
                 ? truncateText(info.description, 60)
                 : '',
-              elapsed: '',
+              elapsed: isComplete ? completeMeta : runningMeta,
               workspaceCwd,
             }}
           />
         </div>
-        {!isComplete && (
-          <div
-            className={`${styles.agentSummary} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
-          >
-            <StatusIcon status={tool.status} />
-            <span className={styles.lineName}>{info.agentType}:</span>
-            <span className={styles.lineArg}>
-              {truncateText(info.description || info.agentType, 50)}
-            </span>
-            {runningMeta && (
-              <span className={styles.lineElapsed}>· {runningMeta}</span>
-            )}
-          </div>
-        )}
-        {isComplete && (
-          <div
-            className={`${styles.agentSummary} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
-          >
-            <StatusIcon status={info.status} />
-            <span className={styles.lineName}>{info.agentType}:</span>
-            <span className={styles.lineArg}>
-              {truncateText(info.description, 50)}
-            </span>
-            {info.subToolCount > 0 && (
-              <span className={styles.lineElapsed}>
-                · {info.subToolCount} tools
-              </span>
-            )}
-            {info.elapsed && (
-              <span className={styles.lineElapsed}>· {info.elapsed}</span>
-            )}
-            {info.tokens && (
-              <span className={styles.lineElapsed}>· {info.tokens}</span>
-            )}
-            {info.reason && (
-              <span className={styles.lineElapsed}>
-                · {truncateText(info.reason, 80)}
-              </span>
-            )}
-          </div>
-        )}
-        {hasApproval && onConfirm && (
-          <ToolApproval request={approval} onConfirm={onConfirm} />
-        )}
-        {hasSubToolApproval && onConfirm && (
-          <ToolApproval request={approval!} onConfirm={onConfirm} />
-        )}
         {showExpanded && (
           <div className={styles.lineDetail}>
             <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
@@ -1100,7 +1068,12 @@ export const ToolGroup = memo(function ToolGroup({
     liveStartedAtRef.current = Date.now();
   }, [hasRunningTool, activeTool?.callId]);
 
-  if (directApprovalTool && tools.length === 1 && onConfirm) {
+  if (
+    directApprovalTool &&
+    !isSubAgentToolCall(directApprovalTool) &&
+    tools.length === 1 &&
+    onConfirm
+  ) {
     return <ToolApproval request={pendingApproval} onConfirm={onConfirm} />;
   }
 

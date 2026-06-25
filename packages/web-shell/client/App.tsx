@@ -79,6 +79,10 @@ import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
+import deleteIconUrl from './assets/icons/delete.svg';
+import editIconUrl from './assets/icons/edit.svg';
+import insertIconUrl from './assets/icons/insert.svg';
+import queueIconUrl from './assets/icons/queue.svg';
 import {
   I18nProvider,
   getTranslator,
@@ -91,6 +95,7 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
+import { getModelDisplayName } from './utils/modelDisplay';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
 import {
@@ -123,7 +128,12 @@ import {
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
-import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
+import type {
+  ACPToolCall,
+  Message,
+  PermissionRequest,
+  SystemMessage,
+} from './adapters/types';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -387,20 +397,24 @@ const emptyComposerApi: WebShellComposerApi = {
   submit: () => {},
 };
 
-type ChatWidthMode = '1000' | 'wide';
+const DEFAULT_CHAT_MAX_WIDTH = 1000;
+type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
-const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 
+function getDefaultChatWidthMode(): ChatWidthMode {
+  return `${DEFAULT_CHAT_MAX_WIDTH}`;
+}
+
 function readChatWidthMode(): ChatWidthMode {
-  if (typeof window === 'undefined') return '1000';
+  if (typeof window === 'undefined') return getDefaultChatWidthMode();
   try {
     return window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY) === 'wide'
       ? 'wide'
-      : '1000';
+      : getDefaultChatWidthMode();
   } catch {
-    return '1000';
+    return getDefaultChatWidthMode();
   }
 }
 
@@ -549,10 +563,10 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 
 function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
   return (
-    `● authType: ${formatModelAuthType(summary.authType)}` +
-    `\n  Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
-    `\n  Base URL: ${summary.baseUrl}` +
-    `\n  API key: ${summary.apiKey}`
+    `AuthType: ${formatModelAuthType(summary.authType)}` +
+    `\nUsing ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
+    `\nBase URL: ${summary.baseUrl}` +
+    `\nAPI key: ${summary.apiKey}`
   );
 }
 
@@ -563,10 +577,22 @@ function parseModelSwitchStatusModel(content: string): string | null {
   return rawModel.replace(/\([^()]+\)$/, '');
 }
 
-function parseModelSwitchSummaryModel(content: string): string | null {
-  if (!content.startsWith('● authType:')) return null;
-  const match = content.match(/\n {2}Using (?:runtime )?model: ([^\n]+)/);
-  return match?.[1]?.trim() || null;
+function isModelSwitchSummaryMessage(
+  message: Message,
+): message is SystemMessage {
+  return (
+    message.role === 'system' &&
+    message.variant === 'info' &&
+    message.source === 'model_switch_summary'
+  );
+}
+
+function getModelSwitchSummaryMessageModel(message: Message): string | null {
+  if (!isModelSwitchSummaryMessage(message) || !isRecord(message.data)) {
+    return null;
+  }
+  const modelId = message.data['modelId'];
+  return typeof modelId === 'string' && modelId ? modelId : null;
 }
 
 function filterDuplicateModelSwitchMessages(
@@ -574,8 +600,8 @@ function filterDuplicateModelSwitchMessages(
 ): Message[] {
   const summarizedModels = new Set<string>();
   for (const message of messages) {
-    if (message.role !== 'system' || message.variant !== 'info') continue;
-    const model = parseModelSwitchSummaryModel(message.content);
+    if (!isModelSwitchSummaryMessage(message)) continue;
+    const model = getModelSwitchSummaryMessageModel(message);
     if (model) summarizedModels.add(model);
   }
   if (summarizedModels.size === 0) return [...messages];
@@ -584,6 +610,31 @@ function filterDuplicateModelSwitchMessages(
     const statusModel = parseModelSwitchStatusModel(message.content);
     return !statusModel || !summarizedModels.has(statusModel);
   });
+}
+
+function isModelSwitchMessage(message: Message): boolean {
+  if (message.role !== 'system' || message.variant !== 'info') return false;
+  return (
+    parseModelSwitchStatusModel(message.content) !== null ||
+    isModelSwitchSummaryMessage(message)
+  );
+}
+
+function filterEmptySessionModelSwitchMessages(
+  messages: readonly Message[],
+): Message[] {
+  if (messages.length === 0) return [];
+  if (!messages.every(isModelSwitchMessage)) return [...messages];
+  return [];
+}
+
+function filterModelSwitchMessages(messages: readonly Message[]): Message[] {
+  // De-duplicate first, then remove empty-session model notices. Reversing this
+  // would drop the summary-only empty-session case before duplicate status
+  // messages have a chance to be removed.
+  return filterEmptySessionModelSwitchMessages(
+    filterDuplicateModelSwitchMessages(messages),
+  );
 }
 
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -721,21 +772,24 @@ function translateCopyMessage(
   return message;
 }
 
+function iconMaskStyle(url: string): CSSProperties {
+  return { '--queued-icon-url': `url(${url})` } as CSSProperties;
+}
+
 function QueuedPromptDisplay({
   prompts,
   t,
   onDelete,
   onInsert,
-  onEditLast,
+  onEdit,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
   onDelete: (id: number) => void;
   onInsert: (id: number) => void;
-  onEditLast: () => void;
+  onEdit: (id: number) => void;
 }) {
   if (prompts.length === 0) return null;
-  const lastPromptId = prompts[prompts.length - 1]?.id;
 
   return (
     <div className={styles.queuedPrompts}>
@@ -752,6 +806,12 @@ function QueuedPromptDisplay({
         const isCommand = isCommandPrompt(prompt.text);
         return (
           <div key={prompt.id} className={styles.queuedPrompt}>
+            <span className={styles.queuedPromptIcon} aria-hidden="true">
+              <span
+                className={styles.queuedPromptMaskIcon}
+                style={iconMaskStyle(queueIconUrl)}
+              />
+            </span>
             <span className={styles.queuedPromptText}>
               {preview}
               {imageCount > 0
@@ -759,22 +819,6 @@ function QueuedPromptDisplay({
                 : ''}
             </span>
             <span className={styles.queuedPromptActions}>
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onDelete(prompt.id)}
-              >
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path
-                    d="M3.5 4.5h9M6.5 2.5h3M5 4.5l.5 8h5l.5-8"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                {t('queue.delete')}
-              </button>
               {imageCount === 0 && (
                 <button
                   type="button"
@@ -785,36 +829,40 @@ function QueuedPromptDisplay({
                     isCommand ? t('queue.insertCommandDisabled') : undefined
                   }
                 >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path
-                      d="M8 3.5v7M4.5 7 8 10.5 11.5 7M3.5 12.5h9"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
+                  <span
+                    className={styles.queuedPromptActionIcon}
+                    style={iconMaskStyle(insertIconUrl)}
+                    aria-hidden="true"
+                  />
                   {t('queue.insert')}
                 </button>
               )}
-              {prompt.id === lastPromptId && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={onEditLast}
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path
-                      d="M3.5 11.5 4 9l6.7-6.7a1.1 1.1 0 0 1 1.6 0l1.4 1.4a1.1 1.1 0 0 1 0 1.6L7 12l-2.5.5h-1z"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  {t('queue.edit')}
-                </button>
-              )}
+              <button
+                type="button"
+                className={styles.queuedPromptAction}
+                onClick={() => onDelete(prompt.id)}
+                aria-label={t('queue.delete')}
+                title={t('queue.delete')}
+              >
+                <span
+                  className={styles.queuedPromptActionIcon}
+                  style={iconMaskStyle(deleteIconUrl)}
+                  aria-hidden="true"
+                />
+              </button>
+              <button
+                type="button"
+                className={styles.queuedPromptAction}
+                onClick={() => onEdit(prompt.id)}
+                aria-label={t('queue.edit')}
+                title={t('queue.edit')}
+              >
+                <span
+                  className={styles.queuedPromptActionIcon}
+                  style={iconMaskStyle(editIconUrl)}
+                  aria-hidden="true"
+                />
+              </button>
             </span>
           </div>
         );
@@ -942,7 +990,7 @@ export function App({
       (message): message is LocalAnchoredMessage => message !== null,
     );
     if (localMessages.length === 0) {
-      return filterDuplicateModelSwitchMessages(messages);
+      return filterModelSwitchMessages(messages);
     }
 
     const result = [...messages];
@@ -960,7 +1008,7 @@ export function App({
           : Math.min(localMessage.anchorIndex, result.length);
       result.splice(index, 0, localMessage.message);
     }
-    return filterDuplicateModelSwitchMessages(result);
+    return filterModelSwitchMessages(result);
   }, [messages, recapMessage]);
   const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
@@ -1019,22 +1067,15 @@ export function App({
     (t) => `${t.id}:${t.status}:${t.content}`,
   );
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
-  // The all-completed list is only shown as a transient "all done" moment
-  // when the panel was already visible live in this client; on session
-  // restore (catch-up replay) a historical finished list stays hidden.
-  // State is adjusted during render (not in an effect) so the
-  // active → completed transition doesn't unmount the panel for a frame.
-  const [todoPanelMode, setTodoPanelMode] = useState<
-    'hidden' | 'active' | 'completed'
-  >('hidden');
+  const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
+    'hidden',
+  );
   const nextTodoPanelMode =
-    connection.catchingUp || floatingTodos.length === 0
+    connection.catchingUp ||
+    floatingTodos.length === 0 ||
+    floatingTodosAllCompleted
       ? 'hidden'
-      : !floatingTodosAllCompleted
-        ? 'active'
-        : todoPanelMode === 'hidden'
-          ? 'hidden'
-          : 'completed';
+      : 'active';
   if (nextTodoPanelMode !== todoPanelMode) {
     setTodoPanelMode(nextTodoPanelMode);
   }
@@ -1288,7 +1329,7 @@ export function App({
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
         id: m.id,
-        label: m.label,
+        label: getModelDisplayName(m.label || m.id),
       })),
     [connection.models],
   );
@@ -1372,6 +1413,7 @@ export function App({
         role: 'system',
         content: `※ recap: ${t('recap.loading')}`,
         variant: 'info',
+        source: 'recap',
       },
     });
     sessionActions.recapSession().then(
@@ -1387,6 +1429,7 @@ export function App({
               ? `※ recap: ${result.recap}`
               : t('recap.empty'),
             variant: 'info',
+            source: 'recap',
           },
         });
       },
@@ -1562,11 +1605,16 @@ export function App({
     return nextPrompt;
   }, []);
 
-  const popQueuedPromptsForEdit = useCallback((): string | null => {
+  const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
     const current = queuedPromptsRef.current;
     if (current.length === 0) return null;
-    const next = current.slice(0, -1);
-    const prompt = current[current.length - 1];
+    const index =
+      id === undefined
+        ? current.length - 1
+        : current.findIndex((prompt) => prompt.id === id);
+    if (index < 0) return null;
+    const prompt = current[index];
+    const next = current.filter((_, i) => i !== index);
     queuedPromptsRef.current = next;
     setQueuedPrompts(next);
     return prompt?.text ?? null;
@@ -1610,14 +1658,22 @@ export function App({
     [reportError, sessionActions, t],
   );
 
-  const editLastQueuedPrompt = useCallback(() => {
-    const queuedText = popQueuedPromptsForEdit();
-    if (!queuedText) return;
-    const current = editorRef.current?.getText() ?? '';
-    const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
-    editorRef.current?.setText(next);
-    editorRef.current?.focus();
-  }, [popQueuedPromptsForEdit]);
+  const editQueuedPrompt = useCallback(
+    (id: number) => {
+      const queuedText = popQueuedPromptForEdit(id);
+      if (!queuedText) return;
+      const current = editorRef.current?.getText() ?? '';
+      const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
+      editorRef.current?.setText(next);
+      editorRef.current?.focus();
+    },
+    [popQueuedPromptForEdit],
+  );
+
+  const popLastQueuedPromptText = useCallback(
+    () => popQueuedPromptForEdit(),
+    [popQueuedPromptForEdit],
+  );
 
   const clearQueuedPrompts = useCallback((): boolean => {
     if (queuedPromptsRef.current.length === 0) return false;
@@ -1986,7 +2042,11 @@ export function App({
         (result) => {
           if (result.recap) {
             store.dispatch([
-              { type: 'status', text: `※ recap: ${result.recap}` },
+              {
+                type: 'status',
+                text: `※ recap: ${result.recap}`,
+                source: 'recap',
+              },
             ]);
           }
         },
@@ -3208,11 +3268,13 @@ export function App({
         .setModel(modelId)
         .then((result) => {
           const summary = getModelSwitchSummary(result);
-          setCurrentModel(summary?.modelId ?? modelId);
+          setCurrentModel(modelId);
           if (summary) {
             store.dispatch({
               type: 'debug',
               text: serializeModelSwitchSummary(summary),
+              source: 'model_switch_summary',
+              data: summary,
             });
           }
         })
@@ -3304,6 +3366,9 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const effectiveChatWidthMode: ChatWidthMode = isChatEmptyState
+    ? getDefaultChatWidthMode()
+    : chatWidthMode;
   const chatWidthToggleMin = getChatMaxWidth(chatMaxWidth);
 
   const appClassName = [
@@ -3320,9 +3385,9 @@ export function App({
   const appStyle = useMemo(
     () => ({
       ...externalStyle,
-      ...getChatWidthStyle(chatWidthMode, chatMaxWidth),
+      ...getChatWidthStyle(effectiveChatWidthMode, chatMaxWidth),
     }),
-    [chatMaxWidth, chatWidthMode, externalStyle],
+    [chatMaxWidth, effectiveChatWidthMode, externalStyle],
   );
   const handleChatWidthModeChange = useCallback((mode: ChatWidthMode) => {
     setChatWidthMode(mode);
@@ -3751,7 +3816,7 @@ export function App({
                   t={t}
                   onDelete={removeQueuedPrompt}
                   onInsert={insertQueuedPrompt}
-                  onEditLast={editLastQueuedPrompt}
+                  onEdit={editQueuedPrompt}
                 />
                 <ChatEditor
                   ref={setEditorHandle}
@@ -3766,7 +3831,7 @@ export function App({
                   slashCommandCategoryOrder={slashCommandCategoryOrder}
                   queuedMessages={queuedTexts}
                   onFocusFooter={handleFocusTaskPill}
-                  onPopQueuedMessages={popQueuedPromptsForEdit}
+                  onPopQueuedMessages={popLastQueuedPromptText}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
                   currentModel={currentModel}
@@ -3813,7 +3878,7 @@ export function App({
                     .filter(isVisibleComposerModel)
                     .map((m) => ({
                       id: m.id,
-                      label: m.label,
+                      label: getModelDisplayName(m.label || m.id),
                       contextWindow: m.contextWindow,
                     }))}
                   skills={loadedSkills}

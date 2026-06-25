@@ -35,7 +35,7 @@ export function AskUserQuestion({
     [request.rawInput],
   );
   const [currentIdx, setCurrentIdx] = useState(0);
-  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [customInputs, setCustomInputs] = useState<Record<number, string>>({});
   const [selectedMulti, setSelectedMulti] = useState<Record<number, string[]>>(
@@ -44,53 +44,29 @@ export function AskUserQuestion({
   const [customFocused, setCustomFocused] = useState(false);
   const submittedRef = useRef(false);
 
-  // Total tabs = questions + submit tab
-  const totalTabs = questions.length + 1;
   const isOnSubmitTab = currentIdx === questions.length;
 
   useEffect(() => {
+    const firstQuestion = questions[0];
     submittedRef.current = false;
     setCurrentIdx(0);
-    setSelectedIdx(0);
-    setAnswers({});
+    setSelectedIdx(firstQuestion?.options.length ? 0 : null);
+    setAnswers(
+      firstQuestion && !firstQuestion.multiSelect && firstQuestion.options[0]
+        ? { 0: firstQuestion.options[0].label }
+        : {},
+    );
     setCustomInputs({});
-    setSelectedMulti({});
+    setSelectedMulti(
+      firstQuestion?.multiSelect && firstQuestion.options[0]
+        ? { 0: [firstQuestion.options[0].label] }
+        : {},
+    );
     setCustomFocused(false);
-  }, [request.id]);
+  }, [questions, request.id]);
 
   const current = isOnSubmitTab ? undefined : questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
-  const totalOptions = isOnSubmitTab ? 2 : (current?.options.length ?? 0) + 1;
-  const otherOptionIdx = current?.options.length ?? 0;
-
-  const getSelectedIdxForTab = useCallback(
-    (
-      tabIdx: number,
-      nextAnswers = answers,
-      nextCustomInputs = customInputs,
-      nextSelectedMulti = selectedMulti,
-    ): number => {
-      if (tabIdx === questions.length) return 0;
-      const question = questions[tabIdx];
-      if (!question) return 0;
-      const otherIdx = question.options.length;
-      if (question.multiSelect) {
-        const selected = nextSelectedMulti[tabIdx] || [];
-        const selectedOptionIdx = question.options.findIndex((option) =>
-          selected.includes(option.label),
-        );
-        if (selectedOptionIdx >= 0) return selectedOptionIdx;
-        return nextCustomInputs[tabIdx] ? otherIdx : 0;
-      }
-      const answer = nextAnswers[tabIdx];
-      const answerOptionIdx = question.options.findIndex(
-        (option) => option.label === answer,
-      );
-      if (answerOptionIdx >= 0) return answerOptionIdx;
-      return nextCustomInputs[tabIdx] || answer ? otherIdx : 0;
-    },
-    [answers, customInputs, questions, selectedMulti],
-  );
 
   const buildResult = useCallback((): Record<string, string> => {
     const result: Record<string, string> = {};
@@ -127,27 +103,22 @@ export function AskUserQuestion({
     onConfirm(request.id, cancelOption.id, undefined);
   }, [request, onConfirm]);
 
-  const switchQuestion = useCallback(
-    (direction: 1 | -1) => {
-      if (totalTabs <= 1) return;
-      setCurrentIdx((idx) => {
-        const next = (idx + direction + totalTabs) % totalTabs;
-        setSelectedIdx(getSelectedIdxForTab(next));
-        setCustomFocused(false);
-        return next;
-      });
-    },
-    [getSelectedIdxForTab, totalTabs],
-  );
-
   const focusCustomInput = useCallback(
     (initialValue?: string) => {
       if (initialValue !== undefined) {
         setCustomInputs((prev) => ({ ...prev, [currentIdx]: initialValue }));
       }
+      if (!isMulti) {
+        setAnswers((prev) => {
+          if (!(currentIdx in prev)) return prev;
+          const next = { ...prev };
+          delete next[currentIdx];
+          return next;
+        });
+      }
       setCustomFocused(true);
     },
-    [currentIdx],
+    [currentIdx, isMulti],
   );
 
   const handleSelectOption = useCallback(
@@ -176,15 +147,12 @@ export function AskUserQuestion({
       } else {
         const nextAnswers = { ...answers, [currentIdx]: label };
         setAnswers(nextAnswers);
-        if (currentIdx < questions.length - 1) {
-          const nextIdx = currentIdx + 1;
-          setCurrentIdx(nextIdx);
-          setSelectedIdx(getSelectedIdxForTab(nextIdx, nextAnswers));
-        } else {
-          // Last question answered — go to submit tab
-          setCurrentIdx(questions.length);
-          setSelectedIdx(getSelectedIdxForTab(questions.length, nextAnswers));
-        }
+        setCustomInputs((prev) => {
+          if (!(currentIdx in prev)) return prev;
+          const next = { ...prev };
+          delete next[currentIdx];
+          return next;
+        });
       }
     },
     [
@@ -194,11 +162,9 @@ export function AskUserQuestion({
       isMulti,
       selectedMulti,
       answers,
-      questions,
       handleSubmit,
       handleCancel,
       focusCustomInput,
-      getSelectedIdxForTab,
     ],
   );
 
@@ -226,148 +192,6 @@ export function AskUserQuestion({
     ],
   );
 
-  useEffect(() => {
-    if (customFocused) return;
-    const claimKey = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-    };
-    const handler = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.key === 'ArrowDown' || e.key === 'j') {
-        claimKey(e);
-        setSelectedIdx((i) => Math.min(i + 1, totalOptions - 1));
-      } else if (e.key === 'ArrowUp' || e.key === 'k') {
-        claimKey(e);
-        setSelectedIdx((i) => Math.max(i - 1, 0));
-      } else if (e.key === 'ArrowRight') {
-        claimKey(e);
-        switchQuestion(1);
-      } else if (e.key === 'ArrowLeft') {
-        claimKey(e);
-        switchQuestion(-1);
-      } else if (e.key === ' ') {
-        claimKey(e);
-        if (isMulti) {
-          handleToggle(selectedIdx);
-        } else {
-          handleSelectOption(selectedIdx);
-        }
-      } else if (e.key === 'Enter') {
-        claimKey(e);
-        if (isMulti) {
-          // In multiSelect, Enter advances to next tab or submits
-          if (currentIdx < questions.length - 1) {
-            const nextIdx = currentIdx + 1;
-            setCurrentIdx(nextIdx);
-            setSelectedIdx(getSelectedIdxForTab(nextIdx));
-          } else {
-            setCurrentIdx(questions.length);
-            setSelectedIdx(getSelectedIdxForTab(questions.length));
-          }
-        } else {
-          handleSelectOption(selectedIdx);
-        }
-      } else if (e.key === 'Escape') {
-        claimKey(e);
-        handleCancel();
-      } else if (e.key >= '1' && e.key <= '9') {
-        const idx = parseInt(e.key) - 1;
-        if (idx < totalOptions) {
-          claimKey(e);
-          setSelectedIdx(idx);
-          if (!isMulti) {
-            handleSelectOption(idx);
-          } else {
-            handleToggle(idx);
-          }
-        }
-      } else if (
-        !isOnSubmitTab &&
-        selectedIdx === otherOptionIdx &&
-        e.key.length === 1 &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.altKey
-      ) {
-        claimKey(e);
-        focusCustomInput(e.key);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [
-    customFocused,
-    totalOptions,
-    selectedIdx,
-    otherOptionIdx,
-    isMulti,
-    isOnSubmitTab,
-    currentIdx,
-    questions.length,
-    handleSelectOption,
-    handleToggle,
-    handleCancel,
-    switchQuestion,
-    focusCustomInput,
-    getSelectedIdxForTab,
-  ]);
-
-  const handleCustomKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      e.stopPropagation();
-      const val = customInputs[currentIdx];
-      if (val) {
-        if (!isMulti) {
-          const nextAnswers = { ...answers, [currentIdx]: val };
-          setAnswers(nextAnswers);
-          if (currentIdx < questions.length - 1) {
-            const nextIdx = currentIdx + 1;
-            setCurrentIdx(nextIdx);
-            setSelectedIdx(getSelectedIdxForTab(nextIdx, nextAnswers));
-            setCustomFocused(false);
-            return;
-          }
-          // Go to submit tab
-          setCurrentIdx(questions.length);
-          setSelectedIdx(getSelectedIdxForTab(questions.length, nextAnswers));
-          setCustomFocused(false);
-          return;
-        }
-        setCustomFocused(false);
-        // Multi — advance to next or submit tab
-        if (currentIdx < questions.length - 1) {
-          const nextIdx = currentIdx + 1;
-          setCurrentIdx(nextIdx);
-          setSelectedIdx(getSelectedIdxForTab(nextIdx));
-        } else {
-          setCurrentIdx(questions.length);
-          setSelectedIdx(getSelectedIdxForTab(questions.length));
-        }
-      }
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      setCustomFocused(false);
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      e.stopPropagation();
-      setCustomFocused(false);
-      setSelectedIdx((i) => Math.min(i + 1, totalOptions - 1));
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      e.stopPropagation();
-      setCustomFocused(false);
-      setSelectedIdx((i) => Math.max(i - 1, 0));
-    } else if (e.key === 'Tab') {
-      e.preventDefault();
-      e.stopPropagation();
-      setCustomFocused(false);
-      switchQuestion(e.shiftKey ? -1 : 1);
-    }
-  };
-
   if (questions.length === 0) return null;
 
   // Check which questions have answers
@@ -392,6 +216,40 @@ export function AskUserQuestion({
     return answers[i] || customInputs[i] || '';
   };
 
+  const canSubmit = questions.every((_, i) => hasAnswer(i));
+  const displayIdx = Math.min(currentIdx, questions.length - 1);
+  const selectQuestion = (nextIdx: number) => {
+    const question = questions[nextIdx];
+    setCurrentIdx(nextIdx);
+    setCustomFocused(false);
+    if (!question?.options.length) {
+      setSelectedIdx(null);
+      return;
+    }
+    setSelectedIdx(0);
+    if (question.multiSelect) {
+      setSelectedMulti((prev) =>
+        (prev[nextIdx] || []).length > 0 || customInputs[nextIdx]
+          ? prev
+          : { ...prev, [nextIdx]: [question.options[0].label] },
+      );
+      return;
+    }
+    setAnswers((prev) =>
+      prev[nextIdx] || customInputs[nextIdx]
+        ? prev
+        : { ...prev, [nextIdx]: question.options[0].label },
+    );
+  };
+  const handlePrevious = () => {
+    if (currentIdx <= 0) return;
+    selectQuestion(currentIdx - 1);
+  };
+  const handleNext = () => {
+    if (currentIdx >= questions.length - 1) return;
+    selectQuestion(currentIdx + 1);
+  };
+
   return (
     <div
       className={`${styles.question} ${
@@ -405,38 +263,24 @@ export function AskUserQuestion({
           {localizeToolDisplayName('ask_user_question', t)}
         </span>
         <span className={styles.toolDesc}>
-          {t('askUser.title', { count: questions.length })}
+          {t('askUser.progress', {
+            current: displayIdx + 1,
+            total: questions.length,
+          })}
         </span>
       </div>
 
-      {/* Tabs for navigation */}
+      {/* Progress indicator */}
       <div className={styles.tabs}>
-        {questions.map((q, i) => (
-          <button
+        {questions.map((_, i) => (
+          <span
             key={i}
             className={`${styles.tab} ${
               i === currentIdx ? styles.tabActive : ''
             }`}
-            onClick={() => {
-              setCurrentIdx(i);
-              setSelectedIdx(getSelectedIdxForTab(i));
-              setCustomFocused(false);
-            }}
-          >
-            {q.header}
-            {hasAnswer(i) && <span className={styles.tabCheck}> ✓</span>}
-          </button>
+            aria-hidden="true"
+          />
         ))}
-        <button
-          className={`${styles.tab} ${isOnSubmitTab ? styles.tabActive : ''}`}
-          onClick={() => {
-            setCurrentIdx(questions.length);
-            setSelectedIdx(getSelectedIdxForTab(questions.length));
-            setCustomFocused(false);
-          }}
-        >
-          {t('askUser.submit')}
-        </button>
       </div>
 
       {isOnSubmitTab ? (
@@ -454,7 +298,10 @@ export function AskUserQuestion({
             ))}
           </div>
           <div className={styles.text}>{t('askUser.confirmPrompt')}</div>
-          <div className={styles.options}>
+          <div
+            className={styles.options}
+            onMouseLeave={() => setSelectedIdx(null)}
+          >
             <div
               className={`${styles.option} ${
                 selectedIdx === 0 ? styles.optionActive : ''
@@ -465,7 +312,7 @@ export function AskUserQuestion({
               <span className={styles.pointer}>
                 {selectedIdx === 0 ? '›' : ' '}
               </span>
-              <span className={styles.optionNum}>1.</span>
+              <span className={styles.optionNum}>1</span>
               <span className={styles.optionLabel}>
                 {t('askUser.submitAnswers')}
               </span>
@@ -480,7 +327,7 @@ export function AskUserQuestion({
               <span className={styles.pointer}>
                 {selectedIdx === 1 ? '›' : ' '}
               </span>
-              <span className={styles.optionNum}>2.</span>
+              <span className={styles.optionNum}>2</span>
               <span className={styles.optionLabel}>{t('askUser.cancel')}</span>
             </div>
           </div>
@@ -498,9 +345,13 @@ export function AskUserQuestion({
               </span>
             )}
           </p>
+          <p className={styles.description}>{t('askUser.selectAnswer')}</p>
 
           {/* Options list */}
-          <div className={styles.options}>
+          <div
+            className={styles.options}
+            onMouseLeave={() => setSelectedIdx(null)}
+          >
             {current.options.map((opt, i) => {
               const isActive = i === selectedIdx;
               const isSelected = isMulti
@@ -524,12 +375,7 @@ export function AskUserQuestion({
                   onMouseEnter={() => setSelectedIdx(i)}
                 >
                   <span className={styles.pointer}>{isActive ? '›' : ' '}</span>
-                  {isMulti && (
-                    <span className={styles.checkbox}>
-                      {isSelected ? '[✓]' : '[ ]'}
-                    </span>
-                  )}
-                  <span className={styles.optionNum}>{i + 1}.</span>
+                  <span className={styles.optionNum}>{i + 1}</span>
                   <span className={styles.optionContent}>
                     <span className={styles.optionLabel}>{opt.label}</span>
                     {opt.description && (
@@ -560,13 +406,16 @@ export function AskUserQuestion({
                   <span className={styles.pointer}>
                     {isCustomActive ? '›' : ' '}
                   </span>
-                  {isMulti && (
-                    <span className={styles.checkbox}>
-                      {hasCustomValue ? '[✓]' : '[ ]'}
-                    </span>
-                  )}
-                  <span className={styles.optionNum}>
-                    {current.options.length + 1}.
+                  <span className={styles.editIcon} aria-hidden="true">
+                    <svg viewBox="0 0 16 16">
+                      <path
+                        d="M3.2 10.9 4 7.8 10.8 1l3.2 3.2-6.8 6.8-3 .8zM10 1.8l3.2 3.2M3 14h10"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
                   </span>
                   {customFocused ? (
                     <input
@@ -580,7 +429,6 @@ export function AskUserQuestion({
                           [currentIdx]: e.target.value,
                         })
                       }
-                      onKeyDown={handleCustomKeyDown}
                       onBlur={() => setCustomFocused(false)}
                       autoFocus
                     />
@@ -599,6 +447,43 @@ export function AskUserQuestion({
           </div>
         </>
       ) : null}
+      <div className={styles.actions}>
+        <button
+          type="button"
+          className={styles.ignoreButton}
+          onClick={handleCancel}
+        >
+          {t('askUser.ignore')}
+        </button>
+        {questions.length > 1 && (
+          <>
+            <button
+              type="button"
+              className={styles.button}
+              disabled={currentIdx <= 0}
+              onClick={handlePrevious}
+            >
+              {t('common.previous')}
+            </button>
+            <button
+              type="button"
+              className={styles.button}
+              disabled={currentIdx >= questions.length - 1}
+              onClick={handleNext}
+            >
+              {t('common.next')}
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          className={`${styles.button} ${styles.submitButton}`}
+          disabled={!canSubmit}
+          onClick={handleSubmit}
+        >
+          {t('askUser.submit')}
+        </button>
+      </div>
     </div>
   );
 }
