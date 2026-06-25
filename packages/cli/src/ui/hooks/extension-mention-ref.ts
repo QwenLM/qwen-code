@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, Extension } from '@qwen-code/qwen-code-core';
+import {
+  type Config,
+  type Extension,
+  stripTerminalControlSequences,
+} from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import { t } from '../../i18n/index.js';
@@ -84,9 +88,11 @@ export function getExtensionSuggestions(
     })
     .slice(0, MAX_SUGGESTIONS_TO_SHOW)
     .map((ext) => ({
-      label: ext.displayName || ext.name,
+      label: stripTerminalControlSequences(ext.displayName || ext.name),
       value: buildExtensionRef(ext.name),
-      description: ext.config.description,
+      description: ext.config.description
+        ? stripTerminalControlSequences(ext.config.description)
+        : undefined,
       sourceBadge: t('Extension'),
       isDirectory: false,
     }));
@@ -114,9 +120,7 @@ export function buildExtensionContextText(extension: Extension): string {
   // Skills
   if (extension.skills && extension.skills.length > 0) {
     const skillNames = extension.skills.map((s) => s.name).join(', ');
-    capabilities.push(
-      `- Skills: ${skillNames} (invoke via /${extension.name}:<skill-name>)`,
-    );
+    capabilities.push(`- Skills: ${skillNames} (invoke via /<skill-name>)`);
   }
 
   // MCP Servers
