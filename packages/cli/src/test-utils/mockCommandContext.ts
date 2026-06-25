@@ -92,6 +92,12 @@ export const createMockCommandContext = (
             byName: {},
           },
           files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+          skills: {
+            totalCalls: 0,
+            totalSuccess: 0,
+            totalFail: 0,
+            byName: {},
+          },
         },
         promptCount: 0,
       } as SessionStatsState,

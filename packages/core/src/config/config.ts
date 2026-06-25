@@ -939,6 +939,8 @@ export interface ConfigParameters {
   enableManagedAutoDream?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
+  /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
+  autoSkillConfirm?: boolean;
   /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
@@ -1349,6 +1351,7 @@ export class Config {
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
   private readonly enableAutoSkill: boolean;
+  private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -1609,6 +1612,7 @@ export class Config {
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
+    this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -4267,6 +4271,10 @@ export class Config {
 
   getAutoSkillEnabled(): boolean {
     return this.enableAutoSkill && !this.getBareMode();
+  }
+
+  getAutoSkillConfirmEnabled(): boolean {
+    return this.autoSkillConfirm && !this.getBareMode();
   }
 
   getPreventSystemSleepEnabled(): boolean {

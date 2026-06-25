@@ -41,6 +41,7 @@ import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
 import { ToolStatsDisplay } from './ToolStatsDisplay.js';
+import { SkillStatsDisplay } from './SkillStatsDisplay.js';
 import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
 import { Help } from './Help.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -335,6 +336,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'tool_stats' && (
         <ToolStatsDisplay width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'skill_stats' && (
+        <SkillStatsDisplay width={boxWidth} />
       )}
       {itemForDisplay.type === 'quit' && (
         <SessionSummaryDisplay
