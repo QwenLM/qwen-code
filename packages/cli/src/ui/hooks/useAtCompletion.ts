@@ -10,6 +10,7 @@ import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
+import { getExtensionSuggestions } from './extension-mention-ref.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -379,6 +380,15 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         return;
       }
 
+      // Extension suggestions are computed synchronously from in-memory data.
+      // Unlike MCP servers, they show even on bare `@` (empty pattern) since
+      // the extension count is typically small and immediate discoverability
+      // matters.
+      const extensionSuggestions = getExtensionSuggestions(
+        config,
+        state.pattern,
+      );
+
       // `@server:uri` MCP resource completion short-circuits filesystem
       // search. Synchronous (in-memory registry), so no abort/slow-timer
       // machinery is needed.
@@ -390,7 +400,10 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         if (slowSearchTimer.current) {
           clearTimeout(slowSearchTimer.current);
         }
-        dispatch({ type: 'SEARCH_SUCCESS', payload: resourceSuggestions });
+        dispatch({
+          type: 'SEARCH_SUCCESS',
+          payload: [...extensionSuggestions, ...resourceSuggestions],
+        });
         return;
       }
 
@@ -405,6 +418,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         state.pattern,
       );
       const mcpSuggestions = [
+        ...extensionSuggestions,
         ...serverSuggestions,
         ...globalResourceSuggestions,
       ];

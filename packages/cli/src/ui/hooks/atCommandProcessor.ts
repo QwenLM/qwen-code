@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, Extension } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isNodeError,
@@ -27,6 +27,11 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import {
+  parseExtensionRef,
+  matchExtensionByRef,
+  buildExtensionContextText,
+} from './extension-mention-ref.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -205,6 +210,13 @@ export async function resolveAtCommandQuery({
     uri: string;
   }> = [];
 
+  // Extension references (`@ext:<name>`) collected during the loop.
+  const activeExtensions = config.getActiveExtensions?.() ?? [];
+  const extensionMentions: Array<{
+    originalAtPath: string;
+    extension: Extension;
+  }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -216,6 +228,19 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+
+    // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
+    // resolution. Only matches when the path starts with `ext:` and the name
+    // corresponds to an active extension.
+    const extRef = parseExtensionRef(pathName);
+    if (extRef) {
+      const extension = matchExtensionByRef(extRef.name, activeExtensions);
+      if (extension) {
+        extensionMentions.push({ originalAtPath, extension });
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+    }
 
     // MCP resource reference (`@server:uri`): detected BEFORE filesystem
     // resolution so a resource URI containing ':' / '//' isn't mistaken for
@@ -444,8 +469,12 @@ export async function resolveAtCommandQuery({
 
   // Fallback for lone "@" or completely invalid @-commands resulting in empty
   // initialQueryText — only when there is nothing to read at all (no valid
-  // file paths AND no resource references).
-  if (pathSpecsToRead.length === 0 && mcpResourceRefs.length === 0) {
+  // file paths, resource references, or extension mentions).
+  if (
+    pathSpecsToRead.length === 0 &&
+    mcpResourceRefs.length === 0 &&
+    extensionMentions.length === 0
+  ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
@@ -530,6 +559,50 @@ export async function resolveAtCommandQuery({
     }
   }
 
+  // Build extension context parts and display cards for @-mentioned extensions.
+  const extensionParts: Part[] = [];
+  const extensionDisplays: IndividualToolCallDisplay[] = [];
+  const extensionLabels: string[] = [];
+  for (let i = 0; i < extensionMentions.length; i++) {
+    const { extension } = extensionMentions[i];
+    const displayName = extension.displayName || extension.name;
+    const callId = `client-extension-${userMessageTimestamp}-${i}`;
+
+    // Build context text describing the extension's capabilities.
+    let contextText = buildExtensionContextText(extension);
+
+    // Read extension context files (e.g., QWEN.md bundled with the extension)
+    // and append their content to the injection block.
+    if (extension.contextFiles && extension.contextFiles.length > 0) {
+      for (const contextFilePath of extension.contextFiles) {
+        try {
+          const content = await fs.readFile(contextFilePath, 'utf-8');
+          if (content.trim()) {
+            // Cap at 50KB per context file to avoid blowing up the context
+            const cappedContent =
+              content.length > 50_000
+                ? content.slice(0, 50_000) + '\n... (truncated)'
+                : content;
+            contextText += `\n\n${cappedContent}`;
+          }
+        } catch {
+          // Skip unreadable context files silently
+        }
+      }
+    }
+
+    extensionParts.push({ text: contextText });
+    extensionLabels.push(`ext:${extension.name}`);
+    extensionDisplays.push({
+      callId,
+      name: 'Activate Extension',
+      description: `Activated extension ${displayName}`,
+      status: ToolCallStatus.Success,
+      resultDisplay: undefined,
+      confirmationDetails: undefined,
+    });
+  }
+
   // File and resource content are grouped by type, NOT interleaved by their
   // position in the user's query. The model correlates each @-reference with
   // its content block via the "--- Content from ... ---" delimiter labels (and
@@ -537,15 +610,20 @@ export async function resolveAtCommandQuery({
   // positional alignment, so grouping is safe.
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
+    ...extensionParts,
     ...fileParts,
     ...resourceParts,
   ];
-  const allLabels = [...contentLabelsForDisplay, ...resourceLabels];
+  const allLabels = [
+    ...extensionLabels,
+    ...contentLabelsForDisplay,
+    ...resourceLabels,
+  ];
 
   return {
     processedQuery: processedQueryParts,
     shouldProceed: true,
-    toolDisplays: [...fileDisplays, ...resourceDisplays],
+    toolDisplays: [...extensionDisplays, ...fileDisplays, ...resourceDisplays],
     filesRead: allLabels,
     recording: {
       filesRead: allLabels,
