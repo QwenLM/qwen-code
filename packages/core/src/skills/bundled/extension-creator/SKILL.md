@@ -196,7 +196,9 @@ Use `--ignore-scripts` so dependency install scripts cannot run before review.
 Before `npm run build`, audit `prebuild`, `build`, and `postbuild`; if any are
 present, summarize them and require explicit user approval before running the
 build. If the build requires install scripts, stop and ask the user whether to
-run the specific script after explaining what it does. If any step exits
+run `npm install` without `--ignore-scripts`, which runs all dependency
+lifecycle scripts, or to run only the specific project-level script with
+`npm run <script>`. Explain what each option would execute. If any step exits
 non-zero, stop and report the error to the user. Do not run the Before Handoff
 checklist or link an extension that failed to build.
 
