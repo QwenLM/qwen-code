@@ -139,6 +139,17 @@ qwen extensions link -- "$extension_path"
 After linking, tell the user to restart Qwen Code if the new extension is not
 visible in the current session.
 
+## After Linking
+
+- Verify the extension appears in `qwen extensions list`.
+- If the extension is missing, inspect the link command output, confirm
+  `qwen-extension.json` is at the linked root, confirm `name` is valid and not a
+  duplicate, and re-check referenced files from the Before Handoff checklist.
+- When iterating on a linked extension, make the file changes, run the relevant
+  build or validation again, then run `qwen extensions uninstall <name>` followed
+  by `qwen extensions link -- "$extension_path"` if Qwen Code does not pick up
+  the updated linked state.
+
 ## Before Handoff
 
 - Confirm `qwen-extension.json` exists at the extension root.
@@ -147,9 +158,10 @@ visible in the current session.
 - Confirm referenced folders or files exist when `contextFileName`, `commands`,
   `skills`, `agents`, `mcpServers`, `hooks`, `channels`, or `lspServers` are
   configured.
-- For manifest fields that reference local paths, resolve them from the
-  extension root with `realpath` and confirm the resolved path remains inside
-  the extension root. Reject absolute paths, `..` traversal, and symlink escapes
-  unless the user explicitly approves the external target.
+- For manifest fields that reference local paths, resolve both the extension
+  root and the candidate path with `realpath`, then confirm the resolved
+  candidate remains inside the resolved root. Reject absolute paths, `..`
+  traversal, and symlink escapes unless the user explicitly approves the
+  external target.
 - Keep the scaffold focused on the requested capability; do not add folders or
   build tooling beyond what the requested capabilities require.
