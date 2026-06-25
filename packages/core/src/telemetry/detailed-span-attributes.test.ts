@@ -276,17 +276,19 @@ describe('detailed-span-attributes', () => {
 
     const toolInputSpan = createMockSpan();
     addToolInputAttributes(config, toolInputSpan, 'Bash', 'abcdef');
-    expect(toolInputSpan.attrs['tool_input']).toBe('[TOOL INPUT: Bash]\nabc');
+    expect(toolInputSpan.attrs['tool_input']).toBe('[TO');
     expect(toolInputSpan.attrs['tool_input_truncated']).toBe(true);
-    expect(toolInputSpan.attrs['tool_input_original_length']).toBe(6);
+    expect(toolInputSpan.attrs['tool_input_original_length']).toBe(
+      '[TOOL INPUT: Bash]\nabcdef'.length,
+    );
 
     const toolResultSpan = createMockSpan();
     addToolResultAttributes(config, toolResultSpan, 'Read', 'abcdef');
-    expect(toolResultSpan.attrs['tool_result']).toBe(
-      '[TOOL RESULT: Read]\nabc',
-    );
+    expect(toolResultSpan.attrs['tool_result']).toBe('[TO');
     expect(toolResultSpan.attrs['tool_result_truncated']).toBe(true);
-    expect(toolResultSpan.attrs['tool_result_original_length']).toBe(6);
+    expect(toolResultSpan.attrs['tool_result_original_length']).toBe(
+      '[TOOL RESULT: Read]\nabcdef'.length,
+    );
   });
 
   describe('addSystemPromptAttributes', () => {
@@ -465,6 +467,17 @@ describe('detailed-span-attributes', () => {
       expect(span.attrs['response.model_output_original_length']).toBe(6);
     });
 
+    it('does not append a truncation suffix to prebounded output', () => {
+      const config = createMockConfig();
+      const span = createMockSpan();
+      mockState.maxLength = 100;
+      addModelOutputAttributes(config, span, 'x'.repeat(100), 200);
+
+      expect(span.attrs['response.model_output']).toBe('x'.repeat(100));
+      expect(span.attrs['response.model_output_truncated']).toBe(true);
+      expect(span.attrs['response.model_output_original_length']).toBe(200);
+    });
+
     it('sets truncation attributes for output over the default limit', () => {
       const config = createMockConfig();
       const span = createMockSpan();
@@ -507,7 +520,23 @@ describe('detailed-span-attributes', () => {
 
       expect(span.attrs['tool_input_truncated']).toBe(true);
       expect(span.attrs['tool_input_original_length']).toBe(
-        DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH + 1,
+        '[TOOL INPUT: Bash]\n'.length +
+          DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH +
+          1,
+      );
+    });
+
+    it('keeps tool_input within the configured limit when tool name is long', () => {
+      const config = createMockConfig();
+      const span = createMockSpan();
+      mockState.maxLength = 50;
+      const toolName = 'n'.repeat(100);
+      addToolInputAttributes(config, span, toolName, '{"command":"ls"}');
+
+      expect(String(span.attrs['tool_input'])).toHaveLength(50);
+      expect(span.attrs['tool_input_truncated']).toBe(true);
+      expect(span.attrs['tool_input_original_length']).toBe(
+        `[TOOL INPUT: ${toolName}]\n{"command":"ls"}`.length,
       );
     });
 
@@ -539,7 +568,23 @@ describe('detailed-span-attributes', () => {
       addToolResultAttributes(config, span, 'Read', largeResult);
 
       expect(span.attrs['tool_result_truncated']).toBe(true);
-      expect(span.attrs['tool_result_original_length']).toBe(1024 * 1024 + 1);
+      expect(span.attrs['tool_result_original_length']).toBe(
+        '[TOOL RESULT: Read]\n'.length + 1024 * 1024 + 1,
+      );
+    });
+
+    it('keeps tool_result within the configured limit when tool name is long', () => {
+      const config = createMockConfig();
+      const span = createMockSpan();
+      mockState.maxLength = 50;
+      const toolName = 'n'.repeat(100);
+      addToolResultAttributes(config, span, toolName, 'file contents here');
+
+      expect(String(span.attrs['tool_result'])).toHaveLength(50);
+      expect(span.attrs['tool_result_truncated']).toBe(true);
+      expect(span.attrs['tool_result_original_length']).toBe(
+        `[TOOL RESULT: ${toolName}]\nfile contents here`.length,
+      );
     });
   });
 

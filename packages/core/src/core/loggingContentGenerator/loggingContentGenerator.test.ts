@@ -969,6 +969,43 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.response_text).toHaveLength(MAX_RESPONSE_TEXT_LENGTH);
   });
 
+  it('accumulates sensitive model output length across multiple parts', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-multipart', 'test-model', [
+            { text: 'a'.repeat(100) },
+            { text: 'b'.repeat(100) },
+          ]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({
+        includeSensitiveSpanAttributes: true,
+        sensitiveSpanAttributeMaxLength: 150,
+      }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-multipart');
+
+    const sensitiveCall = vi.mocked(addModelOutputAttributes).mock.calls.at(-1);
+    expect(sensitiveCall?.[2]).toBe('a'.repeat(100) + 'b'.repeat(50));
+    expect(sensitiveCall?.[3]).toBe(200);
+  });
+
   it('does not fail generateContent when sensitive span output attributes fail', async () => {
     vi.mocked(addModelOutputAttributes).mockImplementationOnce(() => {
       throw new TypeError('bad span attribute input');

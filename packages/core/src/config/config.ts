@@ -106,6 +106,7 @@ import {
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_TELEMETRY_TARGET,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
   isTelemetrySdkInitialized,
   initializeTelemetry,
   shutdownTelemetry,
@@ -1131,11 +1132,7 @@ function resolveSensitiveSpanAttributeMaxLength(
     return DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
   }
 
-  if (
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
-  ) {
+  if (!isValidSensitiveSpanAttributeMaxLength(value)) {
     throw new FatalConfigError(
       `Invalid telemetry.sensitiveSpanAttributeMaxLength: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
         value,

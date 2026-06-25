@@ -50,6 +50,9 @@ export function truncateContent(
   if (originalLength <= maxSize && content.length <= maxSize) {
     return { content, truncated: false };
   }
+  if (originalLength > content.length && content.length <= maxSize) {
+    return { content, truncated: true };
+  }
   const suffix = `\n\n[TRUNCATED - Content exceeds configured limit of ${maxSize} characters]`;
   if (suffix.length >= maxSize) {
     return {
@@ -65,6 +68,19 @@ export function truncateContent(
 
 function getMaxContentSize(config: Config): number {
   return config.getTelemetrySensitiveSpanAttributeMaxLength();
+}
+
+function truncatePrefixedContent(
+  prefix: string,
+  content: string,
+  maxSize: number,
+): { content: string; truncated: boolean; originalLength: number } {
+  const originalContent = `${prefix}${content}`;
+  const result = truncateContent(originalContent, maxSize);
+  return {
+    ...result,
+    originalLength: originalContent.length,
+  };
 }
 
 function shortHash(content: string): string {
@@ -224,15 +240,16 @@ export function addToolInputAttributes(
 ): void {
   if (!areSensitiveSpanAttributesEnabled(config)) return;
 
-  const { content, truncated } = truncateContent(
+  const { content, truncated, originalLength } = truncatePrefixedContent(
+    `[TOOL INPUT: ${toolName}]\n`,
     toolInput,
     getMaxContentSize(config),
   );
   span.setAttributes({
-    tool_input: `[TOOL INPUT: ${toolName}]\n${content}`,
+    tool_input: content,
     ...(truncated && {
       tool_input_truncated: true,
-      tool_input_original_length: toolInput.length,
+      tool_input_original_length: originalLength,
     }),
   });
 }
@@ -247,15 +264,16 @@ export function addToolResultAttributes(
 ): void {
   if (!areSensitiveSpanAttributesEnabled(config)) return;
 
-  const { content, truncated } = truncateContent(
+  const { content, truncated, originalLength } = truncatePrefixedContent(
+    `[TOOL RESULT: ${toolName}]\n`,
     toolResult,
     getMaxContentSize(config),
   );
   span.setAttributes({
-    tool_result: `[TOOL RESULT: ${toolName}]\n${content}`,
+    tool_result: content,
     ...(truncated && {
       tool_result_truncated: true,
-      tool_result_original_length: toolResult.length,
+      tool_result_original_length: originalLength,
     }),
   });
 }

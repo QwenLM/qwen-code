@@ -13,6 +13,7 @@ import {
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   TelemetryTarget,
+  isValidSensitiveSpanAttributeMaxLength,
 } from './index.js';
 import type { ResourceAttributeWarnings } from './resource-attributes.js';
 import {
@@ -61,9 +62,7 @@ function parseSensitiveSpanAttributeMaxLengthEnvValue(
   const parsed = Number(trimmed);
   if (
     !/^\d+$/.test(trimmed) ||
-    !Number.isSafeInteger(parsed) ||
-    parsed < 1 ||
-    parsed > SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+    !isValidSensitiveSpanAttributeMaxLength(parsed)
   ) {
     throw new FatalConfigError(
       `Invalid ${envName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got '${value}'`,
@@ -80,9 +79,7 @@ function parseSensitiveSpanAttributeMaxLengthSetting(
   if (value === undefined) return undefined;
   if (
     typeof value !== 'number' ||
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+    !isValidSensitiveSpanAttributeMaxLength(value)
   ) {
     throw new FatalConfigError(
       `Invalid ${settingName}: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(

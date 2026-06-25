@@ -96,13 +96,14 @@ two things happen:
    JavaScript string units. The default is 1 MiB (`1048576`), raised from the
    previous 60 KiB default; set `61440` to preserve the old cap. The limit
    must be between `1` and `104857600` (100 MiB). It applies to the content
-   payload before Qwen Code adds labels such as `[USER PROMPT]` or the
-   truncation marker, and it is measured as JavaScript string length rather
-   than UTF-8 bytes. Non-ASCII content can therefore occupy more bytes after
-   OTLP export. For most payload types, truncation adds both `*_truncated`
-   and `*_original_length`. System prompts also set `system_prompt_truncated`
-   when truncated, but use the always-present `system_prompt_length` for the
-   original length.
+   payload before Qwen Code adds fixed labels such as `[USER PROMPT]` or the
+   truncation marker; `tool_input` and `tool_result` include the tool label in
+   the cap because tool names can come from external MCP servers. The limit is
+   measured as JavaScript string length rather than UTF-8 bytes. Non-ASCII
+   content can therefore occupy more bytes after OTLP export. For most payload
+   types, truncation adds both `*_truncated` and `*_original_length`. System
+   prompts also set `system_prompt_truncated` when truncated, but use the
+   always-present `system_prompt_length` for the original length.
 
 2. **Log-to-span bridge spans** (used when HTTP traces are exported without a
    logs endpoint) keep their existing `prompt`, `function_args`, and
