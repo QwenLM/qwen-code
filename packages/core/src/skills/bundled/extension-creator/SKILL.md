@@ -1,6 +1,6 @@
 ---
 name: extension-creator
-description: Create, scaffold, customize, validate, and locally test Qwen Code extensions. Use when the user wants a new Qwen Code extension, needs help choosing an extension template, wants to add QWEN.md context, commands, skills, agents, MCP servers, settings, hooks, channels, or LSP servers, or asks how to link and test an extension locally.
+description: Create, scaffold, customize, validate, and locally test Qwen Code extensions. Use when the user wants a new Qwen Code extension, needs help choosing an extension template, wants to add QWEN.md context, commands, skills, agents, MCP servers, settings, hooks, channels, or LSP servers, or asks how to link and test an extension locally. Invoke with `/extension-creator` followed by an extension path and optional template name.
 argument-hint: '<extension-path> [template|capabilities]'
 allowedTools:
   - run_shell_command
@@ -20,7 +20,10 @@ scaffold command and bundled templates.
 ## Workflow
 
 1. Identify the target extension path and requested capabilities.
-2. Scaffold with `qwen extensions new <path> [template]`.
+2. If the path does not exist, scaffold with
+   `qwen extensions new <path> [template]`. If the extension already exists,
+   skip scaffolding and read the existing `qwen-extension.json` before
+   customizing it.
 3. Customize the generated files for the user's extension.
 4. Check the extension shape before handing it back.
 5. Link the extension locally with `qwen extensions link <path>`.
@@ -78,8 +81,10 @@ For templates with TypeScript or MCP server code:
 
 Only run `npm install` and `npm run build` inside directories scaffolded by
 `qwen extensions new` in the current session. If the user provides a
-pre-existing path, review the `package.json` scripts before running any npm
-command, especially `install`, `preinstall`, `postinstall`, and `build`.
+pre-existing path, review the `package.json` scripts and `qwen-extension.json`
+before running any npm command or linking the extension. Pay special attention
+to `install`, `preinstall`, `postinstall`, `build`, `hooks`, `mcpServers`,
+`channels`, and `lspServers`.
 
 ```bash
 cd <extension-path>
