@@ -284,6 +284,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'rate_limit',
   'workspace_reload',
   'client_mcp_over_ws',
+  'cdp_tunnel_over_ws',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -1650,6 +1651,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               clientMcpOverWsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'cdp_tunnel_over_ws') {
+          expect(predicate({ cdpTunnelOverWsEnabled: true })).toBe(true);
+          expect(predicate({ cdpTunnelOverWsEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              cdpTunnelOverWsEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
