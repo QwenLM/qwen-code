@@ -86,7 +86,7 @@ export interface GenerateTextOptions {
   maxAttempts?: number;
   /**
    * Stream the response instead of awaiting the whole non-streaming body.
-   * Defaults to falsy (unchanged non-streaming behavior). Opt in to keep the
+   * Defaults to `false` (unchanged non-streaming behavior). Opt in to keep the
    * HTTP connection alive against BFF gateways whose `proxy_read_timeout` would
    * otherwise kill a slow inference before the first byte arrives. The streamed
    * deltas are collected into the same `{ text, usage }` result.

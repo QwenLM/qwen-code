@@ -100,12 +100,10 @@ export interface SideQueryTextOptions {
    */
   skipOutputLanguagePreference?: boolean;
   /**
-   * Stream the response instead of awaiting the whole non-streaming body.
-   * Defaults to false. Opt in to keep the HTTP connection alive against
-   * gateways whose `proxy_read_timeout` would kill a slow inference before the
-   * first byte arrives (e.g. chat compression behind a BFF). The streamed
-   * deltas are collected into the same `{ text, usage }` result, so only
-   * callers at real timeout risk need to set this.
+   * Opt in to stream the response so a slow inference keeps its HTTP connection
+   * alive against gateways that would time out the non-streaming request (e.g.
+   * chat compression behind a BFF); see {@link GenerateTextOptions.stream} for
+   * the full rationale. Defaults to `false`.
    */
   stream?: boolean;
   validate?: (text: string) => string | null;
