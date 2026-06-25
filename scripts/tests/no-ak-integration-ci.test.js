@@ -47,7 +47,8 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const platformJob = getWorkflowJob(workflow, 'test_platforms');
+    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
     expect(workflow).not.toContain('  integration_no_ak:');
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
@@ -59,7 +60,8 @@ describe('no-AK integration CI wiring', () => {
     expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
     expect(ubuntuJob).not.toContain('secrets.OPENAI_MODEL');
 
-    expect(platformJob).not.toContain(NO_AK_SCRIPT);
+    expect(macosJob).not.toContain(NO_AK_SCRIPT);
+    expect(windowsJob).not.toContain(NO_AK_SCRIPT);
   });
 
   it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
@@ -68,12 +70,13 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const platformJob = getWorkflowJob(workflow, 'test_platforms');
+    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
-    // On PRs both gates check out refs/pull/N/head, which is published the
+    // On PRs every gate checks out refs/pull/N/head, which is published the
     // instant the branch is pushed, instead of the merge ref that GitHub
     // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, platformJob]) {
+    for (const job of [ubuntuJob, macosJob, windowsJob]) {
       expect(job).toContain(
         "format('refs/pull/{0}/head', github.event.pull_request.number)",
       );

@@ -4949,6 +4949,12 @@ export class Config {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);
     });
+    await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
+      const { ReadMcpResourceTool } = await import(
+        '../tools/read-mcp-resource.js'
+      );
+      return new ReadMcpResourceTool(this);
+    });
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
