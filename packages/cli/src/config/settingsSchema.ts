@@ -806,6 +806,16 @@ const SETTINGS_SCHEMA = {
               'Whether to collapse history by default when resuming a session.',
             showInDialog: false,
           },
+          collapsePreviewCount: {
+            type: 'number',
+            label: 'Collapse Preview Count',
+            category: 'UI',
+            requiresRestart: false,
+            default: 0,
+            description:
+              'Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.',
+            showInDialog: false,
+          },
         },
       },
       showLineNumbers: {

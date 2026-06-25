@@ -6,11 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   stripSuppressOnRestore,
   expandCollapsedHistory,
 } from './resumeHistoryUtils.js';
-import { ToolCallStatus } from '../types.js';
+import { MessageType, ToolCallStatus } from '../types.js';
 import type {
   AnyDeclarativeTool,
   Config,
@@ -463,6 +464,88 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
     expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+});
+
+describe('applyCollapsePolicyAndSummary', () => {
+  const makeItems = (): HistoryItem[] =>
+    [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'first response' },
+      { id: 3, type: MessageType.USER, text: 'second' },
+      { id: 4, type: MessageType.GEMINI, text: 'second response' },
+      { id: 5, type: MessageType.USER, text: 'third' },
+      { id: 6, type: MessageType.GEMINI, text: 'third response' },
+    ] as HistoryItem[];
+
+  const expectSuppressed = (item: HistoryItem) => {
+    expect(item.display).toEqual(
+      expect.objectContaining({ suppressOnRestore: true }),
+    );
+  };
+
+  const expectVisible = (item: HistoryItem) => {
+    expect(item.display?.suppressOnRestore).toBeUndefined();
+  };
+
+  it('suppresses all items and shows the full summary count by default', () => {
+    const result = applyCollapsePolicyAndSummary(makeItems(), true);
+
+    expect(result).toHaveLength(7);
+    result.slice(0, 6).forEach(expectSuppressed);
+    expect(result[6]).toEqual(
+      expect.objectContaining({
+        id: 7,
+        type: MessageType.INFO,
+        text: expect.stringContaining('6 messages hidden'),
+        display: { kind: 'collapse-summary' },
+      }),
+    );
+  });
+
+  it('keeps the most recent N user turns visible and summarizes only hidden items', () => {
+    const result = applyCollapsePolicyAndSummary(makeItems(), true, 2);
+
+    expect(result).toHaveLength(7);
+    result.slice(0, 2).forEach(expectSuppressed);
+    result.slice(2, 6).forEach(expectVisible);
+    expect(result[6]).toEqual(
+      expect.objectContaining({
+        id: 7,
+        type: MessageType.INFO,
+        text: expect.stringContaining('2 messages hidden'),
+        display: { kind: 'collapse-summary' },
+      }),
+    );
+  });
+
+  it('shows all items without a summary when preview count covers all user turns', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, true, 3);
+
+    expect(result).toEqual(rawItems);
+    expect(
+      result.some((item) => item.display?.kind === 'collapse-summary'),
+    ).toBe(false);
+    result.forEach(expectVisible);
+  });
+
+  it('shows all items without a summary when preview count is -1', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, true, -1);
+
+    expect(result).toBe(rawItems);
+  });
+
+  it('returns raw items unchanged when collapseOnResume is false', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, false, 1);
+
+    expect(result).toBe(rawItems);
+  });
+
+  it('returns empty history without a summary', () => {
+    expect(applyCollapsePolicyAndSummary([], true)).toEqual([]);
   });
 });
 
