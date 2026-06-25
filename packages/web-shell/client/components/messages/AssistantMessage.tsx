@@ -53,6 +53,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               content={content}
               source="assistant"
               deferMermaid={isStreaming}
+              enhanceTables={!isStreaming}
             />
           </div>
         </div>
