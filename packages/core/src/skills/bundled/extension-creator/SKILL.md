@@ -1,7 +1,15 @@
 ---
 name: extension-creator
-description: Create, scaffold, customize, validate, and locally test Qwen Code extensions. Use when the user wants a new Qwen Code extension, needs help choosing an extension template, wants to add QWEN.md context, commands, skills, agents, or MCP servers to an extension, or asks how to link and test an extension locally.
+description: Create, scaffold, customize, validate, and locally test Qwen Code extensions. Use when the user wants a new Qwen Code extension, needs help choosing an extension template, wants to add QWEN.md context, commands, skills, agents, MCP servers, settings, hooks, channels, or LSP servers, or asks how to link and test an extension locally.
 argument-hint: '<extension-path> [template|capabilities]'
+allowedTools:
+  - run_shell_command
+  - write_file
+  - edit
+  - read_file
+  - glob
+  - grep_search
+  - ask_user_question
 ---
 
 # Extension Creator
@@ -35,8 +43,8 @@ folders by hand.
 
 ## Extension Shape
 
-Keep `qwen-extension.json` at the extension root. Use Qwen Code extension fields
-only:
+Keep `qwen-extension.json` at the extension root. Common Qwen Code extension
+fields include:
 
 - `name`
 - `version`
@@ -47,6 +55,10 @@ only:
 - `skills`
 - `agents`
 - `mcpServers`
+- `settings`
+- `hooks`
+- `channels`
+- `lspServers`
 
 Use these companion locations when needed:
 
@@ -55,10 +67,18 @@ Use these companion locations when needed:
 - `skills/` for skill folders containing `SKILL.md`.
 - `agents/` for subagent markdown files.
 - `mcpServers` in `qwen-extension.json` for MCP server startup config.
+- `settings` in `qwen-extension.json` for user-provided configuration.
+- `hooks` in `qwen-extension.json` for lifecycle hooks.
+- `channels` in `qwen-extension.json` for custom channel adapters.
+- `lspServers` in `qwen-extension.json` for LSP server configuration.
 
 ## Local Test Flow
 
 For templates with TypeScript or MCP server code:
+
+Only run `npm install` inside directories scaffolded by `qwen extensions new`
+in the current session. If the user provides a pre-existing path, review the
+`package.json` scripts before installing dependencies.
 
 ```bash
 cd <extension-path>
