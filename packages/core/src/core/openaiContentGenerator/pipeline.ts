@@ -22,6 +22,7 @@ import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -75,12 +76,18 @@ function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
   const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
   if (raw !== undefined && raw.trim() !== '') {
     const parsed = Number(raw);
-    if (Number.isInteger(parsed) && parsed >= 0) {
+    // Reject values above the JS timer ceiling: setTimeout silently compresses
+    // them to 1ms, which would make the watchdog fire almost immediately.
+    if (
+      Number.isInteger(parsed) &&
+      parsed >= 0 &&
+      parsed <= MAX_STREAM_IDLE_TIMEOUT_MS
+    ) {
       return parsed;
     }
     createDebugLogger('openai-pipeline').warn(
       `Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
-        `(expected a non-negative integer of milliseconds); ` +
+        `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
         `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,
     );
   }
@@ -159,10 +166,16 @@ export type { PipelineConfig } from './types.js';
 export class ContentGenerationPipeline {
   client: OpenAI;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  // Resolved once (config field > env > default) so the env read + any
+  // invalid-value warning happen per pipeline, not per streaming request.
+  private readonly streamIdleTimeoutMs: number;
 
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      this.contentGeneratorConfig,
+    );
   }
 
   async execute(
@@ -234,7 +247,7 @@ export class ContentGenerationPipeline {
         // response, so a stream that returns 200 then goes silent is otherwise
         // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
         // chunks. `<= 0` disables it.
-        const idleMs = resolveStreamIdleTimeoutMs(this.contentGeneratorConfig);
+        const idleMs = this.streamIdleTimeoutMs;
         const guarded =
           idleMs > 0
             ? withStreamInactivityTimeout(

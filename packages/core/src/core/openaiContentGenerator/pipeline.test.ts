@@ -3496,5 +3496,32 @@ describe('ContentGenerationPipeline', () => {
       gated.end(); // unblock so the test doesn't leak a pending stream
       await consume;
     });
+
+    it('ignores an oversized QWEN_STREAM_IDLE_TIMEOUT_MS (beyond the timer ceiling)', async () => {
+      // Above the JS timer ceiling, setTimeout compresses to 1ms — which would
+      // make the watchdog trip almost immediately. Such a value must be
+      // rejected (fall back to the default), not used verbatim.
+      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '9999999999');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; oversized env → default (120000ms)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Must NOT trip near-immediately (would mean the oversized value was used).
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(settled).toBe(false);
+      gated.end(); // unblock so the test doesn't leak a pending stream
+      await consume;
+    });
   });
 });
