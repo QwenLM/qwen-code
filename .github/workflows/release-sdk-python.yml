@@ -478,7 +478,7 @@ jobs:
           # No --delete-branch: main has a merge queue and gh rejects the flag
           # when one is enabled (the queue owns the merge; head-branch deletion
           # follows the repo's "Automatically delete head branches" setting).
-          gh pr merge "${PR_URL}" --merge --auto
+          gh pr merge "${PR_URL}" --squash --auto
 
       - name: 'Create issue on failure'
         if: |-
