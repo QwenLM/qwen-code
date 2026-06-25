@@ -47,8 +47,8 @@ scaffold command and bundled templates.
    Do not proceed to the next step until the user confirms how to continue.
 7. Customize the generated files for the user's extension.
 8. Run the Local Test Flow trust review below. For the `mcp-server` and
-   `starter` templates, run `npm install && npm run build` in the extension
-   directory after the trust review is complete.
+   `starter` templates, use that flow's `npm install --ignore-scripts` and
+   build sequence in the extension directory after the trust review is complete.
 9. Run the Before Handoff checklist below. If any check fails, fix the issue
    and re-check before proceeding.
 10. Before linking, summarize default context files, `settings`, `hooks`,
