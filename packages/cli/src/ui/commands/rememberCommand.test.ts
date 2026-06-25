@@ -43,6 +43,7 @@ describe('rememberCommand', () => {
       type: 'submit_prompt',
       content: expect.stringContaining('user prefers dark mode'),
     });
+    expect((result as { content: string }).content).toContain('memory system');
   });
 
   it('falls back to QWEN.md in bare mode', () => {
@@ -59,6 +60,7 @@ describe('rememberCommand', () => {
       type: 'submit_prompt',
       content: expect.stringContaining('some fact'),
     });
+    expect((result as { content: string }).content).toContain('QWEN.md');
   });
 
   it('declares acp in supportedModes', () => {
