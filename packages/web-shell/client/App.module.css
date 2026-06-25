@@ -303,6 +303,15 @@
   color: var(--text-primary);
 }
 
+.queuedPromptAction:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.queuedPromptAction:disabled:hover {
+  color: var(--text-secondary);
+}
+
 .queuedHint {
   font-style: italic;
 }

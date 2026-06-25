@@ -359,6 +359,8 @@ const EN: Messages = {
   'queue.delete': 'Delete',
   'queue.edit': 'Edit',
   'queue.insert': 'Insert',
+  'queue.insertCommandDisabled':
+    "Commands can't be inserted into the running turn; they run after it finishes.",
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
@@ -599,8 +601,6 @@ const EN: Messages = {
   'extensions.install.usage': 'Usage: /extensions manage|install <source>',
   'extensions.install.waitForSession':
     'Wait for the session to connect before installing an extension.',
-  'extensions.install.waitForTurn':
-    'Wait for the current turn to finish before installing an extension.',
   'local.tools': 'List available tools. Usage: /tools [desc]',
   'loadWarning.commands':
     'Failed to load command list; slash commands may be incomplete.',
@@ -1457,6 +1457,7 @@ const ZH: Messages = {
   'queue.delete': '删除',
   'queue.edit': '编辑',
   'queue.insert': '插入',
+  'queue.insertCommandDisabled': '命令无法插入当前回合，会在回合结束后执行。',
   'queue.insertFailed': '插入排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
@@ -1684,7 +1685,6 @@ const ZH: Messages = {
   'extensions.install.unknownOption': (v) => `未知选项 ${v?.option ?? ''}`,
   'extensions.install.usage': '用法: /extensions manage|install <source>',
   'extensions.install.waitForSession': '等待会话连接后再安装扩展。',
-  'extensions.install.waitForTurn': '等待当前回合结束后再安装扩展。',
   'local.tools': '列出可用工具。用法: /tools [desc]',
   'loadWarning.commands': '命令列表加载失败，斜杠命令可能不完整。',
   'loadWarning.context': '会话上下文加载失败，当前模式可能不准确。',
