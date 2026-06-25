@@ -712,13 +712,46 @@ describe('BaseLlmClient', () => {
       expect(result.text).toBe('');
       expect(result.usage).toBeUndefined();
     });
+
+    it('captures usage that rides the final content-bearing chunk', async () => {
+      // Realistic Gemini/OpenAI shape: usageMetadata arrives on the last chunk
+      // that *also* carries a text delta. Text and usage are read independently
+      // per chunk, so the trailing text must not be dropped when usage is read.
+      const usage = {
+        promptTokenCount: 5,
+        candidatesTokenCount: 3,
+        totalTokenCount: 8,
+      };
+      async function* usageOnTextChunk(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('Hello, ');
+        const finalChunk = createMockTextResponse('world');
+        finalChunk.usageMetadata = usage;
+        yield finalChunk;
+      }
+      mockGenerateContentStream.mockImplementation(async () =>
+        usageOnTextChunk(),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(result.text).toBe('Hello, world');
+      expect(result.usage).toEqual(usage);
+    });
   });
 
   describe('per-model resolution', () => {
     const fastModel = 'fast-model';
     const fastGenerateContent = vi.fn();
+    const fastGenerateContentStream = vi.fn();
     const fastContentGenerator = {
       generateContent: fastGenerateContent,
+      generateContentStream: fastGenerateContentStream,
       embedContent: vi.fn(),
     } as unknown as Mocked<ContentGenerator>;
 
@@ -730,6 +763,7 @@ describe('BaseLlmClient', () => {
         async (fn) => await (fn as () => Promise<unknown>)(),
       );
       fastGenerateContent.mockReset();
+      fastGenerateContentStream.mockReset();
       mockCreateContentGenerator.mockReset();
       mockBuildAgentContentGeneratorConfig.mockReset();
       getResolvedModel.mockReset();
@@ -825,6 +859,39 @@ describe('BaseLlmClient', () => {
         }),
       );
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('streams through a per-model generator resolved by model (compression path)', async () => {
+      // chatCompressionService passes both `model` and `stream: true`, so the
+      // streaming branch must run on the resolveForModel-selected generator,
+      // not the constructor-injected default.
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+      const usage = {
+        promptTokenCount: 2,
+        candidatesTokenCount: 2,
+        totalTokenCount: 4,
+      };
+      fastGenerateContentStream.mockImplementation(async () =>
+        mockTextStream(['fast ', 'stream'], usage),
+      );
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+      const result = await c.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: fastModel,
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(fastGenerateContentStream).toHaveBeenCalledTimes(1);
+      // The constructor-injected default generator must not be touched.
+      expect(mockGenerateContentStream).not.toHaveBeenCalled();
+      expect(result.text).toBe('fast stream');
+      expect(result.usage).toEqual(usage);
     });
 
     it('caches the per-model generator across resolveForModel calls', async () => {
