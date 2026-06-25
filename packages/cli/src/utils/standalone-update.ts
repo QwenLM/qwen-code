@@ -311,7 +311,11 @@ async function extractArchive(
       ps.on('error', reject);
     });
     const resolvedDest = fs.realpathSync(destDir);
-    validateExtractedPaths(resolvedDest, { symlinksOnly: true });
+    // Windows Expand-Archive has no pre-extraction filter like tar.extract,
+    // so keep the full post-extraction traversal scan here. The Unix/tar path
+    // can limit its defense-in-depth scan to symlinks because isSafeTarEntry
+    // validates regular entry paths and rejects hardlinks before extraction.
+    validateExtractedPaths(resolvedDest);
   } else {
     const resolvedDest = fs.realpathSync(destDir);
     await tar.extract({
