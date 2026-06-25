@@ -47,6 +47,15 @@ describe('bundled loop skill', () => {
     expect(body).not.toContain('delayMinutes');
   });
 
+  it('teaches the self-paced loop to lean on monitor/background-task notifications', () => {
+    const { body } = loadLoopSkill();
+
+    expect(body).toContain('<task-notification>');
+    expect(body).toContain('set LoopWakeup as a long fallback');
+    expect(body).toContain('auto-stops on idle or max-events');
+    expect(body).toContain('handle that event first');
+  });
+
   it('keeps fixed-interval inputs on the recurring cron path', () => {
     const { body } = loadLoopSkill();
 
