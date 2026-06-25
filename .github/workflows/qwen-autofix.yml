@@ -187,6 +187,9 @@ jobs:
             MAX_CREATED="$(date -u -d "${MAX_ISSUE_AGE_DAYS} days ago" +%Y-%m-%d)"
 
             filter_unattended_candidates() {
+              local input_file="$1"
+              local output_file="$2"
+
               # A bug stays "unattended" until a real maintainer engages: a comment
               # whose author is OWNER/MEMBER/COLLABORATOR and is not one of our own
               # bots. Plain community comments ("+1", "me too") do not disqualify it
@@ -199,7 +202,7 @@ jobs:
                                 and (((.author.login // "") | IN($bots[])) | not)) ]
                      | length == 0
                    ) ]' \
-                "${WORKDIR}/scan.json" > "$1"
+                "${input_file}" > "${output_file}"
             }
 
             # Tier 1: explicitly triaged bugs (status/ready-for-agent). Highest
@@ -215,13 +218,17 @@ jobs:
             # Tier 2: recent, unattended bugs. Always gathered (not only when tier 1
             # is empty) so a single weak tier-1 issue can't starve the run.
             echo "🔍 Tier 2 — unattended bugs created ${MAX_CREATED}..${MIN_CREATED} (newest first)..."
-            gh issue list --repo "${REPO}" \
+            if ! gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${BUG_LABEL} -label:${READY_FOR_AGENT_LABEL} created:${MAX_CREATED}..${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url,comments \
-              > "${WORKDIR}/scan.json"
-            filter_unattended_candidates "${WORKDIR}/tier2.json"
-            jq -c 'map(. + {autofixTier: 2})' \
-              "${WORKDIR}/tier2.json" > "${WORKDIR}/tier2.with-tier.json"
+              > "${WORKDIR}/tier2-scan.json"; then
+              echo "::warning::Tier-2 issue scan failed; proceeding with tier-1 candidates only."
+              jq -n -c '[]' > "${WORKDIR}/tier2.with-tier.json"
+            else
+              filter_unattended_candidates "${WORKDIR}/tier2-scan.json" "${WORKDIR}/tier2.json"
+              jq -c 'map(. + {autofixTier: 2})' \
+                "${WORKDIR}/tier2.json" > "${WORKDIR}/tier2.with-tier.json"
+            fi
 
             # Tier 1 first (priority), then tier 2; reserve a small tier-2
             # slice so a full tier-1 slate cannot starve recent unattended bugs.
