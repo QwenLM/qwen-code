@@ -159,11 +159,12 @@ review it before running any npm command. Pay special attention to npm lifecycle
 scripts such as `preinstall`, `install`, `postinstall`, `prebuild`,
 `postbuild`, `prepare`, and `prepublishOnly`, the requested `build` script
 itself, and any `pre<script>` or `post<script>` hook for a script you intend to
-run. Also inspect custom npm registries or auth config in `.npmrc`, dependency
-specs that use `file:`, git URLs, tarballs, or direct HTTP URLs, and extension
-execution fields such as `hooks`, `mcpServers`, `channels`, and `lspServers`.
-These fields can execute arbitrary code. Flag suspicious command values such as
-network downloads, piped shells, or encoded payloads. In `contextFileName`,
+run. Also inspect custom npm registries, auth config, and behavioral settings
+such as `script-shell` in `.npmrc`, dependency specs that use `file:`, git URLs,
+tarballs, or direct HTTP URLs, and extension execution fields such as `hooks`,
+`mcpServers`, `channels`, and `lspServers`. These fields can execute arbitrary
+code. Flag suspicious command values such as network downloads, piped shells, or
+encoded payloads. In `contextFileName`,
 reject absolute paths, `..` traversal, and
 `$`-prefixed environment references unless the user explicitly approves the
 external target after you describe the risk. In `settings`, inspect each
