@@ -59,11 +59,12 @@ scaffold command and bundled templates.
    and re-check before proceeding.
 10. Before linking, summarize default context files, `settings`, `hooks`,
    `channels`, and `lspServers` because the trust prompt does not show all of
-   that detail. Then run `qwen extensions link "$extension_path"`, stop at the
-   trust prompt, present the prompt output to the user, and wait for their
-   explicit approval before answering it. Do not auto-approve. If the user
-   declines the trust prompt, do not retry. Report that linking was skipped and
-   suggest the user run `qwen extensions link` manually when ready.
+   that detail. Ask the user whether to approve linking before running
+   `qwen extensions link`. Do not run the command while expecting to pause at
+   the prompt. If the user approves, invoke `qwen extensions link` with an
+   explicit yes input. If the user declines, do not run or retry the command;
+   report that linking was skipped and suggest the user run
+   `qwen extensions link` manually when ready.
 
 ## Template Selection
 
@@ -224,9 +225,8 @@ checklist or link an extension that failed to build.
 For context, commands, skills, or agent-only extensions:
 
 ```bash
-# After the Before Handoff checklist passes and the user explicitly approves
-# proceeding with the trust prompt:
-qwen extensions link "$extension_path"
+# After the Before Handoff checklist passes and the user explicitly approves:
+printf 'y\n' | qwen extensions link "$extension_path"
 ```
 
 After linking, tell the user to restart Qwen Code if the new extension is not
@@ -255,11 +255,12 @@ visible in the current session.
    `qwen-extension.json` and not the directory path.
 7. Before re-linking, summarize default context files, `settings`, `hooks`,
    `channels`, and `lspServers`.
-8. Run `qwen extensions link "$extension_path"`, stop at the trust prompt,
-   present the prompt output to the user, and wait for explicit approval before
-   answering it. If the user declines the trust prompt, do not retry. Report
-   that linking was skipped and suggest the user run `qwen extensions link`
-   manually when ready.
+8. Ask the user whether to approve re-linking before running
+   `qwen extensions link`. Do not run the command while expecting to pause at
+   the prompt. If the user approves, invoke `qwen extensions link` with an
+   explicit yes input. If the user declines, do not run or retry the command;
+   report that linking was skipped and suggest the user run
+   `qwen extensions link` manually when ready.
 
 ## Before Handoff
 
