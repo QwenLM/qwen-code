@@ -533,7 +533,7 @@ export async function resolveAtCommandQuery({
             );
             return null;
           }
-          return fs.readFile(resolved, 'utf-8');
+          return fs.readFile(resolved, { encoding: 'utf-8', signal });
         }),
       );
 
