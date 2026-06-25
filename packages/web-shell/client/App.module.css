@@ -152,10 +152,6 @@
   transition: width 320ms ease;
 }
 
-.footerHidden {
-  display: none;
-}
-
 .bottomPanels {
   position: absolute;
   top: -50px;

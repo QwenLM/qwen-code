@@ -290,6 +290,7 @@ type QwenMemorySettings = {
   enableManagedAutoMemory: boolean;
   enableManagedAutoDream: boolean;
   enableAutoSkill: boolean;
+  autoSkillConfirm: boolean;
 };
 
 type QwenMemoryPaths = {
@@ -369,6 +370,7 @@ type QwenCoreSettingKey =
   | 'memory.enableManagedAutoMemory'
   | 'memory.enableManagedAutoDream'
   | 'memory.enableAutoSkill'
+  | 'memory.autoSkillConfirm'
   | 'disableAllHooks';
 
 type QwenMcpServerConfig = {
@@ -436,6 +438,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'memory.enableManagedAutoMemory': { type: 'boolean' },
   'memory.enableManagedAutoDream': { type: 'boolean' },
   'memory.enableAutoSkill': { type: 'boolean' },
+  'memory.autoSkillConfirm': { type: 'boolean' },
   disableAllHooks: { type: 'boolean' },
 } as const satisfies Record<
   QwenCoreSettingKey,
@@ -456,12 +459,14 @@ const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: true,
   enableAutoSkill: true,
+  autoSkillConfirm: true,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
   'enableManagedAutoMemory',
   'enableManagedAutoDream',
   'enableAutoSkill',
+  'autoSkillConfirm',
 ] as const satisfies ReadonlyArray<keyof QwenMemorySettings>;
 
 function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
@@ -483,6 +488,10 @@ function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
       typeof record['enableAutoSkill'] === 'boolean'
         ? record['enableAutoSkill']
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableAutoSkill,
+    autoSkillConfirm:
+      typeof record['autoSkillConfirm'] === 'boolean'
+        ? record['autoSkillConfirm']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
   };
 }
 
