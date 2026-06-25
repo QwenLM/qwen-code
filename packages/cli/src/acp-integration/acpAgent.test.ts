@@ -473,7 +473,10 @@ vi.mock('../config/settings.js', () => ({
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
 vi.mock('../config/loadedSettingsAdapter.js', () => ({
-  createLoadedSettingsAdapter: vi.fn((settings: unknown) => settings),
+  createLoadedSettingsAdapter: vi.fn((settings: unknown) => ({
+  ...(settings as object),
+  getValue: vi.fn(),
+  })),
 }));
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),

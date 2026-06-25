@@ -219,11 +219,17 @@ export async function applyProviderInstallPlan(
     let effectiveModelSelection = plan.modelSelection;
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
+      const currentBaseUrl = settings.getValue('model.baseUrl') as string | undefined;
       const planOffersCurrentModel =
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
         (plan.modelProviders ?? []).some((patch) =>
-          patch.models.some((model) => model.id === currentModelId),
+          patch.models.some((model) =>
+            isSameModelIdentity(
+              { id: currentModelId, baseUrl: currentBaseUrl },
+              model,
+            ),
+          ),
         );
       if (planOffersCurrentModel) {
         if (plan.modelSelection?.baseUrl) {
