@@ -61,6 +61,8 @@ describe('bundled loop skill', () => {
     );
     expect(body).toContain('If a monitor auto-stopped');
     expect(body).toContain('restart it once');
+    expect(body).toContain('monitor restarted 1/1 time');
+    expect(body).toContain('so it survives context compaction');
     expect(body).toContain('report the repeated auto-stop to the user');
     expect(body).toContain('report the restart count');
     expect(body).toContain('If the signal is ambiguous');
