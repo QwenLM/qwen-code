@@ -290,6 +290,7 @@ type QwenMemorySettings = {
   enableManagedAutoMemory: boolean;
   enableManagedAutoDream: boolean;
   enableAutoSkill: boolean;
+  autoSkillConfirm: boolean;
 };
 
 type QwenMemoryPaths = {
@@ -369,6 +370,7 @@ type QwenCoreSettingKey =
   | 'memory.enableManagedAutoMemory'
   | 'memory.enableManagedAutoDream'
   | 'memory.enableAutoSkill'
+  | 'memory.autoSkillConfirm'
   | 'disableAllHooks';
 
 type QwenMcpServerConfig = {
@@ -436,6 +438,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'memory.enableManagedAutoMemory': { type: 'boolean' },
   'memory.enableManagedAutoDream': { type: 'boolean' },
   'memory.enableAutoSkill': { type: 'boolean' },
+  'memory.autoSkillConfirm': { type: 'boolean' },
   disableAllHooks: { type: 'boolean' },
 } as const satisfies Record<
   QwenCoreSettingKey,
@@ -456,12 +459,14 @@ const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: true,
   enableAutoSkill: true,
+  autoSkillConfirm: true,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
   'enableManagedAutoMemory',
   'enableManagedAutoDream',
   'enableAutoSkill',
+  'autoSkillConfirm',
 ] as const satisfies ReadonlyArray<keyof QwenMemorySettings>;
 
 function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
@@ -483,6 +488,10 @@ function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
       typeof record['enableAutoSkill'] === 'boolean'
         ? record['enableAutoSkill']
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableAutoSkill,
+    autoSkillConfirm:
+      typeof record['autoSkillConfirm'] === 'boolean'
+        ? record['autoSkillConfirm']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
   };
 }
 
@@ -2395,34 +2404,37 @@ function parsePoolDrainMs(envValue: string | undefined): number {
  * invokes `tryReserve`/`release`; this helper produces the controller
  * and wires the event callback.
  */
-function createWorkspaceMcpBudget(
+export function createWorkspaceMcpBudget(
   onEvent: (event: McpBudgetEvent) => void,
 ): WorkspaceMcpBudget | undefined {
   const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
   const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
-  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly.
-  // Use `Number(...)` + `Number.isInteger` so the pool and the manager
+  // Match `McpClientManager.readBudgetFromEnv`'s parsing exactly: only plain
+  // decimal digits set a budget. A loose `Number(...)` would silently accept
+  // `0x10`=16, `1e2`=100, and `1.0`=1 (all pass `isInteger`); the strict
+  // `/^\d+$/` + `isSafeInteger` check rejects them so the pool and the manager
   // honor the same env values.
-  const budget =
-    rawBudget !== undefined && rawBudget !== '' ? Number(rawBudget) : undefined;
+  let budget: number | undefined;
+  if (rawBudget !== undefined && rawBudget !== '') {
+    const trimmed = rawBudget.trim();
+    const parsed = Number(trimmed);
+    if (/^\d+$/.test(trimmed) && Number.isSafeInteger(parsed) && parsed > 0) {
+      budget = parsed;
+    } else {
+      process.stderr.write(
+        `qwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=` +
+          `'${rawBudget}' (expected positive integer); ` +
+          `MCP budget enforcement disabled for this child.\n`,
+      );
+    }
+  }
   const mode: McpBudgetMode = (() => {
     if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
       return rawMode;
     }
-    return budget !== undefined &&
-      Number.isFinite(budget) &&
-      Number.isInteger(budget) &&
-      budget > 0
-      ? 'warn'
-      : 'off';
+    return budget !== undefined ? 'warn' : 'off';
   })();
-  if (
-    mode === 'off' ||
-    budget === undefined ||
-    !Number.isFinite(budget) ||
-    !Number.isInteger(budget) ||
-    budget <= 0
-  ) {
+  if (mode === 'off' || budget === undefined) {
     return undefined;
   }
   return new WorkspaceMcpBudget({
@@ -4252,6 +4264,26 @@ class QwenAgent implements Agent {
       };
     }
 
+    const skillMetrics = metrics.skills ?? {
+      totalCalls: 0,
+      totalSuccess: 0,
+      totalFail: 0,
+      byName: {},
+    };
+    const skillsByName: ServeSessionStatsStatus['skills']['byName'] = {};
+    for (const [name, skill] of Object.entries(skillMetrics.byName)) {
+      Object.defineProperty(skillsByName, name, {
+        value: {
+          count: skill.count,
+          success: skill.success,
+          fail: skill.fail,
+        },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
@@ -4270,6 +4302,12 @@ class QwenAgent implements Agent {
       files: {
         totalLinesAdded: metrics.files.totalLinesAdded,
         totalLinesRemoved: metrics.files.totalLinesRemoved,
+      },
+      skills: {
+        totalCalls: skillMetrics.totalCalls,
+        totalSuccess: skillMetrics.totalSuccess,
+        totalFail: skillMetrics.totalFail,
+        byName: skillsByName,
       },
     };
   }

@@ -943,6 +943,16 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.LOOP_WAKEUP);
     });
 
+    it('registers read_mcp_resource so the model can read MCP resources', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
@@ -4855,6 +4865,27 @@ describe('Model Switching and Config Updates', () => {
       // getModel() returns 'some-model', getModelDisplayName returns it as-is
       // because currentAuthType is falsy
       expect(config.getModelDisplayName()).toBe('some-model');
+    });
+  });
+
+  describe('getAutoSkillConfirmEnabled', () => {
+    it('defaults to true when autoSkillConfirm is unset', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+    });
+
+    it('returns false when autoSkillConfirm is explicitly disabled', () => {
+      const config = new Config({ ...baseParams, autoSkillConfirm: false });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+
+    it('is forced false in bare mode even when autoSkillConfirm is true', () => {
+      const config = new Config({
+        ...baseParams,
+        autoSkillConfirm: true,
+        bareMode: true,
+      });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
     });
   });
 });

@@ -555,6 +555,7 @@ export class PermissionManager {
     'grep_search',
     'run_shell_command',
     'list_directory',
+    'read_mcp_resource',
     'web_fetch',
     'todo_write',
     'save_memory',

@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { updateCommand, handleUpdate } from './update.js';
 import yargs from 'yargs';
-import { ExtensionUpdateState } from '../../ui/state/extensions.js';
+import { ExtensionUpdateState } from '@qwen-code/qwen-code-core';
 
 const mockGetLoadedExtensions = vi.hoisted(() => vi.fn());
 const mockUpdateExtension = vi.hoisted(() => vi.fn());
@@ -28,18 +28,15 @@ vi.mock('./utils.js', () => ({
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   checkForExtensionUpdate: mockCheckForExtensionUpdate,
-}));
-
-vi.mock('../../utils/errors.js', () => ({
-  getErrorMessage: vi.fn((error: Error) => error.message),
-}));
-
-vi.mock('../../ui/state/extensions.js', () => ({
   ExtensionUpdateState: {
     UPDATE_AVAILABLE: 'update available',
     UP_TO_DATE: 'up to date',
     ERROR: 'error',
   },
+}));
+
+vi.mock('../../utils/errors.js', () => ({
+  getErrorMessage: vi.fn((error: Error) => error.message),
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({

@@ -17,6 +17,7 @@ import {
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
+import type { DaemonGithubSetupCompletedData } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
@@ -51,6 +52,26 @@ describe('daemon event schema', () => {
     }
     expect(isDaemonEventType(event, 'model_switched')).toBe(true);
     expect(isDaemonEventType(event, 'permission_request')).toBe(false);
+  });
+
+  it('recognizes trust_change_requested as known daemon event', () => {
+    const event: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'trust_change_requested',
+      data: {
+        workspaceCwd: '/work',
+        desiredState: 'untrusted',
+        reason: 'remote user request',
+      },
+      originatorClientId: 'client-1',
+    };
+
+    const known = asKnownDaemonEvent(event);
+
+    expect(known).toBe(event);
+    expect(known?.type).toBe('trust_change_requested');
+    expect(isDaemonEventType(event, 'trust_change_requested')).toBe(true);
   });
 
   it('leaves malformed or unknown events on the raw DaemonEvent path', () => {
@@ -1691,6 +1712,41 @@ describe('PR 21 — auth device-flow events', () => {
         data: { path: '/work/QWEN.md', action: 'replaced' },
       };
       expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+    });
+
+    it('github_setup_completed: accepts workflow summary and gitignore warning', () => {
+      const known = asKnownDaemonEvent({
+        id: 11,
+        v: 1,
+        type: 'github_setup_completed',
+        data: {
+          releaseTag: 'v1.2.3',
+          readmeUrl:
+            'https://github.com/QwenLM/qwen-code-action/blob/v1.2.3/README.md#quick-start',
+          workflows: [
+            {
+              path: '.github/workflows/qwen-dispatch.yml',
+              status: 'written',
+              sizeBytes: 12,
+            },
+          ],
+          gitignore: { path: '.gitignore', status: 'failed' },
+          warnings: ['Could not update .gitignore'],
+        },
+      });
+
+      expect(known?.type).toBe('github_setup_completed');
+      expect(
+        (known?.data as DaemonGithubSetupCompletedData).gitignore.status,
+      ).toBe('failed');
+      expect(
+        asKnownDaemonEvent({
+          id: 12,
+          v: 1,
+          type: 'github_setup_completed',
+          data: { releaseTag: 'v1.2.3' },
+        }),
+      ).toBeUndefined();
     });
 
     it('mcp_server_restarted: counter + last snapshot + envelope originator merge', () => {

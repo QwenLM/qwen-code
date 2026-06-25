@@ -408,6 +408,16 @@ const SETTINGS_SCHEMA = {
               'Preferred spoken language for voice transcription (e.g. "english", "chinese"). Leave empty to auto-detect.',
             showInDialog: false,
           },
+          refineTranscript: {
+            type: 'boolean',
+            label: 'Refine Voice Transcript',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Clean up voice transcripts with the fast model before inserting them — removes filler words and fixes recognition errors while preserving meaning. Falls back to the raw transcript on failure, and is skipped when no fast model is configured.',
+            showInDialog: false,
+          },
         },
       },
       enableAutoUpdate: {
@@ -1663,6 +1673,16 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Enable background review for reusable project skills after tool-heavy sessions.',
+        showInDialog: false,
+      },
+      autoSkillConfirm: {
+        type: 'boolean',
+        label: 'Confirm Auto Skills Before Saving',
+        category: 'Memory',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.',
         showInDialog: false,
       },
     },

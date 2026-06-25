@@ -1994,6 +1994,9 @@ export async function loadCliConfig(
     enableAutoSkill: bareMode
       ? false
       : (settings.memory?.enableAutoSkill ?? true),
+    autoSkillConfirm: bareMode
+      ? false
+      : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
