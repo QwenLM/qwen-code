@@ -70,7 +70,7 @@ export class StreamInactivityTimeoutError extends Error {
  * `console.warn`) rather than failing the request.
  */
 function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
-  // 1. Explicit config field (programmatic) wins):
+  // 1. Explicit config field (programmatic) wins:
   //    - `<= 0` disables the watchdog (downstream `idleMs > 0` guard skips it).
   //    - Values above the JS timer ceiling are rejected: setTimeout silently
   //      compresses them to 1ms, which would fire near-immediately.
