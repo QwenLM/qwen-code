@@ -526,6 +526,9 @@ jobs:
             exit 1
           fi
           echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
+            echo "::warning::Expected Node 22.x but found $(node -v); integration tests will run against the runner's Node."
+          fi
 
       - name: 'Install Dependencies'
         env:
