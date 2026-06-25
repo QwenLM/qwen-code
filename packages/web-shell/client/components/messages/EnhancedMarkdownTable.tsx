@@ -121,16 +121,9 @@ function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
   );
 }
 
-function hasNativeSelectionWithin(container: HTMLElement | null): boolean {
+function hasNativeSelection(): boolean {
   const selection = document.getSelection();
-  if (!container || !selection || selection.isCollapsed) return false;
-  const { anchorNode, focusNode } = selection;
-  return Boolean(
-    anchorNode &&
-      focusNode &&
-      container.contains(anchorNode) &&
-      container.contains(focusNode),
-  );
+  return Boolean(selection && !selection.isCollapsed);
 }
 
 function isTagElement(node: ReactNode, tag: string): node is TableElement {
@@ -213,6 +206,8 @@ function parseTable(
       headerRows.push(...parseRows(child, `head-${index}`));
     } else if (isTagElement(child, 'tbody')) {
       bodyRows.push(...parseRows(child, `body-${index}`));
+    } else if (isTagElement(child, 'tfoot')) {
+      bodyRows.push(...parseRows(child, `foot-${index}`));
     } else if (isTagElement(child, 'tr')) {
       directRows.push(parseRow(child, `row-${index}`));
     }
@@ -282,7 +277,11 @@ function getSelectionBounds(range: SelectionRange) {
 }
 
 function sanitizeForClipboard(value: string): string {
-  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const inspectedValue = value.replace(
+    /[\u200B-\u200D\u2060\u00AD\uFEFF]/g,
+    '',
+  );
+  return /^[=+\-@]/.test(inspectedValue) ? `'${value}` : value;
 }
 
 function getSelectionText(
@@ -394,7 +393,7 @@ function matchesNumberFilter(
       return cellNumber <= filterNumber;
     case 'between': {
       const filterNumberTo = parseNumber(filter.valueTo ?? '');
-      if (filterNumberTo === null) return true;
+      if (filterNumberTo === null) return false;
       const min = Math.min(filterNumber, filterNumberTo);
       const max = Math.max(filterNumber, filterNumberTo);
       return cellNumber >= min && cellNumber <= max;
@@ -1159,12 +1158,19 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       }
       if (event.key !== 'Tab') return;
       const menu = filterMenuRef.current;
-      if (!menu) return;
+      const activeElement = document.activeElement;
+      if (
+        !menu ||
+        !(activeElement instanceof Node) ||
+        !menu.contains(activeElement)
+      ) {
+        return;
+      }
       const focusableElements = getFocusableFilterMenuElements(menu);
       if (focusableElements.length === 0) return;
       const currentIndex =
-        document.activeElement instanceof HTMLElement
-          ? focusableElements.indexOf(document.activeElement)
+        activeElement instanceof HTMLElement
+          ? focusableElements.indexOf(activeElement)
           : -1;
       const nextIndex = event.shiftKey
         ? currentIndex <= 0
@@ -1347,7 +1353,9 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   };
 
   const startSelectionAtCell = (rowIndex: number, columnIndex: number) => {
-    setOpenFilterMenu(null);
+    if (openFilterMenu !== null) {
+      setOpenFilterMenu(null);
+    }
     draggingRef.current = true;
     setSelection({
       anchorRow: rowIndex,
@@ -1457,7 +1465,7 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
-    if (hasNativeSelectionWithin(containerRef.current)) return;
+    if (hasNativeSelection()) return;
     const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
     if (!text) return;
     event.preventDefault();

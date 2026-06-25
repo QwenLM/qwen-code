@@ -459,15 +459,17 @@ export const Markdown = memo(function Markdown({
     }
     return deferMermaid ? COMPONENTS_DEFER_MERMAID : COMPONENTS_DEFAULT;
   }, [deferMermaid, enhanceTables, renderedContent]);
+  const sourceComponents = sourceMarkdown?.components;
+  const renderedComponents = useMemo(() => {
+    if (!sourceComponents) return components;
+    return {
+      ...components,
+      ...sourceComponents,
+      ...(enhanceTables ? { table: components.table } : {}),
+    };
+  }, [components, enhanceTables, sourceComponents]);
 
   if (!content) return null;
-  const renderedComponents = sourceMarkdown?.components
-    ? {
-        ...components,
-        ...sourceMarkdown.components,
-        ...(enhanceTables ? { table: components.table } : {}),
-      }
-    : components;
   const remarkPlugins = sourceMarkdown?.remarkPlugins
     ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
     : [remarkGfm, remarkMath];
