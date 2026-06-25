@@ -8117,7 +8117,7 @@ describe('sessionRuntimeContext handler', () => {
       closed: mockConnectionState.promise,
     });
     await agent.initialize({});
-    await agent.newSession({});
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     return agent;
   }
 
