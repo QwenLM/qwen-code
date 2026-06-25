@@ -253,6 +253,31 @@ describe('detailed-span-attributes', () => {
       expect(span.attrs['new_context_truncated']).toBe(true);
       expect(span.attrs['new_context_original_length']).toBe(100);
     });
+
+    it('keeps prefixed prompt truncation within the configured limit', () => {
+      mockState.maxLength = 20;
+      const config = createMockConfig();
+      const span = createMockSpan();
+      const prompt = 'x'.repeat(100);
+      addUserPromptAttributes(config, span, prompt);
+
+      expect(String(span.attrs['new_context'])).toHaveLength(20);
+      expect(String(span.attrs['new_context'])).toMatch(/^\[USER PROMPT\]\n/);
+      expect(span.attrs['new_context_truncated']).toBe(true);
+      expect(span.attrs['new_context_original_length']).toBe(prompt.length);
+    });
+
+    it('keeps a visible truncation marker when the prefix consumes the limit', () => {
+      mockState.maxLength = '[USER PROMPT]\n'.length;
+      const config = createMockConfig();
+      const span = createMockSpan();
+      const prompt = 'x'.repeat(100);
+      addUserPromptAttributes(config, span, prompt);
+
+      expect(span.attrs['new_context']).toBe('...[TRUNCATED]');
+      expect(span.attrs['new_context_truncated']).toBe(true);
+      expect(span.attrs['new_context_original_length']).toBe(prompt.length);
+    });
   });
 
   it('uses configured max length for all native sensitive span payloads', () => {

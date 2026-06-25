@@ -1131,6 +1131,9 @@ describe('LoggingContentGenerator', () => {
     expect(vi.mocked(addModelOutputAttributes).mock.calls.at(-1)?.[2]).toBe(
       longText,
     );
+    expect(vi.mocked(addModelOutputAttributes).mock.calls.at(-1)?.[3]).toBe(
+      longText.length,
+    );
   });
 
   it('does not fail generateContentStream when sensitive span output attributes fail', async () => {

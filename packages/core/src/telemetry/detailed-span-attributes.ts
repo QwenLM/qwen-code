@@ -84,10 +84,30 @@ function truncatePrefixedContent(
   content: string,
   maxSize: number,
 ): { content: string; truncated: boolean; originalLength: number } {
-  const prefixedContent = `${prefix}${content}`;
-  const result = truncateContent(prefixedContent, maxSize);
+  const totalLength = prefix.length + content.length;
+  if (totalLength <= maxSize) {
+    return {
+      content: `${prefix}${content}`,
+      truncated: false,
+      originalLength: content.length,
+    };
+  }
+
+  if (prefix.length >= maxSize) {
+    const boundedPrefixedContent =
+      prefix.length === maxSize ? `${prefix}${content.slice(0, 1)}` : prefix;
+    const result = truncateContent(boundedPrefixedContent, maxSize);
+    return {
+      ...result,
+      originalLength: content.length,
+    };
+  }
+
+  const contentBudget = maxSize - prefix.length;
+  const result = truncateContent(content, contentBudget);
   return {
-    ...result,
+    content: `${prefix}${result.content}`,
+    truncated: true,
     originalLength: content.length,
   };
 }
@@ -221,6 +241,10 @@ export function addModelOutputAttributes(
   config: Config,
   span: Span,
   responseText: string | undefined,
+  /**
+   * Pass the pre-truncation length when responseText is already bounded.
+   * Omit only when responseText is the complete model output.
+   */
   originalLength?: number,
 ): void {
   if (!areSensitiveSpanAttributesEnabled(config) || !responseText) return;
