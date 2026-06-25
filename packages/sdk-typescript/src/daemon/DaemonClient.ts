@@ -2380,7 +2380,11 @@ export class DaemonClient {
     sessionId: string,
     entries: Record<string, string>,
     clientId?: string,
-  ): Promise<{ sessionId: string; keys: string[] }> {
+  ): Promise<{
+    sessionId: string;
+    keys: string[];
+    rejected: Array<{ key: string; reason: string }>;
+  }> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/runtime-context`,
       {
@@ -2395,7 +2399,11 @@ export class DaemonClient {
             'POST /session/:id/runtime-context',
           );
         }
-        return (await res.json()) as { sessionId: string; keys: string[] };
+        return (await res.json()) as {
+          sessionId: string;
+          keys: string[];
+          rejected: Array<{ key: string; reason: string }>;
+        };
       },
     );
   }

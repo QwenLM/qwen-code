@@ -417,7 +417,11 @@ export class DaemonSessionClient {
 
   async setRuntimeContext(
     entries: Record<string, string>,
-  ): Promise<{ sessionId: string; keys: string[] }> {
+  ): Promise<{
+    sessionId: string;
+    keys: string[];
+    rejected: Array<{ key: string; reason: string }>;
+  }> {
     return await this.client.setSessionRuntimeContext(
       this.sessionId,
       entries,

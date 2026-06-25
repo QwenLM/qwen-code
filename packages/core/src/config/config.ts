@@ -4243,16 +4243,28 @@ export class Config {
   private static readonly RUNTIME_CONTEXT_MAX_VALUE_BYTES = 32 * 1024;
   private static readonly RUNTIME_CONTEXT_MAX_ENTRIES = 16;
 
-  getRuntimeContext(): ReadonlyMap<string, string> {
+  private getOwnRuntimeContextEntries(): Map<string, string> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'runtimeContextEntries')
+    ) {
+      (
+        this as unknown as { runtimeContextEntries: Map<string, string> }
+      ).runtimeContextEntries = new Map();
+    }
     return this.runtimeContextEntries;
+  }
+
+  getRuntimeContext(): ReadonlyMap<string, string> {
+    return this.getOwnRuntimeContextEntries();
   }
 
   setRuntimeContextEntry(key: string, value: string): boolean {
     if (!Config.RUNTIME_CONTEXT_KEY_RE.test(key)) {
       return false;
     }
+    const entries = this.getOwnRuntimeContextEntries();
     if (!value) {
-      this.runtimeContextEntries.delete(key);
+      entries.delete(key);
       return true;
     }
     if (
@@ -4260,31 +4272,29 @@ export class Config {
     ) {
       return false;
     }
-    if (
-      !this.runtimeContextEntries.has(key) &&
-      this.runtimeContextEntries.size >= Config.RUNTIME_CONTEXT_MAX_ENTRIES
-    ) {
+    if (!entries.has(key) && entries.size >= Config.RUNTIME_CONTEXT_MAX_ENTRIES) {
       return false;
     }
-    this.runtimeContextEntries.set(key, value);
+    entries.set(key, value);
     return true;
   }
 
   removeRuntimeContextEntry(key: string): void {
-    this.runtimeContextEntries.delete(key);
+    this.getOwnRuntimeContextEntries().delete(key);
   }
 
   setRuntimeContext(entries: Record<string, string>): void {
-    this.runtimeContextEntries.clear();
+    const store = this.getOwnRuntimeContextEntries();
+    store.clear();
     for (const [key, value] of Object.entries(entries)) {
       if (
         value &&
         Config.RUNTIME_CONTEXT_KEY_RE.test(key) &&
         Buffer.byteLength(value, 'utf8') <=
           Config.RUNTIME_CONTEXT_MAX_VALUE_BYTES &&
-        this.runtimeContextEntries.size < Config.RUNTIME_CONTEXT_MAX_ENTRIES
+        store.size < Config.RUNTIME_CONTEXT_MAX_ENTRIES
       ) {
-        this.runtimeContextEntries.set(key, value);
+        store.set(key, value);
       }
     }
   }

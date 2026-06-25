@@ -749,7 +749,11 @@ export interface AcpSessionBridge {
     sessionId: string,
     entries: Record<string, string>,
     context?: BridgeClientRequestContext,
-  ): Promise<{ sessionId: string; keys: string[] }>;
+  ): Promise<{
+    sessionId: string;
+    keys: string[];
+    rejected: Array<{ key: string; reason: string }>;
+  }>;
 
   /**
    * Generate a one-sentence "where did I leave off" recap of a live
