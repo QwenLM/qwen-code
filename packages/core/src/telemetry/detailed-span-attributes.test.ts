@@ -147,7 +147,14 @@ describe('detailed-span-attributes', () => {
     it('keeps truncated content within small configured limits', () => {
       const result = truncateContent('x'.repeat(100), 50);
       expect(result.truncated).toBe(true);
-      expect(result.content).toBe('x'.repeat(50));
+      expect(result.content).toHaveLength(50);
+      expect(result.content).toMatch(/\.\.\.\[TRUNCATED\]$/);
+    });
+
+    it('uses a visible truncation marker even when only marker prefix fits', () => {
+      const result = truncateContent('x'.repeat(100), 3);
+      expect(result.truncated).toBe(true);
+      expect(result.content).toBe('...');
     });
 
     it('does not truncate content exactly at the limit', () => {
@@ -258,7 +265,7 @@ describe('detailed-span-attributes', () => {
 
     const userSpan = createMockSpan();
     addUserPromptAttributes(config, userSpan, 'abcdef');
-    expect(userSpan.attrs['new_context']).toBe('[US');
+    expect(userSpan.attrs['new_context']).toBe('...');
     expect(userSpan.attrs['new_context_truncated']).toBe(true);
     expect(userSpan.attrs['new_context_original_length']).toBe(
       '[USER PROMPT]\nabcdef'.length,
@@ -266,13 +273,13 @@ describe('detailed-span-attributes', () => {
 
     const systemSpan = createMockSpan();
     addSystemPromptAttributes(config, systemSpan, 'abcdef');
-    expect(systemSpan.attrs['system_prompt']).toBe('abc');
+    expect(systemSpan.attrs['system_prompt']).toBe('...');
     expect(systemSpan.attrs['system_prompt_truncated']).toBe(true);
 
     const toolSchemaSpan = createMockSpan();
     const toolDeclaration = { name: 'Read', description: 'abcdef' };
     addToolSchemaAttributes(config, toolSchemaSpan, [toolDeclaration]);
-    expect(toolSchemaSpan.events[0]!.attributes['tool_definition']).toBe('{"n');
+    expect(toolSchemaSpan.events[0]!.attributes['tool_definition']).toBe('...');
     expect(
       toolSchemaSpan.events[0]!.attributes['tool_definition_truncated'],
     ).toBe(true);
@@ -282,12 +289,12 @@ describe('detailed-span-attributes', () => {
 
     const modelSpan = createMockSpan();
     addModelOutputAttributes(config, modelSpan, 'abcdef');
-    expect(modelSpan.attrs['response.model_output']).toBe('abc');
+    expect(modelSpan.attrs['response.model_output']).toBe('...');
     expect(modelSpan.attrs['response.model_output_truncated']).toBe(true);
 
     const toolInputSpan = createMockSpan();
     addToolInputAttributes(config, toolInputSpan, 'Bash', 'abcdef');
-    expect(toolInputSpan.attrs['tool_input']).toBe('[TO');
+    expect(toolInputSpan.attrs['tool_input']).toBe('...');
     expect(toolInputSpan.attrs['tool_input_truncated']).toBe(true);
     expect(toolInputSpan.attrs['tool_input_original_length']).toBe(
       '[TOOL INPUT: Bash]\nabcdef'.length,
@@ -295,7 +302,7 @@ describe('detailed-span-attributes', () => {
 
     const toolResultSpan = createMockSpan();
     addToolResultAttributes(config, toolResultSpan, 'Read', 'abcdef');
-    expect(toolResultSpan.attrs['tool_result']).toBe('[TO');
+    expect(toolResultSpan.attrs['tool_result']).toBe('...');
     expect(toolResultSpan.attrs['tool_result_truncated']).toBe(true);
     expect(toolResultSpan.attrs['tool_result_original_length']).toBe(
       '[TOOL RESULT: Read]\nabcdef'.length,

@@ -12,6 +12,7 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH } from './constants.js';
 
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
+const SHORT_TRUNCATION_SUFFIX = '...[TRUNCATED]';
 
 // Process-global; intentionally never cleared in production. Bounded by the
 // number of unique system prompts + tool schemas seen in one session.
@@ -55,8 +56,16 @@ export function truncateContent(
   }
   const suffix = `\n\n[TRUNCATED - Content exceeds configured limit of ${maxSize} characters]`;
   if (suffix.length >= maxSize) {
+    if (SHORT_TRUNCATION_SUFFIX.length >= maxSize) {
+      return {
+        content: SHORT_TRUNCATION_SUFFIX.slice(0, maxSize),
+        truncated: true,
+      };
+    }
     return {
-      content: content.slice(0, maxSize),
+      content:
+        content.slice(0, maxSize - SHORT_TRUNCATION_SUFFIX.length) +
+        SHORT_TRUNCATION_SUFFIX,
       truncated: true,
     };
   }
