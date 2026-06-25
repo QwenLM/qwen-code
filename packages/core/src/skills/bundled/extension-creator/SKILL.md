@@ -57,7 +57,9 @@ scaffold command and bundled templates.
    `channels`, and `lspServers` because the trust prompt does not show all of
    that detail. Then run `qwen extensions link "$extension_path"`, stop at the
    trust prompt, present the prompt output to the user, and wait for their
-   explicit approval before answering it. Do not auto-approve.
+   explicit approval before answering it. Do not auto-approve. If the user
+   declines the trust prompt, do not retry. Report that linking was skipped and
+   suggest the user run `qwen extensions link` manually when ready.
 
 ## Template Selection
 
@@ -111,6 +113,9 @@ Code extension fields include:
   are not substituted there.
 - `channels` - map of channel adapters. Each value uses `entry` for the
   compiled JavaScript entry point and optional `displayName`.
+  `channels.<type>.entry` must be a path relative to the extension root; do not
+  use `${extensionPath}` or other path variables in this field because the
+  runtime already prepends the extension path during resolution.
   `channels.<type>.entry` must import a module exporting `plugin` with a
   matching `channelType` and a `createChannel` function.
 - `lspServers` - inline `.lsp.json`-style object or JSON path. It only applies
@@ -146,17 +151,19 @@ folders, so prefer the folder structure for those resources.
 
 ## Local Test Flow
 
-Whether the path is pre-existing or freshly scaffolded, review `package.json`,
-`.npmrc`, lockfiles when present, and `qwen-extension.json` before running any
-npm command or linking the extension. Pay special attention to npm lifecycle
-scripts such as `preinstall`, `install`, `postinstall`, `prepare`, and
-`prepublishOnly`, `prebuild`, `build`, and `postbuild`, custom npm registries
-or auth config in `.npmrc`, dependency specs that use `file:`, git URLs,
-tarballs, or direct HTTP URLs, and extension execution fields such as `hooks`,
-`mcpServers`, `channels`, and `lspServers`. These fields can execute arbitrary
-code. Flag
-suspicious command values such as network downloads, piped shells, or encoded
-payloads. In `contextFileName`, reject absolute paths, `..` traversal, and
+Whether the path is pre-existing or freshly scaffolded, review
+`qwen-extension.json`, `.npmrc`, and lockfiles when present before running any
+npm command or linking the extension. If the extension has a `package.json`,
+review it before running any npm command. Pay special attention to npm lifecycle
+scripts such as `preinstall`, `install`, `postinstall`, `prebuild`,
+`postbuild`, `prepare`, and `prepublishOnly`, the requested `build` script
+itself, and any `pre<script>` or `post<script>` hook for a script you intend to
+run. Also inspect custom npm registries or auth config in `.npmrc`, dependency
+specs that use `file:`, git URLs, tarballs, or direct HTTP URLs, and extension
+execution fields such as `hooks`, `mcpServers`, `channels`, and `lspServers`.
+These fields can execute arbitrary code. Flag suspicious command values such as
+network downloads, piped shells, or encoded payloads. In `contextFileName`,
+reject absolute paths, `..` traversal, and
 `$`-prefixed environment references unless the user explicitly approves the
 external target after you describe the risk. In `settings`, inspect each
 `envVar` for variables that modify process behavior, such as `NODE_OPTIONS`,
@@ -182,9 +189,9 @@ also been reviewed.
 
 For the `mcp-server` and `starter` templates, which include TypeScript code:
 
-Only run `npm install` and `npm run build` inside directories scaffolded by
-`qwen extensions new` in the current session, unless the pre-existing path
-review above is complete.
+For directories scaffolded by `qwen extensions new` in the current session, run
+the build commands below. For pre-existing directories, only run the build
+commands after the trust review above is complete.
 
 ```bash
 cd -- "$extension_path" && \
@@ -238,7 +245,9 @@ visible in the current session.
    `channels`, and `lspServers`.
 8. Run `qwen extensions link "$extension_path"`, stop at the trust prompt,
    present the prompt output to the user, and wait for explicit approval before
-   answering it.
+   answering it. If the user declines the trust prompt, do not retry. Report
+   that linking was skipped and suggest the user run `qwen extensions link`
+   manually when ready.
 
 ## Before Handoff
 
