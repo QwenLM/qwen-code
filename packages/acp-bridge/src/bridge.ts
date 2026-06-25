@@ -4785,6 +4785,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
+    async setSessionRuntimeContext(sessionId, entries, _context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+
+      const response = (await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext,
+            { sessionId, entries },
+          ),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext,
+        ),
+        getTransportClosedReject(entry),
+      ])) as { keys: string[] };
+
+      return { sessionId, keys: response.keys };
+    },
+
     async generateSessionRecap(sessionId, _context) {
       // Thin pass-through to `qwen/control/session/
       // recap` — the ACP child runs `generateSessionRecap` against the

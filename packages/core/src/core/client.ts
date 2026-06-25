@@ -2136,6 +2136,14 @@ export class GeminiClient {
           systemReminders.unshift(userQueryMemory.prompt);
         }
 
+        const runtimeCtx = this.config.getRuntimeContext();
+        for (const [, value] of runtimeCtx) {
+          const safe = escapeSystemReminderTags(value);
+          systemReminders.push(
+            `<system-reminder>\n${safe}\n</system-reminder>`,
+          );
+        }
+
         requestToSend = [...systemReminders, ...requestToSend];
       }
 

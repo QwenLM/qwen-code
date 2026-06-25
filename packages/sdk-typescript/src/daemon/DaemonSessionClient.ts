@@ -415,6 +415,16 @@ export class DaemonSessionClient {
     );
   }
 
+  async setRuntimeContext(
+    entries: Record<string, string>,
+  ): Promise<{ sessionId: string; keys: string[] }> {
+    return await this.client.setSessionRuntimeContext(
+      this.sessionId,
+      entries,
+      this.clientId,
+    );
+  }
+
   async getRewindSnapshots(): Promise<{
     snapshots: DaemonRewindSnapshotInfo[];
   }> {

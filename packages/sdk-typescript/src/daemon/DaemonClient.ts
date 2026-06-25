@@ -2376,6 +2376,30 @@ export class DaemonClient {
     );
   }
 
+  async setSessionRuntimeContext(
+    sessionId: string,
+    entries: Record<string, string>,
+    clientId?: string,
+  ): Promise<{ sessionId: string; keys: string[] }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/runtime-context`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ entries }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/runtime-context',
+          );
+        }
+        return (await res.json()) as { sessionId: string; keys: string[] };
+      },
+    );
+  }
+
   /**
    * Send a prompt to the agent. Supports both blocking (legacy 200)
    * and non-blocking (202 + SSE `turn_complete`) daemon responses.

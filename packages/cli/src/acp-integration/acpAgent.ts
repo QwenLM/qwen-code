@@ -6143,6 +6143,41 @@ class QwenAgent implements Agent {
 
         return { language: resolvedLanguage, outputLanguage, refreshed };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionRuntimeContext: {
+        const sessionId = params['sessionId'];
+        const entries = params['entries'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof entries !== 'object' ||
+          entries === null ||
+          Array.isArray(entries)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            '`entries` must be a non-null object',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const appliedKeys: string[] = [];
+        for (const [key, value] of Object.entries(
+          entries as Record<string, unknown>,
+        )) {
+          if (typeof value !== 'string') continue;
+          if (value === '') {
+            config.removeRuntimeContextEntry(key);
+            appliedKeys.push(key);
+          } else if (config.setRuntimeContextEntry(key, value)) {
+            appliedKeys.push(key);
+          }
+        }
+        return { keys: appliedKeys };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // Generate a one-sentence "where did I leave off" summary.
         // Best-effort: returns `null` on short history or model failure.

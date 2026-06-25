@@ -741,6 +741,17 @@ export interface AcpSessionBridge {
   }>;
 
   /**
+   * Set, update, or remove runtime context entries on a live session.
+   * Entries are injected as per-turn <system-reminder> blocks on the
+   * next model call. Passing an empty string for a value removes that key.
+   */
+  setSessionRuntimeContext(
+    sessionId: string,
+    entries: Record<string, string>,
+    context?: BridgeClientRequestContext,
+  ): Promise<{ sessionId: string; keys: string[] }>;
+
+  /**
    * Generate a one-sentence "where did I leave off" recap of a live
    * session. Forwards through `qwen/control/session/recap`, which
    * invokes `generateSessionRecap` (`core/services/sessionRecap.ts`) in

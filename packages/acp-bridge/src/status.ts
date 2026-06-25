@@ -146,6 +146,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionGoalClear: 'qwen/control/session/goal/clear',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
+  sessionRuntimeContext: 'qwen/control/session/runtime_context',
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
   /**
