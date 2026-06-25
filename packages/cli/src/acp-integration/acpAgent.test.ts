@@ -8100,7 +8100,18 @@ describe('sessionRuntimeContext handler', () => {
       } as unknown as Session;
     });
 
-    runAcpMode({} as CliArgs);
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const bootConfig = makeRuntimeCtxConfig();
+    runAcpAgent(
+      bootConfig as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      {} as CliArgs,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
     const agent = capturedAgentFactory!({
       closed: mockConnectionState.promise,
     });
