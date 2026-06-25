@@ -59,6 +59,8 @@ describe('bundled loop skill', () => {
     expect(body).toContain(
       'If the notification says the watched condition was met',
     );
+    expect(body).toContain('cancel any pending fallback LoopWakeup');
+    expect(body).toContain('CronDelete');
     expect(body).toContain('If a monitor auto-stopped');
     expect(body).toContain('restart it once');
     expect(body).toContain('monitor restarted 1/1 time');
@@ -74,6 +76,7 @@ describe('bundled loop skill', () => {
     );
     expect(body).toContain('repeated monitor auto-stop');
     expect(body).toContain('not a bare `/loop` wakeup prompt');
+    expect(body).toContain('stale fallback was cancelled');
   });
 
   it('keeps fixed-interval inputs on the recurring cron path', () => {

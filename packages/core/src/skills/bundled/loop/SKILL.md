@@ -44,7 +44,7 @@ Use this path only when the user supplied a prompt and no interval.
 
 1. Do not call CronCreate for this path.
 2. If this tick opens with a `<task-notification>` block (a monitor or background event re-invoked you, not a bare `/loop` wakeup prompt), handle that event before re-running the prompt.
-   - If the notification says the watched condition was met, finish the loop.
+   - If the notification says the watched condition was met, cancel any pending fallback LoopWakeup with CronDelete if you still have its ID, then finish the loop.
    - If a monitor auto-stopped on idle or max-events, restart it once if the watch is still useful, re-arm the fallback, report the restart count to the user, and include that count in the LoopWakeup prompt or reason (for example, `monitor restarted 1/1 time`) so it survives context compaction. If it auto-stops again on the next tick, end the loop and report the repeated auto-stop to the user.
    - If the signal is ambiguous, re-arm a shorter follow-up and investigate on the next tick. If the signal remains ambiguous for three consecutive ticks, end the loop and report that the watch could not reach a clear conclusion.
 3. Run the parsed prompt immediately now.
@@ -60,7 +60,7 @@ Use this path only when the user supplied a prompt and no interval.
    - `delaySeconds`: the next useful delay in seconds. The runtime clamps to 60–3600 (1–60 min); follow the tool's own guidance on picking a value — it accounts for the prompt-cache window and for the fallback-heartbeat case when a background task will wake you.
    - `prompt`: `/loop ${original prompt}` plus any state the next tick must preserve, such as `monitor restarted 1/1 time`.
    - `reason`: a short reason for the chosen delay. Include the monitor restart count here when re-arming after an auto-stop.
-6. Briefly tell the user what was done now. If a wakeup was scheduled, include when the next check is expected. If no wakeup was scheduled, say the loop is complete or not continuing.
+6. Briefly tell the user what was done now. If a wakeup was scheduled, include when the next check is expected. If no wakeup was scheduled because a notification ended the loop, mention whether the stale fallback was cancelled; if the wakeup ID was lost, ignore or answer the stale wakeup briefly when it fires.
 
 ## Fixed-interval recurring path
 
