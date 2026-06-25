@@ -150,26 +150,35 @@ Whether the path is pre-existing or freshly scaffolded, review `package.json`,
 `.npmrc`, lockfiles when present, and `qwen-extension.json` before running any
 npm command or linking the extension. Pay special attention to npm lifecycle
 scripts such as `preinstall`, `install`, `postinstall`, `prepare`, and
-`prepublishOnly`, the requested `build` script, custom npm registries or auth
-config in `.npmrc`, dependency specs that use `file:`, git URLs, tarballs, or
-direct HTTP URLs, and extension execution fields such as `hooks`, `mcpServers`,
-`channels`, and `lspServers`. These fields can execute arbitrary code. Flag
+`prepublishOnly`, `prebuild`, `build`, and `postbuild`, custom npm registries
+or auth config in `.npmrc`, dependency specs that use `file:`, git URLs,
+tarballs, or direct HTTP URLs, and extension execution fields such as `hooks`,
+`mcpServers`, `channels`, and `lspServers`. These fields can execute arbitrary
+code. Flag
 suspicious command values such as network downloads, piped shells, or encoded
 payloads. In `contextFileName`, reject absolute paths, `..` traversal, and
 `$`-prefixed environment references unless the user explicitly approves the
 external target after you describe the risk. In `settings`, inspect each
 `envVar` for variables that modify process behavior, such as `NODE_OPTIONS`,
-`LD_PRELOAD`, `PATH`, or `DYLD_INSERT_LIBRARIES`. In `mcpServers`, `hooks`,
-`channels`, and `lspServers`, also inspect `env` or equivalent environment
-configuration for those variables, and inspect `cwd` for paths outside the
-extension root. Describe the concern to the user and ask whether to proceed.
+`LD_PRELOAD`, `PATH`, or `DYLD_INSERT_LIBRARIES`. In `mcpServers`, inspect local
+execution fields plus remote endpoint and credential fields such as `url`,
+`httpUrl`, `tcp`, `headers`, `oauth`, service-account impersonation settings,
+and any secret-bearing value that uses `$`-prefixed environment expansion.
+Require explicit user approval for remote endpoints, secret-bearing headers, or
+credential forwarding. In `hooks`, `channels`, and `lspServers`, also inspect
+`env` or equivalent environment configuration for process-control variables,
+and inspect `cwd` for paths outside the extension root. Describe the concern to
+the user and ask whether to proceed.
 
 If `hooks` is a file path, if `hooks/hooks.json` exists, or if `lspServers` is a
-JSON file path, resolve the file path inside the extension root, read the JSON
-file, and apply the same command, argument, environment, and `cwd` audit to the
-loaded content before running build commands or linking the extension. Treat a
-clean-looking manifest that points to an external executable config file as
-incomplete until that referenced file has also been reviewed.
+JSON file path, resolve and realpath-check the file before reading it. Treat JSON
+parse failures as blocking. Apply the same command, argument, environment, and
+`cwd` audit to the loaded content before running build commands or linking the
+extension. For hooks, also audit HTTP `url`, `headers`, `allowedEnvVars`, prompt
+`prompt`, and `model` fields. For LSP config, also audit `transport`, `host`,
+`port`, and `socket`. Treat a clean-looking manifest that points to an external
+executable or transport config file as incomplete until that referenced file has
+also been reviewed.
 
 For the `mcp-server` and `starter` templates, which include TypeScript code:
 
@@ -184,10 +193,12 @@ cd -- "$extension_path" && \
 ```
 
 Use `--ignore-scripts` so dependency install scripts cannot run before review.
-If the build requires install scripts, stop and ask the user whether to run the
-specific script after explaining what it does. If any step exits non-zero, stop
-and report the error to the user. Do not run the Before Handoff checklist or
-link an extension that failed to build.
+Before `npm run build`, audit `prebuild`, `build`, and `postbuild`; if any are
+present, summarize them and require explicit user approval before running the
+build. If the build requires install scripts, stop and ask the user whether to
+run the specific script after explaining what it does. If any step exits
+non-zero, stop and report the error to the user. Do not run the Before Handoff
+checklist or link an extension that failed to build.
 
 For context, commands, skills, or agent-only extensions:
 
@@ -245,6 +256,11 @@ visible in the current session.
 - Confirm default-discovered resources are intended before linking: `QWEN.md`
   when `contextFileName` is omitted or empty, `commands/`, `skills/`, `agents/`,
   and `hooks/hooks.json`.
+- Enumerate every discovered command markdown or TOML file, each skill
+  directory and its `SKILL.md`, each agent markdown file, and every hook file
+  before reading or linking. Realpath-check each discovered path, not only the
+  top-level folder, and require explicit user approval for any symlink or file
+  target outside the extension root.
 - For manifest fields and default-discovered resources that reference local
   paths, resolve both the extension root and the candidate path with `realpath`,
   then confirm the resolved candidate equals the resolved root or is contained
