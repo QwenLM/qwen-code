@@ -17,7 +17,7 @@ import type {
   LoadedSource,
   CreateSourceInput,
 } from './types.ts';
-import { validateSourceConfig } from '../config/validators.ts';
+import { assertValidSourceSlug, validateSourceConfig } from '../config/validators.ts';
 import { debug } from '../utils/debug.ts';
 import { readJsonFileSync } from '../utils/files.ts';
 import { getBuiltinSources, isBuiltinSource, getDocsSource } from './builtin-sources.ts';
@@ -31,14 +31,6 @@ import {
   isIconUrl,
 } from '../utils/icon.ts';
 
-const SOURCE_SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-function assertValidSourceSlug(sourceSlug: string): void {
-  if (!SOURCE_SLUG_REGEX.test(sourceSlug)) {
-    throw new Error('Invalid source slug');
-  }
-}
-
 // ============================================================
 // Directory Utilities
 // ============================================================
@@ -47,6 +39,7 @@ function assertValidSourceSlug(sourceSlug: string): void {
  * Get path to a source folder within a workspace
  */
 export function getSourcePath(workspaceRootPath: string, sourceSlug: string): string {
+  assertValidSourceSlug(sourceSlug);
   return join(getWorkspaceSourcesPath(workspaceRootPath), sourceSlug);
 }
 
@@ -433,8 +426,8 @@ export function generateSourceSlug(workspaceRootPath: string, name: string): str
   let slug = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .substring(0, 50);
+    .substring(0, 50)
+    .replace(/^-|-$/g, '');
 
   // Ensure slug is not empty
   if (!slug) {
@@ -566,7 +559,6 @@ export async function createSource(
  * Delete a source from a workspace
  */
 export function deleteSource(workspaceRootPath: string, sourceSlug: string): void {
-  assertValidSourceSlug(sourceSlug);
   const dir = getSourcePath(workspaceRootPath, sourceSlug);
   if (existsSync(dir)) {
     rmSync(dir, { recursive: true });

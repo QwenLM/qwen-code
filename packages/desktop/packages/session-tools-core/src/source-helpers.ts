@@ -10,6 +10,14 @@ import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, cl
 import { join } from 'node:path';
 import type { SourceConfig } from './types.ts';
 
+export const SOURCE_SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function assertValidSourceSlug(sourceSlug: string): void {
+  if (!SOURCE_SLUG_REGEX.test(sourceSlug)) {
+    throw new Error(`Invalid source slug: ${JSON.stringify(sourceSlug)}`);
+  }
+}
+
 /** Strip UTF-8 BOM that breaks JSON.parse */
 function stripBom(text: string): string {
   return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
@@ -19,6 +27,7 @@ function stripBom(text: string): string {
  * Get the path to a source's directory
  */
 export function getSourcePath(workspaceRootPath: string, sourceSlug: string): string {
+  assertValidSourceSlug(sourceSlug);
   return join(workspaceRootPath, 'sources', sourceSlug);
 }
 

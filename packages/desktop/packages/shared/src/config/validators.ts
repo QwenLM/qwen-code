@@ -368,6 +368,13 @@ import { getWorkspaceSourcesPath } from '../workspaces/storage.ts';
 // --- sources/{slug}/config.json ---
 
 const SourceTypeSchema = z.enum(['mcp', 'api', 'local']);
+export const SOURCE_SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function assertValidSourceSlug(sourceSlug: string): void {
+  if (!SOURCE_SLUG_REGEX.test(sourceSlug)) {
+    throw new Error(`Invalid source slug: ${JSON.stringify(sourceSlug)}`);
+  }
+}
 
 // MCP source supports two transport types:
 // - HTTP/SSE: requires url and authType
@@ -451,7 +458,10 @@ const SourceBrandSchema = z.object({
 export const FolderSourceConfigSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
-  slug: z.string().regex(/^[a-z0-9-]+$/, 'Slug must be lowercase alphanumeric with hyphens'),
+  slug: z.string().regex(
+    SOURCE_SLUG_REGEX,
+    'Slug must be lowercase alphanumeric segments separated by single hyphens'
+  ),
   enabled: z.boolean(),
   provider: z.string().min(1),
   type: SourceTypeSchema,
