@@ -593,7 +593,7 @@ describe('createAcpSessionBridge', () => {
         { clientId: first.clientId },
       ),
     ).resolves.toMatchObject({ stopReason: 'end_turn' });
-    await expect(
+    expect(() =>
       bridge.sendPrompt(
         second.sessionId,
         {
@@ -603,7 +603,8 @@ describe('createAcpSessionBridge', () => {
         undefined,
         { clientId: second.clientId },
       ),
-    ).rejects.toBeInstanceOf(InvalidClientIdError);
+    ).toThrow(InvalidClientIdError);
+    expect(bridge.activePromptCount).toBe(0);
 
     await bridge.shutdown();
   });
@@ -779,6 +780,7 @@ describe('createAcpSessionBridge', () => {
       attached: false,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { configOptions: [] },
       compactedReplay: [],
       liveJournal: [],
@@ -883,6 +885,7 @@ describe('createAcpSessionBridge', () => {
       attached: false,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { modes: null },
       lastEventId: 0,
     });
@@ -927,6 +930,7 @@ describe('createAcpSessionBridge', () => {
       attached: true,
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
+      hasActivePrompt: false,
       state: { _meta: { tag: 'restored-foo' } },
       lastEventId: expect.any(Number),
     });
@@ -5338,7 +5342,7 @@ describe('createAcpSessionBridge', () => {
 
     it('rejects unregistered client ids on session-scoped requests', async () => {
       const { bridge, session } = await setup();
-      await expect(
+      expect(() =>
         bridge.sendPrompt(
           session.sessionId,
           {
@@ -5348,7 +5352,8 @@ describe('createAcpSessionBridge', () => {
           undefined,
           { clientId: 'client-not-issued' },
         ),
-      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      ).toThrow(InvalidClientIdError);
+      expect(bridge.activePromptCount).toBe(0);
       await expect(
         bridge.cancelSession(session.sessionId, undefined, {
           clientId: 'client-not-issued',
@@ -8185,6 +8190,36 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('enriched listWorkspaceSessions', () => {
+    it('reports active prompt state when attaching to an existing session', async () => {
+      let finishPrompt: ((value: PromptResponse) => void) | undefined;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            promptImpl: () =>
+              new Promise<PromptResponse>((resolve) => {
+                finishPrompt = resolve;
+              }),
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'keep running' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(finishPrompt).toBeDefined();
+      });
+      const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(attached.attached).toBe(true);
+      expect(attached.hasActivePrompt).toBe(true);
+
+      finishPrompt!({ stopReason: 'end_turn' });
+      await prompt;
+      await bridge.shutdown();
+    });
+
     it('includes createdAt and metadata fields', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

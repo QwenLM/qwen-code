@@ -122,6 +122,96 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('rewrites macOS composed Option+t glyph "†" to Alt+t', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 't',
+            meta: true,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('leaves "†" untouched on non-macOS platforms', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: '',
+            meta: false,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
     it('should recognize regular enter key (keycode 13) in kitty protocol', async () => {
       const keyHandler = vi.fn();
 

@@ -102,6 +102,7 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
+const mockTelemetrySdkState = vi.hoisted(() => ({ initialized: false }));
 
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   const actual =
@@ -137,6 +138,14 @@ vi.mock('../services/sleepInhibitor.js', () => ({
 vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
 }));
+
+vi.mock('../telemetry/sdk.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../telemetry/sdk.js')>();
+  return {
+    ...actual,
+    isTelemetrySdkInitialized: () => mockTelemetrySdkState.initialized,
+  };
+});
 
 function createMockToolSpan(
   name: string,
@@ -1444,6 +1453,54 @@ describe('CoreToolScheduler', () => {
         {
           callId: 'c',
           name: 'selfManaged',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    expect(output).not.toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(output).toBe(content);
+  });
+
+  it('exempts read_mcp_resource from the persistence spill gate', async () => {
+    // The gate fires above DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD (25k) +
+    // GATE_HEADROOM (3k) ≈ 28k and is keyed by tool NAME (not maxOutputChars),
+    // so a self-capped read_mcp_resource result above that size must NOT be
+    // spilled to a stub — the model has to receive the framed body the tool
+    // reports as injected.
+    const content = 'a'.repeat(40_000);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: content,
+      returnDisplay: 'x',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'read_mcp_resource',
+        new MockTool({
+          name: 'read_mcp_resource',
+          execute,
+          maxOutputChars: Number.POSITIVE_INFINITY,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c',
+          name: 'read_mcp_resource',
           args: {},
           isClientInitiated: false,
           prompt_id: 'p',
@@ -2930,6 +2987,179 @@ describe('CoreToolScheduler', () => {
     expect(errored.response.errorType).not.toBe(
       ToolErrorType.UNHANDLED_EXCEPTION,
     );
+  });
+
+  describe('MCP tool-not-found messaging', () => {
+    const makeScheduler = (opts: {
+      mcpServers?: Record<string, unknown>;
+      removed?: string[];
+      // Per-server admission reason for configured-but-unavailable servers.
+      reasons?: Record<string, 'not_allowed' | 'excluded' | 'pending_approval'>;
+      allToolNames?: string[];
+    }) => {
+      const mockToolRegistry = {
+        getAllToolNames: () => opts.allToolNames ?? [],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getMcpServerNames: () => Object.keys(opts.mcpServers ?? {}),
+        getRecentlyRemovedMcpServers: () => opts.removed ?? [],
+        getMcpServerUnavailableReason: (name: string) => {
+          if ((opts.removed ?? []).includes(name)) return 'removed';
+          if (!(name in (opts.mcpServers ?? {}))) return undefined;
+          return opts.reasons?.[name];
+        },
+      } as unknown as Config;
+      return new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+    };
+
+    it('names a server removed this session (precise, branch B)', () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(msg).toContain('"pangu-server"');
+      expect(msg).toContain('removed during this session');
+    });
+
+    it('reports an MCP tool with no configured server (branch A)', () => {
+      const scheduler = makeScheduler({ mcpServers: {}, removed: [] });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__ghost__do_thing',
+      );
+      expect(msg).toContain(
+        'no MCP server providing it is currently configured',
+      );
+    });
+
+    it('reports a configured server that lacks the tool', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        removed: [],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__missing_tool',
+      );
+      expect(msg).toContain('on MCP server "pangu-server"');
+    });
+
+    it('explains a not-allowed server with the allow-list recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'not_allowed' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('"pangu-server"');
+      expect(msg).toContain('allow-list');
+      expect(msg).toContain('mcp.allowed');
+    });
+
+    it('explains an excluded server with the mcp.excluded recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'excluded' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('excluded');
+      expect(msg).toContain('mcp.excluded');
+    });
+
+    it('explains a pending-approval server with the approval recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'pending_approval' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('awaiting approval');
+      expect(msg).toContain('/mcp');
+    });
+
+    it('prefers the removed-this-session message over the generic one', () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(msg).toContain('removed during this session');
+      expect(msg).not.toContain('currently configured');
+    });
+
+    it('returns null for non-MCP names (keeps generic suggestion path)', () => {
+      const scheduler = makeScheduler({ mcpServers: {}, removed: [] });
+      // @ts-expect-error accessing private method
+      expect(scheduler.getMcpToolUnavailableMessage('list_fils')).toBeNull();
+    });
+
+    it('a prefix server name does not match a longer server (boundary)', () => {
+      // `foo` must NOT claim a `mcp__foobar__*` tool.
+      const scheduler = makeScheduler({ mcpServers: {}, removed: ['foo'] });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage('mcp__foobar__x');
+      expect(msg).not.toContain('removed during this session');
+      expect(msg).toContain('no MCP server providing it');
+    });
+
+    it('attributes the tool to the most specific server when names are prefixes', () => {
+      // Both `foo` and `foo__bar` exist; `mcp__foo__bar__baz` startsWith both
+      // `mcp__foo__` and `mcp__foo__bar__`. The longer (more specific) server
+      // must win regardless of iteration order — not the first match.
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['foo', 'foo__bar'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage('mcp__foo__bar__baz');
+      expect(msg).toContain('"foo__bar"');
+      expect(msg).toContain('removed during this session');
+    });
+
+    it('getToolNotFoundMessage routes MCP names to the MCP branch, others to Levenshtein', async () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+        allToolNames: ['list_files', 'read_file'],
+      });
+      // @ts-expect-error accessing private method
+      const mcpMsg = await scheduler.getToolNotFoundMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(mcpMsg).toContain('removed during this session');
+      expect(mcpMsg).not.toContain('Did you mean');
+
+      // @ts-expect-error accessing private method
+      const genericMsg = await scheduler.getToolNotFoundMessage('list_fils');
+      expect(genericMsg).toContain('Did you mean');
+    });
   });
 
   describe('getToolSuggestion', () => {
@@ -5785,6 +6015,7 @@ describe('CoreToolScheduler telemetry spans', () => {
   afterEach(() => {
     shouldThrowToolSpanSetAttribute.value = false;
     shouldThrowToolSpanSetStatus.value = false;
+    mockTelemetrySdkState.initialized = false;
   });
 
   function getLastToolSpan(): ToolSpanRecord {
@@ -5801,6 +6032,8 @@ describe('CoreToolScheduler telemetry spans', () => {
     execute?: () => Promise<ToolResult>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
+    includeSensitiveSpanAttributes?: boolean;
+    sensitiveSpanAttributeMaxLength?: number;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -5853,6 +6086,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(options.messageBus),
       getDisableAllHooks: vi.fn().mockReturnValue(options.disableHooks ?? true),
+      getTelemetryIncludeSensitiveSpanAttributes: () =>
+        options.includeSensitiveSpanAttributes ?? false,
+      getTelemetrySensitiveSpanAttributeMaxLength: () =>
+        options.sensitiveSpanAttributeMaxLength ?? 1024 * 1024,
     } as unknown as Config;
 
     const onAllToolCallsComplete = vi.fn();
@@ -5874,6 +6111,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       abortController?: AbortController;
       throwSpanSetAttribute?: boolean;
       throwSpanSetStatus?: boolean;
+      includeSensitiveSpanAttributes?: boolean;
+      sensitiveSpanAttributeMaxLength?: number;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -6298,6 +6537,27 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('does not fail tool execution when sensitive tool span attributes fail', async () => {
+    mockTelemetrySdkState.initialized = true;
+    debugLoggerWarnSpy.mockClear();
+
+    const { spanRecord, completedCalls } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+      sensitiveSpanAttributeMaxLength: 0,
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(spanRecord.ended).toBe(true);
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      'Failed to add tool input span attributes:',
+      expect.any(TypeError),
+    );
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      'Failed to add tool result span attributes:',
+      expect.any(TypeError),
+    );
   });
 
   it('marks successful tool calls with OK status via endToolSpan', async () => {
@@ -7542,8 +7802,8 @@ describe('CoreToolScheduler telemetry spans', () => {
   });
 
   it('prelude throw in _executeToolCallBody transitions tool from scheduled to error (#4321)', async () => {
-    // _executeToolCallBody's prelude (addToolInputAttributes,
-    // getMessageBus, startToolExecutionSpan, etc.) runs BEFORE the
+    // _executeToolCallBody's prelude (getMessageBus,
+    // startToolExecutionSpan, etc.) runs BEFORE the
     // `scheduled → executing` transition. If a synchronous throw escapes
     // the prelude, the catch in executeSingleToolCall must finalize the
     // tool span with failure_kind=tool_exception AND transition the

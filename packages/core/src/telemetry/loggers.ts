@@ -1017,6 +1017,17 @@ export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
   logger.emit(logRecord);
 }
 
+export function recordSkillInvocation(
+  config: Config,
+  event: { skillName: string; success: boolean },
+): void {
+  uiTelemetryService.recordSkillInvocation(
+    event.skillName,
+    event.success,
+    config.getSessionId(),
+  );
+}
+
 export function logUserFeedback(
   config: Config,
   event: UserFeedbackEvent,

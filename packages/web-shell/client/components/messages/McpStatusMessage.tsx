@@ -840,5 +840,3 @@ export function McpStatusMessage({
     </div>
   );
 }
-
-export { ACTIVE_EVENT as MCP_STATUS_ACTIVE_EVENT };

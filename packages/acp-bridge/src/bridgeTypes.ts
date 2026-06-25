@@ -82,6 +82,8 @@ export interface BridgeSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -317,10 +319,10 @@ export interface AcpSessionBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `PromptQueueFullError` and pre-aborted signals throw
-   * synchronously so HTTP routes can reject before returning 202. Deferred
-   * failures such as `SessionNotFoundError` may be returned as rejected
-   * promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject before
+   * returning 202. Deferred failures such as `SessionNotFoundError` may be
+   * returned as rejected promises.
    */
   sendPrompt(
     sessionId: string,
@@ -764,7 +766,7 @@ export interface AcpSessionBridge {
    */
   isChannelLive(): boolean;
 
-  /** Number of sessions with an active prompt (promptActive === true). */
+  /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
   /**

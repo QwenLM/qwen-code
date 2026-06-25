@@ -11,6 +11,7 @@ import {
   uiTelemetryService,
   type Config,
   createDebugLogger,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
@@ -21,6 +22,7 @@ import { McpPromptLoader } from './services/McpPromptLoader.js';
 import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
+  CommandKind,
   type SlashCommand,
   type SlashCommandActionReturn,
   type ExecutionMode,
@@ -39,6 +41,10 @@ import {
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
 type CommandServiceInstance = Awaited<ReturnType<typeof CommandService.create>>;
+
+function getSkillCommandName(command: SlashCommand): string {
+  return command.skillDetail?.name ?? command.name;
+}
 
 /**
  * Result of handling a slash command in non-interactive mode.
@@ -465,7 +471,26 @@ export const handleSlashCommand = async (
     },
   };
 
-  const result = await commandToExecute.action(context, args);
+  const isSkillCommand = commandToExecute.kind === CommandKind.SKILL;
+  let skillInvocationRecorded = false;
+  const recordSkillCommandInvocation = (success: boolean) => {
+    if (!isSkillCommand || skillInvocationRecorded) {
+      return;
+    }
+    recordSkillInvocation(config, {
+      skillName: getSkillCommandName(commandToExecute),
+      success,
+    });
+    skillInvocationRecorded = true;
+  };
+
+  let result: SlashCommandActionReturn | void;
+  try {
+    result = await commandToExecute.action(context, args);
+  } catch (error) {
+    recordSkillCommandInvocation(false);
+    throw error;
+  }
 
   if (!result) {
     // Command executed but returned no result (e.g., void return)
@@ -477,16 +502,24 @@ export const handleSlashCommand = async (
   }
 
   if (result.type === 'submit_prompt') {
-    const hookResult = await fireUserPromptExpansionHook(
-      config,
-      commandToExecute.name,
-      args,
-      result.content,
-      abortController.signal,
-    );
+    let hookResult: Awaited<ReturnType<typeof fireUserPromptExpansionHook>>;
+    try {
+      hookResult = await fireUserPromptExpansionHook(
+        config,
+        commandToExecute.name,
+        args,
+        result.content,
+        abortController.signal,
+      );
+    } catch (error) {
+      recordSkillCommandInvocation(false);
+      throw error;
+    }
     if (hookResult.blockedResult) {
+      recordSkillCommandInvocation(false);
       return hookResult.blockedResult;
     }
+    recordSkillCommandInvocation(true);
     return handleCommandResult(
       { ...result, content: hookResult.content },
       outputHistoryItems,

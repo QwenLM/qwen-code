@@ -5,9 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
+  assertVoiceBaseUrlNetworkAllowed,
   isStreamingVoiceModel,
   isKeytermEcho,
   resolveVoiceStreamConfig,
@@ -151,6 +155,97 @@ describe('voice-transcriber', () => {
 
     expect(funStreamConfig.transport).toBe('dashscope-task-realtime');
     expect(funStreamConfig.keytermsContext).toBeUndefined();
+  });
+
+  it('threads a custom keyterms file term into the realtime keytermsContext', () => {
+    const workspaceDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'voice-transcriber-keyterms-'),
+    );
+    const qwenDir = path.join(workspaceDir, '.qwen');
+    fs.mkdirSync(qwenDir, { recursive: true });
+    fs.writeFileSync(path.join(qwenDir, 'voice-keyterms.txt'), 'Paraformer\n');
+    try {
+      const settings = {
+        isTrusted: true,
+        workspace: { path: path.join(qwenDir, 'settings.json') },
+        merged: {
+          env: { DASHSCOPE_API_KEY: 'sk-test' },
+          security: { auth: {} },
+        },
+      } as unknown as LoadedSettings;
+
+      const streamConfig = resolveVoiceStreamConfig({
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash-realtime',
+            label: 'Qwen ASR Realtime',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ]),
+        settings,
+        voiceModel: 'qwen3-asr-flash-realtime',
+      });
+
+      expect(streamConfig.keytermsContext).toContain('Paraformer');
+      expect(streamConfig.keytermsContext).toContain('Qwen'); // globals too
+    } finally {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it('threads a custom keyterms file term into the batch keytermsContext', async () => {
+    const workspaceDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'voice-transcriber-keyterms-'),
+    );
+    const qwenDir = path.join(workspaceDir, '.qwen');
+    fs.mkdirSync(qwenDir, { recursive: true });
+    fs.writeFileSync(path.join(qwenDir, 'voice-keyterms.txt'), 'Paraformer\n');
+    try {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      });
+      const settings = {
+        isTrusted: true,
+        workspace: { path: path.join(qwenDir, 'settings.json') },
+        merged: {
+          env: { DASHSCOPE_API_KEY: 'sk-test' },
+          security: { auth: {} },
+        },
+      } as unknown as LoadedSettings;
+
+      await transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings,
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      );
+
+      const body = JSON.parse(fetchFn.mock.calls[0][1].body as string);
+      const sys = body.messages.find(
+        (m: { role: string }) => m.role === 'system',
+      );
+      expect(sys.content[0].text).toContain('Paraformer');
+      expect(sys.content[0].text).toContain('Qwen'); // globals too
+    } finally {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 
   it('does not include project path metadata in voice keyterms', () => {
@@ -379,6 +474,10 @@ describe('voice-transcriber', () => {
       'https://169.254.169.254/v1',
       'https://0.0.0.0/v1',
       'https://[fe80::1]/v1',
+      'https://[fea0::1]/v1',
+      'https://[febf::ff]/v1',
+      'https://[fc00::1]/v1',
+      'https://[fd12::1]/v1',
       'https://[::ffff:169.254.169.254]/v1',
     ]) {
       const config = createConfig([
@@ -398,6 +497,25 @@ describe('voice-transcriber', () => {
         }),
       ).toThrow(/private-network baseUrl/);
     }
+  });
+
+  it('does not over-block public-looking IPv6 literals with fc prefix', () => {
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Public ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://[fc::1]/v1',
+      },
+    ]);
+
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).not.toThrow();
   });
 
   it('rejects voice model hosts that resolve to private-network IPs', async () => {
@@ -420,6 +538,24 @@ describe('voice-transcriber', () => {
           fetchFn: vi.fn(),
         },
       ),
+    ).rejects.toThrow(/private-network address/);
+  });
+
+  it('rejects private-network IP literal voice URLs during network checks', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://169.254.169.254/v1',
+      }),
+    ).rejects.toThrow(/private-network address/);
+  });
+
+  it('rejects private IPv4-compatible IPv6 voice URLs during network checks', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://[::192.168.1.1]/v1',
+      }),
     ).rejects.toThrow(/private-network address/);
   });
 
@@ -533,6 +669,29 @@ describe('voice-transcriber', () => {
     ).toBe(false);
   });
 
+  it('drops a keyterm echo even when user keyterms make the set large', () => {
+    const keyterms = [
+      'grep',
+      'regex',
+      'typescript',
+      'json',
+      'oauth',
+      'subagent',
+      'worktree',
+      'endpoint',
+      'middleware',
+      'schema',
+      ...Array.from({ length: 190 }, (_, i) => `customterm${i}`),
+    ];
+
+    expect(
+      isKeytermEcho(
+        'grep regex typescript json oauth subagent worktree endpoint middleware schema',
+        keyterms.join(' '),
+      ),
+    ).toBe(true);
+  });
+
   it('posts audio to chat/completions as input_audio content', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
@@ -567,6 +726,7 @@ describe('voice-transcriber', () => {
     expect((init.headers as Record<string, string>)['Authorization']).toBe(
       'Bearer sk-test',
     );
+    expect(init.redirect).toBe('manual');
     const body = JSON.parse(init.body as string);
     expect(body.model).toBe('qwen3-asr-flash');
     const userMsg = body.messages.find(
@@ -577,6 +737,41 @@ describe('voice-transcriber', () => {
       /^data:audio\/wav;base64,/,
     );
     expect(userMsg.content[0].input_audio.format).toBe('wav');
+  });
+
+  it('passes the caller abort signal to the ASR fetch', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi
+        .fn()
+        .mockResolvedValue({ choices: [{ message: { content: 'hello' } }] }),
+    });
+    const controller = new AbortController();
+
+    await transcribeVoiceAudio(
+      { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+      {
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Qwen ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1/',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ]),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen3-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+        abortSignal: controller.signal,
+      },
+    );
+
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    controller.abort();
+    expect(init.signal?.aborted).toBe(true);
   });
 
   it('derives input_audio format from the recorder mime type', async () => {
@@ -614,6 +809,46 @@ describe('voice-transcriber', () => {
       /^data:audio\/webm;codecs=opus;base64,/,
     );
     expect(userMsg.content[0].input_audio.format).toBe('webm');
+  });
+
+  it('falls back to wav for octet-stream audio uploads', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi
+        .fn()
+        .mockResolvedValue({ choices: [{ message: { content: 'hello' } }] }),
+    });
+
+    await transcribeVoiceAudio(
+      {
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'application/octet-stream',
+      },
+      {
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Custom ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://asr.example/v1',
+          },
+        ]),
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+      },
+    );
+
+    const [, init] = fetchFn.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    const userMsg = body.messages.find(
+      (m: { role: string }) => m.role === 'user',
+    );
+    expect(userMsg.content[0].input_audio.data).toMatch(
+      /^data:application\/octet-stream;base64,/,
+    );
+    expect(userMsg.content[0].input_audio.format).toBe('wav');
   });
 
   it('sends asr_options.language and a keyterms context message', async () => {
@@ -701,7 +936,7 @@ describe('voice-transcriber', () => {
       text: vi
         .fn()
         .mockResolvedValue(
-          `Bearer sk-secret Invalid API key: sk-test ${'x'.repeat(500)}`,
+          `Authorization: ApiKey sk-route Bearer sk-secret api_key=sk-query secret=sk-secret-token Invalid API key: sk-test ${'x'.repeat(500)}`,
         ),
     });
 
@@ -732,7 +967,12 @@ describe('voice-transcriber', () => {
     expect(error).toBeInstanceOf(Error);
     const message = (error as Error).message;
     expect(message).toContain('Bearer [REDACTED]');
+    expect(message).toContain('Authorization: [REDACTED]');
+    expect(message).toContain('[REDACTED]');
+    expect(message).not.toContain('sk-route');
     expect(message).not.toContain('sk-secret');
+    expect(message).not.toContain('sk-query');
+    expect(message).not.toContain('sk-secret-token');
     expect(message).not.toContain('sk-test');
     expect(message).toMatch(/\.\.\.$/);
   });
@@ -807,6 +1047,41 @@ describe('voice-transcriber', () => {
       ),
     ).resolves.toBe('hi');
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects redirected ASR responses without following them', async () => {
+    const response = {
+      ok: false,
+      status: 307,
+      statusText: 'Temporary Redirect',
+      text: vi.fn(),
+    };
+    const fetchFn = vi.fn().mockResolvedValue(response);
+
+    await expect(
+      transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      ),
+    ).rejects.toThrow('Voice transcription request redirected.');
+
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(init.redirect).toBe('manual');
+    expect(response.text).not.toHaveBeenCalled();
   });
 
   it('drops an echoed keyterm list instead of inserting it', async () => {

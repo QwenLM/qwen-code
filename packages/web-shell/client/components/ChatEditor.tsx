@@ -31,6 +31,7 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { ModeIcon } from './ModeIcon';
+import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
@@ -427,6 +428,17 @@ function getModeLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? modeId;
 }
 
+function getModeListLabel(modeId: string, t: (key: string) => string): string {
+  const labels: Record<string, string> = {
+    plan: t('mode.listLabel.plan'),
+    default: t('mode.listLabel.default'),
+    'auto-edit': t('mode.listLabel.auto-edit'),
+    auto: t('mode.listLabel.auto'),
+    yolo: t('mode.listLabel.yolo'),
+  };
+  return labels[modeId] ?? getModeLabel(modeId, t);
+}
+
 function ToolbarDropdown({
   open,
   items,
@@ -642,11 +654,7 @@ function SlashCommandPanel({
   } as CSSProperties;
 
   return createPortal(
-    <div
-      ref={panelRef}
-      className={styles.slashPortalLayer}
-      style={themeVars}
-    >
+    <div ref={panelRef} className={styles.slashPortalLayer} style={themeVars}>
       <div
         className={styles.slashPanel}
         style={positionedPanelStyle}
@@ -723,8 +731,7 @@ function SlashCommandPanel({
                         ...(showBelow
                           ? { top: rowRect.bottom + gap }
                           : {
-                              bottom:
-                                window.innerHeight - rowRect.top + gap,
+                              bottom: window.innerHeight - rowRect.top + gap,
                             }),
                         maxHeight,
                       });
@@ -952,7 +959,7 @@ export const ChatEditor = memo(
       () =>
         DAEMON_APPROVAL_MODES.map((id) => ({
           id,
-          label: getModeLabel(id, t),
+          label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
@@ -967,7 +974,8 @@ export const ChatEditor = memo(
       return visibleActionSet.has(action);
     };
     const commandNames = useMemo(
-      () => new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
+      () =>
+        new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
       [commands],
     );
     const hasCommand = useCallback(
@@ -1060,11 +1068,6 @@ export const ChatEditor = memo(
               id: 'memory',
               label: t('quickActions.memory'),
               action: { type: 'run', command: '/memory' },
-            },
-            {
-              id: 'extensions',
-              label: t('quickActions.extensions'),
-              action: { type: 'run', command: '/extensions manage' },
             },
             {
               id: 'theme',
@@ -1517,6 +1520,15 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
+                <VoiceButton
+                  disabled={disabled}
+                  onInsert={(text) => {
+                    const existing = core.getText();
+                    const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+                    core.insertText(`${sep}${text} `);
+                    core.focus();
+                  }}
+                />
                 <button
                   className={
                     isRunning

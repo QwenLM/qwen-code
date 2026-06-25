@@ -20,11 +20,7 @@ import { t } from '../../../i18n/index.js';
 import { getCachedStringWidth } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
 
-const isUtf8 = /utf-?8/i.test(
-  process.env['LANG'] || process.env['LC_ALL'] || '',
-);
-export const THINKING_ICON =
-  !process.env['CI'] && isUtf8 ? '💡 ' : isUtf8 ? '⟡ ' : '';
+export const THINKING_ICON = '∴ ';
 
 interface UserMessageProps {
   text: string;
