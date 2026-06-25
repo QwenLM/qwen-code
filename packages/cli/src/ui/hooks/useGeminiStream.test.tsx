@@ -8408,7 +8408,7 @@ describe('useGeminiStream', () => {
       expect(geminiItem.timestamp).toBeGreaterThan(0);
     });
 
-    it('does not attach timestamp to user items', async () => {
+    it('does not attach timestamp to non-gemini items', async () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
@@ -8435,12 +8435,13 @@ describe('useGeminiStream', () => {
         expect(result.current.streamingState).toBe(StreamingState.Idle);
       });
 
-      const userCalls = mockAddItem.mock.calls.filter(
-        (call: any[]) => call[0]?.type === 'user',
+      const nonGeminiCalls = mockAddItem.mock.calls.filter(
+        (call: any[]) => call[0]?.type !== 'gemini',
       );
-      expect(userCalls.length).toBeGreaterThanOrEqual(1);
-      const userItem = userCalls[0][0];
-      expect(userItem).not.toHaveProperty('timestamp');
+      expect(nonGeminiCalls.length).toBeGreaterThanOrEqual(1);
+      for (const call of nonGeminiCalls) {
+        expect(call[0]).not.toHaveProperty('timestamp');
+      }
     });
   });
 });
