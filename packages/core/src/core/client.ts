@@ -2137,10 +2137,10 @@ export class GeminiClient {
         }
 
         const runtimeCtx = this.config.getRuntimeContext();
-        for (const [, value] of runtimeCtx) {
+        for (const [key, value] of runtimeCtx) {
           const safe = escapeSystemReminderTags(value);
           systemReminders.push(
-            `<system-reminder>\n${safe}\n</system-reminder>`,
+            `<system-reminder>\n[${key}] ${safe}\n</system-reminder>`,
           );
         }
 

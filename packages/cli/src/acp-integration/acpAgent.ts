@@ -6180,8 +6180,14 @@ class QwenAgent implements Agent {
             }
           } else if (config.setRuntimeContextEntry(key, value)) {
             appliedKeys.push(key);
+          } else if (!/^[a-zA-Z0-9_-]{1,64}$/.test(key)) {
+            rejected.push({ key, reason: 'invalid_key' });
+          } else if (
+            Buffer.byteLength(value, 'utf8') > 32 * 1024
+          ) {
+            rejected.push({ key, reason: 'value_too_large' });
           } else {
-            rejected.push({ key, reason: 'invalid_key_or_value' });
+            rejected.push({ key, reason: 'capacity_full' });
           }
         }
         return { keys: appliedKeys, rejected };
