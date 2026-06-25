@@ -16,6 +16,7 @@ const raceState = vi.hoisted(() => ({
   enabled: false,
   swapped: false,
   mode: 'recreate' as 'recreate' | 'overwrite',
+  oversizedReadText: '',
 }));
 
 vi.mock('node:fs', async () => {
@@ -44,6 +45,17 @@ vi.mock('node:fs', async () => {
           : actual.openSync(file, flags, mode);
       },
     ),
+    readFileSync: vi.fn(
+      (
+        pathOrFd: Parameters<typeof actual.readFileSync>[0],
+        options?: Parameters<typeof actual.readFileSync>[1],
+      ) => {
+        if (raceState.oversizedReadText && typeof pathOrFd === 'number') {
+          return raceState.oversizedReadText;
+        }
+        return actual.readFileSync(pathOrFd, options);
+      },
+    ),
   };
 });
 
@@ -67,6 +79,7 @@ describe('buildVoiceKeyterms race checks', () => {
     raceState.enabled = false;
     raceState.swapped = false;
     raceState.mode = 'recreate';
+    raceState.oversizedReadText = '';
     fs.rmSync(workspaceDir, { recursive: true, force: true });
     workspaceDir = '';
   });
@@ -108,6 +121,22 @@ describe('buildVoiceKeyterms race checks', () => {
 
     expect(raceState.swapped).toBe(true);
     expect(terms).not.toContain('EvilTerm');
+    expect(terms).toContain('TypeScript'); // globals only
+  });
+
+  it('does not read content larger than the file size cap after open', async () => {
+    workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
+    const qwenDir = path.join(workspaceDir, '.qwen');
+    fs.mkdirSync(qwenDir, { recursive: true });
+    const target = path.join(qwenDir, 'voice-keyterms.txt');
+    fs.writeFileSync(target, 'Small\n');
+
+    raceState.oversizedReadText = `HugeTermMarker\n${'x'.repeat(64 * 1024)}`;
+
+    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
+    const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
+
+    expect(terms).not.toContain('HugeTermMarker');
     expect(terms).toContain('TypeScript'); // globals only
   });
 });

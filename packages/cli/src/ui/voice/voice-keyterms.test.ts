@@ -222,6 +222,20 @@ describe('buildVoiceKeyterms', () => {
       }
     });
 
+    it('falls back to a user-scoped keytermsFile when the system file has no terms', () => {
+      const systemFile = path.join(workspaceDir, 'system-terms.txt');
+      const userFile = path.join(workspaceDir, 'user-terms.txt');
+      fs.writeFileSync(systemFile, '# comments only\n\n');
+      fs.writeFileSync(userFile, 'UserFallbackTerm\n');
+      const terms = buildVoiceKeyterms(
+        makeSettings(workspaceDir, {
+          systemKeytermsFile: systemFile,
+          keytermsFile: userFile,
+        }),
+      );
+      expect(terms).toContain('UserFallbackTerm');
+    });
+
     it('dedupes case-insensitively and keeps the global casing', () => {
       fs.writeFileSync(
         path.join(qwenDir, 'voice-keyterms.txt'),

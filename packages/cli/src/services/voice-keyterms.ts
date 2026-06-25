@@ -107,7 +107,10 @@ function readUserKeyterms(settings: LoadedSettings): string[] {
       if (content === undefined) {
         continue;
       }
-      return parseKeyterms(content);
+      const parsed = parseKeyterms(content);
+      if (parsed.length > 0) {
+        return parsed;
+      }
     } catch {
       // Try the next configured scope, if any.
     }
@@ -192,10 +195,13 @@ function readRegularFileNoFollow({
 }: ValidatedKeytermsFile): string | undefined {
   let fd: number | undefined;
   try {
-    const flags =
-      typeof fs.constants.O_NOFOLLOW === 'number'
-        ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
-        : fs.constants.O_RDONLY;
+    let flags = fs.constants.O_RDONLY;
+    if (typeof fs.constants.O_NOFOLLOW === 'number') {
+      flags |= fs.constants.O_NOFOLLOW;
+    }
+    if (typeof fs.constants.O_NONBLOCK === 'number') {
+      flags |= fs.constants.O_NONBLOCK;
+    }
     fd = fs.openSync(filePath, flags);
     const stat = fs.fstatSync(fd);
     if (
@@ -211,7 +217,11 @@ function readRegularFileNoFollow({
     ) {
       return undefined;
     }
-    return fs.readFileSync(fd, 'utf-8');
+    const content = fs.readFileSync(fd, 'utf-8');
+    if (Buffer.byteLength(content, 'utf8') > MAX_KEYTERMS_FILE_BYTES) {
+      return undefined;
+    }
+    return content;
   } finally {
     if (fd !== undefined) {
       fs.closeSync(fd);
