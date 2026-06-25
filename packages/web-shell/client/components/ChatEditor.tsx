@@ -428,6 +428,17 @@ function getModeLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? modeId;
 }
 
+function getModeListLabel(modeId: string, t: (key: string) => string): string {
+  const labels: Record<string, string> = {
+    plan: t('mode.listLabel.plan'),
+    default: t('mode.listLabel.default'),
+    'auto-edit': t('mode.listLabel.auto-edit'),
+    auto: t('mode.listLabel.auto'),
+    yolo: t('mode.listLabel.yolo'),
+  };
+  return labels[modeId] ?? getModeLabel(modeId, t);
+}
+
 function ToolbarDropdown({
   open,
   items,
@@ -948,7 +959,7 @@ export const ChatEditor = memo(
       () =>
         DAEMON_APPROVAL_MODES.map((id) => ({
           id,
-          label: getModeLabel(id, t),
+          label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
@@ -1057,11 +1068,6 @@ export const ChatEditor = memo(
               id: 'memory',
               label: t('quickActions.memory'),
               action: { type: 'run', command: '/memory' },
-            },
-            {
-              id: 'extensions',
-              label: t('quickActions.extensions'),
-              action: { type: 'run', command: '/extensions manage' },
             },
             {
               id: 'theme',

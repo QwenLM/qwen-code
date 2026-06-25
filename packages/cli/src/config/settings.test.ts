@@ -3558,7 +3558,7 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
-    it('logs when setValue persistence is refused', () => {
+    it('logs without throwing when setValue persistence is refused', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -3576,13 +3576,69 @@ describe('Settings Loading and Merging', () => {
         commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValueOnce(false);
 
-      settings.setValue(SettingScope.User, 'mcpServers', {});
+      expect(() =>
+        settings.setValue(SettingScope.User, 'mcpServers', {}),
+      ).not.toThrow();
 
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
         expect.stringContaining(
           'saveSettings: updateSettingsFilePreservingFormat returned false',
         ),
       );
+    });
+
+    it('re-syncs uncommitted scopes from disk when setValues persistence fails', () => {
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+        [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(
+          p.toString(),
+        ),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              general: { voice: { language: 'en' } },
+            });
+          }
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({
+              general: { voice: { enabled: false } },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mockFn =
+        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValueOnce(true).mockReturnValueOnce(false);
+      const committed: SettingScope[] = [];
+
+      expect(() =>
+        settings.setValues(
+          [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.language',
+              value: 'zh',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.enabled',
+              value: true,
+            },
+          ],
+          (scope) => committed.push(scope),
+        ),
+      ).toThrow(
+        /saveSettings: updateSettingsFilePreservingFormat returned false/,
+      );
+
+      expect(committed).toEqual([SettingScope.User]);
+      expect(settings.user.settings.general?.voice?.language).toBe('zh');
+      expect(settings.workspace.settings.general?.voice?.enabled).toBe(false);
+      expect(settings.merged.general?.voice?.enabled).toBe(false);
     });
   });
 

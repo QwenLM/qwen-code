@@ -30,6 +30,8 @@ import {
 } from './agent-context.js';
 import {
   createDuplicateProviderToolCallResponse,
+  findRepeatedDuplicateProviderToolCall,
+  markDuplicateProviderToolCallResponseSent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
 import {
@@ -662,6 +664,9 @@ export class AgentCore {
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
     const handledProviderToolCallIds = chat.getHistoryFunctionResponseIds();
+    // Scoped to this reasoning loop. A second duplicate response for the same
+    // provider id would keep deterministic providers in a tool-result loop.
+    const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
 
     while (true) {
@@ -841,7 +846,7 @@ export class AgentCore {
         }
 
         if (functionCalls.length > 0) {
-          currentMessages = await this.processFunctionCalls(
+          const toolCallResult = await this.processFunctionCalls(
             functionCalls,
             roundAbortController,
             promptId,
@@ -850,7 +855,13 @@ export class AgentCore {
             currentResponseId,
             wasOutputTruncated,
             handledProviderToolCallIds,
+            duplicateProviderToolCallResponseIds,
           );
+          if (toolCallResult.repeatedDuplicateProviderToolCall) {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            break;
+          }
+          currentMessages = toolCallResult.messages;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -866,6 +877,10 @@ export class AgentCore {
             // user-role record. The framing prefix is stripped — the prefix
             // is a model-facing detail, not part of the original message.
             this.emitExternalInputEvents(externalInputs);
+          }
+          if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
+            terminateMode = AgentTerminateMode.ERROR;
+            break;
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -1168,12 +1183,36 @@ export class AgentCore {
     responseId?: string,
     wasOutputTruncated = false,
     handledProviderToolCallIds = new Set<string>(),
-  ): Promise<Content[]> {
+    duplicateProviderToolCallResponseIds = new Set<string>(),
+  ): Promise<{
+    messages: Content[];
+    repeatedDuplicateProviderToolCall: boolean;
+  }> {
     const toolResponseParts: Part[] = [];
     const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
+    const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
+      uniqueFunctionCalls,
+      (fc) => getProviderToolCallId(fc) ?? fc.id,
+      handledProviderToolCallIds,
+      duplicateProviderToolCallResponseIds,
+    );
+    if (repeatedDuplicateCall) {
+      const providerCallId =
+        getProviderToolCallId(repeatedDuplicateCall) ??
+        repeatedDuplicateCall.id;
+      this.runtimeContext
+        .getDebugLogger()
+        ?.debug(
+          `[processFunctionCalls] Dropping batch after repeated duplicate provider tool-call id: ${providerCallId} (tool: ${String(repeatedDuplicateCall.name)}, round: ${currentRound})`,
+        );
+      return {
+        messages: [{ role: 'user', parts: [] }],
+        repeatedDuplicateProviderToolCall: true,
+      };
+    }
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
@@ -1210,6 +1249,11 @@ export class AgentCore {
 
       if (providerCallId) {
         if (handledProviderToolCallIds.has(providerCallId)) {
+          markDuplicateProviderToolCallResponseSent(
+            providerCallId,
+            duplicateProviderToolCallResponseIds,
+          );
+
           const request: ToolCallRequestInfo = {
             callId,
             providerCallId,
@@ -1542,7 +1586,10 @@ export class AgentCore {
       });
     }
 
-    return [{ role: 'user', parts: toolResponseParts }];
+    return {
+      messages: [{ role: 'user', parts: toolResponseParts }],
+      repeatedDuplicateProviderToolCall: false,
+    };
   }
 
   // ─── Observable state accessors ────────────────────────────
