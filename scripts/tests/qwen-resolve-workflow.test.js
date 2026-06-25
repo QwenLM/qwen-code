@@ -89,8 +89,17 @@ describe('qwen resolve workflow', () => {
 
   // Whole-file `toContain` cannot tell which job a guard lives on. Slice the
   // resolve-pr job so these assertions fail if a future edit drops a guard
-  // specifically from the credentialed conflict-resolution path.
-  const resolveJob = workflow.slice(workflow.indexOf('\n  resolve-pr:'));
+  // specifically from the credentialed conflict-resolution path. Bound the slice
+  // at the next top-level job so a job added after resolve-pr can't leak its
+  // strings in and mask a guard removed from resolve-pr itself. Match a line
+  // indented exactly two spaces; `indexOf('\n  ')` would wrongly stop at the
+  // first 4-space-indented line inside the job.
+  const resolveJobStart = workflow.indexOf('\n  resolve-pr:');
+  const nextJob = workflow.slice(resolveJobStart + 1).search(/\n {2}\S/);
+  const resolveJob =
+    nextJob === -1
+      ? workflow.slice(resolveJobStart)
+      : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
 
   it('keeps the authorization and scope guards on resolve-pr', () => {
     // /resolve must require write+ permission before any credentialed push.
@@ -105,8 +114,11 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).toContain(
       'Agent modified files outside the conflict set',
     );
-    // The push only happens through the credentialed publish step.
-    expect(resolveJob).toContain('--force-with-lease');
+    // The push only happens through the credentialed publish step, SHA-pinned:
+    // the bare flag would allow any force-push regardless of the remote's current
+    // state, defeating the concurrent-update guard.
+    expect(resolveJob).toContain('--force-with-lease="refs/heads/');
+    expect(resolveJob).toContain(':${HEAD_SHA}"');
   });
 
   it('keeps the verification-gate failure checks on resolve-pr', () => {
@@ -137,6 +149,8 @@ describe('qwen resolve workflow', () => {
     // PR-controlled lifecycle scripts never run during install/refresh.
     expect(resolveJob).toContain('npm ci --ignore-scripts');
     expect(resolveJob).toContain('npm install --ignore-scripts');
+    // Concurrent /resolve runs must not interleave on the credentialed push.
+    expect(resolveJob).toContain('cancel-in-progress: false');
   });
 
   it('runs the agent without any GitHub credentials', () => {

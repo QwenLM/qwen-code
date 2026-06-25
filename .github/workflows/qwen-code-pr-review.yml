@@ -707,19 +707,32 @@ jobs:
           PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
         run: |-
           set -euo pipefail
-          mkdir -p "${WORKDIR}"
 
-          write_output() {
-            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
-          }
-
-          # Fail closed: if we exit before writing `decision`, the report steps
-          # (which gate on a concrete value) skip, leaving a red run with no comment.
+          # Fail closed before any fallible command (mkdir, gh, jq): if we exit
+          # before writing `decision`, the report steps (which gate on a concrete
+          # value) skip, leaving a red run with no comment. Arm the trap before
+          # `mkdir` so even a mkdir failure still reports.
           decision_written=0
           trap '[ "$decision_written" = 1 ] || {
             printf "decision=failed\n" >> "$GITHUB_OUTPUT"
             printf "skip_reason=%s\n" "Internal error while preparing PR #${PR_NUMBER:-?} for /resolve (see workflow logs). Re-run /resolve." >> "$GITHUB_OUTPUT"
           }' EXIT
+
+          mkdir -p "${WORKDIR}"
+
+          write_output() {
+            # Reject CR/LF: these are single-line values. A value with an embedded
+            # newline (e.g. an attacker-set PR title) could otherwise inject extra
+            # key=value lines into $GITHUB_OUTPUT and override head_ref/head_sha,
+            # which the credentialed force-push downstream trusts.
+            case "$2" in
+              *$'\n'* | *$'\r'*)
+                echo "::error::Refusing to write output '$1': value contains a newline." >&2
+                return 1
+                ;;
+            esac
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+          }
 
           finish_without_agent() {
             write_output decision "$1"
@@ -860,7 +873,7 @@ jobs:
             ## Required work
 
             1. Read context.md for the base branch name, then inspect the current branch and its existing diff against `origin/<base branch>`.
-            2. Run `git merge origin/<base branch>` using the base branch name from context.md.
+            2. Run `git merge origin/<base branch>` using the base branch name from context.md. Resolve in the working tree, then commit with `git commit -m` using the Conventional Commit message below — do **not** keep Git's default `Merge branch …` message, CI rejects it.
             3. Resolve every conflict by understanding both sides. Do not blindly take ours or theirs.
             4. Only modify files that actually conflicted. Do not edit unrelated files: a separate CI step checks the change scope and rejects out-of-scope edits.
             5. Re-read the final diff as a reviewer. A separate CI step runs build, typecheck, lint, and tests without credentials, so you do not need to run them here.
@@ -872,6 +885,7 @@ jobs:
             - If you cannot confidently resolve the conflict or verification fails, do not commit. Write `${{ env.WORKDIR }}/failure.md` with the blocker and what you learned.
 
       - name: 'Refresh dependencies'
+        id: 'refresh_deps'
         if: "steps.prepare.outputs.decision == 'run' && steps.resolve_conflicts.outcome == 'success'"
         # `npm install`, not `npm ci`: a package.json conflict can leave the lockfile
         # inconsistent and `npm ci` hard-fails on that; install reconciles it.
@@ -895,6 +909,7 @@ jobs:
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
           HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
           RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'
+          REFRESH_OUTCOME: '${{ steps.refresh_deps.outcome }}'
         run: |-
           set -euo pipefail
 
@@ -904,6 +919,15 @@ jobs:
           # Surface the real cause instead.
           if [ "$RESOLVE_OUTCOME" != "success" ]; then
             echo "The conflict-resolution agent step did not succeed (outcome=${RESOLVE_OUTCOME}): API/quota/infrastructure error or cancellation. Check its logs."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # If the dependency refresh failed (e.g. an irreconcilable lockfile), the
+          # build/typecheck/test below would run against stale node_modules and
+          # misreport the real cause as "Build failed". Surface it directly.
+          if [ "$REFRESH_OUTCOME" != "success" ]; then
+            echo "Dependency refresh did not succeed (outcome=${REFRESH_OUTCOME}); build/typecheck/test results would be unreliable. Check its logs."
             echo "outcome=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -974,8 +998,13 @@ jobs:
           # deliberately file-level, not per-hunk: real containment is sandbox +
           # same-repo guard + no agent token; this is one defense-in-depth layer.
           merge_base="$(git merge-base "origin/${BASE_REF}" "origin/${HEAD_REF}")"
-          base_changed="$(git diff --name-only "${merge_base}" "origin/${BASE_REF}" | sort -u)"
-          agent_changed="$(git diff --name-only "origin/${HEAD_REF}" HEAD | sort -u)"
+          # -z/sort -zu mirrors the conflict-marker check above so unusual
+          # filenames in the diff are handled consistently. ponytail: tr back to
+          # newlines because bash vars can't hold NUL — a filename containing a
+          # literal newline still splits, but that's covered by the sandbox +
+          # same-repo + no-token containment this guard backstops.
+          base_changed="$(git diff --name-only -z "${merge_base}" "origin/${BASE_REF}" | sort -zu | tr '\0' '\n')"
+          agent_changed="$(git diff --name-only -z "origin/${HEAD_REF}" HEAD | sort -zu | tr '\0' '\n')"
           out_of_scope="$(comm -23 <(printf '%s\n' "$agent_changed") <(printf '%s\n' "$base_changed"))"
           if [ -n "$out_of_scope" ]; then
             echo "Agent modified files outside the conflict set:"
@@ -1104,6 +1133,10 @@ jobs:
               push_failed=true
               echo "::error::Push rejected; the branch was updated concurrently. Re-run /resolve."
             fi
+            # Scrub the PAT from .git/config: this job runs on a self-hosted ECS
+            # runner where .git/config persists between jobs, so a later job could
+            # otherwise read the token. Runs regardless of push outcome.
+            git remote set-url origin "https://github.com/${REPO}.git"
           fi
 
           {
