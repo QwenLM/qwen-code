@@ -55,7 +55,7 @@ Use this path only when the user supplied a prompt and no interval.
    - Do not call LoopWakeup if the task is complete.
    - Do not call LoopWakeup if the task is blocked on user input or external state that cannot be checked later.
    - Do not call LoopWakeup just to keep polling when no useful next check exists.
-   - If you started a background agent or a Monitor, it wakes you via a terminal `<task-notification>` on exit, failure, cancellation, or monitor auto-stop — so set LoopWakeup as a long fallback rather than a short poll. Do not omit it just because something is watching: the work may hang, a Monitor auto-stops on idle or max-events, and one owned by another agent never notifies you. Omit LoopWakeup only on the terminal conditions above (complete, or blocked).
+   - If you started a background agent or a Monitor, it wakes you via a terminal `<task-notification>` on exit, failure, cancellation, or monitor auto-stop — so set LoopWakeup as a long fallback rather than a short poll. Do not omit it just because something is watching: the work may hang, or a Monitor may auto-stop on idle or max-events (and one owned by another agent routes its notification only to that agent). Omit LoopWakeup only on the terminal conditions above (complete, blocked, or repeated monitor auto-stop).
 5. When scheduling a continuation, call LoopWakeup with:
    - `delaySeconds`: the next useful delay in seconds. The runtime clamps to 60–3600 (1–60 min); follow the tool's own guidance on picking a value — it accounts for the prompt-cache window and for the fallback-heartbeat case when a background task will wake you.
    - `prompt`: `/loop ${original prompt}`

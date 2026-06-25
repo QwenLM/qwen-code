@@ -52,7 +52,7 @@ describe('bundled loop skill', () => {
 
     expect(body).toContain('<task-notification>');
     expect(body).toContain('set LoopWakeup as a long fallback');
-    expect(body).toContain('auto-stops on idle or max-events');
+    expect(body).toContain('auto-stop on idle or max-events');
     expect(body).toContain('handle that event before re-running the prompt');
     expect(body).toContain('terminal `<task-notification>`');
     expect(body).not.toContain('per stdout line');
@@ -66,7 +66,10 @@ describe('bundled loop skill', () => {
     expect(body).toContain('If the signal is ambiguous');
     expect(body).toContain('Do not omit it just because something is watching');
     expect(body).toContain('the work may hang');
-    expect(body).toContain('one owned by another agent never notifies you');
+    expect(body).toContain(
+      'one owned by another agent routes its notification only to that agent',
+    );
+    expect(body).toContain('repeated monitor auto-stop');
     expect(body).toContain('not a bare `/loop` wakeup prompt');
   });
 
