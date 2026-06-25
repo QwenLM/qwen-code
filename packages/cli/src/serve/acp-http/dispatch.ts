@@ -2722,9 +2722,17 @@ export class AcpDispatcher {
     conn: AcpConnection,
     sessionId: string,
     signal: AbortSignal,
+    lastEventId?: number,
   ): Promise<void> {
     try {
-      const iterable = this.bridge.subscribeEvents(sessionId, { signal });
+      // `lastEventId` (from the `Last-Event-ID` reconnect header) drives the
+      // EventBus ring replay: events with `id > lastEventId` still buffered
+      // are replayed before live events flow, recovering content frames lost
+      // in a mid-turn proxy gap (§1.8). `undefined` ⇒ live-only, as before.
+      const iterable = this.bridge.subscribeEvents(sessionId, {
+        signal,
+        ...(lastEventId !== undefined ? { lastEventId } : {}),
+      });
       for await (const event of iterable) {
         if (signal.aborted) break;
         // Count event delivery as connection activity so a long, quiet prompt
@@ -2761,7 +2769,13 @@ export class AcpDispatcher {
     switch (event.type) {
       case 'session_update': {
         // `event.data` is the ACP `SessionNotification` (params shape).
-        conn.sendSession(sessionId, notification('session/update', event.data));
+        // `event.id` is the bus cursor → SSE `id:` line for `Last-Event-ID`
+        // resume (the content frames §1.8 recovers all flow through here).
+        conn.sendSession(
+          sessionId,
+          notification('session/update', event.data),
+          event.id,
+        );
         return;
       }
       case 'permission_request': {
@@ -2813,6 +2827,9 @@ export class AcpDispatcher {
             options: data.options,
             _meta: { [QWEN_META_KEY]: { requestId: data.requestId } },
           }),
+          // Carry the bus cursor: a permission request is a real sequenced
+          // event, so the client must resume past it.
+          event.id,
         );
         return;
       }
@@ -2825,18 +2842,24 @@ export class AcpDispatcher {
             ...(event.data as object),
             kind: 'stream_error',
           }),
+          // Synthetic terminal frame — no bus id, so no SSE `id:` line.
+          event.id,
         );
         return;
       }
       default: {
         // client_evicted / slow_client_warning / state_resync_required /
         // model_switched / approval_mode_changed / … → opaque qwen notify.
+        // `event.id` is undefined for the synthetic control frames (no SSE
+        // `id:` line, so they don't burn a slot in the resume sequence) and
+        // set for ring-backed daemon events.
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
             kind: event.type,
             data: event.data,
           }),
+          event.id,
         );
       }
     }

@@ -42,6 +42,12 @@ export type DetachSessionFn = (
   clientId: string | undefined,
 ) => void;
 
+/** A pre-attach session frame plus its optional bus event id (SSE cursor). */
+interface BufferedSessionFrame {
+  frame: unknown;
+  id?: number;
+}
+
 /**
  * Tracks one logical ACP-over-HTTP connection (RFD #721). A connection is
  * minted at `initialize`, keyed by `Acp-Connection-Id`, and may host many
@@ -60,8 +66,12 @@ export interface SessionBinding {
   clientId?: string;
   /** Session-scoped SSE stream (the client's `GET /acp` with both headers). */
   stream?: TransportStream;
-  /** Frames emitted before the session stream attached, flushed on attach. */
-  buffer: unknown[];
+  /**
+   * Frames emitted before the session stream attached, flushed on attach.
+   * Each keeps its bus event id (when it has one) so the SSE `id:` resume
+   * cursor survives the buffer → live-stream handoff.
+   */
+  buffer: BufferedSessionFrame[];
   /**
    * Aborts the bridge event subscription tied to the CURRENT session
    * stream. Replaced with a fresh controller on every re-attach — a
@@ -293,13 +303,13 @@ export class AcpConnection {
    * creating here would resurrect a ghost binding (no stream, no owner) that
    * buffers up to 256 late pump/reply frames forever.
    */
-  sendSession(sessionId: string, frame: unknown): void {
+  sendSession(sessionId: string, frame: unknown, id?: number): void {
     const binding = this.sessions.get(sessionId);
     if (!binding) return;
     if (binding.stream && !binding.stream.isClosed) {
-      void binding.stream.send(frame);
+      void binding.stream.send(frame, id);
     } else {
-      pushCapped(binding.buffer, frame, `session ${sessionId}`);
+      pushCapped(binding.buffer, { frame, id }, `session ${sessionId}`);
     }
   }
 
@@ -329,7 +339,9 @@ export class AcpConnection {
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
       prevStream.close();
     }
-    for (const frame of binding.buffer.splice(0)) void stream.send(frame);
+    for (const { frame, id } of binding.buffer.splice(0)) {
+      void stream.send(frame, id);
+    }
     return binding;
   }
 
@@ -399,7 +411,7 @@ export class AcpConnection {
   }
 }
 
-function pushCapped(buf: unknown[], frame: unknown, label = 'stream'): void {
+function pushCapped<T>(buf: T[], frame: T, label = 'stream'): void {
   if (buf.length >= MAX_BUFFERED_FRAMES) {
     buf.shift();
     writeStderrLine(

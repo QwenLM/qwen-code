@@ -184,9 +184,15 @@ class FakeBridge {
   }
 
   subscribeThrows = false;
+  /** Records every subscribeEvents call so tests can assert the resume cursor. */
+  subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
 
-  subscribeEvents(sessionId: string, opts?: { signal?: AbortSignal }) {
+  subscribeEvents(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; lastEventId?: number },
+  ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
+    this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
     return q.iterable;
@@ -526,6 +532,53 @@ async function* readSse(
   }
 }
 
+/**
+ * Like `readSse` but yields the RAW frame text (so the `id:` resume-cursor
+ * line is visible — `readSse` only keeps the parsed `data:` payload).
+ */
+async function* readSseRaw(
+  res: Response,
+  signal: AbortSignal,
+): AsyncGenerator<string> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  signal.addEventListener('abort', () => void reader.cancel().catch(() => {}));
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buf += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      // Skip the `retry:` hint and comment-only heartbeats (no `data:` line).
+      if (frame.split('\n').some((l) => l.startsWith('data: '))) yield frame;
+    }
+  }
+}
+
+/** Read the next N RAW data frames (with `id:` lines) from an SSE response. */
+async function takeRawFrames(
+  res: Response,
+  n: number,
+  timeoutMs = 2000,
+): Promise<string[]> {
+  const out: string[] = [];
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    for await (const f of readSseRaw(res, ac.signal)) {
+      out.push(f);
+      if (out.length >= n) break;
+    }
+  } finally {
+    clearTimeout(timer);
+    ac.abort();
+  }
+  return out;
+}
+
 /** Read the next N data frames from an SSE response, then abort. */
 async function takeFrames(
   res: Response,
@@ -848,6 +901,83 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(
       (frames[1] as { result: { stopReason: string } }).result.stopReason,
     ).toBe('end_turn');
+  });
+
+  it('live session/update frames carry an SSE `id:` resume cursor', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk' },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeRawFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    const frames = await got;
+    // `pushQueue` stamps bus ids from 1, so the first session_update is id 1.
+    // The frame MUST carry `id: 1` before its `data:` line — that is the
+    // cursor an SSE client echoes as `Last-Event-ID` on reconnect.
+    expect(frames[0]).toMatch(/(^|\n)id: 1\ndata: /);
+    expect(frames[0]).toContain('"method":"session/update"');
+  });
+
+  it('GET Last-Event-ID flows to subscribeEvents as the resume cursor', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    // Reconnect carrying a cursor → subscribeEvents gets lastEventId=42.
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+    });
+    await resumed.body?.cancel().catch(() => {});
+
+    // A non-numeric header is rejected (logged) → live-only (undefined).
+    const bad = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': 'not-a-number',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await bad.body?.cancel().catch(() => {});
+
+    // A fresh stream with no header → live-only (undefined), as before.
+    const fresh = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 3);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await fresh.body?.cancel().catch(() => {});
   });
 
   it('permission request round-trips agent→client→agent', async () => {

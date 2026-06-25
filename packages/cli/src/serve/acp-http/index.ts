@@ -433,6 +433,10 @@ export function mountAcpHttp(
     // handshake precedes any buffered frames the attach flushes.
     stream.open();
     conn.attachSessionStream(sessionId, stream, ac);
+    // Resume cursor: an EventSource/SSE client auto-resends the last `id:` it
+    // saw as `Last-Event-ID` on reconnect. Drives the EventBus ring replay so
+    // content frames produced during a mid-turn proxy gap are recovered (§1.8).
+    const lastEventId = parseLastEventId(headerOf(req, 'last-event-id'));
     // Identity-guarded close: only tear down if THIS stream is still the
     // session's current one (a reconnect between settle and this microtask
     // would otherwise kill the fresh stream).
@@ -441,19 +445,21 @@ export function mountAcpHttp(
         conn.closeSessionStream(sessionId);
       }
     };
-    void dispatcher.pumpSessionEvents(conn, sessionId, ac.signal).then(
-      // NORMAL completion (iterator returned `done` — subprocess ended): close
-      // so the stream isn't a zombie heartbeating with nothing left to deliver.
-      closeIfCurrent,
-      (err: unknown) => {
-        writeStderrLine(
-          `qwen serve: /acp event pump error (${sessionId}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        closeIfCurrent();
-      },
-    );
+    void dispatcher
+      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
+      .then(
+        // NORMAL completion (iterator returned `done` — subprocess ended): close
+        // so the stream isn't a zombie heartbeating with nothing left to deliver.
+        closeIfCurrent,
+        (err: unknown) => {
+          writeStderrLine(
+            `qwen serve: /acp event pump error (${sessionId}): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          closeIfCurrent();
+        },
+      );
   });
 
   // ── DELETE /acp ────────────────────────────────────────────────────
@@ -887,6 +893,34 @@ export function mountAcpHttp(
 function headerOf(req: Request, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * Parse a `Last-Event-ID` reconnect header into a bus event id. Mirrors the
+ * REST surface's `parseLastEventId` (server.ts): accept ONLY pure decimal
+ * digits (so "1abc"/"1.5" don't silently parse to 1) and reject values past
+ * `Number.MAX_SAFE_INTEGER` (the bus's monotonic ids are bounded by it).
+ * Returns `undefined` for missing/invalid headers ⇒ live-only subscription.
+ * Replicated here rather than imported to avoid a server↔acp-http import cycle.
+ */
+function parseLastEventId(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) {
+    if (raw.length > 0) {
+      writeStderrLine(
+        `qwen serve: /acp rejected Last-Event-ID (not a decimal integer)`,
+      );
+    }
+    return undefined;
+  }
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) {
+    writeStderrLine(
+      `qwen serve: /acp rejected Last-Event-ID (exceeds MAX_SAFE_INTEGER)`,
+    );
+    return undefined;
+  }
+  return n;
 }
 
 /**
