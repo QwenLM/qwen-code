@@ -27,6 +27,10 @@ describe('buildContextUsage', () => {
     expect(buildContextUsage(200_000, -5)).toBeUndefined();
   });
 
+  it('returns undefined when inputTokens is NaN', () => {
+    expect(buildContextUsage(200_000, NaN)).toBeUndefined();
+  });
+
   it('returns undefined when contextWindowSize is negative', () => {
     expect(buildContextUsage(-1, 140_000)).toBeUndefined();
   });

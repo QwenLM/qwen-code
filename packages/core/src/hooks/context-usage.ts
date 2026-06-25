@@ -4,7 +4,12 @@ export function buildContextUsage(
   contextWindowSize: number | undefined,
   inputTokens: number,
 ): ContextUsageData | undefined {
-  if (!contextWindowSize || contextWindowSize <= 0 || inputTokens <= 0) {
+  if (
+    !contextWindowSize ||
+    contextWindowSize <= 0 ||
+    !Number.isFinite(inputTokens) ||
+    inputTokens <= 0
+  ) {
     return undefined;
   }
   return {
