@@ -134,19 +134,22 @@ function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const egressNote = result.egressOccurred
     ? ` Your image and prompt/context were sent to ${target}.`
     : '';
+  // No leading glyph here: the renderer supplies the gutter prefix (🔎 for the
+  // dim notice, ✕ for the error variant). Baking one in too produced a doubled
+  // marker (e.g. `● 🔎 …`).
   if (result.status === 'failed') {
     const reason = result.egressOccurred
       ? 'the vision model request failed'
       : 'the vision bridge could not run';
-    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+    return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
-    return `🔎 Vision bridge cancelled.${egressNote}`;
+    return `Vision bridge cancelled.${egressNote}`;
   }
   // On success the image was always sent, so disclose egress unconditionally.
   const omitted =
     result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
-  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
+  const header = `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   return header;
 }
 
@@ -857,7 +860,7 @@ export const useGeminiStream = (
             type:
               bridgeResult.status === 'failed'
                 ? MessageType.ERROR
-                : MessageType.INFO,
+                : MessageType.VISION_NOTICE,
             text: formatVisionBridgeNotice(bridgeResult),
           },
           timestamp,

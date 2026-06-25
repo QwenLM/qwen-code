@@ -453,14 +453,14 @@ describe('useGeminiStream', () => {
       expect(sent).not.toContain('inlineData');
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.INFO,
+          type: MessageType.VISION_NOTICE,
           text: expect.stringContaining('Converted 1 image(s) to text via vm'),
         }),
         expect.any(Number),
       );
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.INFO,
+          type: MessageType.VISION_NOTICE,
           text: expect.stringContaining(
             'Your image and prompt/context were sent',
           ),
@@ -472,7 +472,7 @@ describe('useGeminiStream', () => {
       // description that the model already surfaces in its answer.
       const visionNotice = mockAddItem.mock.calls.find(
         (c) =>
-          c[0]?.type === MessageType.INFO &&
+          c[0]?.type === MessageType.VISION_NOTICE &&
           String(c[0]?.text).includes('Converted'),
       );
       expect(String(visionNotice?.[0]?.text)).not.toContain(
@@ -608,7 +608,7 @@ describe('useGeminiStream', () => {
       await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.INFO,
+          type: MessageType.VISION_NOTICE,
           text: expect.stringContaining(
             'Your image and prompt/context were sent to vm (vision.example.com).',
           ),

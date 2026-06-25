@@ -28,6 +28,7 @@ import {
   WarningMessage,
   ErrorMessage,
   RetryCountdownMessage,
+  VisionNoticeMessage,
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
@@ -318,6 +319,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'retry_countdown' && (
         <RetryCountdownMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'vision_notice' && (
+        <VisionNoticeMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
