@@ -183,8 +183,8 @@ export const MainContent = () => {
   const [replayCount, setReplayCount] = useState(() =>
     initialReplayCount(visibleHistory.length),
   );
-  const mergedLengthRef = useRef(visibleHistory.length);
-  mergedLengthRef.current = visibleHistory.length;
+  const visibleHistoryLengthRef = useRef(visibleHistory.length);
+  visibleHistoryLengthRef.current = visibleHistory.length;
 
   // The reset MUST happen during render (not in an effect): historyRemountKey
   // also drives the <Static> key below, and Ink remounts Static synchronously
@@ -204,7 +204,7 @@ export const MainContent = () => {
     // doesn't trigger ~M/CHUNK_SIZE extra setImmediate-scheduled
     // re-renders (M = visibleHistory.length) that the VP path discards.
     if (!useVirtualScroll) {
-      setReplayCount(initialReplayCount(mergedLengthRef.current));
+      setReplayCount(initialReplayCount(visibleHistoryLengthRef.current));
     }
   }
 
@@ -218,7 +218,10 @@ export const MainContent = () => {
     }
     const handle = setImmediate(() => {
       setReplayCount((c) =>
-        Math.min(c + PROGRESSIVE_REPLAY_CHUNK_SIZE, mergedLengthRef.current),
+        Math.min(
+          c + PROGRESSIVE_REPLAY_CHUNK_SIZE,
+          visibleHistoryLengthRef.current,
+        ),
       );
     });
     return () => clearImmediate(handle);

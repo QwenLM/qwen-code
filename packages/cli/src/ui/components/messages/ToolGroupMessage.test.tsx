@@ -311,6 +311,33 @@ describe('<ToolGroupMessage />', () => {
       expect(frame).toContain('MockTool[s1]');
     });
 
+    it('all-collapsible group with memory counts renders memory badge', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'r1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'r2',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Success,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Read 2 files');
+      expect(frame).toContain('Recalled 1 memory');
+    });
+
     it('renders tool call awaiting confirmation', () => {
       const toolCalls = [
         createToolCall({

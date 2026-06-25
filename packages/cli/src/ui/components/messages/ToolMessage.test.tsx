@@ -166,7 +166,20 @@ describe('<ToolMessage />', () => {
 
   it('collapses ANSI result for completed collapsible tool', () => {
     const ansiResult: AnsiOutputDisplay = {
-      ansiOutput: [[{ text: 'file content' }]],
+      ansiOutput: [
+        [
+          {
+            text: 'file content',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ],
       totalLines: 1,
       totalBytes: 12,
     };
@@ -342,7 +355,7 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
-  it('diff results are not collapsed for completed tools (bypass shouldCollapseResult)', () => {
+  it('diff results are not collapsed for completed collapsible tools (bypass shouldCollapseResult)', () => {
     const diffResult = {
       fileDiff: '--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new',
       fileName: 'file.txt',
@@ -352,6 +365,8 @@ describe('<ToolMessage />', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
         {...baseProps}
+        name="ReadFile"
+        description="a.ts"
         resultDisplay={diffResult}
         status={ToolCallStatus.Success}
       />,

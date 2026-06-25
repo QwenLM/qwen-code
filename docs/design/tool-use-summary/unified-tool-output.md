@@ -46,7 +46,7 @@ Instead of showing raw tool names and counts (`ReadFile x 3`), generate human-re
 2. **Memory-only groups** have a dedicated rendering path (read/write counts badge) that takes priority, but only when all ops succeed (`!hasErrorTool && every status === Success`)
 3. **Result collapse**: only collapsible tools with `Success` status have their text/ANSI output collapsed. Non-collapsible tools (including MCP tools, WebFetch, etc.) always show results. Canceled tools keep partial output visible
 4. **Tool names** render bold regardless of status, providing consistent styling across both `CompactToolGroupDisplay` and individual `ToolMessage` paths
-5. **Force-expand conditions**: when any tool in a group is confirming, errored, user-initiated, in a focused shell, or a terminal subagent, ALL tools render individually (no partition) with results forced visible
+5. **Force-expand conditions**: when any tool in a group is confirming, errored, user-initiated, in a focused shell, or a terminal subagent, ALL tools render individually (no partition) with results forced visible only for the triggering tools (errored, confirming, terminal subagent) — successful siblings keep normal collapse behavior
 6. **`tool_use_summary`** items (LLM-generated semantic summaries) render unconditionally alongside `CompactToolGroupDisplay`'s mechanical count — they serve different purposes (semantic context vs tool count)
 7. **Memory badge**: rendered in both the all-collapsible path and the mixed path when memory ops are present in a non-memory-only group
 
