@@ -111,7 +111,9 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    if: '${{ !cancelled() }}'
+    # Not on push: the merge queue already tested the merged tree, so a
+    # post-merge re-run on `main` would be redundant.
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -272,16 +274,18 @@ jobs:
           name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
 
-  # macOS/Windows: slowest/costliest runners, rare platform regressions — skip
-  # on PR, run on push to `main` and in the merge queue. Two named jobs, not a
-  # matrix: a skipped matrix job reports one collapsed check name, never the
-  # per-OS required contexts, so PRs would sit "Expected" forever and never
-  # enter the queue. A skipped named job reports under its exact name and
-  # satisfies the required check (same as the Integration Tests job).
+  # macOS/Windows: slowest/costliest runners, rare platform regressions — run
+  # only in the merge queue. Skipped on PR (ubuntu is the fast PR signal) and on
+  # push (the queue already tested the merged tree, so a post-merge re-run is
+  # redundant). Two named jobs, not a matrix: a skipped matrix job reports one
+  # collapsed check name, never the per-OS required contexts, so PRs would sit
+  # "Expected" forever and never enter the queue. A skipped named job reports
+  # under its exact name and satisfies the required check (same as the
+  # Integration Tests job).
   test_macos:
     name: 'Test (macos-latest, Node 22.x)'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name != 'pull_request' }}"
+    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
     runs-on: 'macos-latest'
     permissions:
       contents: 'read'
@@ -329,7 +333,7 @@ jobs:
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name != 'pull_request' }}"
+    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
     runs-on: 'windows-2022'
     permissions:
       contents: 'read'
@@ -418,10 +422,12 @@ jobs:
   codeql:
     name: 'CodeQL'
     needs: 'classify_pr'
-    # Security findings rarely change push-to-push, so a slow scan on every PR
-    # push is poor value. Skip on PR pushes; CodeQL still runs on push to `main`
-    # (and in the merge queue, once enabled) as the pre-/post-merge backstop.
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && github.event_name != 'pull_request' }}"
+    # Security findings rarely change push-to-push, and a slow scan is poor value
+    # as a hard merge gate. Run CodeQL only on push to `main` (post-merge
+    # backstop) — not on PR pushes, and not in the merge queue where, being
+    # non-required, it would just burn a runner and lengthen the serial queue
+    # without blocking anything.
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
     runs-on: 'ubuntu-latest'
     # Analysis normally finishes in ~7-9 min (22 min worst case observed). Without
     # an explicit cap, a hosted runner that drops its heartbeat mid-analysis leaves
