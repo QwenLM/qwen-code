@@ -208,12 +208,16 @@ jobs:
             # Tier 1: explicitly triaged bugs (status/ready-for-agent). Highest
             # signal, so they bypass the unattended filter. Gathered as priority.
             echo "🔍 Tier 1 — ready-for-agent bugs (newest first)..."
-            gh issue list --repo "${REPO}" \
+            if ! gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url \
-              > "${WORKDIR}/scan.json"
-            jq -c '.[0:10] | map(. + {autofixTier: 1})' \
-              "${WORKDIR}/scan.json" > "${WORKDIR}/tier1.json"
+              > "${WORKDIR}/scan.json"; then
+              echo "::warning::Tier-1 issue scan failed; proceeding with tier-2 candidates only."
+              jq -n -c '[]' > "${WORKDIR}/tier1.json"
+            else
+              jq -c '.[0:10] | map(. + {autofixTier: 1})' \
+                "${WORKDIR}/scan.json" > "${WORKDIR}/tier1.json"
+            fi
 
             # Tier 2: recent, unattended bugs. Always gathered (not only when tier 1
             # is empty) so a single weak tier-1 issue can't starve the run.
