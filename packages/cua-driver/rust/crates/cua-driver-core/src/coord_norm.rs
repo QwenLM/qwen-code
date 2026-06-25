@@ -16,29 +16,26 @@
 //! the model reasoned over — so `norm/1000 * dim` lands in the right pixel.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
 
-/// Divisor for 1000-normalized coordinates (Qwen `computer_use` convention:
-/// `pixel = coord / 1000 * resized_dim`). Kept as a constant so the 999-vs-1000
-/// ambiguity (mobile_use cookbook uses 999) has a single place to change.
-const DIV: f64 = 1000.0;
-
-/// Convert a 0–1000 normalized coordinate to a pixel coordinate against `dim`.
-pub fn norm_to_px(norm: f64, dim: u32) -> f64 {
-    (norm / DIV * dim as f64).round()
+/// Convert a normalized coordinate to a pixel coordinate against `dim`, where
+/// `scale` is the normalization full-scale (the "1000" in 1000×1000). Qwen
+/// `computer_use` uses 1000; some cookbooks use 999 — see `coordinate_scale`.
+pub fn norm_to_px(norm: f64, dim: u32, scale: f64) -> f64 {
+    (norm / scale * dim as f64).round()
 }
 
-/// Convert a pixel coordinate to a 0–1000 normalized coordinate against `dim`.
-pub fn px_to_norm(px: f64, dim: u32) -> f64 {
+/// Convert a pixel coordinate back to a normalized coordinate against `dim`.
+pub fn px_to_norm(px: f64, dim: u32, scale: f64) -> f64 {
     if dim == 0 {
         return 0.0;
     }
-    (px / dim as f64 * DIV).round()
+    (px / dim as f64 * scale).round()
 }
 
 /// Input coordinate fields per tool. `true` = X axis (scale by width),
@@ -65,10 +62,11 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
     if args.get("from_zoom").and_then(|v| v.as_bool()).unwrap_or(false) {
         return;
     }
+    let scale = coordinate_scale();
     for &(field, is_x) in input_coord_fields(tool) {
         if let Some(v) = args.get(field).and_then(|v| v.as_f64()) {
             let dim = if is_x { screenshot_w } else { screenshot_h };
-            args[field] = json!(norm_to_px(v, dim));
+            args[field] = json!(norm_to_px(v, dim, scale));
         }
     }
 }
@@ -190,6 +188,25 @@ pub fn default_normalized() -> bool {
     DEFAULT_NORMALIZED.load(Ordering::Relaxed)
 }
 
+/// Normalization full-scale — the "1000" in 1000×1000. Configurable to absorb
+/// the 999-vs-1000 cookbook ambiguity (Qwen `computer_use` uses 1000,
+/// `mobile_use` uses 999). Seeded once at startup from
+/// `CUA_DRIVER_RS_COORDINATE_SCALE`; default 1000. Stored as an integer because
+/// normalization scales are whole numbers in practice.
+static COORDINATE_SCALE: AtomicU64 = AtomicU64::new(1000);
+
+/// Seed the normalization full-scale (called once at startup). 0 is rejected
+/// (it would divide by zero) and falls back to 1000.
+pub fn set_coordinate_scale(scale: u32) {
+    let s = if scale == 0 { 1000 } else { scale };
+    COORDINATE_SCALE.store(s as u64, Ordering::Relaxed);
+}
+
+/// The active normalization full-scale, as f64 for the conversion math.
+pub fn coordinate_scale() -> f64 {
+    COORDINATE_SCALE.load(Ordering::Relaxed) as f64
+}
+
 // ── Per-window size cache ────────────────────────────────────────────────────
 //
 // Cross-call window state (written by get_window_state, read by the next
@@ -243,25 +260,38 @@ mod tests {
     #[test]
     fn norm_to_px_maps_midpoint() {
         // 500/1000 of an 800px-wide image = 400px
-        assert_eq!(norm_to_px(500.0, 800), 400.0);
+        assert_eq!(norm_to_px(500.0, 800, 1000.0), 400.0);
     }
 
     #[test]
     fn norm_to_px_maps_edges() {
-        assert_eq!(norm_to_px(0.0, 800), 0.0);
-        assert_eq!(norm_to_px(1000.0, 800), 800.0);
+        assert_eq!(norm_to_px(0.0, 800, 1000.0), 0.0);
+        assert_eq!(norm_to_px(1000.0, 800, 1000.0), 800.0);
     }
 
     #[test]
     fn norm_to_px_rounds_to_nearest() {
         // 333/1000 of 800 = 266.4 → 266
-        assert_eq!(norm_to_px(333.0, 800), 266.0);
+        assert_eq!(norm_to_px(333.0, 800, 1000.0), 266.0);
     }
 
     #[test]
     fn px_to_norm_is_inverse_at_midpoint() {
-        assert_eq!(px_to_norm(400.0, 800), 500.0);
-        assert_eq!(px_to_norm(800.0, 800), 1000.0);
+        assert_eq!(px_to_norm(400.0, 800, 1000.0), 500.0);
+        assert_eq!(px_to_norm(800.0, 800, 1000.0), 1000.0);
+    }
+
+    #[test]
+    fn norm_to_px_respects_custom_scale() {
+        // Full-scale 999 → dim (mobile_use cookbook convention).
+        assert_eq!(norm_to_px(999.0, 800, 999.0), 800.0);
+        // Same input under different scales lands differently: 999/1000*800 = 799.2 → 799
+        assert_eq!(norm_to_px(999.0, 800, 1000.0), 799.0);
+    }
+
+    #[test]
+    fn coordinate_scale_defaults_to_1000() {
+        assert_eq!(coordinate_scale(), 1000.0);
     }
 
     // ---- args field mapping (x uses width, y uses height) ----

@@ -49,15 +49,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// to pass without making every Command variant carry the flag.
 static CLAUDE_CODE_COMPAT: AtomicBool = AtomicBool::new(false);
 
-/// Seed the coordinate-space default from env before any registry is built.
-/// `CUA_DRIVER_RS_COORDINATE_SPACE=normalized_1000` opts into the
-/// relative-coordinate shim; anything else (incl. unset) stays pixels —
-/// zero behavior change for existing pixel-based clients.
+/// Seed the coordinate-space default + scale from env before any registry is
+/// built. `CUA_DRIVER_RS_COORDINATE_SPACE=normalized_1000` opts into the
+/// relative-coordinate shim; anything else (incl. unset) stays pixels — zero
+/// behavior change. `CUA_DRIVER_RS_COORDINATE_SCALE` overrides the normalization
+/// full-scale (default 1000; e.g. 999 for the mobile_use cookbook convention).
 fn seed_coordinate_space_from_env() {
     let normalized = std::env::var("CUA_DRIVER_RS_COORDINATE_SPACE")
         .map(|v| v.eq_ignore_ascii_case("normalized_1000"))
         .unwrap_or(false);
     cua_driver_core::coord_norm::set_default_normalized(normalized);
+
+    if let Ok(raw) = std::env::var("CUA_DRIVER_RS_COORDINATE_SCALE") {
+        if let Ok(scale) = raw.trim().parse::<u32>() {
+            cua_driver_core::coord_norm::set_coordinate_scale(scale);
+        }
+    }
 }
 
 fn init_logging() {
