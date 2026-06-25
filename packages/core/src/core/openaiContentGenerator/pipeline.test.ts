@@ -3079,6 +3079,7 @@ describe('ContentGenerationPipeline', () => {
     });
     afterEach(() => {
       vi.useRealTimers();
+      vi.unstubAllEnvs();
     });
 
     it('aborts and throws ETIMEDOUT when the stream is silent past the idle timeout', async () => {
@@ -3421,6 +3422,79 @@ describe('ContentGenerationPipeline', () => {
       expect(gated.wasReturned()).toBe(true);
       // Proves the bypass: the handler (which would strip the code) is skipped.
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
+      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '3000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no explicit streamIdleTimeoutMs → env applies
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // tripped at 3000ms from the env
+    });
+
+    it('lets an explicit streamIdleTimeoutMs config take precedence over the env', async () => {
+      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', '1000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(5000); // config 5000 wins over env 1000
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(1000); // env value — must NOT trip
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(4000); // reach the config value (5000)
+      await consume;
+      expect(settled).toBe(true);
+    });
+
+    it('ignores a malformed QWEN_STREAM_IDLE_TIMEOUT_MS and falls back to the default', async () => {
+      vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', 'not-a-number');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; invalid env → default (120000ms)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // A malformed value must NOT become 0/NaN (which would trip immediately);
+      // the default (120000ms) is far beyond this advance.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(settled).toBe(false);
+      gated.end(); // unblock so the test doesn't leak a pending stream
+      await consume;
     });
   });
 });

@@ -20,7 +20,10 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
-import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './constants.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
@@ -56,6 +59,32 @@ export class StreamInactivityTimeoutError extends Error {
     );
     this.name = 'StreamInactivityTimeoutError';
   }
+}
+
+/**
+ * Resolve the effective streaming inactivity timeout (ms). Precedence:
+ * explicit `ContentGeneratorConfig.streamIdleTimeoutMs` (programmatic, wins —
+ * including `0` to disable) > the `QWEN_STREAM_IDLE_TIMEOUT_MS` env deployment
+ * knob > the built-in default. A malformed env value is ignored (with a debug
+ * warning) rather than failing the request.
+ */
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  if (typeof config.streamIdleTimeoutMs === 'number') {
+    return config.streamIdleTimeoutMs;
+  }
+  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
+  if (raw !== undefined && raw.trim() !== '') {
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      return parsed;
+    }
+    createDebugLogger('openai-pipeline').warn(
+      `Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
+        `(expected a non-negative integer of milliseconds); ` +
+        `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,
+    );
+  }
+  return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
 }
 
 /**
@@ -205,9 +234,7 @@ export class ContentGenerationPipeline {
         // response, so a stream that returns 200 then goes silent is otherwise
         // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
         // chunks. `<= 0` disables it.
-        const idleMs =
-          this.contentGeneratorConfig.streamIdleTimeoutMs ??
-          DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+        const idleMs = resolveStreamIdleTimeoutMs(this.contentGeneratorConfig);
         const guarded =
           idleMs > 0
             ? withStreamInactivityTimeout(
