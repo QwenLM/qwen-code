@@ -82,6 +82,8 @@ export interface BridgeSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -751,7 +753,7 @@ export interface AcpSessionBridge {
    */
   isChannelLive(): boolean;
 
-  /** Number of sessions with an active prompt (promptActive === true). */
+  /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
   /**

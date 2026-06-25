@@ -78,7 +78,6 @@ import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
-import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -112,18 +111,13 @@ import {
   serializeStatusMessage,
   type StatusInfo,
 } from './components/messages/StatusMessage';
-import {
-  MCP_STATUS_ACTIVE_EVENT,
-  parseMcpStatusMessage,
-  type SerializedMcpStatusMessage,
-} from './components/messages/McpStatusMessage';
+import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpDialog } from './components/dialogs/McpDialog';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
-import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
@@ -588,15 +582,6 @@ function filterDuplicateModelSwitchMessages(
   });
 }
 
-function hasMcpStatusPanel(messages: readonly Message[]): boolean {
-  return messages.some(
-    (message) =>
-      message.role === 'system' &&
-      message.variant === 'info' &&
-      parseMcpStatusMessage(message.content) !== null,
-  );
-}
-
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
   return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
 }
@@ -965,18 +950,6 @@ export function App({
     }
     return filterDuplicateModelSwitchMessages(result);
   }, [messages, recapMessage]);
-  const hasMcpPanelMessage = useMemo(
-    () => hasMcpStatusPanel(displayMessages),
-    [displayMessages],
-  );
-  useEffect(() => {
-    if (hasMcpPanelMessage) return;
-    window.dispatchEvent(
-      new CustomEvent(MCP_STATUS_ACTIVE_EVENT, {
-        detail: { active: false },
-      }),
-    );
-  }, [hasMcpPanelMessage]);
   const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),
@@ -1284,8 +1257,6 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
-  const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
-  const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -1329,8 +1300,7 @@ export function App({
     showSettingsDialog ||
     showMemoryDialog ||
     showAuthDialog;
-  const bottomHidden = mcpPanelActive || tasksPanelActive;
-  const interactionBlocked = dialogOpen || bottomHidden;
+  const interactionBlocked = dialogOpen;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -3684,14 +3654,7 @@ export function App({
               </TodoContextsProvider>
             </CompactModeContext.Provider>
 
-            <div
-              ref={footerRef}
-              className={
-                bottomHidden
-                  ? `${styles.footer} ${styles.footerHidden}`
-                  : styles.footer
-              }
-            >
+            <div ref={footerRef} className={styles.footer}>
               {showScrollToBottom && (
                 <div
                   className={
