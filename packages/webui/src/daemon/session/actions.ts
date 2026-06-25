@@ -728,7 +728,10 @@ export function createDaemonSessionActions({
         if (activePromptsRef.current.get(shellKey)?.controller === ctrl) {
           activePromptsRef.current.delete(shellKey);
         }
-        if (sessionRef.current?.sessionId === session.sessionId) {
+        if (
+          sessionRef.current?.sessionId === session.sessionId &&
+          !hasSessionActivePrompt()
+        ) {
           setPromptStatus('idle');
         }
       }

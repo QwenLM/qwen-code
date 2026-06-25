@@ -2346,6 +2346,97 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('streaming');
   });
 
+  it('keeps local prompts active when a restored prompt completes', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const releaseRestoredComplete = createDeferred<void>();
+    const restoredCompleteDelivered = createDeferred<void>();
+    const releaseLocalComplete = createDeferred<void>();
+    const localCompleteDelivered = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      submitPrompt: vi.fn(() => accepted.promise),
+      events: async function* restoredPromptCompleteDuringLocalPrompt() {
+        await releaseRestoredComplete.promise;
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'restored-prompt', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        restoredCompleteDelivered.resolve();
+        await releaseLocalComplete.promise;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'local-prompt', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        localCompleteDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = requireActions(actions).sendPrompt('local prompt');
+      accepted.resolve({ promptId: 'local-prompt', lastEventId: 10 });
+      await flushPromises();
+      releaseRestoredComplete.resolve();
+      await restoredCompleteDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).not.toBe('idle');
+
+    await act(async () => {
+      releaseLocalComplete.resolve();
+      await localCompleteDelivered.promise;
+      await flushPromises();
+    });
+    await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
+  });
+
+  it('keeps restored active prompts busy after shell commands finish', async () => {
+    const session = createMockSession({
+      hasActivePrompt: true,
+      shellCommand: vi.fn(async () => undefined),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await requireActions(actions).sendShellCommand('echo ok');
+      await flushPromises();
+    });
+
+    expect(promptStatus).not.toBe('idle');
+  });
+
   it('settles restored active prompts when turn_complete arrives', async () => {
     const turnCompleted = createDeferred<void>();
     const session = createMockSession({
@@ -2462,6 +2553,70 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
+  it('keeps local prompts active when a restored prompt is cancelled', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const releaseRestoredCancel = createDeferred<void>();
+    const restoredCancelDelivered = createDeferred<void>();
+    const releaseLocalComplete = createDeferred<void>();
+    const localCompleteDelivered = createDeferred<void>();
+    const session = createMockSession({
+      hasActivePrompt: true,
+      submitPrompt: vi.fn(() => accepted.promise),
+      events: async function* restoredPromptCancelDuringLocalPrompt() {
+        await releaseRestoredCancel.promise;
+        yield {
+          id: 6,
+          v: 1,
+          type: 'prompt_cancelled',
+          originatorClientId: 'client-2',
+          data: { sessionId: 'session-1', reason: 'user_cancel' },
+        } satisfies DaemonEvent;
+        restoredCancelDelivered.resolve();
+        await releaseLocalComplete.promise;
+        yield {
+          id: 7,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'local-prompt', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        localCompleteDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = requireActions(actions).sendPrompt('local prompt');
+      accepted.resolve({ promptId: 'local-prompt', lastEventId: 10 });
+      await flushPromises();
+      releaseRestoredCancel.resolve();
+      await restoredCancelDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).not.toBe('idle');
+
+    await act(async () => {
+      releaseLocalComplete.resolve();
+      await localCompleteDelivered.promise;
+      await flushPromises();
+    });
+    await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
+  });
+
   it('does not revive settled restored active prompts after SSE reconnect', async () => {
     const turnCompleted = createDeferred<void>();
     const reconnected = createDeferred<void>();
@@ -2515,33 +2670,26 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
-  it('settles restored active prompts during epoch replay', async () => {
-    const replayCompleted = createDeferred<void>();
-    const session = createMockSession({
+  it('reloads restored active prompts after epoch reset', async () => {
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-epoch-active',
       hasActivePrompt: true,
-      events: async function* restoredPromptEpochReplay() {
+      events: async function* restoredPromptEpochReset() {
         yield {
           id: 6,
           v: 1,
           type: 'state_resync_required',
           data: { reason: 'epoch_reset' },
         } satisfies DaemonEvent;
-        yield {
-          id: 7,
-          v: 1,
-          type: 'turn_complete',
-          data: { promptId: 'restored-prompt', stopReason: 'end_turn' },
-        } satisfies DaemonEvent;
-        yield {
-          id: 8,
-          v: 1,
-          type: 'replay_complete',
-          data: { replayedCount: 1, lastReplayedEventId: 8 },
-        } satisfies DaemonEvent;
-        replayCompleted.resolve();
       },
     });
-    sdkMocks.sessions.push(session);
+    const reloadedSession = createMockSession({
+      sessionId: 'session-epoch-active',
+      hasActivePrompt: true,
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
     let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
 
     function Harness() {
@@ -2555,40 +2703,39 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await replayCompleted.promise;
+      await reloaded.promise;
       await flushPromises();
     });
 
-    expect(promptStatus).toBe('idle');
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      'session-epoch-active',
+      { workspaceCwd: '/mock-workspace' },
+      expect.any(String),
+    );
+    expect(promptStatus).toBe('streaming');
   });
 
-  it('settles restored active prompts from prompt_cancelled during epoch replay', async () => {
-    const replayCompleted = createDeferred<void>();
-    const session = createMockSession({
+  it('clears restored active prompts when epoch reload is idle', async () => {
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-epoch-idle',
       hasActivePrompt: true,
-      events: async function* restoredPromptEpochReplayCancelled() {
+      events: async function* restoredPromptEpochReset() {
         yield {
           id: 6,
           v: 1,
           type: 'state_resync_required',
           data: { reason: 'epoch_reset' },
         } satisfies DaemonEvent;
-        yield {
-          id: 7,
-          v: 1,
-          type: 'prompt_cancelled',
-          data: { sessionId: 'session-1', reason: 'user_cancel' },
-        } satisfies DaemonEvent;
-        yield {
-          id: 8,
-          v: 1,
-          type: 'replay_complete',
-          data: { replayedCount: 1, lastReplayedEventId: 8 },
-        } satisfies DaemonEvent;
-        replayCompleted.resolve();
       },
     });
-    sdkMocks.sessions.push(session);
+    const reloadedSession = createMockSession({
+      sessionId: 'session-epoch-idle',
+      hasActivePrompt: false,
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
     let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
 
     function Harness() {
@@ -2602,7 +2749,7 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await replayCompleted.promise;
+      await reloaded.promise;
       await flushPromises();
     });
 
@@ -2708,19 +2855,26 @@ describe('DaemonSessionProvider', () => {
 
   it('keeps restored active prompts streaming after resync requests', async () => {
     const resyncSeen = createDeferred<void>();
+    const reloaded = createDeferred<void>();
     const session = createMockSession({
+      sessionId: 'session-restored-resync',
       hasActivePrompt: true,
       events: async function* restoredPromptThenResync() {
+        resyncSeen.resolve();
         yield {
           id: 6,
           v: 1,
           type: 'state_resync_required',
           data: { reason: 'epoch_reset' },
         } satisfies DaemonEvent;
-        resyncSeen.resolve();
       },
     });
-    sdkMocks.sessions.push(session);
+    const reloadedSession = createMockSession({
+      sessionId: 'session-restored-resync',
+      hasActivePrompt: true,
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(session, reloadedSession);
     let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
 
     function Harness() {
@@ -2735,6 +2889,7 @@ describe('DaemonSessionProvider', () => {
     });
     await act(async () => {
       await resyncSeen.promise;
+      await reloaded.promise;
       await flushPromises();
     });
 
@@ -4285,11 +4440,10 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
-  it('resets stale transcript and accepts replay after epoch-reset resync', async () => {
+  it('reloads stale transcript after epoch-reset resync', async () => {
     const startEpochReset = createDeferred<void>();
     const epochResetDelivered = createDeferred<void>();
-    const continueReplay = createDeferred<void>();
-    const replayDrained = createDeferred<void>();
+    const reloaded = createDeferred<void>();
     const sessionRef: { current?: MockSession } = {};
     const setLastEventId = vi.fn((lastEventId: number | undefined) => {
       if (sessionRef.current) {
@@ -4305,6 +4459,7 @@ describe('DaemonSessionProvider', () => {
       ) {
         await startEpochReset.promise;
         if (opts.signal?.aborted) return;
+        epochResetDelivered.resolve();
         yield {
           v: 1,
           type: 'state_resync_required',
@@ -4314,45 +4469,36 @@ describe('DaemonSessionProvider', () => {
             earliestAvailableId: 1,
           },
         };
-        epochResetDelivered.resolve();
-        await continueReplay.promise;
-        if (opts.signal?.aborted) return;
-        yield {
-          id: 1,
-          v: 1,
-          type: 'session_update',
-          data: {
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'fresh replayed' },
-            },
-          },
-        };
-        yield {
-          id: 2,
-          v: 1,
-          type: 'turn_complete',
-          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
-        };
-        yield {
-          v: 1,
-          type: 'replay_complete',
-          data: { replayedCount: 2, lastReplayedEventId: 2 },
-        };
-        replayDrained.resolve();
-        await new Promise<void>((resolve) => {
-          if (opts.signal?.aborted) {
-            resolve();
-            return;
-          }
-          opts.signal?.addEventListener('abort', () => resolve(), {
-            once: true,
-          });
-        });
       },
     });
+    const reloadedSession = createMockSession({
+      sessionId: session.sessionId,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'fresh replayed' },
+              },
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'turn_complete',
+            data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: createPendingEvents(reloaded),
+    });
     sessionRef.current = session;
-    sdkMocks.sessions.push(session);
+    sdkMocks.sessions.push(session, reloadedSession);
 
     let actions: DaemonUiSessionActions | undefined;
     let blocks: readonly DaemonTranscriptBlock[] = [];
@@ -4380,11 +4526,9 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(setLastEventId).toHaveBeenCalledWith(0);
-    expect(blocks).toMatchObject([{ kind: 'user', text: 'stale local' }]);
 
     await act(async () => {
-      continueReplay.resolve();
-      await replayDrained.promise;
+      await reloaded.promise;
       await flushPromises();
     });
 
@@ -4395,7 +4539,7 @@ describe('DaemonSessionProvider', () => {
     const pendingPrompt = promptResult;
     if (!pendingPrompt) throw new Error('prompt was not started');
     await expect(pendingPrompt).resolves.toEqual({
-      stopReason: 'end_turn',
+      stopReason: 'cancelled',
     });
   });
 
@@ -5472,17 +5616,13 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
-  it('stops reconnect on session_closed during epoch replay', async () => {
-    // Verifies the epoch replay path also handles session_closed
-    // with client_close correctly. If the user deletes a session
-    // while epoch replay is in progress, the provider must still
-    // exit the reconnect loop instead of auto-recreating.
+  it('reloads after epoch reset instead of consuming same-stream session_closed', async () => {
     const epochResetDelivered = createDeferred<void>();
+    const reloaded = createDeferred<void>();
     const session = createMockSession({
-      events: async function* epochReplayThenClose(
-        opts: { signal?: AbortSignal } = {},
-      ) {
-        // Trigger epoch reset
+      sessionId: 'session-epoch-closed-tail',
+      events: async function* epochResetThenClose() {
+        epochResetDelivered.resolve();
         yield {
           v: 1,
           type: 'state_resync_required',
@@ -5492,18 +5632,19 @@ describe('DaemonSessionProvider', () => {
             earliestAvailableId: 1,
           },
         };
-        epochResetDelivered.resolve();
-        // During replay, send session_closed with client_close
         yield {
           id: 1,
           v: 1,
           type: 'session_closed',
           data: { reason: 'client_close' },
         };
-        if (opts.signal?.aborted) return;
       },
     });
-    sdkMocks.sessions.push(session);
+    const reloadedSession = createMockSession({
+      sessionId: 'session-epoch-closed-tail',
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(session, reloadedSession);
 
     let connection: DaemonConnectionState | undefined;
     function Harness() {
@@ -5520,24 +5661,21 @@ describe('DaemonSessionProvider', () => {
 
     await act(async () => {
       await epochResetDelivered.promise;
+      await reloaded.promise;
       await flushPromises();
     });
 
-    // Give any potential reconnect timer a window to fire
-    await act(async () => {
-      await wait(100);
-      await flushPromises();
-    });
-    await act(async () => {
-      await flushPromises();
-    });
-
-    // createOrAttach called exactly once — no auto-recreate
     expect(
       sdkMocks.MockDaemonSessionClient.createOrAttach,
     ).toHaveBeenCalledTimes(1);
-    expect(connection?.status).toBe('disconnected');
-    expect(connection?.sessionId).toBeUndefined();
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      'session-epoch-closed-tail',
+      { workspaceCwd: '/mock-workspace' },
+      expect.any(String),
+    );
+    expect(connection?.status).toBe('connected');
+    expect(connection?.sessionId).toBe('session-epoch-closed-tail');
   });
 
   it.each(['idle_timeout', 'last_client_detached'] as const)(
@@ -5906,6 +6044,22 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
 
 function createIdleEvents(): MockSession['events'] {
   return async function* idleEvents(opts: { signal?: AbortSignal } = {}) {
+    await new Promise<void>((resolve) => {
+      if (opts.signal?.aborted) {
+        resolve();
+        return;
+      }
+      opts.signal?.addEventListener('abort', () => resolve(), { once: true });
+    });
+    yield* [];
+  };
+}
+
+function createPendingEvents(
+  started: ReturnType<typeof createDeferred<void>>,
+): MockSession['events'] {
+  return async function* pendingEvents(opts: { signal?: AbortSignal } = {}) {
+    started.resolve();
     await new Promise<void>((resolve) => {
       if (opts.signal?.aborted) {
         resolve();

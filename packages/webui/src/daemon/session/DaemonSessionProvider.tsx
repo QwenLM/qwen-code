@@ -719,8 +719,34 @@ export function DaemonSessionProvider({
 
           let sawEvent = false;
           let resyncRequested = false;
-          let epochReplayUiEvents: DaemonUiEvent[] | undefined;
-          let epochReplaySourceEvents: DaemonEvent[] = [];
+          const requestEpochResetReload = () => {
+            // An epoch reset means the daemon/EventBus timeline was rebuilt.
+            // The current SSE cursor and any restored/local prompt activity may
+            // describe the old epoch, so do a full /load and let
+            // hasActivePrompt from that fresh snapshot become authoritative.
+            const active = activePromptsRef.current.get(
+              activeSession.sessionId,
+            );
+            active?.controller.abort();
+            activePromptsRef.current.delete(activeSession.sessionId);
+            if (restoredActivePrompt) {
+              settleRestoredActivePrompt();
+            }
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setPromptStatus('idle');
+            store.reset();
+            activeSession.setLastEventId(0);
+            reconnectSessionId = activeSession.sessionId;
+            resyncRequested = true;
+            session = undefined;
+            sessionRef.current = undefined;
+            hasCurrentSessionActivePromptRef.current = () => false;
+            setConnection((current) => ({
+              ...current,
+              status: 'connecting',
+              error: undefined,
+            }));
+          };
           for await (const event of activeSession.events({
             signal: abort.signal,
             maxQueued,
@@ -759,124 +785,9 @@ export function DaemonSessionProvider({
                     ? (event.data as Record<string, unknown>).reason
                     : undefined;
                 if (reason === 'epoch_reset') {
-                  if (!hasSessionActivePrompt()) {
-                    setPromptStatus('idle');
-                    clearPassiveAssistantDoneTimer(
-                      passiveAssistantDoneTimerRef,
-                    );
-                  }
-                  activeSession.setLastEventId(0);
-                  epochReplayUiEvents = [];
-                  epochReplaySourceEvents = [];
-                  continue;
-                }
-              }
-              if (epochReplayUiEvents) {
-                epochReplaySourceEvents.push(event);
-                epochReplayUiEvents.push(...uiEvents);
-                if (event.type === 'turn_complete') {
-                  const stopReason =
-                    (event.data as DaemonTurnCompleteData | undefined)
-                      ?.stopReason ?? 'end_turn';
-                  epochReplayUiEvents.push(
-                    assistantDoneFromTurnEvent(event, stopReason),
-                  );
-                  if (restoredActivePrompt) {
-                    settleRestoredActivePrompt();
-                    clearPassiveAssistantDoneTimer(
-                      passiveAssistantDoneTimerRef,
-                    );
-                    if (!hasSessionActivePrompt()) {
-                      setPromptStatus('idle');
-                    }
-                  }
-                } else if (event.type === 'turn_error') {
-                  epochReplayUiEvents.push(
-                    assistantDoneFromTurnEvent(event, 'error'),
-                  );
-                  if (restoredActivePrompt) {
-                    settleRestoredActivePrompt();
-                    clearPassiveAssistantDoneTimer(
-                      passiveAssistantDoneTimerRef,
-                    );
-                    if (!hasSessionActivePrompt()) {
-                      setPromptStatus('idle');
-                    }
-                  }
-                } else if (event.type === 'prompt_cancelled') {
-                  epochReplayUiEvents.push(
-                    assistantDoneFromTurnEvent(event, 'cancelled'),
-                  );
-                  if (restoredActivePrompt) {
-                    settleRestoredActivePrompt();
-                    clearPassiveAssistantDoneTimer(
-                      passiveAssistantDoneTimerRef,
-                    );
-                    if (!hasSessionActivePrompt()) {
-                      setPromptStatus('idle');
-                    }
-                  }
-                }
-
-                const replayComplete = uiEvents.some(
-                  (uiEvent) => uiEvent.type === 'session.replay_complete',
-                );
-                if (replayComplete) {
-                  if (!hasSessionActivePrompt()) {
-                    clearPassiveAssistantDoneTimer(
-                      passiveAssistantDoneTimerRef,
-                    );
-                    epochReplayUiEvents.push({
-                      type: 'assistant.done',
-                      reason: 'replay_complete',
-                    });
-                    setPromptStatus('idle');
-                  }
-                  const replayUiEvents = epochReplayUiEvents;
-                  const replaySourceEvents = epochReplaySourceEvents;
-                  epochReplayUiEvents = undefined;
-                  epochReplaySourceEvents = [];
-                  store.reset();
-                  if (replayUiEvents.length > 0) {
-                    store.dispatch(replayUiEvents);
-                    bumpWorkspaceEventSignals(
-                      replayUiEvents,
-                      setWorkspaceEventSignals,
-                    );
-                  }
-                  for (const replayEvent of replaySourceEvents) {
-                    settleActivePromptFromTurnEvent(
-                      activePromptsRef.current,
-                      settledPromptsRef.current,
-                      activeSession.sessionId,
-                      replayEvent,
-                      store,
-                      setPromptStatus,
-                      passiveAssistantDoneTimerRef,
-                      { requireBoundPromptId: true },
-                    );
-                  }
-                  setConnection((c) => ({ ...c, catchingUp: undefined }));
-                }
-
-                // session_closed with client_close during epoch replay
-                if (
-                  event.type === 'session_closed' &&
-                  (event.data as Record<string, unknown> | undefined)
-                    ?.reason === 'client_close'
-                ) {
-                  userDeletedSession = true;
-                  const closedSessionId = activeSession.sessionId;
-                  const active = activePromptsRef.current.get(closedSessionId);
-                  active?.controller.abort();
-                  activePromptsRef.current.delete(closedSessionId);
-                  session = undefined;
-                  sessionRef.current = undefined;
-                  hasCurrentSessionActivePromptRef.current = () => false;
+                  requestEpochResetReload();
                   break;
                 }
-
-                continue;
               }
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
@@ -916,7 +827,9 @@ export function DaemonSessionProvider({
                         ?.stopReason ?? 'end_turn')
                     : 'error';
                 store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
-                setPromptStatus('idle');
+                if (!hasSessionActivePrompt()) {
+                  setPromptStatus('idle');
+                }
               }
               const shouldGuardAssistant =
                 !hasSessionActivePrompt() &&
@@ -934,10 +847,13 @@ export function DaemonSessionProvider({
                   store.dispatch(
                     assistantDoneFromTurnEvent(event, 'cancelled'),
                   );
+                  const cancellingRestoredPrompt = restoredActivePrompt;
                   settleRestoredActivePrompt();
                   restoredPromptSettled = true;
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                  activePromptsRef.current.delete(activeSession.sessionId);
+                  if (!cancellingRestoredPrompt) {
+                    activePromptsRef.current.delete(activeSession.sessionId);
+                  }
                   if (!hasSessionActivePrompt()) {
                     setPromptStatus('idle');
                   }
@@ -999,29 +915,26 @@ export function DaemonSessionProvider({
                 );
               }
               // ── state_resync_required handling ──────────────────────
-              // Two sub-cases:
-              //   epoch_reset — daemon restarted but ring is intact; reset
-              //     store + rewind lastEventId so subsequent events rebuild
-              //     the transcript from the ring on this same SSE stream.
-              //   ring_evicted — too many events accumulated while we were
-              //     disconnected; the ring lost earlier events, so we must
-              //     break out and do a full session load (PATH B).
+              // Resyncs are transcript recovery signals, not prompt terminal
+              // signals. For epoch_reset and ring_evicted we reload the session
+              // snapshot; the fresh /load response is the source of truth for
+              // hasActivePrompt and transcript replay.
               if (event.type === 'state_resync_required') {
                 const reason =
                   typeof event.data === 'object' && event.data !== null
                     ? (event.data as Record<string, unknown>).reason
                     : undefined;
-                // Resync asks us to rebuild transcript state, but it is not a
-                // prompt terminal signal. Keep loading alive for local/restored
-                // prompts until turn_complete, turn_error, or prompt_cancelled.
-                if (!hasSessionActivePrompt()) {
-                  setPromptStatus('idle');
-                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                }
-                store.reset();
-                if (reason === 'epoch_reset') {
-                  activeSession.setLastEventId(0);
-                } else {
+                if (reason !== 'epoch_reset') {
+                  // Resync asks us to rebuild transcript state, but it is not a
+                  // prompt terminal signal. Keep loading alive for local/restored
+                  // prompts until turn_complete, turn_error, or prompt_cancelled.
+                  if (!hasSessionActivePrompt()) {
+                    setPromptStatus('idle');
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                  }
+                  store.reset();
                   // Ring eviction means the SSE replay window has a real gap.
                   // Resetting and continuing on the same stream can only replay
                   // the surviving tail; reload the session snapshot instead so
