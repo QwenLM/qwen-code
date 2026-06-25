@@ -121,7 +121,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `workflowsEnabled`, `lsp.enabled`, and `folderTrust` settings respectively. When disabled they won't appear and will report an unknown command.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command.
 
 ### 1.5 Built-in Skills
 
@@ -316,7 +316,7 @@ Commands for obtaining information and performing system settings.
 | `/help`          | Display help information for available commands                                                                                | `/help` or `/?`                                                                     |
 | `/status`        | Display version information                                                                                                    | `/status` or `/about`                                                               |
 | `/status paths`  | Display current session file and log paths                                                                                     | `/status paths`                                                                     |
-| `/stats`         | Open the interactive usage statistics dashboard                                                                                | `/stats` or `/usage`                                                                |
+| `/stats`         | Open the interactive usage statistics dashboard (Session, Activity, and Efficiency tabs)                                       | `/stats` or `/usage`                                                                |
 | `/stats model`   | Show per-model token breakdown and estimated cost                                                                              | `/stats model`                                                                      |
 | `/stats tools`   | Show per-tool call counts                                                                                                      | `/stats tools`                                                                      |
 | `/stats skills`  | Show per-skill call counts for the current live session (live only; excludes cross-session daily/monthly activity)             | `/stats skills`                                                                     |
