@@ -72,9 +72,7 @@ Code extension fields include:
   `{"en": "Name", "fr": "Nom"}`.
 - `description` - plain string or locale object.
 - `contextFileName`
-- `mcpServers` - MCP server startup config. Use `${extensionPath}` and `${/}`
-  for portable paths, for example
-  `"args": ["${extensionPath}${/}dist${/}server.js"]`.
+- `mcpServers` - MCP server startup config.
 - `settings` - array of user-prompted configuration entries. Each entry uses
   `name`, `description`, `envVar`, and optional `sensitive`. Do not place API
   keys, tokens, or other secret values in `qwen-extension.json`; collect values
@@ -88,14 +86,20 @@ Code extension fields include:
 - `lspServers` - inline `.lsp.json`-style object or JSON path. It only applies
   when LSP support is enabled.
 
+Qwen Code hydrates portable path variables in string fields throughout
+`qwen-extension.json`. Use `${extensionPath}` for the extension root,
+`${workspacePath}` for the active workspace root, and `${/}` or
+`${pathSeparator}` for the platform path separator, for example
+`"args": ["${extensionPath}${/}dist${/}server.js"]`.
+
 Use these resource locations when needed:
 
 - `QWEN.md` for extension context.
-- `commands/` for slash command markdown files. Subdirectories create
-  namespaced commands, for example `commands/fs/grep-code.md` becomes
-  `/fs grep-code`.
-- `skills/` for skill folders containing `SKILL.md`.
-- `agents/` for subagent markdown files.
+- `commands/<name>.md` or `commands/<name>.toml` for slash commands.
+  Subdirectories create colon-separated names, for example
+  `commands/fs/grep-code.md` becomes `/fs:grep-code`.
+- `skills/<skill-name>/SKILL.md` for skills.
+- `agents/<name>.md` for subagents.
 
 Qwen Code discovers command, skill, and agent resources from the corresponding
 folders, so prefer the folder structure for those resources.
@@ -147,5 +151,5 @@ visible in the current session.
   extension root with `realpath` and confirm the resolved path remains inside
   the extension root. Reject absolute paths, `..` traversal, and symlink escapes
   unless the user explicitly approves the external target.
-- Keep the scaffold focused on the requested capability; do not add unused
-  folders or build tooling.
+- Keep the scaffold focused on the requested capability; do not add folders or
+  build tooling beyond what the requested capabilities require.
