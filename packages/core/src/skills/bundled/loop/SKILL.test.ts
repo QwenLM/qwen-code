@@ -54,6 +54,14 @@ describe('bundled loop skill', () => {
     expect(body).toContain('set LoopWakeup as a long fallback');
     expect(body).toContain('auto-stops on idle or max-events');
     expect(body).toContain('handle that event first');
+    expect(body).toContain('per stdout line');
+    expect(body).toContain(
+      'If the notification says the watched condition was met',
+    );
+    expect(body).toContain('If a monitor auto-stopped');
+    expect(body).toContain('If the signal is ambiguous');
+    expect(body).toContain('Do not omit it just because something is watching');
+    expect(body).toContain('not a bare `/loop` wakeup prompt');
   });
 
   it('keeps fixed-interval inputs on the recurring cron path', () => {

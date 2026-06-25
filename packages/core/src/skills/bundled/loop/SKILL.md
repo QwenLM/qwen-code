@@ -51,12 +51,15 @@ Use this path only when the user supplied a prompt and no interval.
    - Do not call LoopWakeup if the task is complete.
    - Do not call LoopWakeup if the task is blocked on user input or external state that cannot be checked later.
    - Do not call LoopWakeup just to keep polling when no useful next check exists.
-   - If you started a background agent or a Monitor that finishes when the watched condition is met, it wakes you via a `<task-notification>` when it terminates — so set LoopWakeup as a long fallback rather than a short poll. Do not omit it just because something is watching: the work may hang, a Monitor auto-stops on idle or max-events, and one owned by another agent never notifies you. Omit LoopWakeup only on the terminal conditions above (complete, or blocked).
+   - If you started a background agent or a Monitor, it wakes you via `<task-notification>` events as it runs (per stdout line) and a final one on termination — so set LoopWakeup as a long fallback rather than a short poll. Do not omit it just because something is watching: the work may hang, a Monitor auto-stops on idle or max-events, and one owned by another agent never notifies you. Omit LoopWakeup only on the terminal conditions above (complete, or blocked).
 4. When scheduling a continuation, call LoopWakeup with:
    - `delaySeconds`: the next useful delay in seconds. The runtime clamps to 60–3600 (1–60 min); follow the tool's own guidance on picking a value — it accounts for the prompt-cache window and for the fallback-heartbeat case when a background task will wake you.
    - `prompt`: `/loop ${original prompt}`
    - `reason`: a short reason for the chosen delay.
 5. If this tick opens with a `<task-notification>` block (a monitor or background event re-invoked you, not a bare `/loop` wakeup prompt), handle that event first, then decide whether to re-arm the fallback wakeup or end the loop.
+   - If the notification says the watched condition was met, finish the loop.
+   - If a monitor auto-stopped on idle or max-events, restart it if the watch is still useful and re-arm the fallback.
+   - If the signal is ambiguous, re-arm a shorter follow-up and investigate on the next tick.
 6. Briefly tell the user what was done now. If a wakeup was scheduled, include when the next check is expected. If no wakeup was scheduled, say the loop is complete or not continuing.
 
 ## Fixed-interval recurring path

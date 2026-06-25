@@ -125,7 +125,7 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
     super(
       LoopWakeupTool.Name,
       ToolDisplayNames.LOOP_WAKEUP,
-      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur. A self-paced wakeup chain may run for at most 24h. When a background task you started will wake you on its own — a backgrounded agent or a Monitor emits a `<task-notification>` when it finishes — keep this wakeup as a long fallback heartbeat rather than a poll; see `delaySeconds`.',
+      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur. A self-paced wakeup chain may run for at most 24h. When a background task you started will wake you on its own — a backgrounded agent or a Monitor emits `<task-notification>` events as it runs (per stdout line) and a final one on termination — keep this wakeup as a long fallback heartbeat rather than a poll; see `delaySeconds`.',
       Kind.Other,
       {
         type: 'object',

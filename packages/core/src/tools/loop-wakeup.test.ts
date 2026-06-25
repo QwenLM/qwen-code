@@ -49,6 +49,7 @@ describe('LoopWakeupTool', () => {
   it('documents the fallback-heartbeat semantics for monitor/background work', () => {
     expect(tool.description).toContain('fallback heartbeat');
     expect(tool.description).toContain('<task-notification>');
+    expect(tool.description).toContain('per stdout line');
     const params = tool.schema.parametersJsonSchema as {
       properties: { delaySeconds: { description: string } };
     };
