@@ -66,8 +66,8 @@ export class StreamInactivityTimeoutError extends Error {
  * Resolve the effective streaming inactivity timeout (ms). Precedence:
  * explicit `ContentGeneratorConfig.streamIdleTimeoutMs` (programmatic, wins —
  * including `0` to disable) > the `QWEN_STREAM_IDLE_TIMEOUT_MS` env deployment
- * knob > the built-in default. A malformed env value is ignored (with a debug
- * warning) rather than failing the request.
+ * knob > the built-in default. A malformed env value is ignored (with a
+ * `console.warn`) rather than failing the request.
  */
 function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
   // 1. Explicit config field (programmatic) wins):

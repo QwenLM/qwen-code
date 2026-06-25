@@ -3588,6 +3588,31 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(true); // trips at the default (config rejected)
     });
 
+    it('accepts the exact MAX_STREAM_IDLE_TIMEOUT_MS boundary value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // The exact ceiling must be accepted (not rejected as out-of-range).
+      // Guards against an off-by-one changing `<=` to `<`.
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Must NOT trip at the default (which would mean the ceiling was rejected).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
     it('falls back from an invalid config to the env value (config→env cascade)', async () => {
       vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '4000');
       const gated = gatedStream(); // silent
