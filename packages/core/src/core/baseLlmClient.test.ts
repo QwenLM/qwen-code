@@ -60,10 +60,12 @@ vi.mock('../models/content-generator-config.js', () => ({
 }));
 
 const mockGenerateContent = vi.fn();
+const mockGenerateContentStream = vi.fn();
 const mockEmbedContent = vi.fn();
 
 const mockContentGenerator = {
   generateContent: mockGenerateContent,
+  generateContentStream: mockGenerateContentStream,
   embedContent: mockEmbedContent,
 } as unknown as Mocked<ContentGenerator>;
 
@@ -129,6 +131,21 @@ const createMockTextResponse = (text: string): GenerateContentResponse =>
       },
     ],
   }) as GenerateContentResponse;
+
+// Builds an async generator that yields one response per text delta, then an
+// optional trailing usage-only chunk — mirroring how the streaming pipeline
+// emits content deltas followed by a final chunk carrying usageMetadata.
+async function* mockTextStream(
+  chunks: string[],
+  usage?: GenerateContentResponse['usageMetadata'],
+): AsyncGenerator<GenerateContentResponse> {
+  for (const text of chunks) {
+    yield createMockTextResponse(text);
+  }
+  if (usage) {
+    yield { usageMetadata: usage } as GenerateContentResponse;
+  }
+}
 
 describe('BaseLlmClient', () => {
   let client: BaseLlmClient;
@@ -551,6 +568,81 @@ describe('BaseLlmClient', () => {
       await expect(client.generateEmbedding(texts)).rejects.toThrow(
         'API Failure',
       );
+    });
+  });
+
+  describe('generateText - streaming', () => {
+    it('routes through generateContentStream, concatenates deltas, trims once, and captures final-chunk usage', async () => {
+      const usage = {
+        promptTokenCount: 11,
+        candidatesTokenCount: 7,
+        totalTokenCount: 18,
+      };
+      mockGenerateContentStream.mockImplementation(async () =>
+        mockTextStream(['  Hello', ', ', 'world  '], usage),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(mockGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+      // Deltas are concatenated, then trimmed once at the end.
+      expect(result.text).toBe('Hello, world');
+      expect(result.usage).toEqual(usage);
+    });
+
+    it('drops thought parts and tolerates a stream that omits usage', async () => {
+      async function* streamWithThought(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('answer');
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'reasoning', thought: true }],
+              },
+              index: 0,
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      }
+      mockGenerateContentStream.mockImplementation(async () =>
+        streamWithThought(),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(result.text).toBe('answer');
+      expect(result.usage).toBeUndefined();
+    });
+
+    it('does not stream when stream is omitted (non-streaming path, still trimmed)', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('  plain  '),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContentStream).not.toHaveBeenCalled();
+      expect(result.text).toBe('plain');
     });
   });
 

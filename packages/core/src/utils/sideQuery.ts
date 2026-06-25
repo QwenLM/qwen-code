@@ -99,6 +99,15 @@ export interface SideQueryTextOptions {
    * new user-visible side queries honor the preference automatically.
    */
   skipOutputLanguagePreference?: boolean;
+  /**
+   * Stream the response instead of awaiting the whole non-streaming body.
+   * Defaults to false. Opt in to keep the HTTP connection alive against
+   * gateways whose `proxy_read_timeout` would kill a slow inference before the
+   * first byte arrives (e.g. chat compression behind a BFF). The streamed
+   * deltas are collected into the same `{ text, usage }` result, so only
+   * callers at real timeout risk need to set this.
+   */
+  stream?: boolean;
   validate?: (text: string) => string | null;
 }
 
@@ -248,6 +257,7 @@ export async function runSideQuery<TResponse>(
     ...(options.maxAttempts !== undefined && {
       maxAttempts: options.maxAttempts,
     }),
+    ...(options.stream !== undefined && { stream: options.stream }),
   });
 
   const customError = options.validate?.(result.text);

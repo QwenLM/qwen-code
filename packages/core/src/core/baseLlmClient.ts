@@ -84,6 +84,14 @@ export interface GenerateTextOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
+  /**
+   * Stream the response instead of awaiting the whole non-streaming body.
+   * Defaults to falsy (unchanged non-streaming behavior). Opt in to keep the
+   * HTTP connection alive against BFF gateways whose `proxy_read_timeout` would
+   * otherwise kill a slow inference before the first byte arrives. The streamed
+   * deltas are collected into the same `{ text, usage }` result.
+   */
+  stream?: boolean;
 }
 
 /**
@@ -325,6 +333,7 @@ export class BaseLlmClient {
       systemInstruction,
       promptId,
       maxAttempts,
+      stream,
     } = options;
 
     const requestConfig: GenerateContentConfig = {
@@ -341,15 +350,46 @@ export class BaseLlmClient {
     } = await this.resolveForModel(model);
 
     try {
-      const apiCall = () =>
-        contentGenerator.generateContent(
-          {
-            model: requestModel,
-            config: requestConfig,
-            contents,
-          },
-          promptId ?? '',
-        );
+      const request = {
+        model: requestModel,
+        config: requestConfig,
+        contents,
+      };
+
+      // Both branches resolve to the same `{ text, usage }` shape so a single
+      // retryWithBackoff governs the whole request (a mid-stream failure retries
+      // the entire call — side queries are idempotent). Streaming keeps the HTTP
+      // connection alive so a slow inference can't be killed by a gateway's
+      // `proxy_read_timeout`; non-streaming is the unchanged default.
+      const apiCall: () => Promise<GenerateTextResult> = stream
+        ? async () => {
+            const responseStream = await contentGenerator.generateContentStream(
+              request,
+              promptId ?? '',
+            );
+            // Chunks are deltas, not cumulative snapshots, so concatenate.
+            // getResponseText already drops thought parts; usageMetadata rides
+            // the final chunk (last one wins), matching the non-streaming read.
+            let text = '';
+            let usage: GenerateContentResponseUsageMetadata | undefined;
+            for await (const chunk of responseStream) {
+              text += getResponseText(chunk) ?? '';
+              if (chunk.usageMetadata) {
+                usage = chunk.usageMetadata;
+              }
+            }
+            return { text, usage };
+          }
+        : async () => {
+            const result = await contentGenerator.generateContent(
+              request,
+              promptId ?? '',
+            );
+            return {
+              text: getResponseText(result) ?? '',
+              usage: result.usageMetadata,
+            };
+          };
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
@@ -379,8 +419,8 @@ export class BaseLlmClient {
       });
 
       return {
-        text: (getResponseText(result) ?? '').trim(),
-        usage: result.usageMetadata,
+        text: result.text.trim(),
+        usage: result.usage,
       };
     } catch (error) {
       if (abortSignal.aborted) {
