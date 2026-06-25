@@ -233,7 +233,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                 }
               >
                 {t(thinkingSummaryKey, {
-                  duration: thinkingActive ? thinkingDuration : '',
+                  duration: thinkingDuration,
                 })}
               </span>
               <span
