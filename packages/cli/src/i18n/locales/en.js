@@ -212,6 +212,7 @@ export default {
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
+  'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1479,8 +1480,10 @@ export default {
     'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
   'Voice: recording': 'Voice: recording',
   'Voice: transcribing': 'Voice: transcribing',
+  'Voice: refining': 'Voice: refining',
   'listening…': 'listening…',
   'transcribing…': 'transcribing…',
+  'refining…': 'refining…',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',

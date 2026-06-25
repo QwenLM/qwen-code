@@ -96,6 +96,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
+const RESOLVED_MOCK_WORKSPACE_DIR = pathActual.resolve(MOCK_WORKSPACE_DIR);
 // Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
 const MOCK_WORKSPACE_SETTINGS_PATH = pathActual.join(
   MOCK_WORKSPACE_DIR,
@@ -213,6 +214,32 @@ describe('Settings Loading and Merging', () => {
       expect(settings.user.settings).toEqual({});
       expect(settings.workspace.settings).toEqual({});
       expect(settings.merged).toEqual({});
+    });
+
+    it('loads .env starting from the explicit workspace directory', () => {
+      const envKey = 'LOAD_SETTINGS_WORKSPACE_ENV_MARKER';
+      const workspaceEnvPath = pathActual.join(
+        RESOLVED_MOCK_WORKSPACE_DIR,
+        '.env',
+      );
+      delete process.env[envKey];
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p.toString() === workspaceEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation((p: fs.PathLike) => {
+        if (p.toString() === workspaceEnvPath) {
+          return `${envKey}=from-workspace\n`;
+        }
+        return '{}';
+      });
+
+      try {
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env[envKey]).toBe('from-workspace');
+      } finally {
+        delete process.env[envKey];
+      }
     });
 
     describe('home directory workspace scope', () => {
@@ -3888,7 +3915,11 @@ describe('Settings Loading and Merging', () => {
       });
 
       it('should allow .env file to override settings.env values', () => {
-        const geminiEnvPath = path.resolve(path.join(QWEN_DIR, '.env'));
+        const geminiEnvPath = path.join(
+          RESOLVED_MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
         const userSettingsContent: Settings = {
           env: {
             ENV_OVERRIDE_TEST: 'from_settings',
@@ -4108,6 +4139,9 @@ describe('Settings Loading and Merging', () => {
 
     describe('QWEN_HOME custom directory', () => {
       const originalQwenHome = process.env['QWEN_HOME'];
+      const originalQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      const originalTrustedFoldersPath =
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
 
       beforeEach(() => {
         delete process.env['DEBUG'];
@@ -4120,6 +4154,17 @@ describe('Settings Loading and Merging', () => {
           delete process.env['QWEN_HOME'];
         } else {
           process.env['QWEN_HOME'] = originalQwenHome;
+        }
+        if (originalQwenRuntimeDir === undefined) {
+          delete process.env['QWEN_RUNTIME_DIR'];
+        } else {
+          process.env['QWEN_RUNTIME_DIR'] = originalQwenRuntimeDir;
+        }
+        if (originalTrustedFoldersPath === undefined) {
+          delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+        } else {
+          process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+            originalTrustedFoldersPath;
         }
         delete process.env['DEBUG'];
         delete process.env['DEBUG_MODE'];
@@ -4160,6 +4205,7 @@ describe('Settings Loading and Merging', () => {
         delete process.env['QWEN_HOME'];
         delete process.env['QWEN_RUNTIME_DIR'];
         delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
 
         const cwdSpy = vi
           .spyOn(process, 'cwd')
@@ -4181,6 +4227,7 @@ describe('Settings Loading and Merging', () => {
                 'QWEN_HOME=/tmp/hijack',
                 'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
                 'QWEN_CODE_MCP_APPROVALS_PATH=/tmp/preapproved.json',
+                'QWEN_CODE_TRUSTED_FOLDERS_PATH=/tmp/trusted.json',
                 'OTHER_VAR=ok',
               ].join('\n');
             return '{}';
@@ -4193,11 +4240,43 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['QWEN_HOME']).toBeUndefined();
         expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
         expect(process.env['QWEN_CODE_MCP_APPROVALS_PATH']).toBeUndefined();
+        expect(process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']).toBeUndefined();
         // Other vars from the same project .env still load.
         expect(process.env['OTHER_VAR']).toEqual('ok');
 
         delete process.env['OTHER_VAR'];
         cwdSpy.mockRestore();
+      });
+
+      it('pre-resolves trusted-folders path from a user-level .env', () => {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+        const customHome = '/tmp/qwen-home-trust';
+        const customGlobalEnvPath = path.join(customHome, '.env');
+        process.env['QWEN_HOME'] = customHome;
+        process.env['QWEN_RUNTIME_DIR'] = '/tmp/qwen-runtime';
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, customGlobalEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH) return JSON.stringify({});
+            if (p === customGlobalEnvPath) {
+              return 'QWEN_CODE_TRUSTED_FOLDERS_PATH=/tmp/custom-trust.json';
+            }
+            return '{}';
+          },
+        );
+
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+
+        expect(process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']).toBe(
+          '/tmp/custom-trust.json',
+        );
       });
 
       it('still honors QWEN_HOME from a user-level .env (~/.qwen/.env)', () => {

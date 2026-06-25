@@ -43,6 +43,7 @@ import {
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -74,6 +75,7 @@ import {
   resolveVoiceStreamConfig,
   transcribeVoiceAudio,
 } from '../voice/voice-transcriber.js';
+import { refineVoiceTranscript } from '../voice/voice-refine.js';
 import { openQwenAsrRealtimeStream } from '../voice/qwen-asr-realtime-session.js';
 import { openVoiceStream } from '../voice/voice-stream-session.js';
 import { openVoiceStreamWithRetry } from '../voice/voice-stream-retry.js';
@@ -86,6 +88,48 @@ export interface Attachment {
   id: string; // Unique identifier (timestamp)
   path: string; // Full file path
   filename: string; // Filename only (for display)
+}
+
+const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+/**
+ * Classify a pasted blob as image-file-path(s).
+ *
+ * Some terminals and clipboard helpers handle an image paste by injecting the
+ * saved file path as text (optionally prefixed with `@`, shell-escaped, or
+ * space/newline-separated for multiple files) instead of routing through our
+ * own Ctrl+V handler. Recognizing those lets Cmd+V (terminal-driven) converge
+ * on the same attachment UX as Ctrl+V. Mirrors Claude Code's usePasteHandler:
+ * split on newlines and on spaces that precede an absolute path (spaces inside
+ * a path are shell-escaped), then normalize each token.
+ *
+ * @returns `imagePaths` (normalized tokens with an image extension) and
+ *   `allImages` (true only when every token is such a path), so the caller can
+ *   promote a pure image-path paste without swallowing mixed text.
+ */
+export function classifyPastedImagePaths(pasted: string): {
+  imagePaths: string[];
+  allImages: boolean;
+} {
+  const tokens = pasted
+    .split(/ (?=@?\/|@?[A-Za-z]:\\)/)
+    .flatMap((part) => part.split('\n'))
+    .map((token) => token.trim())
+    .filter(Boolean);
+  const imagePaths: string[] = [];
+  let allImages = tokens.length > 0;
+  for (const token of tokens) {
+    const normalized = token
+      .replace(/^@/, '') // strip the `@` reference prefix
+      .replace(/^["']|["']$/g, '') // strip surrounding quotes
+      .replace(/\\ /g, ' '); // unescape shell-escaped spaces
+    if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
+      imagePaths.push(normalized);
+    } else {
+      allImages = false;
+    }
+  }
+  return { imagePaths, allImages };
 }
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
@@ -326,6 +370,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       transcribeVoiceAudio(audio, { config, settings, voiceModel }),
     [config, settings],
   );
+  // Refine the transcript with the fast model before inserting. On by default,
+  // but skipped when the user opted out or no fast model is configured.
+  const voiceRefineEnabled =
+    settings.merged.general?.voice?.refineTranscript !== false &&
+    config.getFastModel() != null;
+  const refineVoice = useCallback(
+    (raw: string, signal: AbortSignal) =>
+      refineVoiceTranscript(config, raw, signal),
+    [config],
+  );
   const voiceMicWarnedStatusRef = useRef<string | null>(null);
   const voiceRecorderRef = useRef<ReturnType<
     typeof createVoiceRecorder
@@ -413,6 +467,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     addItem: uiState.historyManager?.addItem,
     createRecorder: getVoiceRecorder,
     transcribe: transcribeVoice,
+    refine: voiceRefineEnabled ? refineVoice : undefined,
     onSubmit: (text) => voiceSubmitRef.current(text),
     warmup: warmupVoice,
     streaming: voiceStreaming,
@@ -642,6 +697,52 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, []);
 
+  // Promote a paste that is purely image-file path(s) (e.g. a terminal/clipboard
+  // helper that injects `@<path>` text on Cmd+V) into attachment chips, so the
+  // interaction matches Ctrl+V. Each source image is copied into the global temp
+  // dir (the same place Ctrl+V saves to) so it resolves under the workspace
+  // boundary on submit regardless of where it originally lived. If none of the
+  // candidate paths resolve, the original text is inserted unchanged.
+  const promotePastedImagePaths = useCallback(
+    async (imagePaths: string[], originalPasted: string) => {
+      const cwd = config.getTargetDir();
+      const clipboardDir = path.join(Storage.getGlobalTempDir(), 'clipboard');
+      const attachments: Attachment[] = [];
+      for (const imagePath of imagePaths) {
+        const sourcePath = path.isAbsolute(imagePath)
+          ? imagePath
+          : path.resolve(cwd, imagePath);
+        try {
+          const stats = await fs.stat(sourcePath);
+          if (!stats.isFile()) continue;
+          await fs.mkdir(clipboardDir, { recursive: true });
+          const destPath = path.join(
+            clipboardDir,
+            `clipboard-${Date.now()}-${attachments.length}${path.extname(sourcePath)}`,
+          );
+          await fs.copyFile(sourcePath, destPath);
+          attachments.push({
+            id: `${Date.now()}-${attachments.length}`,
+            path: destPath,
+            filename: path.basename(destPath),
+          });
+        } catch {
+          // Source missing or copy failed — skip this token.
+        }
+      }
+      if (attachments.length > 0) {
+        cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
+          // Ignore cleanup errors
+        });
+        setAttachments((prev) => [...prev, ...attachments]);
+      } else {
+        // Looked like image paths but none resolved — keep the original as text.
+        buffer.insert(originalPasted, { paste: false });
+      }
+    },
+    [config, buffer],
+  );
+
   // Handle deletion of an attachment from the list
   const handleAttachmentDelete = useCallback((index: number) => {
     setAttachments((prev) => {
@@ -849,8 +950,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         const lineCount = pasted.split('\n').length;
 
         // Ensure we never accidentally interpret paste as regular input.
+        const pastedImagePaths = classifyPastedImagePaths(pasted);
         if (key.pasteImage) {
           handleClipboardImage(true);
+        } else if (
+          pastedImagePaths.allImages &&
+          pastedImagePaths.imagePaths.length > 0
+        ) {
+          // Pasted text is purely image path(s) — promote to attachment chips
+          // so Cmd+V (terminal-injected path) matches the Ctrl+V experience.
+          void promotePastedImagePaths(pastedImagePaths.imagePaths, pasted);
         } else if (
           charCount > LARGE_PASTE_CHAR_THRESHOLD ||
           lineCount > LARGE_PASTE_LINE_THRESHOLD
@@ -1580,6 +1689,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
+      promotePastedImagePaths,
       resetCompletionState,
       dismissCompletion,
       escPressCount,
@@ -1841,7 +1951,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? t('Voice: recording')
       : voiceInput.status === 'transcribing'
         ? t('Voice: transcribing')
-        : undefined;
+        : voiceInput.status === 'refining'
+          ? t('Voice: refining')
+          : undefined;
 
   const prefixNode = (
     <Text
