@@ -202,6 +202,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_stats',
   'session_lsp',
+  'session_status',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
