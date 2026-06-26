@@ -730,6 +730,7 @@ const EN: Messages = {
   'mcp.parameters': 'Parameters:',
   'mcp.required': ' required',
   'mcp.resources': 'Resources',
+  'mcp.resourcesUnavailable': 'Resource details unavailable.',
   'mcp.resourceCount': (v) =>
     `${v?.count ?? 0} ${v?.count === 1 ? 'resource' : 'resources'}`,
   'mcp.promptCount': (v) =>
@@ -740,7 +741,6 @@ const EN: Messages = {
   'mcp.resource.sizeLabel': 'Size:',
   'mcp.resource.bytes': (v) =>
     `${v?.count ?? 0} ${v?.count === 1 ? 'byte' : 'bytes'}`,
-  'mcp.resource.reference': 'Reference in chat',
   'mcp.scrollPosition': (v) => `${v?.current ?? 0}/${v?.total ?? 0}`,
   'mcp.shortcut.back': 'Esc to back',
   'mcp.shortcut.close': 'Esc to close',
@@ -1871,6 +1871,7 @@ const ZH: Messages = {
   'mcp.parameters': '参数：',
   'mcp.required': ' 必填',
   'mcp.resources': '资源',
+  'mcp.resourcesUnavailable': '无法加载资源详情。',
   'mcp.resourceCount': (v) => `${v?.count ?? 0} 个资源`,
   'mcp.promptCount': (v) => `${v?.count ?? 0} 个提示词`,
   'mcp.resource.uriLabel': 'URI：',
@@ -1878,7 +1879,6 @@ const ZH: Messages = {
   'mcp.resource.mimeTypeLabel': 'MIME 类型：',
   'mcp.resource.sizeLabel': '大小：',
   'mcp.resource.bytes': (v) => `${v?.count ?? 0} 字节`,
-  'mcp.resource.reference': '在对话中引用',
   'mcp.scrollPosition': (v) => `${v?.current ?? 0}/${v?.total ?? 0}`,
   'mcp.shortcut.back': 'Esc 返回',
   'mcp.shortcut.close': 'Esc 关闭',

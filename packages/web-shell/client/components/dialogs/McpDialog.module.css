@@ -321,14 +321,6 @@
   white-space: nowrap;
 }
 
-.resourceRef {
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
-  font-size: 12px;
-  color: var(--accent-color, var(--text-primary));
-  word-break: break-all;
-}
-
 .toolDetail {
   display: flex;
   flex-direction: column;

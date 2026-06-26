@@ -3569,13 +3569,19 @@ class QwenAgent implements Agent {
       return resources;
     }
     for (const session of this.getActiveSessions()) {
-      const sessionResources =
-        session
-          .getConfig()
-          .getResourceRegistry?.()
-          ?.getResourcesByServer(serverName) ?? [];
-      if (sessionResources.length > 0) {
-        return sessionResources;
+      try {
+        const sessionResources =
+          session
+            .getConfig()
+            .getResourceRegistry?.()
+            ?.getResourcesByServer(serverName) ?? [];
+        if (sessionResources.length > 0) {
+          return sessionResources;
+        }
+      } catch {
+        // A degraded session must not collapse the base /workspace/mcp
+        // status — skip it and keep scanning. (The counts ride that status,
+        // so one bad session shouldn't blank out every server's row.)
       }
     }
     return resources;
@@ -3598,13 +3604,17 @@ class QwenAgent implements Agent {
       return prompts;
     }
     for (const session of this.getActiveSessions()) {
-      const sessionPrompts =
-        session
-          .getConfig()
-          .getPromptRegistry?.()
-          ?.getPromptsByServer(serverName) ?? [];
-      if (sessionPrompts.length > 0) {
-        return sessionPrompts;
+      try {
+        const sessionPrompts =
+          session
+            .getConfig()
+            .getPromptRegistry?.()
+            ?.getPromptsByServer(serverName) ?? [];
+        if (sessionPrompts.length > 0) {
+          return sessionPrompts;
+        }
+      } catch {
+        // See resolveServerMcpResources — skip a degraded session.
       }
     }
     return prompts;

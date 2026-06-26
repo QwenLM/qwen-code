@@ -1604,6 +1604,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
       { serverName: 'docs' },
     );
+    const mcpResourcesMissing = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
+      { serverName: 'not-configured' },
+    );
     const skills = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceSkills,
       {},
@@ -1687,6 +1691,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       (mcpResources as { resources: Array<Record<string, unknown>> })
         .resources[1],
     ).not.toHaveProperty('serverName');
+
+    // An unconfigured server name returns an error cell and does NOT fall
+    // back to scanning other servers/sessions.
+    expect(mcpResourcesMissing).toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      serverName: 'not-configured',
+      initialized: true,
+      acpChannelLive: true,
+      resources: [],
+      errors: [{ kind: 'mcp_resources', status: 'error' }],
+    });
 
     expect(skills).toMatchObject({
       v: 1,

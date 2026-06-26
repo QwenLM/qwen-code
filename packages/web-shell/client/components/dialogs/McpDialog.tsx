@@ -117,15 +117,6 @@ function resourceKey(serverName: string, uri: string): string {
   return `${serverName}\u0000${uri}`;
 }
 
-/**
- * Build the in-chat reference for an MCP resource. Mirrors the TUI's
- * `buildMcpResourceRef`: the stored ref is `<serverName>:<uri>`; the `@`
- * is the input trigger character, prepended only for display.
- */
-function buildMcpResourceRef(serverName: string, uri: string): string {
-  return `${serverName}:${uri}`;
-}
-
 const detailLabel = trimDialogLabel;
 
 function ChevronIcon({ expanded }: { expanded: boolean }) {
@@ -271,11 +262,9 @@ function ToolDetail({ tool, t }: { tool: DaemonWorkspaceMcpToolStatus; t: T }) {
 
 function ResourceDetail({
   resource,
-  serverName,
   t,
 }: {
   resource: DaemonWorkspaceMcpResourceStatus;
-  serverName: string;
   t: T;
 }) {
   // Only surface the friendly name when it adds information beyond the URI
@@ -316,13 +305,6 @@ function ResourceDetail({
           </div>
         </div>
       ) : null}
-      {/* How to reference: typing @server:uri in chat injects the content. */}
-      <div className={styles.section}>
-        <div className={styles.sectionTitle}>{t('mcp.resource.reference')}</div>
-        <code className={styles.resourceRef}>
-          @{buildMcpResourceRef(serverName, resource.uri)}
-        </code>
-      </div>
     </div>
   );
 }
@@ -403,13 +385,20 @@ export function McpDialog({ message }: McpDialogProps) {
       }));
       // Keep the resource list in sync after reconnect/enable. Only fetch
       // when the refreshed status still advertises resources; otherwise
-      // drop any now-stale list so the section disappears.
+      // drop any now-stale list so the section disappears. The fetch is
+      // isolated in its own try/catch so a failed resource refresh never
+      // turns a successful reconnect/enable into a reported failure.
       if (nextServer.resourceCount) {
-        const nextResources = await mcp.loadResources(nextServer.name);
-        setResourcesByServer((current) => ({
-          ...current,
-          [nextServer.name]: nextResources,
-        }));
+        try {
+          const nextResources = await mcp.loadResources(nextServer.name);
+          setResourcesByServer((current) => ({
+            ...current,
+            [nextServer.name]: nextResources,
+          }));
+        } catch {
+          // Leave the prior resource list in place; the count badge still
+          // reflects the refreshed status.
+        }
       } else {
         setResourcesByServer((current) => {
           if (!(nextServer.name in current)) return current;
@@ -641,11 +630,16 @@ export function McpDialog({ message }: McpDialogProps) {
                               })}
                             </div>
                           )}
-                          {resources.length > 0 ? (
+                          {resourceCount > 0 ? (
                             <div className={styles.resources}>
                               <div className={styles.sectionTitle}>
                                 {t('mcp.resources')}
                               </div>
+                              {resources.length === 0 ? (
+                                <div className={styles.emptyTools}>
+                                  {t('mcp.resourcesUnavailable')}
+                                </div>
+                              ) : null}
                               {resources.map((resource) => {
                                 const key = resourceKey(
                                   server.name,
@@ -695,7 +689,6 @@ export function McpDialog({ message }: McpDialogProps) {
                                     {resourceExpanded ? (
                                       <ResourceDetail
                                         resource={resource}
-                                        serverName={server.name}
                                         t={t}
                                       />
                                     ) : null}
