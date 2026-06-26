@@ -9,9 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 const refreshIssueComments =
-  workflow.match(
-    /refresh_issue_comments\(\) \{[\s\S]*?\n            \}/,
-  )?.[0] ?? '';
+  workflow.match(/refresh_issue_comments\(\) \{[\s\S]*?\n[ ]{12}\}/)?.[0] ?? '';
 
 describe('qwen-autofix workflow', () => {
   it('does not classify tier-2 issues with incomplete fallback comments', () => {
