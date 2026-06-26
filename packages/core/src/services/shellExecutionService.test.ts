@@ -1567,6 +1567,24 @@ describe('ShellExecutionService', () => {
       expect(mockPtyProcess.kill).toHaveBeenCalled();
     });
 
+    it('exit cleanup tree-kills child_process children via the absolute taskkill', () => {
+      mockPlatform.mockReturnValue('win32');
+      const childPid = 54321;
+      ShellExecutionService['activeChildProcesses'].add(childPid);
+
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activeChildProcesses'].delete(childPid);
+
+      // Pins killChildProcesses on the absolute System32 path — a regression to
+      // the bare 'taskkill' name reopens the binary-planting hole. See #5873.
+      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(childPid),
+      ]);
+    });
+
     it('win32 taskkill is invoked by absolute System32 path, not the bare name', async () => {
       mockPlatform.mockReturnValue('win32');
 
@@ -1684,6 +1702,49 @@ describe('ShellExecutionService', () => {
         '/pid',
         String(mockPtyProcess.pid),
       ]);
+    });
+
+    it('win32 promoted shell skips the post-settle reap when the pty already exited', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_5873_settle_esrch',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        { postPromote: { onSettle: () => {} } },
+      );
+      // Promote succeeded while the shell was still alive (default liveness).
+      expect(result.promoted).toBe(true);
+
+      // Now the shell has exited: the post-settle liveness check fails (ESRCH),
+      // so the firePostSettle reap must be skipped (no taskkill against a
+      // possibly-reused pid). Mirrors the foreground finalizer's guard. See #5873.
+      mockProcessKill.mockImplementation(
+        (_pid: number, signal?: string | number) => {
+          if (signal === 0) {
+            throw new Error('ESRCH');
+          }
+          return true;
+        },
+      );
+      try {
+        const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+        const postPromoteExitHandler =
+          onExitRegistrations[onExitRegistrations.length - 1][0];
+        postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+        expect(mockCpSpawn).not.toHaveBeenCalledWith(
+          TASKKILL,
+          expect.anything(),
+        );
+      } finally {
+        mockProcessKill.mockImplementation(() => true);
+      }
     });
   });
 

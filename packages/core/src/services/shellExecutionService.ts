@@ -477,9 +477,10 @@ interface ProcessCleanupStrategy {
  * A failed *launch* of taskkill (System32 off PATH, EMFILE, EACCES) is reported
  * via an async 'error' event, not a throw, so the try/catch below cannot see
  * it. Without a listener that 'error' would bubble up as an unhandled
- * EventEmitter error and crash the CLI from this cleanup path; attach a no-op
- * one. (Callers that need the kill to actually land must provide their own
- * fallback — see performCancelKill.) See #5873.
+ * EventEmitter error and crash the CLI from this cleanup path; the 'error' and
+ * 'exit' listeners below log the failure via debugLogger without re-throwing.
+ * Callers that need the kill to actually land must provide their own fallback —
+ * see performCancelKill. See #5873.
  */
 // Resolve taskkill by absolute System32 path, never the bare name. On Windows
 // child_process spawn resolves a bare command through the executable search
