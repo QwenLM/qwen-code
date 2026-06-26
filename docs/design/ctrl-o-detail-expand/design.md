@@ -310,6 +310,42 @@ transcript 走 alt-screen 接管整屏，但后台对话仍在跑——这带来
 
 > 依赖说明：本功能的可用性前置 = #5751 的鼠标引用计数修复（否则 VP 下鼠标可能被某个折叠块的卸载误关）。设计与实现以"#5751 已在 main"为前提；commit 顺序见 §9。
 
+### 4.9 Transcript 全详情的数据层补全（消除"第二层折叠"中间态）
+
+**问题（验收实测发现）**：§3.4 截图显示，Ctrl+O transcript 下 `read_file` / `ls`（列出文件）/ `grep`（搜索）这三类**可折叠工具**只渲染一行摘要（`Listed 3 item(s)` / `Found 4 matches` / `读取文件 README.md`），**没有完整明细**（实际目录条目、grep 命中行、文件全文）。这违背 transcript "全详情" 的语义——存在用户感知到的"第二层折叠中间态"。
+
+**根因（数据层，非折叠开关）**：经取证，§4.5 的 `fullDetail → forceExpandAll / forceShowResult / availableTerminalHeight=undefined` 链路**全部正确生效**；问题在于前端根本拿不到完整明细：
+
+- `ToolResult` 有两路内容（`packages/core/src/tools/tools.ts:443+`）：`llmContent`（"factual outcome"，完整）与 `returnDisplay`（注释明确为 "user-friendly **summary**"）。
+- `ls` / `grep` / `ripGrep` / `read_file` 的 `returnDisplay` 只装摘要（`Listed N` / `Found N` / `''`），完整内容只进 `llmContent`（取证：`ls.ts` / `grep.ts` / `ripGrep.ts` / `read-file.ts` 的返回）。
+- 前端工具显示结构 `IndividualToolCallDisplay`（`packages/cli/src/ui/types.ts:65`）**只有 `resultDisplay`**，无完整内容字段；转换点 `useReactToolScheduler.ts:330` 只取 `response.resultDisplay`（摘要）。
+- 完整内容虽以 `ToolCallResponseInfo.responseParts`（`turn.ts:116`）到达前端，但那是 `functionResponse` 包装，`partToString` 对 functionResponse part 返回空（`partUtils.ts:61-69` 只取 `part.text`）——**前端无法干净提取**。
+
+**方案（路径 C：core 端派生完整文本字段，集中一处）**：
+
+- **为什么不是路径 A（前端解析 responseParts）**：需手撕 `functionResponse.response.output` 协议结构，脆弱且与 LLM 传输格式耦合。
+- **为什么不是路径 B（逐工具改 returnDisplay 携带完整内容）**：要改 `ls`/`grep`/`ripGrep`/`read_file` 等多个工具，且违背 `returnDisplay`="summary" 的既有语义契约。
+- **路径 C（采用）**：在 core 组装 `ToolCallResponseInfo` 的**唯一 success 路径**上，用此刻仍是裸 `PartListUnion` 的 `toolResult.llmContent` 经 `partToString` 派生一个完整文本字段——一处改动、不碰工具层、不碰 returnDisplay 语义。
+
+落点：
+
+1. **core `ToolCallResponseInfo`（`turn.ts:116`）新增** `contentForDisplay?: string`（可选，仅 success 派生）。
+2. **core 组装处**（`coreToolScheduler.ts` success 分支，与 `convertToFunctionResponse(...)` 同点）：`contentForDisplay = compactString(partToString(toolResult.llmContent), 'history')`。**复用** `MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS = 32_000`（`toolResultDisplayCompaction.ts`）作内存护栏——"全详情"指**不在 UI 上折叠**，但仍受与 history 一致的 32k 保留上限约束（极端大输出由 transcript 的 `ScrollableList` 滚动承接，不再二次截断 UI）。
+3. **cli `IndividualToolCallDisplay`（`types.ts:65`）新增** `detailedDisplay?: string`。
+4. **cli 转换点** `useReactToolScheduler.ts:330` success 分支透传 `detailedDisplay: trackedCall.response.contentForDisplay`。
+5. **cli `ToolMessage`**：当 `forceShowResult`（含 `fullDetail`）为真**且**该工具 `isCollapsibleTool(name)`**且**存在 `detailedDisplay` 时，渲染 `detailedDisplay` 取代摘要 `resultDisplay`；其余路径（主视图折叠态、非 collapsible 工具）**行为不变**。
+
+**范围界定**：
+
+- 仅影响 `read/search/list` 这三类 collapsible 工具的 **transcript（fullDetail）** 渲染。
+- 主视图（非 fullDetail）**完全不变**——第一层分区摘要 `✔ Searched 1 pattern, read 1 file, listed 1 directory` 保持。
+- `run_shell_command`（`returnDisplay = result.output`，完整）/ `edit` / `write`（`returnDisplay = 完整 diff`）本就完整，**不动**。
+
+**风险与测试点**：
+
+- 内存：`contentForDisplay` 是 `llmContent` 的文本派生，与 `responseParts` 内容重叠 → 受 32k 上限约束；非文本（read 图片的 inlineData）经 `partToString` 自然为空，不渲染二进制。
+- 测试：core 派生字段单测（含 32k 截断标记）；`ToolMessage` 在 `fullDetail` + collapsible + 有/无 `detailedDisplay` 的渲染分支测试；回归——主视图折叠摘要不受影响。
+
 ## 5. 改动清单（按文件）
 
 > 完整符号清单来自代码取证，下列为需改动文件与动作；行号以当前 main 为准，实现时以实际为准。
