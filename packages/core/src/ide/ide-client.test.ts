@@ -646,6 +646,68 @@ describe('IdeClient', () => {
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     });
 
+    it('should return legacy config when workspacePath is undefined', async () => {
+      const config = { port: '1111', ppid: 12345 };
+      vi.mocked(fs.promises.readFile).mockResolvedValueOnce(
+        JSON.stringify(config),
+      );
+      vi.mocked(fs.promises.readdir).mockClear();
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(result).toEqual(config);
+      expect(fs.promises.readFile).toHaveBeenCalledWith(
+        path.join('/tmp', 'qwen-code-ide-server-12345.json'),
+        'utf8',
+      );
+      expect(fs.promises.readdir).not.toHaveBeenCalled();
+    });
+
+    it('should return legacy config when env lock belongs to another workspace', async () => {
+      process.env['QWEN_CODE_IDE_SERVER_PORT'] = '1234';
+      const envConfig = {
+        port: '1234',
+        workspacePath: '/other/workspace',
+      };
+      const legacyConfig = {
+        port: '1111',
+        workspacePath: '/test/workspace',
+        ppid: 12345,
+      };
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/home/test', '.qwen', 'ide', '1234.lock')) {
+            return JSON.stringify(envConfig);
+          }
+          if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
+            return JSON.stringify(legacyConfig);
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      vi.mocked(fs.promises.readdir).mockClear();
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(result).toEqual(legacyConfig);
+      expect(fs.promises.readdir).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Ignoring IDE env lock file: workspace "/other/workspace" does not match cwd "/test/workspace/sub-dir".',
+      );
+      delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+    });
+
     it.each(['../evil', '12345/../../etc', 'abc', ' 8080 ', '8080.0'])(
       'should scan the lock directory when env port is invalid: %s',
       async (port) => {
