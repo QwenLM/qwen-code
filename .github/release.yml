@@ -1,0 +1,6 @@
+# Configuration for GitHub's automatic release notes generation
+# PRs with 'skip-changelog' label will be excluded from release notes
+changelog:
+  exclude:
+    labels:
+      - 'skip-changelog'

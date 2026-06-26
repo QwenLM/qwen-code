@@ -1,0 +1,41 @@
+.message {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--warning-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  max-height: 50vh;
+  padding: 10px 12px;
+}
+
+.content {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.question {
+  color: var(--warning-color);
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.prefix {
+  font-weight: 700;
+}
+
+.answer {
+  margin-top: 8px;
+}
+
+.pending {
+  color: var(--warning-color);
+}
+
+.shortcuts {
+  margin-top: 10px;
+  color: var(--text-dimmed);
+  font-size: 12px;
+  line-height: 1.35;
+}

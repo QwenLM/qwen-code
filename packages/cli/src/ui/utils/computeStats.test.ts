@@ -12,13 +12,13 @@ import {
   computeSessionStats,
 } from './computeStats.js';
 import type {
-  ModelMetrics,
+  ModelMetricsCore,
   SessionMetrics,
 } from '../contexts/SessionContext.js';
 
 describe('calculateErrorRate', () => {
   it('should return 0 if totalRequests is 0', () => {
-    const metrics: ModelMetrics = {
+    const metrics: ModelMetricsCore = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 0 },
       tokens: {
         prompt: 0,
@@ -26,14 +26,13 @@ describe('calculateErrorRate', () => {
         total: 0,
         cached: 0,
         thoughts: 0,
-        tool: 0,
       },
     };
     expect(calculateErrorRate(metrics)).toBe(0);
   });
 
   it('should calculate the error rate correctly', () => {
-    const metrics: ModelMetrics = {
+    const metrics: ModelMetricsCore = {
       api: { totalRequests: 10, totalErrors: 2, totalLatencyMs: 0 },
       tokens: {
         prompt: 0,
@@ -41,7 +40,6 @@ describe('calculateErrorRate', () => {
         total: 0,
         cached: 0,
         thoughts: 0,
-        tool: 0,
       },
     };
     expect(calculateErrorRate(metrics)).toBe(20);
@@ -50,7 +48,7 @@ describe('calculateErrorRate', () => {
 
 describe('calculateAverageLatency', () => {
   it('should return 0 if totalRequests is 0', () => {
-    const metrics: ModelMetrics = {
+    const metrics: ModelMetricsCore = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 1000 },
       tokens: {
         prompt: 0,
@@ -58,14 +56,13 @@ describe('calculateAverageLatency', () => {
         total: 0,
         cached: 0,
         thoughts: 0,
-        tool: 0,
       },
     };
     expect(calculateAverageLatency(metrics)).toBe(0);
   });
 
   it('should calculate the average latency correctly', () => {
-    const metrics: ModelMetrics = {
+    const metrics: ModelMetricsCore = {
       api: { totalRequests: 10, totalErrors: 0, totalLatencyMs: 1500 },
       tokens: {
         prompt: 0,
@@ -73,7 +70,6 @@ describe('calculateAverageLatency', () => {
         total: 0,
         cached: 0,
         thoughts: 0,
-        tool: 0,
       },
     };
     expect(calculateAverageLatency(metrics)).toBe(150);
@@ -82,7 +78,7 @@ describe('calculateAverageLatency', () => {
 
 describe('calculateCacheHitRate', () => {
   it('should return 0 if prompt tokens is 0', () => {
-    const metrics: ModelMetrics = {
+    const metrics: ModelMetricsCore = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 0 },
       tokens: {
         prompt: 0,
@@ -90,14 +86,13 @@ describe('calculateCacheHitRate', () => {
         total: 0,
         cached: 100,
         thoughts: 0,
-        tool: 0,
       },
     };
     expect(calculateCacheHitRate(metrics)).toBe(0);
   });
 
   it('should calculate the cache hit rate correctly', () => {
-    const metrics: ModelMetrics = {
+    const metrics: ModelMetricsCore = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 0 },
       tokens: {
         prompt: 200,
@@ -105,7 +100,6 @@ describe('calculateCacheHitRate', () => {
         total: 0,
         cached: 50,
         thoughts: 0,
-        tool: 0,
       },
     };
     expect(calculateCacheHitRate(metrics)).toBe(25);
@@ -160,8 +154,8 @@ describe('computeSessionStats', () => {
             total: 20,
             cached: 0,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -198,8 +192,8 @@ describe('computeSessionStats', () => {
             total: 160,
             cached: 50,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {

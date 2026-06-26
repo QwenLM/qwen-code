@@ -41,6 +41,7 @@ export function agentMessagesToHistoryItems(
   pendingApprovals: ReadonlyMap<string, ToolCallConfirmationDetails>,
   liveOutputs?: ReadonlyMap<string, ToolResultDisplay>,
   shellPids?: ReadonlyMap<string, number>,
+  executionStartTimes?: ReadonlyMap<string, number>,
 ): HistoryItem[] {
   const items: HistoryItem[] = [];
   let nextId = 0;
@@ -179,6 +180,10 @@ export function agentMessagesToHistoryItems(
           ptyId:
             status === ToolCallStatus.Executing
               ? shellPids?.get(callId)
+              : undefined,
+          executionStartTime:
+            status === ToolCallStatus.Executing
+              ? executionStartTimes?.get(callId)
               : undefined,
         };
       });

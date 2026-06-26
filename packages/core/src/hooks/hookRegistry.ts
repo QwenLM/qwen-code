@@ -11,7 +11,6 @@ import {
   HOOKS_CONFIG_FIELDS,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { TrustedHooksManager } from './trustedHooks.js';
 
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
 
@@ -30,7 +29,7 @@ export interface ExtensionWithHooks {
 export interface HookRegistryConfig {
   getProjectRoot(): string;
   isTrustedFolder(): boolean;
-  getHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
+  getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getExtensions(): ExtensionWithHooks[];
 }
@@ -52,6 +51,13 @@ export interface HookRegistryEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /**
+   * Identifier for ephemeral entries attached at runtime by a specific
+   * subagent (via {@link HookRegistry.addAgentHooks}). Used by the matching
+   * unregister callback to remove the entries when the subagent ends. Plain
+   * (session/user/project/extension) entries leave this undefined.
+   */
+  agentScope?: string;
 }
 
 /**
@@ -99,6 +105,51 @@ export class HookRegistry {
   }
 
   /**
+   * Append ephemeral hook entries scoped to a specific subagent. Used by
+   * `SubagentManager` to wire the `hooks` field from a declarative agent
+   * frontmatter into the live registry when the subagent spawns.
+   *
+   * The hooks are validated through the same per-definition pipeline as
+   * session/user/project hooks (`processHookDefinition`), so a malformed
+   * entry is logged and dropped instead of breaking the spawn. Returns an
+   * unregister callback that removes exactly the entries added by this call;
+   * the caller is responsible for invoking it when the subagent finishes.
+   *
+   * v1 scope limitation: entries added here fire for every event of their
+   * declared type while they remain in the registry, regardless of which
+   * agent is currently active. If two subagents with different per-agent
+   * hook sets run concurrently, both sets fire for both agents. Proper
+   * per-agent scope filtering at firing time is left to a follow-up.
+   */
+  addAgentHooks(
+    hooks: { [K in HookEventName]?: HookDefinition[] },
+    agentScope: string,
+  ): () => void {
+    const before = this.entries.length;
+    this.processHooksConfiguration(
+      hooks,
+      HooksConfigSource.Session,
+      agentScope,
+    );
+    const addedCount = this.entries.length - before;
+    debugLogger.debug(
+      `Registered ${addedCount} ephemeral hook entries for agent scope "${agentScope}"`,
+    );
+    return () => {
+      const sizeBefore = this.entries.length;
+      this.entries = this.entries.filter(
+        (entry) => entry.agentScope !== agentScope,
+      );
+      const removed = sizeBefore - this.entries.length;
+      if (removed > 0) {
+        debugLogger.debug(
+          `Removed ${removed} ephemeral hook entries for agent scope "${agentScope}"`,
+        );
+      }
+    };
+  }
+
+  /**
    * Enable or disable a specific hook
    */
   setHookEnabled(hookName: string, enabled: boolean): void {
@@ -121,68 +172,58 @@ export class HookRegistry {
   }
 
   /**
-   * Get hook name for identification and display purposes
+   * Get a stable unique identity for duplicate detection.
+   * Uses full values (not truncated) to ensure accurate duplicate detection.
+   */
+  private getHookIdentity(
+    entry: HookRegistryEntry | { config: HookConfig },
+  ): string {
+    const config = entry.config;
+    if (config.name) return config.name;
+    if (config.type === 'command')
+      return (config as { command?: string }).command || 'unknown-command';
+    if (config.type === 'http')
+      return (config as { url?: string }).url || 'unknown-url';
+    if (config.type === 'function')
+      return (config as { id?: string }).id || 'unknown-function';
+    if (config.type === 'prompt')
+      return (config as { prompt?: string }).prompt || 'prompt-hook';
+    return 'unknown-hook';
+  }
+
+  /**
+   * Get hook name for display purposes (may be truncated for readability).
    */
   private getHookName(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    return entry.config.name || entry.config.command || 'unknown-command';
-  }
-
-  /**
-   * Check for untrusted project hooks and warn the user
-   */
-  private checkProjectHooksTrust(): void {
-    const projectHooks = this.config.getProjectHooks();
-    if (!projectHooks) return;
-
-    try {
-      const trustedHooksManager = new TrustedHooksManager();
-      const untrusted = trustedHooksManager.getUntrustedHooks(
-        this.config.getProjectRoot(),
-        projectHooks,
-      );
-
-      if (untrusted.length > 0) {
-        const message = `WARNING: The following project-level hooks have been detected in this workspace:
-${untrusted.map((h: string) => `  - ${h}`).join('\n')}
-
-These hooks will be executed. If you did not configure these hooks or do not trust this project,
-please review the project settings (.qwen/settings.json) and remove them.`;
-        this.feedbackEmitter?.emitFeedback('warning', message);
-
-        // Trust them so we don't warn again
-        trustedHooksManager.trustHooks(
-          this.config.getProjectRoot(),
-          projectHooks,
-        );
-      }
-    } catch {
-      debugLogger.warn('Failed to check project hooks trust');
+    const identity = this.getHookIdentity(entry);
+    // Truncate prompt identities for display
+    const config = entry.config;
+    if (!config.name && config.type === 'prompt') {
+      return identity.length > 30 ? identity.slice(0, 30) + '...' : identity;
     }
+    return identity;
   }
 
   /**
    * Process hooks from the config that was already loaded by the CLI
    */
   private processHooksFromConfig(): void {
-    if (this.config.isTrustedFolder()) {
-      this.checkProjectHooksTrust();
+    // Load user hooks (always available, regardless of folder trust)
+    const userHooks = this.config.getUserHooks();
+    if (userHooks) {
+      this.processHooksConfiguration(userHooks, HooksConfigSource.User);
     }
 
-    // Get hooks from the main config (this comes from the merged settings)
-    const configHooks = this.config.getHooks();
-    if (configHooks) {
-      if (this.config.isTrustedFolder()) {
-        this.processHooksConfiguration(configHooks, HooksConfigSource.Project);
-      } else {
-        debugLogger.warn(
-          'Project hooks disabled because the folder is not trusted.',
-        );
-      }
+    // Load project hooks (only in trusted folders)
+    // The config.getProjectHooks() already checks trust status internally
+    const projectHooks = this.config.getProjectHooks();
+    if (projectHooks) {
+      this.processHooksConfiguration(projectHooks, HooksConfigSource.Project);
     }
 
-    // Get hooks from extensions
+    // Extension hooks are always loaded
     const extensions = this.config.getExtensions() || [];
     for (const extension of extensions) {
       if (extension.isActive && extension.hooks) {
@@ -200,6 +241,7 @@ please review the project settings (.qwen/settings.json) and remove them.`;
   private processHooksConfiguration(
     hooksConfig: { [K in HookEventName]?: HookDefinition[] },
     source: HooksConfigSource,
+    agentScope?: string,
   ): void {
     for (const [eventName, definitions] of Object.entries(hooksConfig)) {
       if (HOOKS_CONFIG_FIELDS.includes(eventName)) {
@@ -224,7 +266,12 @@ please review the project settings (.qwen/settings.json) and remove them.`;
       }
 
       for (const definition of definitions) {
-        this.processHookDefinition(definition, typedEventName, source);
+        this.processHookDefinition(
+          definition,
+          typedEventName,
+          source,
+          agentScope,
+        );
       }
     }
   }
@@ -236,6 +283,7 @@ please review the project settings (.qwen/settings.json) and remove them.`;
     definition: HookDefinition,
     eventName: HookEventName,
     source: HooksConfigSource,
+    agentScope?: string,
   ): void {
     if (
       !definition ||
@@ -255,14 +303,19 @@ please review the project settings (.qwen/settings.json) and remove them.`;
         typeof hookConfig === 'object' &&
         this.validateHookConfig(hookConfig, eventName, source)
       ) {
+        const hookIdentity = this.getHookIdentity({ config: hookConfig });
         const hookName = this.getHookName({ config: hookConfig });
 
-        // Check for duplicate hooks (same name+command+source+eventName+matcher+sequential)
+        // Check for duplicate hooks. `agentScope` participates in the key so
+        // a per-agent hook does not get swallowed when an identical
+        // session/user/project hook already exists, and so two concurrent
+        // subagents declaring the same hook each keep their own copy.
         const isDuplicate = this.entries.some(
           (existing) =>
             existing.eventName === eventName &&
             existing.source === source &&
-            this.getHookName(existing) === hookName &&
+            existing.agentScope === agentScope &&
+            this.getHookIdentity(existing) === hookIdentity &&
             existing.matcher === definition.matcher &&
             existing.sequential === definition.sequential,
         );
@@ -273,8 +326,10 @@ please review the project settings (.qwen/settings.json) and remove them.`;
           continue;
         }
 
-        // Add source to hook config
-        hookConfig.source = source;
+        // Add source to hook config (only for command and http hooks)
+        if (hookConfig.type !== 'function') {
+          (hookConfig as { source?: HooksConfigSource }).source = source;
+        }
 
         this.entries.push({
           config: hookConfig,
@@ -283,6 +338,7 @@ please review the project settings (.qwen/settings.json) and remove them.`;
           matcher: definition.matcher,
           sequential: definition.sequential,
           enabled: true,
+          ...(agentScope !== undefined ? { agentScope } : {}),
         });
       } else {
         // Invalid hooks are logged and discarded here, they won't reach HookRunner
@@ -302,7 +358,10 @@ please review the project settings (.qwen/settings.json) and remove them.`;
     eventName: HookEventName,
     source: HooksConfigSource,
   ): boolean {
-    if (!config.type || !['command', 'plugin'].includes(config.type)) {
+    if (
+      !config.type ||
+      !['command', 'http', 'function', 'prompt'].includes(config.type)
+    ) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
       );
@@ -312,6 +371,27 @@ please review the project settings (.qwen/settings.json) and remove them.`;
     if (config.type === 'command' && !config.command) {
       debugLogger.warn(
         `Command hook ${eventName} from ${source} missing command field`,
+      );
+      return false;
+    }
+
+    if (config.type === 'http' && !config.url) {
+      debugLogger.warn(
+        `HTTP hook ${eventName} from ${source} missing url field`,
+      );
+      return false;
+    }
+
+    if (config.type === 'function' && typeof config.callback !== 'function') {
+      debugLogger.warn(
+        `Function hook ${eventName} from ${source} missing or invalid callback`,
+      );
+      return false;
+    }
+
+    if (config.type === 'prompt' && !config.prompt) {
+      debugLogger.warn(
+        `Prompt hook ${eventName} from ${source} missing prompt field`,
       );
       return false;
     }

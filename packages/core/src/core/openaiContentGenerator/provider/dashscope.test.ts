@@ -22,6 +22,16 @@ import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../../../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 // Mock OpenAI
 vi.mock('openai', () => ({
   default: vi.fn().mockImplementation((config) => ({
@@ -38,6 +48,20 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
+// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value
+vi.mock('../constants.js', () => ({
+  DEFAULT_TIMEOUT: 120000,
+  DEFAULT_MAX_RETRIES: 3,
+  DEFAULT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
+  DEFAULT_DASHSCOPE_BASE_URL:
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  DEFAULT_DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
+  DEFAULT_OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
+  get DASHSCOPE_PROXY_BASE_URL() {
+    return process.env['DASHSCOPE_PROXY_BASE_URL'];
+  },
+}));
+
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
@@ -45,6 +69,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     const mockedBuildRuntimeFetchOptions =
       buildRuntimeFetchOptions as unknown as MockedFunction<
         (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
@@ -139,6 +164,106 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for Token Plan URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for internal alibaba-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via internal origin: gateway.alibaba-inc.com',
+      );
+    });
+
+    it('should return true for internal aliyun-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://model-gateway.aliyun-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for multi-level internal subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://a.b.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for port-bearing internal URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com:8443/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alibaba-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alibaba-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for bare aliyun-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://aliyun-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for lookalike internal domains without dot boundary', () => {
+      const configs = [
+        'https://notalibaba-inc.com/v1',
+        'https://notaliyun-inc.com/v1',
+        'https://alibaba-inc.com.evil.com/v1',
+        'https://aliyun-inc.com.evil.com/v1',
+        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+      ];
+
+      configs.forEach((baseUrl) => {
+        const result = DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        } as ContentGeneratorConfig);
+        expect(result).toBe(false);
+      });
+    });
+
     it('should return false for non-DashScope configurations', () => {
       const configs = [
         {
@@ -161,6 +286,134 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         );
         expect(result).toBe(false);
       });
+    });
+
+    it('should return false when the dashscope domain only appears in the URL path', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://evil.example.com/dashscope.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for a domain that only ends with dashscope.aliyuncs.com as a suffix without a dot', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://notdashscope.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for an unparseable baseUrl', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'not a url',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://your-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false when baseUrl does not match DASHSCOPE_PROXY_BASE_URL', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://other-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should debug log when baseUrl does not match DASHSCOPE_PROXY_BASE_URL', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://other-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+
+      expect(result).toBe(false);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match',
+        ),
+      );
+    });
+
+    it('should log internal-origin activation instead of proxy mismatch for internal domains', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via internal origin: gateway.alibaba-inc.com',
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining(
+          'DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match',
+        ),
+      );
+    });
+
+    it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL with trailing slash', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://your-proxy.com/dashscope/',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
     });
   });
 
@@ -564,6 +817,227 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
+    // glm-* on DashScope drop array-form content on tool-less ("plain") chat
+    // requests. For glm models with no function-calling context the provider
+    // skips cache control and collapses text content to plain strings, so
+    // side-queries like web_fetch aren't silently emptied. Other models and
+    // tool-bearing requests keep the existing cache-control path untouched.
+    describe('glm array-drop fix (plain-text flatten)', () => {
+      it('should flatten system and user text content to strings for a glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant.' },
+            {
+              role: 'user',
+              content: [{ type: 'text', text: 'Summarize this page.' }],
+            },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        // No cache_control is applied; both messages become plain strings.
+        expect(result.messages[0].content).toBe('You are a helpful assistant.');
+        expect(result.messages[1].content).toBe('Summarize this page.');
+      });
+
+      it('should join multi-part text-only array content with blank lines', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'First block' },
+                { type: 'text', text: 'Second block' },
+              ],
+            },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toBe('First block\n\nSecond block');
+      });
+
+      it('should flatten the streamed last message too for a glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: true,
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toBe('Hello');
+      });
+
+      it('should NOT flatten array content that contains a non-text (media) part', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'What is this?' },
+                {
+                  type: 'image_url',
+                  image_url: { url: 'https://example.com/x.jpg' },
+                },
+              ],
+            },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        // The whole message is left untouched (cannot be a plain string).
+        expect(result.messages[0].content).toEqual([
+          { type: 'text', text: 'What is this?' },
+          {
+            type: 'image_url',
+            image_url: { url: 'https://example.com/x.jpg' },
+          },
+        ]);
+      });
+
+      it('should leave an empty content array unchanged for a glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [{ role: 'user', content: [] }],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toEqual([]);
+      });
+
+      it('should flatten glm content even when cache control is disabled', () => {
+        (
+          mockCliConfig.getContentGeneratorConfig as MockedFunction<
+            typeof mockCliConfig.getContentGeneratorConfig
+          >
+        ).mockReturnValue({
+          model: 'glm-5.2',
+          enableCacheControl: false,
+        });
+
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'glm-5.2',
+          stream: false,
+          messages: [
+            { role: 'system', content: [{ type: 'text', text: 'Sys' }] },
+            { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        expect(result.messages[0].content).toBe('Sys');
+        expect(result.messages[1].content).toBe('Hi');
+      });
+
+      // Any function-calling signal (a tools field, an assistant tool_call, or a
+      // tool result in history) keeps glm out of the flatten path: cache control
+      // is applied and array content is preserved.
+      const functionCallingCases: Array<{
+        name: string;
+        extraMessages: OpenAI.Chat.ChatCompletionMessageParam[];
+        tools?: OpenAI.Chat.ChatCompletionTool[];
+        userIndex: number;
+      }> = [
+        {
+          name: 'declares tools',
+          extraMessages: [],
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'noop',
+                parameters: { type: 'object', properties: {} },
+              },
+            },
+          ],
+          userIndex: 1,
+        },
+        {
+          name: 'has an assistant turn with tool_calls',
+          extraMessages: [
+            {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'noop', arguments: '{}' },
+                },
+              ],
+            },
+          ],
+          userIndex: 2,
+        },
+        {
+          name: 'has tool-result history',
+          extraMessages: [
+            { role: 'tool', content: 'tool result', tool_call_id: 'call_1' },
+          ],
+          userIndex: 2,
+        },
+      ];
+
+      it.each(functionCallingCases)(
+        'should keep cache control and array content for a glm request that $name',
+        ({ extraMessages, tools, userIndex }) => {
+          const request: OpenAI.Chat.ChatCompletionCreateParams = {
+            model: 'glm-5.2',
+            stream: false,
+            messages: [
+              { role: 'system', content: 'Sys' },
+              ...extraMessages,
+              { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+            ],
+            ...(tools ? { tools } : {}),
+          };
+
+          const result = provider.buildRequest(request, 'test-prompt-id');
+
+          expect(result.messages[0].content).toEqual([
+            { type: 'text', text: 'Sys', cache_control: { type: 'ephemeral' } },
+          ]);
+          expect(Array.isArray(result.messages[userIndex].content)).toBe(true);
+        },
+      );
+
+      it('should NOT flatten content for a non-glm tool-less request', () => {
+        const request: OpenAI.Chat.ChatCompletionCreateParams = {
+          model: 'qwen-max',
+          stream: false,
+          messages: [
+            { role: 'system', content: 'Sys' },
+            { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+          ],
+        };
+
+        const result = provider.buildRequest(request, 'test-prompt-id');
+
+        // Non-glm: existing behavior — system cached as array, user untouched.
+        expect(result.messages[0].content).toEqual([
+          { type: 'text', text: 'Sys', cache_control: { type: 'ephemeral' } },
+        ]);
+        expect(result.messages[1].content).toEqual([
+          { type: 'text', text: 'Hi' },
+        ]);
+      });
+    });
+
     it('should handle empty messages array', () => {
       const emptyRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen-max',
@@ -949,6 +1423,78 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const result = provider.buildRequest(request, 'test-prompt-id');
 
       expect(result).not.toHaveProperty('custom_param');
+    });
+
+    it('should default preserve_thinking to true on the request', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-max',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(true);
+    });
+
+    it('should let user extra_body.preserve_thinking override the default', () => {
+      const providerWithOptOut = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: {
+            preserve_thinking: false,
+          },
+        },
+        mockCliConfig,
+      );
+
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-max',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = providerWithOptOut.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(false);
+    });
+
+    it('should default preserve_thinking to true on vision model requests', () => {
+      // qwen3.7-plus is a reasoning model routed through the vision path
+      // (matches VISION_MODEL_PREFIX_PATTERNS); it still needs the flag.
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).vl_high_resolution_images).toBe(true);
+    });
+
+    it('should let user extra_body.preserve_thinking override the default on vision models', () => {
+      const providerWithOptOut = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: {
+            preserve_thinking: false,
+          },
+        },
+        mockCliConfig,
+      );
+
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3.7-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = providerWithOptOut.buildRequest(request, 'test-prompt-id');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).preserve_thinking).toBe(false);
     });
   });
 });

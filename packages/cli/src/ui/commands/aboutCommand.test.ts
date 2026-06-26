@@ -10,8 +10,10 @@ import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
 import * as systemInfoUtils from '../../utils/systemInfo.js';
+import * as sessionPathsUtils from '../../utils/sessionPaths.js';
 
 vi.mock('../../utils/systemInfo.js');
+vi.mock('../../utils/sessionPaths.js');
 
 describe('aboutCommand', () => {
   let mockContext: CommandContext;
@@ -55,6 +57,12 @@ describe('aboutCommand', () => {
       memoryUsage: '100 MB',
       baseUrl: undefined,
     });
+    vi.mocked(sessionPathsUtils.collectSessionPathInfo).mockResolvedValue({
+      sections: [],
+    });
+    vi.mocked(sessionPathsUtils.formatSessionPathInfo).mockReturnValue(
+      'Session files:\n  Session ID: test-session-id',
+    );
   });
 
   afterEach(() => {
@@ -279,5 +287,146 @@ describe('aboutCommand', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('paths subcommand should return current session file paths', async () => {
+    const pathsSubCommand = aboutCommand.subCommands?.find(
+      (sc) => sc.name === 'paths',
+    );
+    if (!pathsSubCommand?.action) {
+      throw new Error('The paths subcommand must have an action.');
+    }
+
+    const result = (await pathsSubCommand.action(mockContext, '')) as {
+      type: string;
+      messageType: string;
+      content: string;
+    };
+
+    expect(sessionPathsUtils.collectSessionPathInfo).toHaveBeenCalledWith(
+      mockContext,
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Session files:\n  Session ID: test-session-id',
+    });
+    expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  describe('non-interactive mode', () => {
+    it('should return text summary without calling addItem', async () => {
+      if (!aboutCommand.action) {
+        throw new Error('The about command must have an action.');
+      }
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+      // Attach a spy to the non-interactive context's ui
+      nonInteractiveContext.ui.addItem = vi.fn();
+
+      const result = await aboutCommand.action(nonInteractiveContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('test-version'),
+      });
+      expect(result).toEqual(
+        expect.objectContaining({
+          content: expect.stringContaining('test-model'),
+        }),
+      );
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('should include git commit and IDE when available', async () => {
+      if (!aboutCommand.action) throw new Error('No action');
+
+      vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+        cliVersion: 'test-version',
+        osPlatform: 'test-os',
+        osArch: 'x64',
+        osRelease: '22.0.0',
+        nodeVersion: 'v20.0.0',
+        npmVersion: '10.0.0',
+        sandboxEnv: 'no sandbox',
+        modelVersion: 'test-model',
+        selectedAuthType: 'test-auth',
+        ideClient: 'vscode',
+        sessionId: 'sess-1',
+        memoryUsage: '100 MB',
+        baseUrl: undefined,
+        gitCommit: 'abc1234',
+      });
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+
+      const result = (await aboutCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('abc1234');
+      expect(result.content).toContain('vscode');
+    });
+
+    it('paths subcommand should return text without calling addItem', async () => {
+      const pathsSubCommand = aboutCommand.subCommands?.find(
+        (sc) => sc.name === 'paths',
+      );
+      if (!pathsSubCommand?.action) {
+        throw new Error('The paths subcommand must have an action.');
+      }
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+      nonInteractiveContext.ui.addItem = vi.fn();
+
+      const result = await pathsSubCommand.action(nonInteractiveContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Session files:\n  Session ID: test-session-id',
+      });
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('should include LSP status when available', async () => {
+      if (!aboutCommand.action) throw new Error('No action');
+
+      vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+        cliVersion: 'test-version',
+        osPlatform: 'test-os',
+        osArch: 'x64',
+        osRelease: '22.0.0',
+        nodeVersion: 'v20.0.0',
+        npmVersion: '10.0.0',
+        sandboxEnv: 'no sandbox',
+        modelVersion: 'test-model',
+        selectedAuthType: 'test-auth',
+        ideClient: '',
+        sessionId: 'sess-1',
+        memoryUsage: '100 MB',
+        baseUrl: undefined,
+        lspStatus: 'enabled, 1/1 ready',
+      });
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+
+      const result = (await aboutCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('LSP: enabled, 1/1 ready');
+    });
   });
 });

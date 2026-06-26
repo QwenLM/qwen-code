@@ -230,7 +230,7 @@ export interface SDKPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'yolo';
+export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * Authentication types supported by the CLI.
@@ -334,6 +334,9 @@ export type WireSDKMcpServerConfig = Omit<SDKMcpServerConfig, 'instance'>;
 export interface CLIControlInitializeRequest {
   subtype: 'initialize';
   hooks?: HookRegistration[] | null;
+  timeout?: {
+    canUseTool?: number;
+  };
   /**
    * SDK MCP servers config
    * These are MCP servers running in the SDK process, connected via control plane.
@@ -383,6 +386,11 @@ export interface CLIControlSupportedCommandsRequest {
   subtype: 'supported_commands';
 }
 
+export interface CLIControlGetContextUsageRequest {
+  subtype: 'get_context_usage';
+  show_details?: boolean;
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
   | CLIControlPermissionRequest
@@ -392,7 +400,8 @@ export type ControlRequestPayload =
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
-  | CLIControlSupportedCommandsRequest;
+  | CLIControlSupportedCommandsRequest
+  | CLIControlGetContextUsageRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
@@ -585,6 +594,7 @@ export enum ControlRequestType {
   INTERRUPT = 'interrupt',
   SET_MODEL = 'set_model',
   SUPPORTED_COMMANDS = 'supported_commands',
+  GET_CONTEXT_USAGE = 'get_context_usage',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',

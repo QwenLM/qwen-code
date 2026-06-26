@@ -16,7 +16,7 @@ export type ParsedSlashCommand = {
  * Parses a raw slash command string into its command, arguments, and canonical path.
  * If no valid command is found, the `commandToExecute` property will be `undefined`.
  *
- * @param query The raw input string, e.g., "/memory add some data" or "/help".
+ * @param query The raw input string, e.g., "/config set theme dark" or "/help".
  * @param commands The list of available top-level slash commands.
  * @returns An object containing the resolved command, its arguments, and its canonical path.
  */
@@ -26,13 +26,15 @@ export const parseSlashCommand = (
 ): ParsedSlashCommand => {
   const trimmed = query.trim();
 
-  const parts = trimmed.substring(1).trim().split(/\s+/);
+  const commandText = trimmed.substring(1).trim();
+  const parts = commandText.split(/\s+/);
   const commandPath = parts.filter((p) => p); // The parts of the command, e.g., ['memory', 'add']
 
   let currentCommands = commands;
   let commandToExecute: SlashCommand | undefined;
   let pathIndex = 0;
   const canonicalPath: string[] = [];
+  let argsStart = 0;
 
   for (const part of commandPath) {
     // TODO: For better performance and architectural clarity, this two-pass
@@ -55,6 +57,8 @@ export const parseSlashCommand = (
       commandToExecute = foundCommand;
       canonicalPath.push(foundCommand.name);
       pathIndex++;
+      const partIndex = commandText.indexOf(part, argsStart);
+      argsStart = partIndex + part.length;
       if (foundCommand.subCommands) {
         currentCommands = foundCommand.subCommands;
       } else {
@@ -65,7 +69,9 @@ export const parseSlashCommand = (
     }
   }
 
-  const args = parts.slice(pathIndex).join(' ');
+  const args = commandToExecute
+    ? commandText.slice(argsStart).trim()
+    : parts.slice(pathIndex).join(' ');
 
   return { commandToExecute, args, canonicalPath };
 };

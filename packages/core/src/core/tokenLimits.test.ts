@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalize,
   tokenLimit,
+  knownTokenLimit,
   DEFAULT_TOKEN_LIMIT,
   DEFAULT_OUTPUT_TOKEN_LIMIT,
 } from './tokenLimits.js';
@@ -171,6 +172,11 @@ describe('tokenLimit', () => {
   });
 
   describe('DeepSeek', () => {
+    it('should return 1M for DeepSeek V4 models', () => {
+      expect(tokenLimit('deepseek-v4-flash')).toBe(1000000);
+      expect(tokenLimit('deepseek-v4-pro')).toBe(1000000);
+    });
+
     it('should return 128K for DeepSeek models', () => {
       expect(tokenLimit('deepseek-r1')).toBe(131072);
       expect(tokenLimit('deepseek-v3')).toBe(131072);
@@ -179,9 +185,30 @@ describe('tokenLimit', () => {
   });
 
   describe('Zhipu GLM', () => {
-    it('should return 200K for GLM-5 and GLM-4.7 (latest)', () => {
+    it('should default GLM-5.2+ and GLM-6.x onward to 1M (forward default)', () => {
+      expect(tokenLimit('glm-5.2')).toBe(1000000);
+      expect(tokenLimit('GLM-5.2')).toBe(1000000);
+      expect(tokenLimit('glm-5.3')).toBe(1000000);
+      expect(tokenLimit('glm-6')).toBe(1000000);
+      expect(tokenLimit('glm-6.5')).toBe(1000000);
+      expect(tokenLimit('glm-10')).toBe(1000000); // two-digit major
+    });
+
+    it('should strip third-party deploy prefixes before matching', () => {
+      expect(tokenLimit('zai/GLM-5.2')).toBe(1000000);
+      expect(tokenLimit('pai/glm-5.3')).toBe(1000000);
+      expect(tokenLimit('pai/glm-5.1')).toBe(202752);
+    });
+
+    it('should pin GLM-5 / 5.1 and GLM-4.x to 200K', () => {
       expect(tokenLimit('glm-5')).toBe(202752);
+      expect(tokenLimit('glm-5.0')).toBe(202752);
+      expect(tokenLimit('glm-5.1')).toBe(202752);
       expect(tokenLimit('glm-4.7')).toBe(202752);
+    });
+
+    it('should keep non-numeric GLM names on the conservative fallback', () => {
+      expect(tokenLimit('glm-z1')).toBe(202752);
     });
 
     it('should return 200K for legacy GLM (fallback)', () => {
@@ -192,6 +219,10 @@ describe('tokenLimit', () => {
   });
 
   describe('MiniMax', () => {
+    it('should return 1M for MiniMax-M3', () => {
+      expect(tokenLimit('MiniMax-M3')).toBe(1000000);
+    });
+
     it('should return 196608 for MiniMax-M2.5 (latest)', () => {
       expect(tokenLimit('MiniMax-M2.5')).toBe(196608);
     });
@@ -231,6 +262,21 @@ describe('tokenLimit', () => {
   it('should handle case-insensitive model names', () => {
     expect(tokenLimit('GPT-4O')).toBe(131072);
     expect(tokenLimit('CLAUDE-3.5-SONNET')).toBe(200000);
+  });
+});
+
+describe('knownTokenLimit', () => {
+  it('returns a limit for known input models', () => {
+    expect(knownTokenLimit('qwen3-max')).toBe(262144);
+    expect(knownTokenLimit('gpt-5')).toBe(272000);
+  });
+
+  it('returns a limit for known output models', () => {
+    expect(knownTokenLimit('qwen3-max', 'output')).toBe(32768);
+  });
+
+  it('returns undefined for unknown models instead of the default fallback', () => {
+    expect(knownTokenLimit('unknown-model-v1.0')).toBeUndefined();
   });
 });
 
@@ -280,6 +326,8 @@ describe('tokenLimit with output type', () => {
 
   describe('other output limits', () => {
     it('should return correct output limits for DeepSeek', () => {
+      expect(tokenLimit('deepseek-v4-flash', 'output')).toBe(384000);
+      expect(tokenLimit('deepseek-v4-pro', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-reasoner', 'output')).toBe(65536);
       expect(tokenLimit('deepseek-r1', 'output')).toBe(65536);
       expect(tokenLimit('deepseek-r1-0528', 'output')).toBe(65536);
@@ -287,7 +335,11 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for GLM', () => {
-      expect(tokenLimit('glm-5', 'output')).toBe(16384);
+      expect(tokenLimit('glm-5.2', 'output')).toBe(131072);
+      expect(tokenLimit('GLM-5.2', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5.1', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5-turbo', 'output')).toBe(131072);
       expect(tokenLimit('glm-4.7', 'output')).toBe(16384);
     });
 

@@ -88,14 +88,28 @@ describe('checkNextSpeaker', () => {
 
     // Spy on getHistory for chatInstance
     vi.spyOn(chatInstance, 'getHistory');
+    vi.spyOn(chatInstance, 'getHistoryTail');
+    vi.spyOn(chatInstance, 'getLastHistoryEntry');
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
+  function mockChatHistory(history: Content[]): void {
+    vi.mocked(chatInstance.getHistory).mockReturnValue(history);
+    vi.mocked(chatInstance.getHistoryTail).mockReturnValue(
+      history.length > 0 ? [structuredClone(history[history.length - 1]!)] : [],
+    );
+    vi.mocked(chatInstance.getLastHistoryEntry).mockReturnValue(
+      history.length > 0
+        ? structuredClone(history[history.length - 1]!)
+        : undefined,
+    );
+  }
+
   it('should return null if history is empty', async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([]);
+    mockChatHistory([]);
     const result = await checkNextSpeaker(
       chatInstance,
       mockConfig,
@@ -107,9 +121,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it('should return null if the last speaker was the user', async () => {
-    vi.mocked(chatInstance.getHistory).mockReturnValue([
-      { role: 'user', parts: [{ text: 'Hello' }] },
-    ]);
+    mockChatHistory([{ role: 'user', parts: [{ text: 'Hello' }] }]);
     const result = await checkNextSpeaker(
       chatInstance,
       mockConfig,
@@ -121,7 +133,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it("should return { next_speaker: 'model' } when model intends to continue", async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'I will now do something.' }] },
     ] as Content[]);
     const mockApiResponse: NextSpeakerResponse = {
@@ -141,7 +153,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it("should return { next_speaker: 'user' } when model asks a question", async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'What would you like to do?' }] },
     ] as Content[]);
     const mockApiResponse: NextSpeakerResponse = {
@@ -160,7 +172,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it("should return { next_speaker: 'user' } when model makes a statement", async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'This is a statement.' }] },
     ] as Content[]);
     const mockApiResponse: NextSpeakerResponse = {
@@ -182,7 +194,7 @@ describe('checkNextSpeaker', () => {
     const consoleWarnSpy = vi
       .spyOn(console, 'warn')
       .mockImplementation(() => {});
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'Some model output.' }] },
     ] as Content[]);
     (mockBaseLlmClient.generateJson as Mock).mockRejectedValue(
@@ -200,7 +212,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it('should return null if baseLlmClient.generateJson returns invalid JSON (missing next_speaker)', async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'Some model output.' }] },
     ] as Content[]);
     (mockBaseLlmClient.generateJson as Mock).mockResolvedValue({
@@ -217,7 +229,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it('should return null if baseLlmClient.generateJson returns a non-string next_speaker', async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'Some model output.' }] },
     ] as Content[]);
     (mockBaseLlmClient.generateJson as Mock).mockResolvedValue({
@@ -235,7 +247,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it('should return null if baseLlmClient.generateJson returns an invalid next_speaker string value', async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'Some model output.' }] },
     ] as Content[]);
     (mockBaseLlmClient.generateJson as Mock).mockResolvedValue({
@@ -253,7 +265,7 @@ describe('checkNextSpeaker', () => {
   });
 
   it('should call generateJson with the correct parameters', async () => {
-    (chatInstance.getHistory as Mock).mockReturnValue([
+    mockChatHistory([
       { role: 'model', parts: [{ text: 'Some model output.' }] },
     ] as Content[]);
     const mockApiResponse: NextSpeakerResponse = {
@@ -269,5 +281,88 @@ describe('checkNextSpeaker', () => {
       .calls[0];
     expect(generateJsonCall[0].model).toBe('test-model');
     expect(generateJsonCall[0].promptId).toBe(promptId);
+  });
+
+  it('should send only the last curated model message to the side query', async () => {
+    const oldHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'old user context'.repeat(1000) }] },
+      { role: 'model', parts: [{ text: 'old model context'.repeat(1000) }] },
+    ];
+    const lastModelMessage: Content = {
+      role: 'model',
+      parts: [{ text: 'Some model output.' }],
+    };
+    mockChatHistory([...oldHistory, lastModelMessage]);
+    (mockBaseLlmClient.generateJson as Mock).mockResolvedValue({
+      reasoning: 'Model made a statement, awaiting user input.',
+      next_speaker: 'user',
+    } satisfies NextSpeakerResponse);
+
+    await checkNextSpeaker(chatInstance, mockConfig, abortSignal, promptId);
+
+    const generateJsonCall = (mockBaseLlmClient.generateJson as Mock).mock
+      .calls[0];
+    expect(generateJsonCall[0].contents).toHaveLength(2);
+    expect(generateJsonCall[0].contents[0]).toEqual(lastModelMessage);
+    expect(generateJsonCall[0].contents[1]).toMatchObject({
+      role: 'user',
+    });
+    expect(chatInstance.getHistory).not.toHaveBeenCalled();
+    expect(chatInstance.getHistoryTail).toHaveBeenCalledWith(1, true);
+  });
+
+  it('should use raw last history entry to detect function responses', async () => {
+    vi.mocked(chatInstance.getHistoryTail).mockReturnValue([
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read_file', args: {} } }],
+      },
+    ] as Content[]);
+    vi.mocked(chatInstance.getLastHistoryEntry).mockReturnValue({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'read_file',
+            response: { result: 'file content' },
+          },
+        },
+      ],
+    } as Content);
+
+    const result = await checkNextSpeaker(
+      chatInstance,
+      mockConfig,
+      abortSignal,
+      promptId,
+    );
+
+    expect(result).toEqual({
+      reasoning:
+        'The last message was a function response, so the model should speak next.',
+      next_speaker: 'model',
+    });
+    expect(chatInstance.getHistory).not.toHaveBeenCalled();
+    expect(chatInstance.getHistoryTail).not.toHaveBeenCalled();
+    expect(chatInstance.getLastHistoryEntry).toHaveBeenCalledTimes(1);
+    expect(mockBaseLlmClient.generateJson).not.toHaveBeenCalled();
+  });
+
+  it('should avoid cloning comprehensive history just to inspect the last message', async () => {
+    mockChatHistory([
+      { role: 'user', parts: [{ text: 'Hello' }] },
+      { role: 'model', parts: [{ text: 'Some model output.' }] },
+    ] as Content[]);
+    (mockBaseLlmClient.generateJson as Mock).mockResolvedValue({
+      reasoning: 'Model made a statement, awaiting user input.',
+      next_speaker: 'user',
+    } satisfies NextSpeakerResponse);
+
+    await checkNextSpeaker(chatInstance, mockConfig, abortSignal, promptId);
+
+    expect(chatInstance.getHistory).not.toHaveBeenCalled();
+    expect(chatInstance.getHistoryTail).toHaveBeenCalledTimes(1);
+    expect(chatInstance.getHistoryTail).toHaveBeenCalledWith(1, true);
+    expect(chatInstance.getLastHistoryEntry).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,0 +1,55 @@
+.status {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.pending {
+  color: var(--text-dimmed);
+}
+
+.running {
+  color: var(--warning-color);
+}
+
+.done {
+  color: var(--success-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.icon {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.name {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.elapsed {
+  color: var(--text-dimmed);
+  font-size: 12px;
+}
+
+.spinner {
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

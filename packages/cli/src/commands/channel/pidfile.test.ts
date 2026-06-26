@@ -79,6 +79,50 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(filePath in fsStore).toBe(false);
   });
 
+  it('cleans up and returns null for a pidfile with pid 0', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 0,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    const info = readServiceInfo();
+
+    expect(info).toBeNull();
+    expect(process.kill).not.toHaveBeenCalled();
+    expect(filePath in fsStore).toBe(false);
+  });
+
+  it('cleans up and returns null for malformed service info', () => {
+    const filePath = getPidFilePath();
+    const invalidPidfiles = [
+      { pid: -1, startedAt: new Date().toISOString(), channels: ['telegram'] },
+      { pid: 1.5, startedAt: new Date().toISOString(), channels: ['telegram'] },
+      {
+        pid: '1234',
+        startedAt: new Date().toISOString(),
+        channels: ['telegram'],
+      },
+      { pid: 1234, startedAt: 'not-a-date', channels: ['telegram'] },
+      { pid: 1234, startedAt: new Date().toISOString(), channels: 'telegram' },
+      { pid: 1234, startedAt: new Date().toISOString(), channels: [42] },
+    ];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    for (const info of invalidPidfiles) {
+      fsStore[filePath] = JSON.stringify(info);
+      expect(readServiceInfo()).toBeNull();
+      expect(filePath in fsStore).toBe(false);
+    }
+
+    expect(process.kill).not.toHaveBeenCalled();
+  });
+
   it('cleans up and returns null for stale PID (dead process)', () => {
     // First write with alive process
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -86,7 +130,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
     writeServiceInfo(['telegram']);
 
     // Now simulate dead process
-     
+
     process.kill = vi.fn(() => {
       throw new Error('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,7 +166,6 @@ describe('signalService', () => {
   });
 
   it('returns false when process is not found', () => {
-     
     process.kill = vi.fn(() => {
       throw new Error('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -136,11 +179,17 @@ describe('signalService', () => {
     signalService(1234);
     expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
   });
+
+  it('returns false for pid 0 without sending a signal', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    expect(signalService(0)).toBe(false);
+    expect(process.kill).not.toHaveBeenCalled();
+  });
 });
 
 describe('waitForExit', () => {
   it('returns true immediately if process is already dead', async () => {
-     
     process.kill = vi.fn(() => {
       throw new Error('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -150,9 +199,19 @@ describe('waitForExit', () => {
     expect(result).toBe(true);
   });
 
+  it('treats pid 0 as already exited without polling it', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    const result = await waitForExit(0, 1000, 50);
+
+    expect(result).toBe(true);
+    expect(process.kill).not.toHaveBeenCalled();
+  });
+
   it('returns true when process dies within timeout', async () => {
     let alive = true;
-     
+
     process.kill = vi.fn(() => {
       if (!alive) throw new Error('ESRCH');
       return true;

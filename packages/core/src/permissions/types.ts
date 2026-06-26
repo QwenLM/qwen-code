@@ -59,6 +59,8 @@ export interface PermissionRule {
    * Set automatically during parsing based on the tool name/category.
    */
   specifierKind?: SpecifierKind;
+  /** True if the raw rule was malformed (e.g. unbalanced parens) and should never match. */
+  invalid?: boolean;
 }
 
 /** A complete set of permission rules organized by type. */
@@ -84,6 +86,11 @@ export interface PermissionCheckContext {
    * The shell command being executed (only for Bash / run_shell_command).
    */
   command?: string;
+  /**
+   * Effective working directory for shell-like tools when resolving
+   * relative virtual file operations extracted from the command.
+   */
+  cwd?: string;
   /**
    * The file path being accessed (only for Read / Edit / Write tools).
    * Should be an absolute path for matching against path patterns.

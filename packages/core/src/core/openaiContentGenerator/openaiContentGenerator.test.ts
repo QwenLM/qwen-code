@@ -161,6 +161,30 @@ describe('OpenAIContentGenerator (Refactored)', () => {
       // This test verifies the method exists and can be called
       expect(typeof generator.embedContent).toBe('function');
     });
+
+    it('should redact proxy credentials from embedding request errors', async () => {
+      const generatorWithClient = generator as unknown as {
+        pipeline: {
+          client: {
+            embeddings: {
+              create: ReturnType<typeof vi.fn>;
+            };
+          };
+        };
+      };
+      generatorWithClient.pipeline.client.embeddings.create.mockRejectedValue(
+        new Error('connect ECONNREFUSED token@proxy.local:8080'),
+      );
+
+      await expect(
+        generator.embedContent({
+          model: 'text-embedding-ada-002',
+          contents: 'hello',
+        }),
+      ).rejects.toThrow(
+        'OpenAI API error: connect ECONNREFUSED <redacted>@proxy.local:8080',
+      );
+    });
   });
 
   describe('shouldSuppressErrorLogging', () => {

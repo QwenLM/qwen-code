@@ -47,6 +47,7 @@ interface UseWebViewMessagesProps {
     setNextCursor: (cursor: number | undefined) => void;
     setHasMore: (hasMore: boolean) => void;
     setIsLoading: (loading: boolean) => void;
+    setIsSwitchingSession: (switching: boolean) => void;
   };
 
   // File context
@@ -70,6 +71,7 @@ interface UseWebViewMessagesProps {
 
   // Message handling
   messageHandling: {
+    messages: WebViewMessage[];
     setMessages: (
       messages:
         | WebViewMessage[]
@@ -91,6 +93,7 @@ interface UseWebViewMessagesProps {
   // Tool calls
   handleToolCallUpdate: (update: ToolCallUpdate) => void;
   clearToolCalls: () => void;
+  rewindToolCallsToTimestamp?: (cutoffTimestamp: number) => void;
 
   // Plan
   setPlanEntries: (entries: PlanEntry[]) => void;
@@ -129,8 +132,134 @@ interface UseWebViewMessagesProps {
   setModelInfo?: (info: ModelInfo | null) => void;
   // Available commands setter
   setAvailableCommands?: (commands: AvailableCommand[]) => void;
+  // Available skills setter
+  setAvailableSkills?: (skills: string[]) => void;
   // Available models setter
   setAvailableModels?: (models: ModelInfo[]) => void;
+  // Account info setter (triggers dialog)
+  setAccountInfo?: (
+    info: {
+      authType?: string | null;
+      baseUrl?: string | null;
+      envKey?: string | null;
+      modelId?: string | null;
+      error?: string;
+    } | null,
+  ) => void;
+  // Latest generated insight report path
+  setInsightReportPath?: (path: string | null) => void;
+  // Latest structured insight progress update
+  setInsightProgress?: (
+    progress: { stage: string; progress: number; detail?: string } | null,
+  ) => void;
+}
+
+type ConversationResetHandlers = {
+  messageHandling: Pick<
+    UseWebViewMessagesProps['messageHandling'],
+    | 'clearMessages'
+    | 'endStreaming'
+    | 'clearWaitingForResponse'
+    | 'clearThinking'
+  >;
+  clearToolCalls: UseWebViewMessagesProps['clearToolCalls'];
+  clearActiveExecToolCalls: () => void;
+  setPlanEntries: UseWebViewMessagesProps['setPlanEntries'];
+  handlePermissionRequest: UseWebViewMessagesProps['handlePermissionRequest'];
+  handleAskUserQuestion: UseWebViewMessagesProps['handleAskUserQuestion'];
+  sessionManagement: Pick<
+    UseWebViewMessagesProps['sessionManagement'],
+    'setCurrentSessionId' | 'setCurrentSessionTitle'
+  >;
+  resetUserTurnCounter?: () => void;
+  setUsageStats?: UseWebViewMessagesProps['setUsageStats'];
+};
+
+/**
+ * Surface the canonical tool name (the ACP frame's `_meta.toolName`) onto the
+ * PermissionToolCall so the drawer can render tool-specific UI (e.g. the Agent
+ * tool's "Launch this agent?" prompt) without depending on a protocol `kind`
+ * ACP can't carry. Mutates in place; a pre-existing `toolName` is preserved and
+ * an absent `_meta` is a no-op.
+ */
+export function liftToolNameFromMeta(
+  toolCall:
+    | (PermissionToolCall & { _meta?: { toolName?: string } })
+    | undefined,
+): void {
+  if (
+    toolCall &&
+    toolCall.toolName === undefined &&
+    typeof toolCall._meta?.toolName === 'string'
+  ) {
+    toolCall.toolName = toolCall._meta.toolName;
+  }
+}
+
+export function resetConversationState({
+  handlers,
+  clearImageResolutions,
+  vscode,
+}: {
+  handlers: ConversationResetHandlers;
+  clearImageResolutions: () => void;
+  vscode: { postMessage: (message: unknown) => void };
+}) {
+  handlers.messageHandling.endStreaming();
+  handlers.clearActiveExecToolCalls();
+  handlers.messageHandling.clearWaitingForResponse();
+  handlers.messageHandling.clearThinking();
+  handlers.messageHandling.clearMessages();
+  handlers.clearToolCalls();
+  handlers.resetUserTurnCounter?.();
+  handlers.setPlanEntries([]);
+  handlers.handlePermissionRequest(null);
+  handlers.handleAskUserQuestion(null);
+  handlers.sessionManagement.setCurrentSessionId(null);
+  clearImageResolutions();
+  handlers.setUsageStats?.(undefined);
+  handlers.sessionManagement.setCurrentSessionTitle('Past Conversations');
+  // Reset the VS Code tab title to default label
+  vscode.postMessage({
+    type: 'updatePanelTitle',
+    data: { title: 'Qwen Code' },
+  });
+}
+
+function indexUserMessagesForEditRewind(messages: WebViewMessageBase[]): {
+  messages: WebViewMessageBase[];
+  nextTurnIndex: number;
+} {
+  let nextTurnIndex = 0;
+  const indexedMessages = messages.map((entry) => {
+    if (entry.role !== 'user') {
+      return entry;
+    }
+    const indexed = { ...entry, turnIndex: nextTurnIndex };
+    nextTurnIndex += 1;
+    return indexed;
+  });
+
+  return { messages: indexedMessages, nextTurnIndex };
+}
+
+function restoreMessagesForEditRewind({
+  messages,
+  materializeMessages,
+}: {
+  messages: WebViewMessageBase[];
+  materializeMessages: (messages: WebViewMessageBase[]) => WebViewMessage[];
+}): { messages: WebViewMessage[]; nextTurnIndex: number } {
+  // IMPORTANT: indexUserMessagesForEditRewind must be called before
+  // materializeMessages. Image message expansion creates additional
+  // user-role entries that share the parent's turnIndex.
+  const { messages: indexedMessages, nextTurnIndex } =
+    indexUserMessagesForEditRewind(messages);
+
+  return {
+    messages: materializeMessages(indexedMessages),
+    nextTurnIndex,
+  };
 }
 
 /**
@@ -143,6 +272,7 @@ export const useWebViewMessages = ({
   messageHandling,
   handleToolCallUpdate,
   clearToolCalls,
+  rewindToolCallsToTimestamp,
   setPlanEntries,
   handlePermissionRequest,
   handleAskUserQuestion,
@@ -153,7 +283,11 @@ export const useWebViewMessages = ({
   setUsageStats,
   setModelInfo,
   setAvailableCommands,
+  setAvailableSkills,
   setAvailableModels,
+  setAccountInfo,
+  setInsightReportPath,
+  setInsightProgress,
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
@@ -171,10 +305,12 @@ export const useWebViewMessages = ({
   // Track active long-running tool calls (execute/bash/command) so we can
   // keep the bottom "waiting" message visible until all of them complete.
   const activeExecToolCallsRef = useRef<Set<string>>(new Set());
+  const activeInsightRunRef = useRef(false);
   const modelInfoRef = useRef<ModelInfo | null>(null);
   // Track the active requestId from the latest streamStart so we can
   // discard stale streamEnd events from cancelled/previous requests.
   const activeRequestIdRef = useRef<string | null>(null);
+  const userTurnCounterRef = useRef(0);
   // Use ref to store callbacks to avoid useEffect dependency issues
   const handlersRef = useRef({
     sessionManagement,
@@ -182,6 +318,7 @@ export const useWebViewMessages = ({
     messageHandling,
     handleToolCallUpdate,
     clearToolCalls,
+    rewindToolCallsToTimestamp,
     setPlanEntries,
     handlePermissionRequest,
     handleAskUserQuestion,
@@ -189,7 +326,11 @@ export const useWebViewMessages = ({
     setUsageStats,
     setModelInfo,
     setAvailableCommands,
+    setAvailableSkills,
     setAvailableModels,
+    setAccountInfo,
+    setInsightReportPath,
+    setInsightProgress,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -224,6 +365,29 @@ export const useWebViewMessages = ({
     return true;
   };
 
+  const clearInsightState = () => {
+    activeInsightRunRef.current = false;
+    handlersRef.current.setInsightProgress?.(null);
+    handlersRef.current.setInsightReportPath?.(null);
+  };
+
+  const setInsightProgressState = (progress: {
+    stage: string;
+    progress: number;
+    detail?: string;
+  }) => {
+    activeInsightRunRef.current = true;
+    handlersRef.current.setInsightReportPath?.(null);
+    handlersRef.current.messageHandling.clearWaitingForResponse();
+    handlersRef.current.setInsightProgress?.(progress);
+  };
+
+  const setInsightReportReadyState = (path: string | null) => {
+    activeInsightRunRef.current = false;
+    handlersRef.current.setInsightProgress?.(null);
+    handlersRef.current.setInsightReportPath?.(path);
+  };
+
   // Update refs
   useEffect(() => {
     handlersRef.current = {
@@ -232,6 +396,7 @@ export const useWebViewMessages = ({
       messageHandling,
       handleToolCallUpdate,
       clearToolCalls,
+      rewindToolCallsToTimestamp,
       setPlanEntries,
       handlePermissionRequest,
       handleAskUserQuestion,
@@ -239,7 +404,11 @@ export const useWebViewMessages = ({
       setUsageStats,
       setModelInfo,
       setAvailableCommands,
+      setAvailableSkills,
       setAvailableModels,
+      setAccountInfo,
+      setInsightReportPath,
+      setInsightProgress,
     };
   });
 
@@ -294,6 +463,18 @@ export const useWebViewMessages = ({
             }
           } catch (_error) {
             // Ignore error when setting available commands
+          }
+          break;
+        }
+
+        case 'availableSkills': {
+          try {
+            const skills = message.data?.skills as string[] | undefined;
+            if (skills) {
+              handlers.setAvailableSkills?.(skills);
+            }
+          } catch (_error) {
+            // Ignore error when setting available skills
           }
           break;
         }
@@ -358,15 +539,8 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'loginSuccess': {
-          // Clear loading state and show a short assistant notice
+        case 'authSuccess': {
           handlers.messageHandling.clearWaitingForResponse();
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: 'Successfully logged in. You can continue chatting.',
-            timestamp: Date.now(),
-          });
-          // Set authentication state to true
           handlers.setIsAuthenticated?.(true);
           break;
         }
@@ -396,12 +570,12 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'loginError': {
+        case 'authError': {
           // Clear loading state and show error notice
           handlers.messageHandling.clearWaitingForResponse();
           const errorMsg =
             (message?.data?.message as string) ||
-            'Login failed. Please try again.';
+            'Auth failed. Please try again.';
           handlers.messageHandling.addMessage({
             role: 'assistant',
             content: errorMsg,
@@ -409,6 +583,13 @@ export const useWebViewMessages = ({
           });
           // Set authentication state to false
           handlers.setIsAuthenticated?.(false);
+          break;
+        }
+
+        case 'authCancelled': {
+          // User dismissed the auth picker — clear loading state so the
+          // input is not left disabled.
+          handlers.messageHandling.clearWaitingForResponse();
           break;
         }
 
@@ -424,12 +605,31 @@ export const useWebViewMessages = ({
           break;
         }
 
+        case 'accountInfo': {
+          const info = message?.data as
+            | {
+                authType?: string | null;
+                baseUrl?: string | null;
+                envKey?: string | null;
+                modelId?: string | null;
+                error?: string;
+              }
+            | undefined;
+          handlers.setAccountInfo?.(info ?? null);
+          break;
+        }
+
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
+          const { messages: restoredMessages, nextTurnIndex } =
+            restoreMessagesForEditRewind({
+              messages: conversation.messages as WebViewMessageBase[],
+              materializeMessages,
+            });
+          userTurnCounterRef.current = nextTurnIndex;
+          clearInsightState();
           clearImageResolutions();
-          handlers.messageHandling.setMessages(
-            materializeMessages(conversation.messages as WebViewMessageBase[]),
-          );
+          handlers.messageHandling.setMessages(restoredMessages);
           break;
         }
 
@@ -445,7 +645,12 @@ export const useWebViewMessages = ({
               endLine?: number;
             };
           };
-          materializeMessage(msg as WebViewMessageBase).forEach((entry) =>
+          const baseMessage = msg as WebViewMessageBase;
+          if (baseMessage.role === 'user') {
+            baseMessage.turnIndex = userTurnCounterRef.current;
+            userTurnCounterRef.current += 1;
+          }
+          materializeMessage(baseMessage).forEach((entry) =>
             handlers.messageHandling.addMessage(entry),
           );
           // Robustness: if an assistant message arrives outside the normal stream
@@ -475,6 +680,68 @@ export const useWebViewMessages = ({
           break;
         }
 
+        case 'conversationRewound': {
+          const targetTurnIndex =
+            typeof message.data?.targetTurnIndex === 'number'
+              ? message.data.targetTurnIndex
+              : -1;
+          if (targetTurnIndex < 0) {
+            break;
+          }
+
+          const currentMessages = handlers.messageHandling.messages;
+          let fallbackUserTurnIndex = 0;
+          let truncateAt = currentMessages.length;
+          let cutoffTimestamp = Date.now();
+          let foundTargetTurn = false;
+
+          for (let i = 0; i < currentMessages.length; i++) {
+            const msg = currentMessages[i];
+            if (msg?.role !== 'user') {
+              continue;
+            }
+            const turnIndex =
+              typeof msg.turnIndex === 'number'
+                ? msg.turnIndex
+                : fallbackUserTurnIndex;
+            fallbackUserTurnIndex = Math.max(
+              fallbackUserTurnIndex,
+              turnIndex + 1,
+            );
+            if (turnIndex === targetTurnIndex) {
+              truncateAt = i;
+              cutoffTimestamp = msg.timestamp;
+              foundTargetTurn = true;
+              break;
+            }
+          }
+
+          if (!foundTargetTurn) {
+            console.warn(
+              '[useWebViewMessages] conversationRewound target turn not found:',
+              targetTurnIndex,
+            );
+            break;
+          }
+
+          userTurnCounterRef.current = targetTurnIndex;
+          handlers.messageHandling.setMessages(
+            currentMessages.slice(0, truncateAt),
+          );
+          handlers.rewindToolCallsToTimestamp?.(cutoffTimestamp);
+          activeExecToolCallsRef.current.clear();
+          clearInsightState();
+          clearImageResolutions();
+          handlers.setPlanEntries([]);
+          lastPlanSnapshotRef.current = null;
+          handlers.setUsageStats?.(undefined);
+          handlers.handlePermissionRequest(null);
+          handlers.handleAskUserQuestion(null);
+          handlers.messageHandling.clearWaitingForResponse();
+          handlers.messageHandling.clearThinking();
+          break;
+        }
+
         case 'streamStart': {
           const startData = message.data as
             | { timestamp?: number; requestId?: string }
@@ -498,7 +765,7 @@ export const useWebViewMessages = ({
 
         case 'streamEnd': {
           const endData = message.data as
-            | { reason?: string; requestId?: string }
+            | { reason?: string; requestId?: string; source?: string }
             | undefined;
           const endRequestId = endData?.requestId ?? null;
 
@@ -510,6 +777,8 @@ export const useWebViewMessages = ({
                 endRequestId,
                 'active:',
                 activeRequestIdRef.current,
+                'source:',
+                endData?.source,
               );
               break;
             }
@@ -518,6 +787,7 @@ export const useWebViewMessages = ({
           // Always end local streaming state and clear thinking state
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
+          activeRequestIdRef.current = null;
 
           // If stream ended due to explicit user cancellation, proactively clear
           // waiting indicator and reset tracked execution calls.
@@ -535,6 +805,9 @@ export const useWebViewMessages = ({
             if (FORCE_CLEAR_STREAM_END_REASONS.has(reason)) {
               // Clear active execution tool call tracking, reset state
               activeExecToolCallsRef.current.clear();
+              if (activeInsightRunRef.current) {
+                clearInsightState();
+              }
               // Clear waiting response state to ensure UI returns to normal
               handlers.messageHandling.clearWaitingForResponse();
               break;
@@ -559,7 +832,11 @@ export const useWebViewMessages = ({
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
           activeExecToolCallsRef.current.clear();
+          if (activeInsightRunRef.current) {
+            clearInsightState();
+          }
           handlers.messageHandling.clearWaitingForResponse();
+          handlers.sessionManagement.setIsSwitchingSession(false);
           // Display error message to user so they know what went wrong
           const errorMessage =
             (message?.data?.message as string) ||
@@ -573,6 +850,16 @@ export const useWebViewMessages = ({
         }
 
         case 'permissionRequest': {
+          // Surface the canonical tool name (the ACP frame's `_meta.toolName`)
+          // onto the PermissionToolCall so the drawer can render tool-specific
+          // UI (e.g. the Agent tool's "Launch this agent?" prompt) without
+          // depending on a protocol `kind` ACP can't carry.
+          liftToolNameFromMeta(
+            message.data?.toolCall as
+              | (PermissionToolCall & { _meta?: { toolName?: string } })
+              | undefined,
+          );
+
           handlers.handlePermissionRequest(message.data);
 
           const permToolCall = message.data?.toolCall as {
@@ -859,6 +1146,7 @@ export const useWebViewMessages = ({
 
         case 'qwenSessionSwitched':
           handlers.sessionManagement.setShowSessionSelector(false);
+          clearInsightState();
           if (message.data.sessionId) {
             handlers.sessionManagement.setCurrentSessionId(
               message.data.sessionId as string,
@@ -876,12 +1164,15 @@ export const useWebViewMessages = ({
           }
           if (message.data.messages) {
             clearImageResolutions();
-            handlers.messageHandling.setMessages(
-              materializeMessages(
-                message.data.messages as WebViewMessageBase[],
-              ),
-            );
+            const { messages: restoredMessages, nextTurnIndex } =
+              restoreMessagesForEditRewind({
+                messages: message.data.messages as WebViewMessageBase[],
+                materializeMessages,
+              });
+            userTurnCounterRef.current = nextTurnIndex;
+            handlers.messageHandling.setMessages(restoredMessages);
           } else {
+            userTurnCounterRef.current = 0;
             handlers.messageHandling.clearMessages();
           }
 
@@ -913,18 +1204,25 @@ export const useWebViewMessages = ({
           lastPlanSnapshotRef.current = null;
           break;
 
+        case 'sessionLoadComplete':
+        case 'sessionExpired':
+          handlers.sessionManagement.setIsSwitchingSession(false);
+          break;
+
         case 'conversationCleared':
-          handlers.messageHandling.clearMessages();
-          handlers.clearToolCalls();
-          handlers.sessionManagement.setCurrentSessionId(null);
-          clearImageResolutions();
-          handlers.sessionManagement.setCurrentSessionTitle(
-            'Past Conversations',
-          );
-          // Reset the VS Code tab title to default label
-          vscode.postMessage({
-            type: 'updatePanelTitle',
-            data: { title: 'Qwen Code' },
+          clearInsightState();
+          resetConversationState({
+            handlers: {
+              ...handlers,
+              clearActiveExecToolCalls: () => {
+                activeExecToolCallsRef.current.clear();
+              },
+              resetUserTurnCounter: () => {
+                userTurnCounterRef.current = 0;
+              },
+            },
+            clearImageResolutions,
+            vscode,
           });
           lastPlanSnapshotRef.current = null;
           break;
@@ -937,6 +1235,35 @@ export const useWebViewMessages = ({
             handlers.sessionManagement.setCurrentSessionTitle(title);
             // Ask extension host to reflect this title in the tab label
             vscode.postMessage({ type: 'updatePanelTitle', data: { title } });
+          }
+          break;
+        }
+
+        case 'sessionDeleted': {
+          const deletedId = message.data?.sessionId as string;
+          if (deletedId) {
+            handlers.sessionManagement.setQwenSessions(
+              (prev: Array<Record<string, unknown>>) =>
+                prev.filter(
+                  (s) => s.sessionId !== deletedId && s.id !== deletedId,
+                ),
+            );
+          }
+          break;
+        }
+
+        case 'sessionRenamed': {
+          const renamedId = message.data?.sessionId as string;
+          const newTitle = message.data?.title as string;
+          if (renamedId && newTitle) {
+            handlers.sessionManagement.setQwenSessions(
+              (prev: Array<Record<string, unknown>>) =>
+                prev.map((s) =>
+                  s.sessionId === renamedId || s.id === renamedId
+                    ? { ...s, title: newTitle, name: newTitle }
+                    : s,
+                ),
+            );
           }
           break;
         }
@@ -1015,11 +1342,39 @@ export const useWebViewMessages = ({
           );
           break;
         }
+
+        case 'insightProgress': {
+          const stage = message.data?.stage as string | undefined;
+          const progress = message.data?.progress as number | undefined;
+          const detail = message.data?.detail as string | undefined;
+          if (typeof stage === 'string' && typeof progress === 'number') {
+            setInsightProgressState({
+              stage,
+              progress,
+              detail,
+            });
+          }
+          break;
+        }
+
+        case 'insightProgressCleared': {
+          clearInsightState();
+          break;
+        }
+
+        case 'insightReportReady': {
+          const path = message.data?.path as string | undefined;
+          setInsightReportReadyState(path ?? null);
+          break;
+        }
         case 'cancelStreaming':
           // Handle cancel streaming response from extension
           // Note: The "Interrupted" message is already added by handleCancel in App.tsx
           // to provide immediate UI feedback. We only need to ensure streaming states
           // are properly cleaned up here.
+          if (activeInsightRunRef.current) {
+            clearInsightState();
+          }
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearWaitingForResponse();
           break;

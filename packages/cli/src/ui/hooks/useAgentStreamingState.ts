@@ -84,14 +84,13 @@ export function useAgentStreamingState(
 
     // Dedicated listener for usage metadata — updates React state directly
     // so the token count is available immediately (even if no other event
-    // triggers a re-render). Prefers totalTokenCount (prompt + output)
-    // because output becomes history for the next round, matching
-    // geminiChat.ts.
+    // triggers a re-render). Context usage tracks prompt size; output
+    // isn't in history yet.
     const usageHandler = (event: {
       usage?: { totalTokenCount?: number; promptTokenCount?: number };
     }) => {
       const count =
-        event?.usage?.totalTokenCount ?? event?.usage?.promptTokenCount;
+        event?.usage?.promptTokenCount ?? event?.usage?.totalTokenCount;
       if (typeof count === 'number' && count > 0) {
         setLastPromptTokenCount(count);
       }

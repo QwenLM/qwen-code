@@ -1,0 +1,67 @@
+.message {
+  color: var(--text-primary);
+  overflow: scroll;
+  margin-bottom: 12px;
+  margin-left: 14px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+  max-height: 200px;
+}
+
+.compact {
+  overflow: hidden;
+  max-height: none;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.status {
+  color: var(--success-color);
+  flex: 0 0 auto;
+}
+
+.name {
+  color: var(--text-primary);
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 13px;
+
+}
+
+.command {
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.output {
+  margin: 0;
+  padding: 8px 14px 10px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.compactHint {
+  color: var(--text-dimmed);
+  font-size: 12px;
+  line-height: 1.35;
+}

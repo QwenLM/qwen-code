@@ -18,6 +18,20 @@ export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 export const CAPPED_DEFAULT_MAX_TOKENS: TokenCount = 8_000;
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
 
+export function parsePositiveIntegerEnvValue(
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
+
+  return parsed;
+}
+
 /**
  * Accurate numeric limits:
  * - power-of-two approximations (128K -> 131072, 256K -> 262144, etc.)
@@ -32,6 +46,7 @@ const LIMITS = {
   '200k': 200_000, // vendor-declared decimal, used by OpenAI, Anthropic, etc.
   '256k': 262_144,
   '272k': 272_000, // vendor-declared decimal, GPT-5.x input (400K total - 128K output)
+  '384k': 384_000, // vendor-declared decimal, DeepSeek V4 max output
   '400k': 400_000, // vendor-declared decimal, used by OpenAI GPT-5.x
   '512k': 524_288,
   '1m': 1_000_000,
@@ -125,17 +140,23 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // DeepSeek
   // -------------------
+  [/^deepseek-v4/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
   [/^deepseek/, LIMITS['128k']],
 
   // -------------------
   // Zhipu GLM
   // -------------------
-  [/^glm-5/, 202_752 as TokenCount], // GLM-5: exact vendor limit
-  [/^glm-/, 202_752 as TokenCount], // GLM fallback: 128K
+  // 1M context is the forward default for new GLM releases (GLM-5.2+, GLM-6.x,
+  // and beyond) so they need no future code change. Confirmed 200K families
+  // (GLM-5 / 5.0 / 5.1, GLM-4.x and older) are pinned explicitly first.
+  [/^glm-5(\.[01])?(-|$)/, 202_752 as TokenCount], // GLM-5 / 5.0 / 5.1: 200K
+  [/^glm-(?:[5-9]|\d{2,})/, LIMITS['1m']], // GLM-5.2+, 6.x..9.x, 10.x+: 1M
+  [/^glm-/, 202_752 as TokenCount], // GLM <=4.x / non-numeric fallback: 200K
 
   // -------------------
   // MiniMax
   // -------------------
+  [/^minimax-m3/i, LIMITS['1m']], // MiniMax-M3: 1,000,000
   [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
   [/^minimax-/i, LIMITS['200k']], // MiniMax fallback: 200K
 
@@ -176,12 +197,13 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
 
   // DeepSeek
+  [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax
@@ -190,6 +212,22 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Kimi
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
+
+function findTokenLimit(
+  model: Model,
+  type: TokenLimitType = 'input',
+): TokenCount | undefined {
+  const norm = normalize(model);
+  const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
+
+  for (const [regex, limit] of patterns) {
+    if (regex.test(norm)) {
+      return limit;
+    }
+  }
+
+  return undefined;
+}
 
 /**
  * Check if a model has an explicitly defined output token limit.
@@ -202,6 +240,13 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 export function hasExplicitOutputLimit(model: Model): boolean {
   const norm = normalize(model);
   return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
+}
+
+export function knownTokenLimit(
+  model: Model,
+  type: TokenLimitType = 'input',
+): TokenCount | undefined {
+  return findTokenLimit(model, type);
 }
 
 /**
@@ -223,17 +268,8 @@ export function tokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
 ): TokenCount {
-  const norm = normalize(model);
-
-  // Choose the appropriate patterns based on token type
-  const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
-
-  for (const [regex, limit] of patterns) {
-    if (regex.test(norm)) {
-      return limit;
-    }
-  }
-
-  // Return appropriate default based on token type
-  return type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT;
+  return (
+    knownTokenLimit(model, type) ??
+    (type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT)
+  );
 }

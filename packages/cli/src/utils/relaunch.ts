@@ -28,6 +28,7 @@ export async function relaunchOnExitCode(runner: () => Promise<number>) {
 export async function relaunchAppInChildProcess(
   additionalNodeArgs: string[],
   additionalScriptArgs: string[],
+  options?: { afterSpawn?: () => void },
 ) {
   if (process.env['QWEN_CODE_NO_RELAUNCH']) {
     return;
@@ -55,6 +56,15 @@ export async function relaunchAppInChildProcess(
       stdio: 'inherit',
       env: newEnv,
     });
+
+    // Allow the parent to clean up process.env after spawn copies it
+    // but before the next relaunch iteration.
+    try {
+      options?.afterSpawn?.();
+    } catch (err) {
+      child.kill();
+      throw err;
+    }
 
     return new Promise<number>((resolve, reject) => {
       child.on('error', reject);

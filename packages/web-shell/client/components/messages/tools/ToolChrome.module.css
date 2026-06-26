@@ -1,0 +1,345 @@
+.group {
+  margin: 5px 0;
+  padding: 8px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.line {
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.chatGroupWrap {
+  margin: 2px 0;
+}
+
+.chatSummary {
+  width: 100%;
+  margin: 0;
+  padding: 2px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #a1a2a3;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chatSummary:hover,
+.chatSummary:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+.chatSummaryIcon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.chatSummaryIcon svg {
+  display: block;
+}
+
+.chatSummaryToolIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.chatSummaryText {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.chatSummaryTextActive {
+  color: #a1a2a3;
+  background-image: linear-gradient(
+    105deg,
+    #a1a2a3 0%,
+    #a1a2a3 46%,
+    rgba(255, 255, 255, 0.92) 50%,
+    #a1a2a3 54%,
+    #a1a2a3 100%
+  );
+  background-size: 300% 100%;
+  background-position: 150% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-summary-shine 5s linear infinite;
+}
+
+@keyframes chat-summary-shine {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -150% 0;
+  }
+}
+
+.chatChevronRight,
+.chatChevronDown {
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chatSummary:hover .chatChevronRight,
+.chatSummary:hover .chatChevronDown,
+.chatSummary:focus-visible .chatChevronRight,
+.chatSummary:focus-visible .chatChevronDown {
+  opacity: 1;
+}
+
+.chatChevronRight {
+  transform: rotate(-45deg);
+}
+
+.chatChevronDown {
+  transform: rotate(45deg);
+  margin-top: -3px;
+  opacity: 1;
+}
+
+.chatSummaryContentClip {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 180ms ease;
+}
+
+.chatSummaryContentCollapsed {
+  grid-template-rows: 0fr;
+}
+
+.chatSummaryContentInner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.lineMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.iconDone {
+  color: var(--success-color);
+}
+
+.iconError {
+  color: var(--error-color);
+}
+
+.iconPending {
+  color: var(--text-dimmed);
+}
+
+.iconSpin {
+  color: var(--warning-color);
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.lineName {
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.lineArg {
+  color: var(--text-secondary);
+  font-size: 13px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lineElapsed {
+  margin-left: auto;
+  color: var(--text-dimmed);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.lineExpandable {
+  cursor: pointer;
+  margin: -2px 0;
+  padding: 2px 0;
+  user-select: none;
+}
+
+.lineExpandable * {
+  cursor: pointer;
+}
+
+.lineExpandable:hover .lineName {
+  color: var(--accent-color);
+}
+
+.agentSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: 22px;
+  margin-top: 2px;
+}
+
+.lineOutput {
+  margin-left: 16px;
+  font-size: 12px;
+  color: var(--text-dimmed);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+/* Full, wrapped tool argument shown below the header when the row is expanded
+   (the header drops its single-line ellipsised copy). Aligns with the expanded
+   output block below it. */
+.lineFullArg {
+  margin-left: 16px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.lineDetail {
+}
+
+.expandedBash,
+.expandedRead {
+  overflow: hidden;
+}
+
+.expandedOutput {
+  padding: 0px 0px 0 16px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  margin-bottom: 0;
+}
+
+.expandedEdit {
+  margin-top: 2px;
+}
+
+.expandedWrite {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.writeAdd {
+  color: var(--success-color);
+}
+
+.expandBtn {
+  display: block;
+  width: 100%;
+  padding: 3px 10px;
+  margin-top: 10px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--subtle-bg);
+  border: none;
+  color: var(--text-dimmed);
+  cursor: pointer;
+  text-align: left;
+}
+
+.expandBtn:hover {
+  color: var(--accent-color);
+  background: var(--info-bg);
+}
+
+.todoProgress {
+  color: var(--text-dimmed);
+  font-size: 12px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.todoBody {
+  padding: 4px 0 2px 14px;
+}
+
+.compactGroup {
+  margin-bottom: 12px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+}
+
+.compactHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compactCount {
+  color: var(--text-dimmed);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.compactHint {
+  font-size: 12px;
+  color: var(--text-dimmed);
+  margin-top: 4px;
+}

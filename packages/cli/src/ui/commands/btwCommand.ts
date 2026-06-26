@@ -13,12 +13,12 @@ import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
-import type { GeminiClient } from '@qwen-code/qwen-code-core';
-import type { Content } from '@google/genai';
-
-function makeBtwPromptId(sessionId: string): string {
-  return `${sessionId}########btw-${Date.now()}`;
-}
+import {
+  BTW_MAX_INPUT_LENGTH,
+  buildBtwCacheSafeParams,
+  buildBtwPrompt,
+  runForkedAgent,
+} from '@qwen-code/qwen-code-core';
 
 function formatBtwError(error: unknown): string {
   return t('Failed to answer btw question: {{error}}', {
@@ -27,83 +27,42 @@ function formatBtwError(error: unknown): string {
   });
 }
 
-// Keep only the most recent history messages to limit token usage for side
-// questions. MAX_BTW_HISTORY_MESSAGES caps the number of history Content
-// entries included as context before the /btw question is appended.
-const MAX_BTW_HISTORY_MESSAGES = 20;
-
-function trimHistory(history: Content[]): Content[] {
-  if (history.length <= MAX_BTW_HISTORY_MESSAGES) {
-    return history;
+function getBtwCacheSafeParams(context: CommandContext) {
+  const { config } = context.services;
+  if (config) {
+    return buildBtwCacheSafeParams(config);
   }
-  // Slice from the end, ensuring we start on a 'user' message so the
-  // alternating user/model pattern is preserved.
-  const sliced = history.slice(-MAX_BTW_HISTORY_MESSAGES);
-  if (sliced[0]?.role === 'model' && sliced.length > 1) {
-    return sliced.slice(1);
-  }
-  return sliced;
+  return null;
 }
 
 /**
- * Helper to make the ephemeral generateContent call and extract the answer.
- * Uses a snapshot of the current conversation history as context.
+ * Run a side question using runForkedAgent (cache path).
+ *
+ * runForkedAgent with cacheSafeParams shares the main conversation's
+ * CacheSafeParams (systemInstruction + history) so the fork sees the full
+ * conversation context and benefits from prompt-cache hits. Tools are denied
+ * at the per-request level (NO_TOOLS) — single-turn, text-only.
  */
 async function askBtw(
-  geminiClient: GeminiClient,
-  model: string,
+  context: CommandContext,
   question: string,
   abortSignal: AbortSignal,
-  promptId: string,
 ): Promise<string> {
-  const history = trimHistory(geminiClient.getHistory(true));
+  const { config } = context.services;
+  if (!config) throw new Error('Config not loaded');
 
-  // Side-question guidance sent as a user message (not a system instruction).
-  // Inspired by Claude Code's design:
-  // - Emphasizes direct answering without tools
-  // - Clarifies the isolated nature of the side question
-  // - Prevents the model from promising actions it can't take
-  const response = await geminiClient.generateContent(
-    [
-      ...history,
-      {
-        role: 'user',
-        parts: [
-          {
-            text: `[This is a side question - answer directly and concisely.
+  const cacheSafeParams = getBtwCacheSafeParams(context);
+  if (!cacheSafeParams)
+    throw new Error(t('No conversation context available for /btw'));
 
-IMPORTANT:
-- You are a separate, lightweight agent spawned to answer this one question
-- The main conversation continues independently in the background
-- Do NOT reference being interrupted or what you were "previously doing"
-
-CRITICAL CONSTRAINTS:
-- You have NO tools available - you cannot read files, run commands, search, or take any actions
-- This is a one-off response in a single turn
-- You can ONLY provide information based on what you already know from the conversation context
-- NEVER say things like "Let me try...", "I'll now...", "Let me check...", or promise to take any action
-- If you don't know the answer, say so - do not offer to look it up or investigate
-
-Simply answer the question directly with the information you have.]
-
-${question}`,
-          },
-        ],
-      },
-    ],
-    {},
+  const result = await runForkedAgent({
+    config,
+    userMessage: buildBtwPrompt(question),
+    cacheSafeParams,
     abortSignal,
-    model,
-    promptId,
-  );
+  });
 
-  const parts = response.candidates?.[0]?.content?.parts;
-  return (
-    parts
-      ?.map((part) => part.text)
-      .filter((text): text is string => typeof text === 'string')
-      .join('') || t('No response received.')
-  );
+  return result.text || t('No response received.');
 }
 
 export const btwCommand: SlashCommand = {
@@ -114,19 +73,28 @@ export const btwCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
     const question = args.trim();
-    const executionMode = context.executionMode ?? 'interactive';
-    const abortSignal = context.abortSignal ?? new AbortController().signal;
 
     if (!question) {
       return {
         type: 'message',
         messageType: 'error',
         content: t('Please provide a question. Usage: /btw <your question>'),
+      };
+    }
+
+    if (question.length > BTW_MAX_INPUT_LENGTH) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Question too long (max {{max}} chars)', {
+          max: String(BTW_MAX_INPUT_LENGTH),
+        }),
       };
     }
 
@@ -141,10 +109,7 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    const geminiClient = config.getGeminiClient();
     const model = config.getModel();
-    const sessionId = config.getSessionId();
-
     if (!model) {
       return {
         type: 'message',
@@ -153,55 +118,15 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    // ACP mode: return a stream_messages async generator
-    if (executionMode === 'acp') {
-      const btwPromptId = makeBtwPromptId(sessionId);
-      const messages = async function* () {
-        try {
-          yield {
-            messageType: 'info' as const,
-            content: t('Thinking...'),
-          };
-
-          const answer = await askBtw(
-            geminiClient,
-            model,
-            question,
-            abortSignal,
-            btwPromptId,
-          );
-
-          yield {
-            messageType: 'info' as const,
-            content: `btw> ${question}\n${answer}`,
-          };
-        } catch (error) {
-          yield {
-            messageType: 'error' as const,
-            content: formatBtwError(error),
-          };
-        }
-      };
-
-      return { type: 'stream_messages', messages: messages() };
-    }
-
-    // Non-interactive mode: return a simple message result
-    if (executionMode === 'non_interactive') {
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode !== 'interactive') {
       try {
-        const btwPromptId = makeBtwPromptId(sessionId);
         const answer = await askBtw(
-          geminiClient,
-          model,
+          context,
           question,
-          abortSignal,
-          btwPromptId,
+          context.abortSignal ?? new AbortController().signal,
         );
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: `btw> ${question}\n${answer}`,
-        };
+        return { type: 'message', messageType: 'info', content: answer };
       } catch (error) {
         return {
           type: 'message',
@@ -213,7 +138,6 @@ export const btwCommand: SlashCommand = {
 
     // Interactive mode: use dedicated btwItem state for the fixed bottom area.
     // This does NOT occupy pendingItem, so the main conversation is never blocked.
-
     // Cancel any previous in-flight btw before starting a new one.
     ui.cancelBtw();
 
@@ -231,10 +155,9 @@ export const btwCommand: SlashCommand = {
     };
     ui.setBtwItem(pendingItem);
 
-    // Fire-and-forget: run the API call in the background so the main
+    // Fire-and-forget: runForkedAgent runs in the background so the main
     // conversation is not blocked while waiting for the btw answer.
-    const btwPromptId = makeBtwPromptId(sessionId);
-    void askBtw(geminiClient, model, question, btwSignal, btwPromptId)
+    void askBtw(context, question, btwSignal)
       .then((answer) => {
         if (btwSignal.aborted) return;
 

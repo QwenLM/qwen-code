@@ -8,6 +8,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FC } from 'react';
 import type { ModelInfo } from '@agentclientprotocol/sdk';
 import { PlanCompletedIcon } from '@qwen-code/webui';
+import {
+  DISCONTINUED_MESSAGES,
+  isDiscontinuedModel,
+} from '../../utils/discontinuedModel.js';
 
 interface ModelSelectorProps {
   visible: boolean;
@@ -27,6 +31,7 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState(0);
   const [mounted, setMounted] = useState(false);
+  const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
 
   // Reset selection when models change or when opened
   useEffect(() => {
@@ -37,10 +42,24 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
       );
       setSelected(currentIndex >= 0 ? currentIndex : 0);
       setMounted(true);
+      setBlockedMessage(null);
     } else {
       setMounted(false);
+      setBlockedMessage(null);
     }
   }, [visible, models, currentModelId]);
+
+  const handleModelSelect = useCallback(
+    (modelId: string) => {
+      if (isDiscontinuedModel(modelId)) {
+        setBlockedMessage(DISCONTINUED_MESSAGES.blockedError);
+        return;
+      }
+      onSelectModel(modelId);
+      onClose();
+    },
+    [onSelectModel, onClose],
+  );
 
   // Handle clicking outside to close and keyboard navigation
   useEffect(() => {
@@ -62,21 +81,32 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
         case 'ArrowDown':
           event.preventDefault();
           setSelected((prev) => Math.min(prev + 1, models.length - 1));
+          // Clear stale block banner so keyboard navigation gives the same
+          // feedback as mouse hover.
+          setBlockedMessage(null);
           break;
         case 'ArrowUp':
           event.preventDefault();
           setSelected((prev) => Math.max(prev - 1, 0));
+          setBlockedMessage(null);
           break;
-        case 'Enter':
+        case 'Enter': {
           // Prevent form submission AND stop propagation so the input form
           // does not treat this Enter as a message send.
           event.preventDefault();
           event.stopPropagation();
-          if (models[selected]) {
-            onSelectModel(models[selected].modelId);
-            onClose();
+          const target = models[selected];
+          if (!target) {
+            break;
           }
+          if (isDiscontinuedModel(target.modelId)) {
+            setBlockedMessage(DISCONTINUED_MESSAGES.blockedError);
+            break;
+          }
+          onSelectModel(target.modelId);
+          onClose();
           break;
+        }
         case 'Escape':
           event.preventDefault();
           onClose();
@@ -108,14 +138,6 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
     }
   }, [selected]);
 
-  const handleModelSelect = useCallback(
-    (modelId: string) => {
-      onSelectModel(modelId);
-      onClose();
-    },
-    [onSelectModel, onClose],
-  );
-
   if (!visible) {
     return null;
   }
@@ -139,6 +161,24 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
         Select a model
       </div>
 
+      {/* Inline blocked-selection error (cleared on hover or close) */}
+      {blockedMessage && (
+        <div
+          role="alert"
+          data-testid="model-selector-blocked"
+          className="mx-2 mb-1 rounded px-3 py-2 text-[0.85em]"
+          style={{
+            background: 'var(--vscode-inputValidation-warningBackground)',
+            color: 'var(--vscode-inputValidation-warningForeground)',
+            border:
+              '1px solid var(--vscode-inputValidation-warningBorder, transparent)',
+          }}
+        >
+          <span aria-hidden="true">⚠ </span>
+          {blockedMessage}
+        </div>
+      )}
+
       {/* Model list */}
       <div className="flex max-h-[300px] flex-col overflow-y-auto p-[var(--app-list-padding)] pb-2">
         {models.length === 0 ? (
@@ -149,16 +189,31 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
           models.map((model, index) => {
             const isActive = index === selected;
             const isCurrentModel = model.modelId === currentModelId;
+            const discontinued = isDiscontinuedModel(model.modelId);
+            const description = discontinued
+              ? DISCONTINUED_MESSAGES.description
+              : model.description;
             return (
               <div
                 key={model.modelId}
                 data-index={index}
+                data-discontinued={discontinued ? 'true' : undefined}
                 role="menuitem"
+                aria-disabled={discontinued ? 'true' : undefined}
                 onClick={() => handleModelSelect(model.modelId)}
-                onMouseEnter={() => setSelected(index)}
+                onMouseEnter={() => {
+                  setSelected(index);
+                  // Clear stale block message when hovering a different row so
+                  // back-to-back attempts on different discontinued models still
+                  // produce fresh feedback.
+                  setBlockedMessage(null);
+                }}
                 className={[
                   'model-selector-item',
-                  'mx-1 cursor-pointer rounded-[var(--app-list-border-radius)]',
+                  'mx-1 rounded-[var(--app-list-border-radius)]',
+                  discontinued
+                    ? 'cursor-not-allowed opacity-60'
+                    : 'cursor-pointer',
                   'p-[var(--app-list-item-padding)]',
                   isActive ? 'bg-[var(--app-list-active-background)]' : '',
                 ].join(' ')}
@@ -174,10 +229,33 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
                       ].join(' ')}
                     >
                       {model.name}
+                      {discontinued && (
+                        <span
+                          data-testid="discontinued-badge"
+                          className="ml-1.5 text-[0.85em]"
+                          style={{
+                            color:
+                              'var(--vscode-editorWarning-foreground, #cca700)',
+                          }}
+                        >
+                          {DISCONTINUED_MESSAGES.badge}
+                        </span>
+                      )}
                     </span>
-                    {model.description && (
-                      <span className="block truncate text-[0.85em] text-[var(--app-secondary-foreground)] opacity-70">
-                        {model.description}
+                    {description && (
+                      <span
+                        className="block truncate text-[0.85em] text-[var(--app-secondary-foreground)] opacity-70"
+                        style={
+                          discontinued
+                            ? {
+                                color:
+                                  'var(--vscode-editorWarning-foreground, #cca700)',
+                                opacity: 1,
+                              }
+                            : undefined
+                        }
+                      >
+                        {description}
                       </span>
                     )}
                   </div>

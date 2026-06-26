@@ -26,6 +26,8 @@ const FIELD_RANGES: Array<[number, number]> = [
   [0, 7], // day of week (0 and 7 both mean Sunday)
 ];
 
+const INTEGER_TOKEN_RE = /^\d+$/;
+
 /**
  * Parses a single cron field into a set of matching values.
  * Supports: star, single values, steps (star/N), ranges (a-b), comma lists.
@@ -53,26 +55,37 @@ function parseField(field: string, min: number, max: number): Set<number> {
       rangeStart = min;
       rangeEnd = max;
     } else if (base.includes('-')) {
-      const [startStr, endStr] = base.split('-');
-      rangeStart = parseInt(startStr!, 10);
-      rangeEnd = parseInt(endStr!, 10);
-      if (isNaN(rangeStart) || isNaN(rangeEnd)) {
+      const rangeParts = base.split('-');
+      if (
+        rangeParts.length !== 2 ||
+        !INTEGER_TOKEN_RE.test(rangeParts[0]!) ||
+        !INTEGER_TOKEN_RE.test(rangeParts[1]!)
+      ) {
         throw new Error(`Invalid range: "${base}"`);
       }
+      const [startStr, endStr] = rangeParts;
+      rangeStart = parseInt(startStr!, 10);
+      rangeEnd = parseInt(endStr!, 10);
       if (rangeStart < min || rangeEnd > max || rangeStart > rangeEnd) {
         throw new Error(`Range ${base} out of bounds [${min}-${max}]`);
       }
     } else {
+      if (!INTEGER_TOKEN_RE.test(base)) {
+        throw new Error(`Invalid value: "${base}"`);
+      }
       const val = parseInt(base, 10);
-      if (isNaN(val) || val < min || val > max) {
+      if (val < min || val > max) {
         throw new Error(`Value "${base}" out of bounds [${min}-${max}]`);
       }
       rangeStart = val;
       rangeEnd = val;
     }
 
+    if (stepParts.length === 2 && !INTEGER_TOKEN_RE.test(stepParts[1]!)) {
+      throw new Error(`Invalid step: "${stepParts[1]}"`);
+    }
     const step = stepParts.length === 2 ? parseInt(stepParts[1]!, 10) : 1;
-    if (isNaN(step) || step <= 0) {
+    if (step <= 0) {
       throw new Error(`Invalid step: "${stepParts[1]}"`);
     }
 

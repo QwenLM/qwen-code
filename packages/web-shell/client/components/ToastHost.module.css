@@ -1,0 +1,89 @@
+.host {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 30;
+  display: flex;
+  width: min(420px, calc(100% - 24px));
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 9px 8px 9px 12px;
+  border: 1px solid
+    color-mix(in srgb, var(--text-primary) 14%, var(--border-color));
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  pointer-events: auto;
+}
+
+.message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+.close:hover,
+.close:focus-visible {
+  background: var(--subtle-bg-strong);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.info {
+  border-left-color: var(--accent-color);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--accent-color) 16%, transparent),
+    color-mix(in srgb, var(--accent-color) 16%, transparent)
+  );
+}
+
+.success {
+  border-left-color: var(--success-color);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--success-color) 16%, transparent),
+    color-mix(in srgb, var(--success-color) 16%, transparent)
+  );
+}
+
+.warning {
+  border-left-color: var(--warning-color);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--warning-color) 18%, transparent),
+    color-mix(in srgb, var(--warning-color) 18%, transparent)
+  );
+}
+
+.error {
+  border-left-color: var(--error-color);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--error-color) 18%, transparent),
+    color-mix(in srgb, var(--error-color) 18%, transparent)
+  );
+}

@@ -1,0 +1,79 @@
+.tool {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.description {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.command,
+.file,
+.content,
+.args,
+.output {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--editor-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  min-width: 0;
+  overflow: auto;
+}
+
+.command,
+.file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+}
+
+.prompt,
+.fileIcon {
+  color: var(--accent-color);
+  flex-shrink: 0;
+}
+
+.content,
+.args,
+.output {
+  max-height: 360px;
+}
+
+.content pre,
+.args pre,
+.output pre {
+  margin: 0;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.editHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.editFile {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editToggle {
+  margin-left: auto;
+  color: var(--text-dimmed);
+  font-size: 10px;
+  flex-shrink: 0;
+}

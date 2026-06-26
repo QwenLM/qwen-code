@@ -46,5 +46,30 @@ describe('markdownUtilities', () => {
       const content = 'Single line of text';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
+
+    it('should hard split a long single line when a max length is provided', () => {
+      const content = 'a'.repeat(100);
+      expect(findLastSafeSplitPoint(content, 40)).toBe(40);
+    });
+
+    it('should prefer a safe newline before the max length', () => {
+      const content = 'first line\nsecond line\nthird line';
+      expect(findLastSafeSplitPoint(content, 18)).toBe(11);
+    });
+
+    it('should not split past the max length for a boundary newline', () => {
+      const content = `${'a'.repeat(40)}\n\nrest`;
+      expect(findLastSafeSplitPoint(content, 40)).toBe(40);
+    });
+
+    it('should preserve an opening code block when possible with a max length', () => {
+      const content = 'intro\n\n```ts\nconst value = 1;\n';
+      expect(findLastSafeSplitPoint(content, 20)).toBe(7);
+    });
+
+    it('should hard split an oversized leading code block with a max length', () => {
+      const content = '```ts\n' + 'a'.repeat(100);
+      expect(findLastSafeSplitPoint(content, 40)).toBe(40);
+    });
   });
 });

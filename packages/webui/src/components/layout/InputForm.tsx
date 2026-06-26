@@ -23,6 +23,7 @@ import { ContextIndicator } from './ContextIndicator.js';
 import type { CompletionItem } from '../../types/completion.js';
 import type { ContextUsage } from './ContextIndicator.js';
 import type { FollowupState } from '../../types/followup.js';
+import { stripZeroWidthSpaces } from '../../utils/inputPlaceholder.js';
 
 /**
  * Edit mode display information
@@ -203,7 +204,7 @@ export const InputForm: FC<InputFormProps> = ({
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
   const hasDraftContent =
-    canSubmit ?? inputText.replace(/\u200B/g, '').trim().length > 0;
+    canSubmit ?? stripZeroWidthSpaces(inputText).trim().length > 0;
   const completionItemsResolved = completionItems ?? [];
   const completionActive =
     completionIsOpen &&
@@ -304,8 +305,8 @@ export const InputForm: FC<InputFormProps> = ({
     : '';
 
   return (
-    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)]">
-      <div className="block">
+    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)] pointer-events-none">
+      <div className="block pointer-events-auto">
         <form className="composer-form" onSubmit={onSubmit}>
           {/* Inner background layer */}
           <div className="composer-overlay" />
@@ -337,14 +338,14 @@ export const InputForm: FC<InputFormProps> = ({
               // Use a data flag so CSS can show placeholder even if the browser
               // inserts an invisible <br> into contentEditable (so :empty no longer matches)
               data-empty={
-                inputText.replace(/\u200B/g, '').trim().length === 0
+                stripZeroWidthSpaces(inputText).trim().length === 0
                   ? 'true'
                   : 'false'
               }
               onInput={(e) => {
                 const target = e.target as HTMLDivElement;
                 // Filter out zero-width space that we use to maintain height
-                const text = target.textContent?.replace(/\u200B/g, '') || '';
+                const text = stripZeroWidthSpaces(target.textContent ?? '');
                 onInputChange(text);
                 // Dismiss follow-up suggestion when user starts typing
                 if (hasFollowup && !inputText && text) {

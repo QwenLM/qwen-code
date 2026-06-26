@@ -5,6 +5,7 @@
  */
 
 import type {
+  CompactionThresholds,
   CompressionStatus,
   MCPServerConfig,
   ThoughtSummary,
@@ -12,6 +13,7 @@ import type {
   ToolConfirmationOutcome,
   ToolResultDisplay,
   AgentStatus,
+  ArenaDiffSummary,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -69,6 +71,9 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  executionStartTime?: number;
+  /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
+  isMemoryOp?: 'read' | 'write';
 }
 
 export interface CompressionProps {
@@ -86,16 +91,42 @@ export interface SummaryProps {
 
 export interface HistoryItemBase {
   text?: string; // Text content for user/gemini/info/error messages
+  /** Display-only flags that do not affect canonical history semantics. */
+  display?: {
+    /**
+     * If true, the item is kept in history for turn mapping but not
+     * rendered in the restored transcript. Set by ui.history.collapseOnResume
+     * when resuming a session.
+     */
+    suppressOnRestore?: boolean;
+    /**
+     * Identifies special display-only items, like the summary row added
+     * when history is collapsed.
+     */
+    kind?: 'collapse-summary';
+  };
 }
 
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  promptId?: string;
+  /**
+   * Whether this UI history item represents a user turn that reached the model.
+   *
+   * NOTE: This is set explicitly by slash command processing because visible
+   * slash-command invocations may be handled locally without entering API
+   * history. Regular user messages leave this undefined and are classified by
+   * the legacy lexical fallback in isRealUserTurn. New user-item paths with
+   * ambiguous model-history behavior must set this explicitly.
+   */
+  sentToModel?: boolean;
 };
 
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
@@ -106,6 +137,7 @@ export type HistoryItemGeminiContent = HistoryItemBase & {
 export type HistoryItemGeminiThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
+  durationMs?: number;
 };
 
 export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
@@ -116,6 +148,8 @@ export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
+  linkUrl?: string;
+  linkText?: string;
 };
 
 export type HistoryItemError = HistoryItemBase & {
@@ -156,6 +190,7 @@ export type HistoryItemAbout = HistoryItemBase & {
     memoryUsage: string;
     baseUrl?: string;
     gitCommit?: string;
+    lspStatus?: string;
   };
 };
 
@@ -169,6 +204,41 @@ export type HistoryItemStats = HistoryItemBase & {
   duration: string;
 };
 
+/**
+ * Structured payload rendered by `/diff`. Kept as plain data (not React nodes)
+ * so the same model can feed both the Ink-based interactive display and the
+ * plain-text non-interactive / ACP output.
+ */
+export interface DiffRenderRow {
+  filename: string;
+  /** `undefined` for binary files; a line count (lower bound if `truncated`)
+   *  otherwise. */
+  added?: number;
+  /** `undefined` for binary and untracked files. */
+  removed?: number;
+  isBinary: boolean;
+  isUntracked: boolean;
+  /** `true` when the file is removed from the worktree relative to HEAD.
+   *  Mutually exclusive with `isUntracked`. */
+  isDeleted: boolean;
+  /** Only set for untracked text files that exceeded the read cap. */
+  truncated: boolean;
+}
+
+export interface DiffRenderModel {
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  rows: DiffRenderRow[];
+  /** `filesCount - rows.length` when the per-file cap truncated the listing. */
+  hiddenCount: number;
+}
+
+export type HistoryItemDiffStats = HistoryItemBase & {
+  type: 'diff_stats';
+  model: DiffRenderModel;
+};
+
 export type HistoryItemModelStats = HistoryItemBase & {
   type: 'model_stats';
 };
@@ -177,15 +247,53 @@ export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
 };
 
+export type HistoryItemSkillStats = HistoryItemBase & {
+  type: 'skill_stats';
+};
+
 export type HistoryItemQuit = HistoryItemBase & {
   type: 'quit';
   duration: string;
 };
 
+/**
+ * Displayed after a turn when managed-auto-memory files were written
+ * (either in-turn by the model, or by the post-turn dream/extract pipeline).
+ */
+export type HistoryItemMemorySaved = HistoryItemBase & {
+  type: 'memory_saved';
+  /** Number of memory files written / updated. */
+  writtenCount: number;
+  /** Verb to display, e.g. 'Saved' or 'Updated'. Defaults to 'Saved'. */
+  verb?: string;
+};
+
 export type HistoryItemToolGroup = HistoryItemBase & {
   type: 'tool_group';
   tools: IndividualToolCallDisplay[];
+  /** Count of tool calls that wrote to managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryWriteCount?: number;
+  /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryReadCount?: number;
   isUserInitiated?: boolean;
+};
+
+/**
+ * Short LLM-generated label summarizing a preceding tool batch. Emitted after
+ * the batch completes and consumed by compact-mode rendering to replace the
+ * generic "Tool × N" line with something like "Searched in auth/". Also
+ * surfaces to SDK clients as a `tool_use_summary` stream message.
+ */
+export type HistoryItemToolUseSummary = HistoryItemBase & {
+  type: 'tool_use_summary';
+  summary: string;
+  /** Tool callIds this summary describes. Used to locate the target tool_group. */
+  precedingToolUseIds: string[];
+};
+
+export type HistoryItemNotification = HistoryItemBase & {
+  type: 'notification';
+  text: string;
 };
 
 export type HistoryItemUserShell = HistoryItemBase & {
@@ -265,6 +373,17 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
 
 // --- Context Usage types ---
 
+export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
+
+/**
+ * Alias for the core compaction-thresholds shape. Re-exported under the
+ * CLI-friendly name so consumers in this package don't pull on the core
+ * module path; structurally identical to `CompactionThresholds`. The
+ * `readonly` modifiers on the core type are immaterial for UI rendering,
+ * but kept implicitly through the alias.
+ */
+export type ContextThresholds = CompactionThresholds;
+
 export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -273,7 +392,20 @@ export interface ContextCategoryBreakdown {
   skills: number;
   messages: number;
   freeSpace: number;
+  /**
+   * Distance from the auto-compaction threshold to the window edge.
+   * Derived from `thresholds.auto` (= `contextWindowSize - auto`); retained
+   * so the legacy three-segment progress bar in `ContextUsage.tsx` keeps
+   * working without a separate code path.
+   */
   autocompactBuffer: number;
+  /** Three-tier ladder used by auto-compaction (warn / auto / hard) plus the effective window. */
+  thresholds: ContextThresholds;
+  /**
+   * Which tier the current usage sits in. `safe` is below `warn`; `warn` /
+   * `auto` / `hard` mean `totalTokens` has crossed the corresponding tier.
+   */
+  currentTier: ContextTier;
 }
 
 export interface ContextToolDetail {
@@ -328,6 +460,9 @@ export interface ArenaAgentCardData {
   rounds: number;
   error?: string;
   diff?: string;
+  diffSummary?: ArenaDiffSummary;
+  modifiedFiles?: string[];
+  approachSummary?: string;
 }
 
 export type HistoryItemArenaAgentComplete = HistoryItemBase & {
@@ -363,6 +498,17 @@ export type HistoryItemBtw = HistoryItemBase & {
 };
 
 /**
+ * Away-summary recap shown when the user returns to the session after a
+ * period of inactivity (or via /recap). Rendered inline as a regular
+ * history item (matching Claude Code's away_summary message); scrolls
+ * with the conversation, no sticky pinning.
+ */
+export type HistoryItemAwayRecap = HistoryItemBase & {
+  type: 'away_recap';
+  text: string;
+};
+
+/**
  * UserPromptSubmit hook blocked event.
  * Displayed when a UserPromptSubmit hook blocks the user's prompt.
  */
@@ -392,12 +538,64 @@ export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
   message: string;
 };
 
+// --- Doctor diagnostics types ---
+
+export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
+
+export interface DoctorCheckResult {
+  category: string;
+  name: string;
+  status: DoctorCheckStatus;
+  message: string;
+  detail?: string;
+}
+
+export type HistoryItemDoctor = HistoryItemBase & {
+  type: 'doctor';
+  checks: DoctorCheckResult[];
+  summary: { pass: number; warn: number; fail: number };
+};
+
+export type GoalStatusKind =
+  | 'set'
+  | 'achieved'
+  | 'cleared'
+  | 'failed'
+  | 'aborted'
+  | 'checking';
+
+export const TERMINAL_GOAL_STATUS_KINDS = [
+  'achieved',
+  'aborted',
+  'failed',
+] as const satisfies readonly GoalStatusKind[];
+
+export function isTerminalGoalStatusKind(
+  kind: GoalStatusKind,
+): kind is (typeof TERMINAL_GOAL_STATUS_KINDS)[number] {
+  return TERMINAL_GOAL_STATUS_KINDS.includes(
+    kind as (typeof TERMINAL_GOAL_STATUS_KINDS)[number],
+  );
+}
+
+export type HistoryItemGoalStatus = HistoryItemBase & {
+  type: 'goal_status';
+  kind: GoalStatusKind;
+  condition: string;
+  /** Set for active, progress, and terminal goal states. */
+  iterations?: number;
+  setAt?: number;
+  durationMs?: number;
+  lastReason?: string;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
 // Individually exported types extending HistoryItemBase
 export type HistoryItemWithoutId =
   | HistoryItemUser
+  | HistoryItemNotification
   | HistoryItemUserShell
   | HistoryItemGemini
   | HistoryItemGeminiContent
@@ -411,9 +609,11 @@ export type HistoryItemWithoutId =
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
+  | HistoryItemToolUseSummary
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemSkillStats
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -427,9 +627,14 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
   | HistoryItemBtw
+  | HistoryItemMemorySaved
+  | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
-  | HistoryItemStopHookSystemMessage;
+  | HistoryItemStopHookSystemMessage
+  | HistoryItemDoctor
+  | HistoryItemDiffStats
+  | HistoryItemGoalStatus;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -445,6 +650,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  SKILL_STATS = 'skill_stats',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',
@@ -458,6 +664,9 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  NOTIFICATION = 'notification',
+  DIFF_STATS = 'diff_stats',
+  GOAL_STATUS = 'goal_status',
 }
 
 export interface InsightProgressProps {
@@ -471,7 +680,11 @@ export interface InsightProgressProps {
 // Simplified message structure for internal feedback
 export type Message =
   | {
-      type: MessageType.INFO | MessageType.ERROR | MessageType.USER;
+      type:
+        | MessageType.INFO
+        | MessageType.WARNING
+        | MessageType.ERROR
+        | MessageType.USER;
       content: string; // Renamed from text for clarity in this context
       timestamp: Date;
     }
@@ -493,6 +706,7 @@ export type Message =
         memoryUsage: string;
         baseUrl?: string;
         gitCommit?: string;
+        lspStatus?: string;
       };
       content?: string; // Optional content, not really used for ABOUT
     }
@@ -514,6 +728,11 @@ export type Message =
     }
   | {
       type: MessageType.TOOL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
+      type: MessageType.SKILL_STATS;
       timestamp: Date;
       content?: string;
     }
@@ -552,6 +771,8 @@ export interface ConsoleMessageItem {
 export interface SubmitPromptResult {
   type: 'submit_prompt';
   content: PartListUnion;
+  /** Optional callback invoked after the agent turn completes successfully. */
+  onComplete?: () => Promise<void>;
 }
 
 /**

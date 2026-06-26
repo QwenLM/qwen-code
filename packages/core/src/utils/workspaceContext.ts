@@ -14,6 +14,11 @@ const debugLogger = createDebugLogger('WORKSPACE');
 
 export type Unsubscribe = () => void;
 
+export interface ResolvedWorkspaceDirectories {
+  directories: Set<string>;
+  initialDirectories: Set<string>;
+}
+
 /**
  * WorkspaceContext manages multiple workspace directories and validates paths
  * against them. This allows the CLI to operate on files from multiple directories
@@ -23,6 +28,16 @@ export class WorkspaceContext {
   private directories = new Set<string>();
   private initialDirectories: Set<string>;
   private onDirectoriesChangedListeners = new Set<() => void>();
+  /**
+   * Memoized realpath results. Every workspace-bounded tool call ultimately
+   * routes through {@link fullyResolvedPath} → `fs.realpathSync`; without
+   * this cache the same path gets re-resolved on every Read/Glob/Grep/Ls
+   * invocation. Bounded so long sessions touching many files don't grow
+   * without limit; FIFO eviction is good enough — the working set tends to
+   * be the small set of paths the model is actively manipulating.
+   */
+  private resolvedPathCache = new Map<string, string>();
+  private static readonly RESOLVED_PATH_CACHE_MAX = 1024;
 
   /**
    * Creates a new WorkspaceContext with the given initial directory and optional additional directories.
@@ -71,7 +86,10 @@ export class WorkspaceContext {
    */
   addDirectory(directory: string, basePath: string = process.cwd()): void {
     try {
-      const resolved = this.resolveAndValidateDir(directory, basePath);
+      const resolved = WorkspaceContext.resolveAndValidateDir(
+        directory,
+        basePath,
+      );
       if (this.directories.has(resolved)) {
         return;
       }
@@ -84,7 +102,7 @@ export class WorkspaceContext {
     }
   }
 
-  private resolveAndValidateDir(
+  private static resolveAndValidateDir(
     directory: string,
     basePath: string = process.cwd(),
   ): string {
@@ -101,6 +119,24 @@ export class WorkspaceContext {
     }
 
     return fs.realpathSync(absolutePath);
+  }
+
+  static resolveRootDirectories(
+    directory: string,
+    additionalDirectories: readonly string[] = [],
+  ): ResolvedWorkspaceDirectories {
+    const primaryDirectory = WorkspaceContext.resolveAndValidateDir(directory);
+    const directories = new Set<string>([primaryDirectory]);
+    for (const additionalDirectory of additionalDirectories) {
+      directories.add(
+        WorkspaceContext.resolveAndValidateDir(additionalDirectory),
+      );
+    }
+
+    return {
+      directories,
+      initialDirectories: new Set([primaryDirectory]),
+    };
   }
 
   /**
@@ -125,7 +161,7 @@ export class WorkspaceContext {
     // Resolve to match the stored form
     let resolved: string;
     try {
-      resolved = this.resolveAndValidateDir(directory);
+      resolved = WorkspaceContext.resolveAndValidateDir(directory);
     } catch {
       // If we can't resolve it, try matching by raw string (e.g. directory was deleted)
       resolved = path.isAbsolute(directory)
@@ -152,7 +188,7 @@ export class WorkspaceContext {
    */
   isInitialDirectory(directory: string): boolean {
     try {
-      const resolved = this.resolveAndValidateDir(directory);
+      const resolved = WorkspaceContext.resolveAndValidateDir(directory);
       return this.initialDirectories.has(resolved);
     } catch {
       const absolutePath = path.isAbsolute(directory)
@@ -165,7 +201,7 @@ export class WorkspaceContext {
   setDirectories(directories: readonly string[]): void {
     const newDirectories = new Set<string>();
     for (const dir of directories) {
-      newDirectories.add(this.resolveAndValidateDir(dir));
+      newDirectories.add(WorkspaceContext.resolveAndValidateDir(dir));
     }
 
     if (
@@ -173,6 +209,30 @@ export class WorkspaceContext {
       ![...newDirectories].every((d) => this.directories.has(d))
     ) {
       this.directories = newDirectories;
+      this.notifyDirectoriesChanged();
+    }
+  }
+
+  applyRootDirectories(resolved: ResolvedWorkspaceDirectories): void {
+    const newDirectories = new Set(resolved.directories);
+    const newInitialDirectories = new Set(resolved.initialDirectories);
+    for (const existing of this.directories) {
+      if (!this.initialDirectories.has(existing)) {
+        newDirectories.add(existing);
+      }
+    }
+    const directoriesChanged =
+      newDirectories.size !== this.directories.size ||
+      ![...newDirectories].every((d) => this.directories.has(d));
+    const initialDirectoriesChanged =
+      newInitialDirectories.size !== this.initialDirectories.size ||
+      ![...newInitialDirectories].every((d) => this.initialDirectories.has(d));
+
+    this.directories = newDirectories;
+    this.initialDirectories = newInitialDirectories;
+    this.resolvedPathCache.clear();
+
+    if (directoriesChanged || initialDirectoriesChanged) {
       this.notifyDirectoriesChanged();
     }
   }
@@ -201,10 +261,21 @@ export class WorkspaceContext {
    * Fully resolves a path, including symbolic links.
    * If the path does not exist, it returns the fully resolved path as it would be
    * if it did exist.
+   *
+   * Result is memoized in {@link resolvedPathCache}. Filesystem-state cache:
+   * if a file is renamed / a symlink is retargeted mid-session the cache
+   * goes stale, which is the same correctness profile as any single
+   * `realpathSync` call (it captures a moment in time). The win is cutting
+   * 8+ syscalls per tool-heavy prompt down to 1.
    */
   private fullyResolvedPath(pathToCheck: string): string {
+    const cached = this.resolvedPathCache.get(pathToCheck);
+    if (cached !== undefined) {
+      return cached;
+    }
+    let resolved: string;
     try {
-      return fs.realpathSync(pathToCheck);
+      resolved = fs.realpathSync(pathToCheck);
     } catch (e: unknown) {
       if (
         isNodeError(e) &&
@@ -215,10 +286,21 @@ export class WorkspaceContext {
         !this.isFileSymlink(e.path)
       ) {
         // If it doesn't exist, e.path contains the fully resolved path.
-        return e.path;
+        resolved = e.path;
+      } else {
+        // Don't cache exceptions — the path may exist on retry.
+        throw e;
       }
-      throw e;
     }
+    if (
+      this.resolvedPathCache.size >= WorkspaceContext.RESOLVED_PATH_CACHE_MAX
+    ) {
+      // FIFO eviction: drop the oldest insertion (Map preserves insert order).
+      const oldest = this.resolvedPathCache.keys().next().value;
+      if (oldest !== undefined) this.resolvedPathCache.delete(oldest);
+    }
+    this.resolvedPathCache.set(pathToCheck, resolved);
+    return resolved;
   }
 
   /**

@@ -130,6 +130,12 @@ src/*.tmp
       expect(parser.isIgnored(outsidePath)).toBe(false);
     });
 
+    it('should still evaluate files whose names start with two dots', async () => {
+      await createTestFile('.gitignore', '..secret.log');
+
+      expect(parser.isIgnored('..secret.log')).toBe(true);
+    });
+
     it('should handle relative paths correctly', () => {
       expect(parser.isIgnored(path.join('node_modules', 'some-package'))).toBe(
         true,
