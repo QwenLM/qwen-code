@@ -29,6 +29,7 @@ import { encodeWav } from './wav';
 import { assertVoiceBaseUrlNetworkAllowed } from './net-guard';
 import {
   MAX_AUDIO_BYTES,
+  sanitizeResponseDetails,
   transcribeQwenAsrBatch,
   type VoiceConfig,
 } from './transcribe';
@@ -73,6 +74,13 @@ export interface VoiceHandlerDeps {
 
 function errMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Streaming/realtime stream errors can carry raw upstream socket detail (auth
+// URLs, Bearer tokens) via `ws.on('error')`; redact through the same sanitizer
+// the batch path uses before the text reaches the renderer.
+function sanitizeStreamError(error: unknown, apiKey?: string): string {
+  return sanitizeResponseDetails(errMessage(error), apiKey);
 }
 
 export function toStreamConfig(config: VoiceConfig): VoiceStreamConfig {
@@ -267,7 +275,7 @@ export function createVoiceConnectionHandler(
       if (ctx.streaming) {
         const callbacks: VoiceStreamCallbacks = {
           onInterim: (text) => sendJson({ type: 'interim', text }),
-          onError: (error) => fail(errMessage(error)),
+          onError: (error) => fail(sanitizeStreamError(error, config.apiKey)),
         };
         const opening = openStream(config, callbacks);
         sessionPromise = opening;
@@ -275,7 +283,7 @@ export function createVoiceConnectionHandler(
         try {
           opened = await opening;
         } catch (error) {
-          fail(errMessage(error));
+          fail(sanitizeStreamError(error, config.apiKey));
           return;
         }
         if (isClosed()) {
@@ -325,7 +333,13 @@ export function createVoiceConnectionHandler(
           );
         }
       } catch (error) {
-        fail(errMessage(error));
+        // Streaming finish() can reject with raw upstream socket detail; redact
+        // it. Batch errors are already sanitized inside transcribeQwenAsrBatch.
+        fail(
+          ctx.streaming
+            ? sanitizeStreamError(error, ctx.config.apiKey)
+            : errMessage(error),
+        );
         return;
       }
       sendJson({ type: 'final', text: transcript });

@@ -65,10 +65,13 @@ export function isAllowedVoiceOrigin(
   origin: string | undefined,
   allowedOrigins: readonly string[] = [],
 ): boolean {
+  // `file://` is the packaged Electron renderer's origin. No custom app scheme
+  // (e.g. `qwen://`) is registered anywhere, so accepting one would only let an
+  // unregistered same-machine scheme pass origin validation — keep it out as
+  // defense-in-depth alongside the loopback bind + voice token.
   return (
     !origin ||
     origin.startsWith('file://') ||
-    origin.startsWith('qwen://') ||
     allowedOrigins.includes(origin)
   );
 }

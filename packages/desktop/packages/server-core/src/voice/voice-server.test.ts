@@ -23,7 +23,9 @@ describe('isAllowedVoiceOrigin', () => {
   it('allows app origins and rejects browser origins', () => {
     expect(isAllowedVoiceOrigin(undefined)).toBe(true)
     expect(isAllowedVoiceOrigin('file://')).toBe(true)
-    expect(isAllowedVoiceOrigin('qwen://app')).toBe(true)
+    // No `qwen://` scheme is registered anywhere, so an unregistered custom
+    // scheme must not pass origin validation.
+    expect(isAllowedVoiceOrigin('qwen://app')).toBe(false)
     expect(
       isAllowedVoiceOrigin('http://localhost:5173', [
         'http://localhost:5173',

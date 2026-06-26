@@ -11,6 +11,11 @@ import { useVoiceCapture, type VoiceCaptureStatus } from './useVoiceCapture';
 /** Waveform bar count across the recording bar. */
 const BAR_COUNT = 32;
 
+// Voice server cold start (OAuth refresh / slow disk) can outlast the renderer
+// by a few seconds, so poll the loopback URL a bounded number of times.
+const VOICE_URL_RETRY_INTERVAL_MS = 1500;
+const MAX_VOICE_URL_RETRIES = 10;
+
 export interface UseVoiceDictationReturn {
   available: boolean;
   status: VoiceCaptureStatus;
@@ -37,14 +42,20 @@ export function useVoiceDictation(options: {
   const [wsUrl, setWsUrl] = useState<string | null>(
     () => window.electronAPI?.getVoiceStreamUrl?.() ?? null,
   );
-  // The voice server may come up just after the renderer; retry once.
+  // The voice server may come up just after the renderer; retry on an interval
+  // until the URL resolves. `setWsUrl(null)` is a no-op when the value stays
+  // null, so a separate retry counter is what actually re-fires this effect on
+  // each miss (re-running with only `[wsUrl]` would stall after the first try).
+  const [retryCount, setRetryCount] = useState(0);
   useEffect(() => {
-    if (wsUrl) return;
+    if (wsUrl || retryCount >= MAX_VOICE_URL_RETRIES) return;
     const id = setTimeout(() => {
-      setWsUrl(window.electronAPI?.getVoiceStreamUrl?.() ?? null);
-    }, 1500);
+      const next = window.electronAPI?.getVoiceStreamUrl?.() ?? null;
+      if (next) setWsUrl(next);
+      else setRetryCount((n) => n + 1);
+    }, VOICE_URL_RETRY_INTERVAL_MS);
     return () => clearTimeout(id);
-  }, [wsUrl]);
+  }, [wsUrl, retryCount]);
 
   const [notice, setNotice] = useState<string | undefined>(undefined);
   const onInsertRef = useRef(options.onInsert);

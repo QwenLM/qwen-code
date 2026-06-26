@@ -143,6 +143,44 @@ describe('createVoiceConnectionHandler', () => {
     expect(aborted).toBe(false)
   })
 
+  it('redacts credentials from streaming session errors before sending them to the renderer', async () => {
+    let onError: ((error: Error) => void) | undefined
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        apiKey: 'leaked-token',
+      }),
+      openStream: async (_config, callbacks) => {
+        onError = callbacks.onError
+        return {
+          pushAudio: () => {},
+          finish: async () => '',
+          abort: () => {},
+        }
+      },
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+
+    // Upstream `ws.on('error')` can surface auth URLs / Bearer tokens verbatim;
+    // the handler must redact them like the batch path before they reach the UI.
+    onError?.(
+      new Error(
+        'Bearer leaked-token connecting to wss://host/api-ws?apikey=leaked-token',
+      ),
+    )
+    await flush()
+
+    const errors = ws.sentJson().filter((message) => message.type === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].message).toContain('Bearer [REDACTED]')
+    expect(errors[0].message).not.toContain('leaked-token')
+  })
+
   it('aborts in-flight batch transcription when the socket closes', async () => {
     let signal: AbortSignal | undefined
     const ws = new FakeWebSocket()
