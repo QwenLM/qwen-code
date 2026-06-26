@@ -446,13 +446,25 @@ export interface DaemonMcpChildRefusedBatchData {
  * ~/.qwen/QWEN.md), `mode` is the requested write mode, and
  * `bytesWritten` is the size of the file post-write.
  */
-export interface DaemonMemoryChangedData {
+export interface DaemonFileMemoryChangedData {
   scope: 'workspace' | 'global';
   filePath: string;
   mode: 'append' | 'replace';
   bytesWritten: number;
   [key: string]: unknown;
 }
+
+export interface DaemonManagedMemoryChangedData {
+  scope: 'managed';
+  source: 'workspace_memory_remember' | (string & {});
+  taskId: string;
+  touchedScopes: Array<'user' | 'project'>;
+  [key: string]: unknown;
+}
+
+export type DaemonMemoryChangedData =
+  | DaemonFileMemoryChangedData
+  | DaemonManagedMemoryChangedData;
 
 /**
  * A workspace agent CRUD mutation completed successfully. `change`
@@ -2488,6 +2500,13 @@ function isMcpChildRefusedBatchData(
 function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {
   if (!isRecord(value)) return false;
   const scope = value['scope'];
+  if (scope === 'managed') {
+    return (
+      isNonEmptyString(value['source']) &&
+      isNonEmptyString(value['taskId']) &&
+      Array.isArray(value['touchedScopes'])
+    );
+  }
   const mode = value['mode'];
   return (
     (scope === 'workspace' || scope === 'global') &&

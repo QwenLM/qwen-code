@@ -228,6 +228,8 @@ export type {
   DaemonMcpChildRefusedBatchEvent,
   DaemonMcpGuardrailEvent,
   DaemonMcpRefusedServer,
+  DaemonFileMemoryChangedData,
+  DaemonManagedMemoryChangedData,
   DaemonMemoryChangedData,
   DaemonMemoryChangedEvent,
   DaemonModelSwitchedData,

@@ -99,6 +99,7 @@ export async function planManagedAutoMemoryDreamByAgent(
   const transcriptDir = getTranscriptDir(projectRoot);
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     allowShell: true,
+    includeUserMemory: false,
   });
   const result = await runForkedAgent({
     name: 'managed-auto-memory-dreamer',

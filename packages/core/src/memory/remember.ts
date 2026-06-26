@@ -47,7 +47,7 @@ export function buildManagedRememberPrompt(
     projectDir !== undefined
       ? ` Choose the destination directory by the type's \`<scope>\`: USER memory at \`${userDir}\` for cross-project facts, PROJECT memory at \`${projectDir}\` for this-project-only facts.`
       : '';
-  return `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n${trimmed}`;
+  return `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n<user-content>\n${trimmed}\n</user-content>`;
 }
 
 export function buildBareRememberPrompt(fact: string): string {
@@ -144,6 +144,9 @@ export async function runManagedRememberByAgent(params: {
   const scopedConfig = createMemoryScopedAgentConfig(
     baseConfig,
     params.projectRoot,
+    {
+      restrictReadsToMemoryPaths: true,
+    },
   );
   const result = await runForkedAgent({
     name: 'managed-auto-memory-remember',
@@ -173,18 +176,18 @@ export async function runManagedRememberByAgent(params: {
     result.filesTouched,
     params.projectRoot,
   );
-  if (touchedScopes.includes('project')) {
-    await rebuildManagedAutoMemoryIndex(params.projectRoot);
-  }
-  if (touchedScopes.includes('user')) {
-    try {
-      await rebuildUserAutoMemoryIndex();
-    } catch {
-      // Mirrors existing managed-memory behavior: user memory is useful
-      // when available, but project memory writes should not fail because
-      // ~/.qwen/memories cannot be indexed.
-    }
-  }
+  await Promise.all([
+    touchedScopes.includes('project')
+      ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+      : Promise.resolve(),
+    touchedScopes.includes('user')
+      ? rebuildUserAutoMemoryIndex().catch(() => {
+          // Mirrors existing managed-memory behavior: user memory is useful
+          // when available, but project memory writes should not fail because
+          // ~/.qwen/memories cannot be indexed.
+        })
+      : Promise.resolve(),
+  ]);
 
   return {
     summary: result.finalText,

@@ -5,11 +5,16 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { randomUUID } from 'node:crypto';
 import type {
   AcpSessionBridge,
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+
+const debugLogger = createDebugLogger('WORKSPACE_REMEMBER');
 
 export type WorkspaceMemoryRememberTaskStatus =
   | 'queued'
@@ -30,6 +35,10 @@ export interface WorkspaceMemoryRememberTaskSnapshot {
   };
 }
 
+type WorkspaceMemoryRememberTaskRecord = WorkspaceMemoryRememberTaskSnapshot & {
+  originatorClientId?: string;
+};
+
 export interface WorkspaceRememberRouteDeps {
   bridge: AcpSessionBridge;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
@@ -37,22 +46,24 @@ export interface WorkspaceRememberRouteDeps {
   safeBody: (req: Request) => Record<string, unknown>;
 }
 
-const MAX_REMEMBER_CONTENT_BYTES = 64 * 1024;
-
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function createRememberTaskId(): string {
-  const random = Math.random().toString(36).slice(2, 10);
-  return `remember-${Date.now().toString(36)}-${random}`;
+  return `remember-${randomUUID()}`;
 }
 
 function cloneTask(
-  task: WorkspaceMemoryRememberTaskSnapshot,
+  task: WorkspaceMemoryRememberTaskRecord,
 ): WorkspaceMemoryRememberTaskSnapshot {
   return {
-    ...task,
+    taskId: task.taskId,
+    status: task.status,
+    contextMode: task.contextMode,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    ...(task.error ? { error: { ...task.error } } : {}),
     result: task.result
       ? {
           ...task.result,
@@ -87,31 +98,60 @@ function publicErrorMessage(code: string): string {
   if (code === 'remember_path_escape') {
     return 'Remember agent touched a path outside managed memory.';
   }
+  if (code === 'remember_queue_full') {
+    return 'Workspace memory remember queue is full.';
+  }
   return 'Workspace memory remember failed.';
 }
 
 class WorkspaceRememberTaskLane {
-  private readonly tasks = new Map<
-    string,
-    WorkspaceMemoryRememberTaskSnapshot
-  >();
+  private static readonly MAX_TASKS = 1000;
+  private static readonly MAX_PENDING = 16;
+  private readonly tasks = new Map<string, WorkspaceMemoryRememberTaskRecord>();
   private tail: Promise<void> = Promise.resolve();
 
   constructor(private readonly bridge: AcpSessionBridge) {}
+
+  private pendingCount(): number {
+    let count = 0;
+    for (const task of this.tasks.values()) {
+      if (task.status === 'queued' || task.status === 'running') count++;
+    }
+    return count;
+  }
+
+  private evictTerminalTasks(): void {
+    if (this.tasks.size <= WorkspaceRememberTaskLane.MAX_TASKS) return;
+    for (const [id, task] of this.tasks) {
+      if (task.status === 'completed' || task.status === 'failed') {
+        this.tasks.delete(id);
+        if (this.tasks.size <= WorkspaceRememberTaskLane.MAX_TASKS) break;
+      }
+    }
+  }
 
   enqueue(params: {
     content: string;
     contextMode: BridgeWorkspaceMemoryRememberContextMode;
     originatorClientId?: string;
   }): WorkspaceMemoryRememberTaskSnapshot {
-    const task: WorkspaceMemoryRememberTaskSnapshot = {
+    if (this.pendingCount() >= WorkspaceRememberTaskLane.MAX_PENDING) {
+      throw Object.assign(new Error('Remember queue is full'), {
+        code: 'remember_queue_full',
+      });
+    }
+    const task: WorkspaceMemoryRememberTaskRecord = {
       taskId: createRememberTaskId(),
       status: 'queued',
       contextMode: params.contextMode,
       createdAt: nowIso(),
       updatedAt: nowIso(),
+      ...(params.originatorClientId
+        ? { originatorClientId: params.originatorClientId }
+        : {}),
     };
     this.tasks.set(task.taskId, task);
+    this.evictTerminalTasks();
 
     const run = async () => {
       task.status = 'running';
@@ -144,16 +184,29 @@ class WorkspaceRememberTaskLane {
           message: publicErrorMessage(code),
         };
         task.updatedAt = nowIso();
+      } finally {
+        this.evictTerminalTasks();
       }
     };
 
     this.tail = this.tail.then(run, run);
-    void this.tail.catch(() => undefined);
+    void this.tail.catch((err: unknown) => {
+      debugLogger.error('Unhandled task lane error:', err);
+    });
     return cloneTask(task);
   }
 
-  get(taskId: string): WorkspaceMemoryRememberTaskSnapshot | undefined {
+  get(
+    taskId: string,
+    requesterClientId?: string,
+  ): WorkspaceMemoryRememberTaskSnapshot | undefined {
     const task = this.tasks.get(taskId);
+    if (
+      task?.originatorClientId &&
+      task.originatorClientId !== requesterClientId
+    ) {
+      return undefined;
+    }
     return task ? cloneTask(task) : undefined;
   }
 }
@@ -235,17 +288,29 @@ export function mountWorkspaceMemoryRememberRoutes(
         return;
       }
 
-      const task = lane.enqueue({
-        content: content.trim(),
-        contextMode: contextModeRaw,
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
+      let task: WorkspaceMemoryRememberTaskSnapshot;
+      try {
+        task = lane.enqueue({
+          content: content.trim(),
+          contextMode: contextModeRaw,
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch (err) {
+        const code = errorCode(err);
+        res.status(code === 'remember_queue_full' ? 429 : 500).json({
+          error: publicErrorMessage(code),
+          code,
+        });
+        return;
+      }
       res.status(202).json(task);
     },
   );
 
   app.get('/workspace/memory/remember/:taskId', (req, res) => {
-    const task = lane.get(req.params.taskId);
+    const requesterClientId = validateOriginatorClientId(deps, req, res);
+    if (requesterClientId === null) return;
+    const task = lane.get(req.params.taskId, requesterClientId);
     if (!task) {
       res.status(404).json({
         error: 'Workspace memory remember task not found',

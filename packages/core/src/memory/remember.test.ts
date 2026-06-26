@@ -85,6 +85,8 @@ describe('remember memory helper', () => {
     expect(managed).toContain('PROJECT memory at');
     expect(managed).toContain(getAutoMemoryRoot(projectRoot));
     expect(managed).toContain('prefers focused tests');
+    expect(managed).toContain('<user-content>');
+    expect(managed).toContain('</user-content>');
     expect(managed).not.toContain('  prefers focused tests  ');
 
     const bare = buildBareRememberPrompt('  appends to qwen  ');
@@ -202,5 +204,37 @@ describe('remember memory helper', () => {
       }),
     ).rejects.toMatchObject({ code: 'remember_path_escape' });
     expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('propagates failed and cancelled agent termination reasons', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValueOnce({
+      status: 'failed',
+      terminateReason: 'max turns exceeded',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember me.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toThrow('max turns exceeded');
+
+    vi.mocked(runForkedAgent).mockResolvedValueOnce({
+      status: 'cancelled',
+      terminateReason: 'aborted',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember me.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toThrow('aborted');
   });
 });

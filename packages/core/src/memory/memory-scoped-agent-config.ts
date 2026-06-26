@@ -5,6 +5,8 @@
  */
 
 import type { Config } from '../config/config.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   PermissionCheckContext,
@@ -13,11 +15,7 @@ import type {
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
-import {
-  getAutoMemoryRoot,
-  getUserAutoMemoryRoot,
-  isAnyAutoMemPath,
-} from './paths.js';
+import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 
 type MemoryScopedPermissionManager = Pick<
   PermissionManager,
@@ -30,6 +28,8 @@ type MemoryScopedPermissionManager = Pick<
 
 export interface MemoryScopedAgentConfigOptions {
   allowShell?: boolean;
+  includeUserMemory?: boolean;
+  restrictReadsToMemoryPaths?: boolean;
 }
 
 function isScopedTool(
@@ -37,9 +37,10 @@ function isScopedTool(
   opts: Required<MemoryScopedAgentConfigOptions>,
 ): boolean {
   return (
-    toolName === ToolNames.READ_FILE ||
-    toolName === ToolNames.GREP ||
-    toolName === ToolNames.LS ||
+    (opts.restrictReadsToMemoryPaths &&
+      (toolName === ToolNames.READ_FILE ||
+        toolName === ToolNames.GREP ||
+        toolName === ToolNames.LS)) ||
     toolName === ToolNames.EDIT ||
     toolName === ToolNames.WRITE_FILE ||
     (opts.allowShell && toolName === ToolNames.SHELL)
@@ -64,8 +65,37 @@ function mergePermissionDecision(
 function isAllowedMemoryPath(
   filePath: string | undefined,
   projectRoot: string,
+  opts: Required<MemoryScopedAgentConfigOptions>,
 ): boolean {
-  return !!filePath && isAnyAutoMemPath(filePath, projectRoot);
+  if (!filePath) return false;
+  const projectMemoryRoot = realpathOrResolved(getAutoMemoryRoot(projectRoot));
+  const userMemoryRoot = realpathOrResolved(getUserAutoMemoryRoot());
+  const isAllowed = (candidate: string): boolean =>
+    isWithinRoot(candidate, projectMemoryRoot) ||
+    (opts.includeUserMemory && isWithinRoot(candidate, userMemoryRoot));
+  try {
+    return isAllowed(fs.realpathSync(filePath));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    try {
+      return isAllowed(fs.realpathSync(path.dirname(filePath)));
+    } catch {
+      return false;
+    }
+  }
+}
+
+function realpathOrResolved(filePath: string): string {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function isWithinRoot(filePath: string, root: string): boolean {
+  const rel = path.relative(root, filePath);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 async function evaluateScopedDecision(
@@ -86,9 +116,15 @@ async function evaluateScopedDecision(
     case ToolNames.READ_FILE:
     case ToolNames.GREP:
     case ToolNames.LS:
+      if (!opts.restrictReadsToMemoryPaths) return 'default';
+      return isAllowedMemoryPath(ctx.filePath, projectRoot, opts)
+        ? 'allow'
+        : 'deny';
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
-      return isAllowedMemoryPath(ctx.filePath, projectRoot) ? 'allow' : 'deny';
+      return isAllowedMemoryPath(ctx.filePath, projectRoot, opts)
+        ? 'allow'
+        : 'deny';
     default:
       return 'default';
   }
@@ -99,36 +135,29 @@ function getScopedDenyRule(
   projectRoot: string,
   opts: Required<MemoryScopedAgentConfigOptions>,
 ): string | undefined {
+  const allowedRoots = opts.includeUserMemory
+    ? `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)}`
+    : getAutoMemoryRoot(projectRoot);
   switch (ctx.toolName) {
     case ToolNames.SHELL:
       return opts.allowShell
         ? 'ManagedAutoMemory(run_shell_command: read-only only)'
         : 'ManagedAutoMemory(run_shell_command: disabled)';
     case ToolNames.READ_FILE:
-      return (
-        `ManagedAutoMemory(read_file: only within ` +
-        `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)})`
-      );
+      if (!opts.restrictReadsToMemoryPaths) return undefined;
+      return `ManagedAutoMemory(read_file: only within ` + `${allowedRoots})`;
     case ToolNames.GREP:
-      return (
-        `ManagedAutoMemory(grep_search: only within ` +
-        `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)})`
-      );
+      if (!opts.restrictReadsToMemoryPaths) return undefined;
+      return `ManagedAutoMemory(grep_search: only within ` + `${allowedRoots})`;
     case ToolNames.LS:
+      if (!opts.restrictReadsToMemoryPaths) return undefined;
       return (
-        `ManagedAutoMemory(list_directory: only within ` +
-        `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)})`
+        `ManagedAutoMemory(list_directory: only within ` + `${allowedRoots})`
       );
     case ToolNames.EDIT:
-      return (
-        `ManagedAutoMemory(edit: only within ` +
-        `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)})`
-      );
+      return `ManagedAutoMemory(edit: only within ${allowedRoots})`;
     case ToolNames.WRITE_FILE:
-      return (
-        `ManagedAutoMemory(write_file: only within ` +
-        `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)})`
-      );
+      return `ManagedAutoMemory(write_file: only within ${allowedRoots})`;
     default:
       return undefined;
   }
@@ -141,6 +170,8 @@ export function createMemoryScopedAgentConfig(
 ): Config {
   const opts: Required<MemoryScopedAgentConfigOptions> = {
     allowShell: options.allowShell ?? false,
+    includeUserMemory: options.includeUserMemory ?? true,
+    restrictReadsToMemoryPaths: options.restrictReadsToMemoryPaths ?? false,
   };
   const basePm = config.getPermissionManager?.();
   const scopedPm: MemoryScopedPermissionManager = {

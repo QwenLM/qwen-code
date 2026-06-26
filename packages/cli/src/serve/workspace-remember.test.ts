@@ -193,11 +193,15 @@ describe('workspace memory remember routes', () => {
       contextMode: 'clean',
     });
     const taskId = post.body.taskId as string;
+    expect(taskId).toMatch(
+      /^remember-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
     await waitFor(() => bridge.rememberCalls.length === 1);
     await waitFor(() => bridge.events.length === 1);
 
     const get = await request(app)
       .get(`/workspace/memory/remember/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
       .expect(200);
     expect(get.body).toMatchObject({
       taskId,
@@ -248,6 +252,55 @@ describe('workspace memory remember routes', () => {
       .get('/workspace/memory/remember/remember-missing')
       .expect(404)
       .expect((res) => expect(res.body.code).toBe('remember_task_not_found'));
+  });
+
+  it('does not expose client-owned task status to other clients', async () => {
+    const bridge = buildBridgeStub({ knownIds: ['client-1', 'client-2'] });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ content: 'Remember this' })
+      .expect(202);
+    const taskId = post.body.taskId as string;
+
+    await request(app).get(`/workspace/memory/remember/${taskId}`).expect(404);
+    await request(app)
+      .get(`/workspace/memory/remember/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-2')
+      .expect(404);
+    await request(app)
+      .get(`/workspace/memory/remember/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+  });
+
+  it('rejects new tasks when the hidden remember queue is full', async () => {
+    const pending = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(() => pending.promise),
+    });
+    const app = buildApp(bridge);
+
+    for (let i = 0; i < 16; i++) {
+      await request(app)
+        .post('/workspace/memory/remember')
+        .send({ content: `remember ${i}` })
+        .expect(202);
+    }
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'overflow' })
+      .expect(429)
+      .expect((res) => {
+        expect(res.body.code).toBe('remember_queue_full');
+      });
+
+    pending.resolve({
+      filesTouched: [],
+      touchedScopes: [],
+    });
   });
 
   it('runs hidden remember tasks serially within the remember lane', async () => {
@@ -315,5 +368,49 @@ describe('workspace memory remember routes', () => {
         expect(res.body.code).toBe('managed_memory_unavailable');
       });
     expect(bridge.rememberCalls).toHaveLength(0);
+  });
+
+  it('records bridge failures with stable public error codes', async () => {
+    const bridge = buildBridgeStub({
+      rememberImpl: vi
+        .fn()
+        .mockRejectedValueOnce({ code: 'remember_path_escape' })
+        .mockRejectedValueOnce({
+          data: { errorKind: 'managed_memory_unavailable' },
+        }),
+    });
+    const app = buildApp(bridge);
+
+    const first = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'escape' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${first.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'remember_path_escape',
+          message: 'Remember agent touched a path outside managed memory.',
+        });
+      });
+
+    const second = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'unavailable' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 2);
+    await request(app)
+      .get(`/workspace/memory/remember/${second.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'managed_memory_unavailable',
+          message: 'Managed memory is unavailable for this daemon workspace.',
+        });
+      });
   });
 });

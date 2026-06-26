@@ -2172,6 +2172,26 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes managed memory_changed from workspace remember', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project'],
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.memory.changed',
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project'],
+      }),
+    ]);
+  });
+
   it('normalizes agent_changed for create/update/delete', () => {
     for (const change of ['created', 'updated', 'deleted'] as const) {
       const events = normalizeDaemonEvent(
