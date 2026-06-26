@@ -61,6 +61,7 @@ describe('readLoopTaskFile', () => {
     expect(result).toEqual({
       status: 'found',
       path: path.join(projectRoot, '.qwen', 'loop.md'),
+      source: 'project',
       content: 'project tasks',
       truncated: false,
     });
@@ -74,6 +75,7 @@ describe('readLoopTaskFile', () => {
     expect(result).toEqual({
       status: 'found',
       path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
       content: 'user tasks',
       truncated: false,
     });
@@ -91,6 +93,7 @@ describe('readLoopTaskFile', () => {
     expect(result).toEqual({
       status: 'found',
       path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
       content: 'user tasks',
       truncated: false,
     });
@@ -110,6 +113,7 @@ describe('readLoopTaskFile', () => {
     expect(result).toEqual({
       status: 'found',
       path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
       content: 'user tasks',
       truncated: false,
     });
@@ -126,6 +130,7 @@ describe('readLoopTaskFile', () => {
     expect(result).toEqual({
       status: 'found',
       path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
       content: 'user tasks',
       truncated: false,
     });
@@ -143,6 +148,7 @@ describe('readLoopTaskFile', () => {
     expect(result).toEqual({
       status: 'found',
       path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
       content: 'user tasks',
       truncated: false,
     });
@@ -171,6 +177,7 @@ describe('readLoopTaskFile', () => {
     expect(result).toEqual({
       status: 'found',
       path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
       content: 'user tasks',
       truncated: false,
     });

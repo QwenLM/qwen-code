@@ -149,6 +149,19 @@ describe('LoopTickResolver', () => {
     expect(tick.modelText).toContain('- recreated tasks');
   });
 
+  it('gives the absent tick the same shared heading style (and dynamic suffix)', async () => {
+    const cron = await resolver.resolve('cron');
+    expect(cron.modelText).toContain('# /loop tick — loop.md absent\n');
+
+    const dyn = new LoopTickResolver({ projectRoot, homeDir });
+    const dynTick = await dyn.resolve('dynamic');
+    expect(dynTick.modelText).toContain(
+      '# /loop tick — loop.md absent (dynamic pacing)\n',
+    );
+    // Exactly one H1 — the heading isn't duplicated by the body.
+    expect(dynTick.modelText.match(/^# /gm)).toHaveLength(1);
+  });
+
   it('re-expands after delete→recreate even when the recreated content is identical', async () => {
     await writeProject('- same tasks');
     expect((await resolver.resolve('dynamic')).full).toBe(true);

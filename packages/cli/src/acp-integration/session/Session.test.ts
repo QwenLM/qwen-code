@@ -4326,7 +4326,7 @@ describe('Session', () => {
               .map((p) => p.text ?? '')
               .join('');
           });
-          expect(block).toContain('# /loop tick — tasks from');
+          expect(block).toContain('# /loop tick — loop.md tasks from');
           expect(block).toContain('- finish the migration');
         } finally {
           await fs.rm(tmpDir, { recursive: true, force: true });

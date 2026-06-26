@@ -12,10 +12,15 @@ const debugLogger = createDebugLogger('LOOP_TASK_FILE');
 
 export const LOOP_TASK_FILE_MAX_BYTES = 25_000;
 
+/** Which candidate a found loop.md came from. The caller maps this to a label
+ * (an exhaustive map fails closed if a new candidate is added). */
+export type LoopTaskFileSource = 'project' | 'home';
+
 export type LoopTaskFileResult =
   | {
       status: 'found';
       path: string;
+      source: LoopTaskFileSource;
       content: string;
       truncated: boolean;
     }
@@ -89,14 +94,18 @@ export async function readLoopTaskFile({
   homeDir,
   realProjectRoot,
 }: ReadLoopTaskFileOptions): Promise<LoopTaskFileResult> {
-  const projectFile = path.join(projectRoot, '.qwen', 'loop.md');
-  const homeFile = path.join(homeDir, '.qwen', 'loop.md');
-  const checkedPaths = [projectFile, homeFile];
+  const candidates: ReadonlyArray<{
+    source: LoopTaskFileSource;
+    path: string;
+  }> = [
+    { source: 'project', path: path.join(projectRoot, '.qwen', 'loop.md') },
+    { source: 'home', path: path.join(homeDir, '.qwen', 'loop.md') },
+  ];
 
-  for (const filePath of checkedPaths) {
+  for (const { source, path: filePath } of candidates) {
     let buffer: Buffer | null;
     try {
-      if (filePath === projectFile) {
+      if (source === 'project') {
         const realRoot = realProjectRoot ?? (await fs.realpath(projectRoot));
         const real = await fs.realpath(filePath);
         if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
@@ -164,6 +173,7 @@ export async function readLoopTaskFile({
     return {
       status: 'found',
       path: filePath,
+      source,
       content,
       truncated,
     };
@@ -171,6 +181,6 @@ export async function readLoopTaskFile({
 
   return {
     status: 'missing',
-    checkedPaths,
+    checkedPaths: candidates.map((c) => c.path),
   };
 }

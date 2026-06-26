@@ -5,10 +5,10 @@
  */
 
 import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import {
   LOOP_TASK_FILE_MAX_BYTES,
   readLoopTaskFile,
+  type LoopTaskFileSource,
 } from './loop-task-file.js';
 
 /**
@@ -60,23 +60,38 @@ const SHORT_REMINDER_BODY: Record<LoopMode, string> = {
 };
 
 /**
- * The single H1 for a tick message. `sourceLabel` (set only on a full-block
- * delivery) is a relative label like "project loop.md", never the absolute
- * path — so the resolved file location isn't leaked to the model/API provider.
+ * The single H1 for every tick variant (full block, short reminder, absent), so
+ * they share one heading style and the dynamic-pacing suffix lives in one place.
+ * `sourceLabel` (set only on a full-block delivery) is a relative label like
+ * "project loop.md", never the absolute path — so the resolved file location
+ * isn't leaked to the model/API provider.
  */
-function tickHeading(mode: LoopMode, sourceLabel?: string): string {
-  const base = sourceLabel
-    ? `# /loop tick — loop.md tasks from ${sourceLabel}`
-    : '# /loop tick — loop.md tasks';
+function tickHeading(
+  mode: LoopMode,
+  opts: { sourceLabel?: string; absent?: boolean } = {},
+): string {
+  const subject = opts.absent
+    ? 'loop.md absent'
+    : opts.sourceLabel
+      ? `loop.md tasks from ${opts.sourceLabel}`
+      : 'loop.md tasks';
+  const base = `# /loop tick — ${subject}`;
   return mode === 'dynamic' ? `${base} (dynamic pacing)` : base;
 }
 
-const SHORT_ABSENT: Record<LoopMode, string> = {
-  cron:
-    '# /loop tick — loop.md absent\n' +
-    'loop.md is not currently present at .qwen/loop.md (project) or ~/.qwen/loop.md (home). Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
+/** Model-safe relative label per source — exhaustive, so a new loop.md
+ * candidate added to readLoopTaskFile won't compile until it gets a label
+ * (rather than silently mislabelling it). */
+const SOURCE_LABELS: Record<LoopTaskFileSource, string> = {
+  project: 'project loop.md',
+  home: 'home loop.md',
+};
+
+// Body of the absent reminder — the H1 is supplied by tickHeading() so the
+// absent tick shares the same heading style as the full block and reminder.
+const SHORT_ABSENT_BODY: Record<LoopMode, string> = {
+  cron: 'loop.md is not currently present at .qwen/loop.md (project) or ~/.qwen/loop.md (home). Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
   dynamic:
-    '# /loop tick — loop.md absent (dynamic pacing)\n' +
     'loop.md is not currently present at .qwen/loop.md (project) or ~/.qwen/loop.md (home). Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
 };
 
@@ -150,7 +165,10 @@ export class LoopTickResolver {
       // guaranteed to be in context.
       this.#pendingContent = null;
       this.#lastContent = null;
-      return { modelText: SHORT_ABSENT[mode], full: false };
+      return {
+        modelText: `${tickHeading(mode, { absent: true })}\n${SHORT_ABSENT_BODY[mode]}`,
+        full: false,
+      };
     }
 
     const content = result.truncated
@@ -166,14 +184,12 @@ export class LoopTickResolver {
       };
     }
 
-    // Relative label, not result.path (the absolute path) — that would leak the
-    // OS username / dir layout to the API provider. The absolute path still goes
-    // to the caller via sourcePath for local UI use.
-    const projectFile = path.join(this.deps.projectRoot, '.qwen', 'loop.md');
-    const sourceLabel =
-      result.path === projectFile ? 'project loop.md' : 'home loop.md';
+    // Label by which candidate matched, not result.path (the absolute path) —
+    // the absolute path would leak the OS username / dir layout to the API
+    // provider. It still reaches the caller via sourcePath for local UI use.
+    const sourceLabel = SOURCE_LABELS[result.source];
     return {
-      modelText: `${tickHeading(mode, sourceLabel)}\n${INTRO}\n${content}\n${SHORT_REMINDER_BODY[mode]}`,
+      modelText: `${tickHeading(mode, { sourceLabel })}\n${INTRO}\n${content}\n${SHORT_REMINDER_BODY[mode]}`,
       full: true,
       sourcePath: result.path,
     };
