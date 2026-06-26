@@ -571,3 +571,131 @@ describe('AcpHttpTransport', () => {
     });
   });
 });
+
+// A streamed text/event-stream Response that emits the given raw SSE frames
+// then closes, so subscribeEvents' read loop ends and the generator returns.
+function sseResponse(frames: string[]): Response {
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const f of frames) controller.enqueue(enc.encode(f));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', () => {
+  // One SSE frame: optional `id:` (bus cursor) + a `data:` JSON-RPC payload.
+  function frame(id: number | undefined, msg: unknown): string {
+    const idLine = id !== undefined ? `id: ${id}\n` : '';
+    return `${idLine}data: ${JSON.stringify(msg)}\n\n`;
+  }
+
+  function sessionStreamFetch(frames: string[]) {
+    return initAwareFetch({
+      connectionIdHeader: 'conn-1',
+      subsequentReply: (req) =>
+        req.method === 'GET' && req.headers['acp-session-id']
+          ? sseResponse(frames)
+          : jsonResponse(200, { jsonrpc: '2.0', id: 1, result: { ok: true } }),
+    });
+  }
+
+  async function collect(
+    t: AcpHttpTransport,
+    sessionId: string,
+  ): Promise<Array<{ id?: number; type: string; data: unknown }>> {
+    const out: Array<{ id?: number; type: string; data: unknown }> = [];
+    for await (const e of t.subscribeEvents(sessionId)) {
+      out.push(e as { id?: number; type: string; data: unknown });
+    }
+    return out;
+  }
+
+  it('opens GET /acp with Acp-Session-Id + Acp-Connection-Id (not REST /session/:id/events)', async () => {
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    await collect(t, 'sess-1');
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall).toBeDefined();
+    expect(getCall?.headers['acp-session-id']).toBe('sess-1');
+    expect(getCall?.headers['acp-connection-id']).toBe('conn-1');
+    // Must NOT use the REST session-events endpoint.
+    expect(calls.some((c) => c.url.includes('/session/'))).toBe(false);
+  });
+
+  it('yields a session/update notification as a DaemonEvent stamped with the bus id from the `id:` line', async () => {
+    const { fetch } = sessionStreamFetch([
+      frame(42, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk', text: 'hi' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('agent_message_chunk');
+    expect(events[0].id).toBe(42); // real bus cursor, not the synthetic id
+  });
+
+  it('consumes a JSON-RPC response frame (routes to pending) WITHOUT yielding it as an event — the W2 no-hang dispatch', async () => {
+    // A response frame (id, no method) is dispatched to pending-resolution
+    // (same path as the connection stream), not surfaced as a DaemonEvent.
+    // The following notification proves the stream keeps flowing past it.
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, {
+        jsonrpc: '2.0',
+        id: 999,
+        result: { stopReason: 'end_turn' },
+      }),
+      frame(7, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_thought_chunk', text: 't' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('agent_thought_chunk');
+  });
+
+  it('surfaces a session/request_permission request as a permission_request event', async () => {
+    const { fetch } = sessionStreamFetch([
+      frame(9, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          toolCall: { name: 'write_file' },
+          options: [{ optionId: 'allow' }],
+          _meta: { qwen: { requestId: 'req-1' } },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('permission_request');
+    expect((events[0].data as { requestId: string }).requestId).toBe('req-1');
+    expect(events[0].id).toBe(9);
+  });
+});

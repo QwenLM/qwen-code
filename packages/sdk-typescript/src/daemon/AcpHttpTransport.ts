@@ -11,8 +11,10 @@ import type {
   DaemonTransportSubscribeOptions,
 } from './DaemonTransport.js';
 import { DaemonTransportClosedError } from './DaemonTransport.js';
-import { parseSseStream } from './sse.js';
-import type { JsonRpcNotification } from './AcpEventDenormalizer.js';
+import {
+  denormalizeAcpNotification,
+  type JsonRpcNotification,
+} from './AcpEventDenormalizer.js';
 import {
   matchRoute,
   synthesizeResponse,
@@ -49,6 +51,42 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+/**
+ * Map a `session/request_permission` JSON-RPC request (as the daemon sends it
+ * on the session-scoped `/acp` stream) to a `permission_request` DaemonEvent,
+ * mirroring what the REST surface emits so consumers handle it identically.
+ * The agent-stamped `requestId` (in `_meta.qwen.requestId`) is the correlator
+ * the eventual vote must echo (§1.7). Returns `undefined` if it can't be read.
+ */
+function permissionRequestToEvent(
+  msg: Record<string, unknown>,
+  busId: number | undefined,
+): DaemonEvent | undefined {
+  const params = isRecord(msg['params']) ? msg['params'] : {};
+  const meta = isRecord(params['_meta']) ? params['_meta'] : undefined;
+  const qwenMeta = meta && isRecord(meta['qwen']) ? meta['qwen'] : undefined;
+  const requestId =
+    qwenMeta && typeof qwenMeta['requestId'] === 'string'
+      ? qwenMeta['requestId']
+      : undefined;
+  if (!requestId) return undefined;
+  return {
+    id: busId,
+    v: 1,
+    type: 'permission_request',
+    data: {
+      requestId,
+      sessionId:
+        typeof params['sessionId'] === 'string'
+          ? params['sessionId']
+          : undefined,
+      toolCall: params['toolCall'],
+      options: params['options'],
+    },
+    _meta: meta,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // AcpHttpTransport
 // ---------------------------------------------------------------------------
@@ -63,11 +101,19 @@ interface PendingRequest {
  * connection-scoped SSE stream at `GET /acp` for subsequent responses.
  *
  * Subsequent `POST /acp` requests return 202 (ack); the real JSON-RPC
- * response rides the connection-scoped SSE stream. Responses are
- * correlated by `id` using a `Map<id, {resolve, reject}>`.
+ * response rides an SSE stream. Responses are correlated by `id` using a
+ * `Map<id, {resolve, reject}>` shared across both streams.
  *
- * Session events are received via a session-scoped SSE stream at
- * `GET /acp` with appropriate headers (session filtering).
+ * Session events AND session-scoped JSON-RPC responses are received via the
+ * session-scoped SSE stream at `GET /acp` (with `Acp-Session-Id`), which is
+ * the resumable §1.8 stream the daemon's `replySession` routes session replies
+ * onto. `subscribeEvents` reads it and dispatches each frame: a JSON-RPC
+ * response resolves its pending request (so e.g. `session/prompt` doesn't hang
+ * waiting on a reply it would otherwise never observe), a notification becomes
+ * a `DaemonEvent`, and a `session/request_permission` request is surfaced as a
+ * `permission_request` event (responding to it is the §1.7 follow-up). The
+ * connection-scoped stream still carries replies to connection-level requests
+ * (e.g. `initialize`, `session/new`).
  */
 export class AcpHttpTransport implements DaemonTransport {
   private readonly baseUrl: string;
@@ -182,15 +228,21 @@ export class AcpHttpTransport implements DaemonTransport {
 
     await this.ensureInitialized();
 
-    // Open a session-scoped SSE stream. For ACP HTTP, we use
-    // the daemon's per-session SSE endpoint — same URL as REST
-    // because ACP HTTP sessions still expose SSE for events.
+    // Open the SESSION-scoped `/acp` stream (GET /acp + Acp-Session-Id), NOT
+    // REST `/session/:id/events`. This is the resumable §1.8 stream and — the
+    // reason for this routing — the stream the daemon's `replySession` puts
+    // session-scoped JSON-RPC *responses* on. Reading it here is what lets a
+    // `session/prompt` reply resolve its pending request instead of hanging.
     const headers: Record<string, string> = {
       Accept: 'text/event-stream',
     };
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
+    if (this.connectionId) {
+      headers['Acp-Connection-Id'] = this.connectionId;
+    }
+    headers['Acp-Session-Id'] = sessionId;
     if (opts.lastEventId !== undefined) {
       headers['Last-Event-ID'] = String(opts.lastEventId);
     }
@@ -219,14 +271,12 @@ export class AcpHttpTransport implements DaemonTransport {
       ? composeAbortSignals([opts.signal, connectCtrl.signal])
       : connectCtrl.signal;
 
-    let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
-    if (opts.maxQueued !== undefined) {
-      url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
-    }
-
     let res: Response;
     try {
-      res = await this._fetch(url, { headers, signal: fetchSignal });
+      res = await this._fetch(`${this.baseUrl}/acp`, {
+        headers,
+        signal: fetchSignal,
+      });
     } finally {
       if (connectTimer !== undefined) clearTimeout(connectTimer);
     }
@@ -247,7 +297,7 @@ export class AcpHttpTransport implements DaemonTransport {
         body && typeof body === 'object' && 'error' in body
           ? String((body as { error: unknown }).error)
           : `HTTP ${res.status}`;
-      throw Object.assign(new Error(`GET /session/:id/events: ${detail}`), {
+      throw Object.assign(new Error(`GET /acp (session stream): ${detail}`), {
         status: res.status,
         body,
       });
@@ -262,7 +312,7 @@ export class AcpHttpTransport implements DaemonTransport {
       }
       throw Object.assign(
         new Error(
-          `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
+          `GET /acp (session stream): expected content-type text/event-stream, got "${ct}"`,
         ),
         { status: res.status, body: ct },
       );
@@ -272,7 +322,114 @@ export class AcpHttpTransport implements DaemonTransport {
       throw new Error('SSE response has no body');
     }
 
-    yield* parseSseStream(res.body, opts.signal);
+    // The `/acp` session stream carries RAW JSON-RPC frames (not REST
+    // `BridgeEvent` envelopes), so parse them directly and dispatch by shape.
+    // Each SSE frame may carry an `id:` line — the EventBus cursor we stamp
+    // onto yielded events so the consumer resumes from the REAL daemon id
+    // (the denormalizer's synthetic id is not resume-compatible); frames with
+    // no `id:` (synthetic terminals) yield `id: undefined`, which the consumer
+    // ignores for Last-Event-ID tracking.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    const signal = opts.signal;
+    // `reader.read()` doesn't observe `signal` on its own — race it against an
+    // abort rejection so dispose()/caller-abort can unblock a hanging read.
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      signal?.addEventListener(
+        'abort',
+        () =>
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError')),
+        { once: true },
+      );
+    });
+
+    try {
+      while (!signal?.aborted) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          abortPromise,
+        ]);
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const rawFrame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+
+          let busId: number | undefined;
+          let dataLine: string | undefined;
+          for (const line of rawFrame.split('\n')) {
+            if (line.startsWith('id:')) {
+              const n = Number(line.slice(3).trim());
+              if (Number.isInteger(n)) busId = n;
+            } else if (line.startsWith('data:')) {
+              dataLine = line.slice('data:'.length).replace(/^ /, '');
+            }
+          }
+          if (dataLine === undefined) continue;
+
+          let msg: unknown;
+          try {
+            msg = JSON.parse(dataLine);
+          } catch {
+            continue; // heartbeat / non-JSON
+          }
+          if (!isRecord(msg)) continue;
+
+          const hasId = 'id' in msg;
+          const method = (msg as { method?: unknown }).method;
+
+          // (1) JSON-RPC response (id, no method) → resolve the pending request.
+          // THIS is the W2 fix: a `session/prompt` reply routed here by the
+          // daemon's `replySession` now settles its promise instead of hanging.
+          if (hasId && typeof method !== 'string') {
+            const rid = (msg as { id: unknown }).id;
+            if (typeof rid === 'number') {
+              const pending = this.pending.get(rid);
+              if (pending) {
+                this.pending.delete(rid);
+                pending.resolve(msg as unknown as JsonRpcResponse);
+              }
+            }
+            continue;
+          }
+
+          // (2) Agent→client permission request → surface as an event so the
+          // consumer can show it. Responding (POSTing the vote) is the §1.7
+          // permission-coordination follow-up; here we only deliver it.
+          if (method === 'session/request_permission') {
+            const ev = permissionRequestToEvent(msg, busId);
+            if (ev) yield ev;
+            continue;
+          }
+
+          // (3) Notification → DaemonEvent, stamped with the real bus cursor.
+          if (typeof method === 'string' && !hasId) {
+            const ev = denormalizeAcpNotification(
+              msg as unknown as JsonRpcNotification,
+            );
+            if (ev) {
+              ev.id = busId; // authoritative cursor (or undefined → ignored)
+              yield ev;
+            }
+            continue;
+          }
+          // else: unrecognized frame → ignore
+        }
+      }
+    } finally {
+      try {
+        reader.cancel().catch(() => {});
+      } catch {
+        /* already closed */
+      }
+    }
   }
 
   dispose(): void {
