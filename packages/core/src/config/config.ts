@@ -961,6 +961,7 @@ export interface ConfigParameters {
    * {@link Config.getTeamMemoryEnabled}.
    */
   enableTeamMemory?: boolean;
+  enableTeamMemorySync?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -1394,6 +1395,7 @@ export class Config {
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
+  private readonly enableTeamMemorySync: boolean;
   // Latch so the "team memory enabled but not shareable" warning is emitted at
   // most once per process, even though refreshHierarchicalMemory may re-run.
   private teamMemoryShareabilityChecked = false;
@@ -1664,6 +1666,7 @@ export class Config {
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableTeamMemory = params.enableTeamMemory ?? false;
+    this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
@@ -4393,14 +4396,22 @@ export class Config {
 
   /**
    * Whether the daemon/session should auto-sync team memory with the git
-   * remote (pull + commit + push). Opt-in via `QWEN_CODE_MEMORY_TEAM_SYNC=1`;
-   * off by default since it mutates the repo and pushes. Inert in bare mode.
+   * remote (pull + commit + push). Resolves the `memory.enableTeamMemorySync`
+   * setting, with env `QWEN_CODE_MEMORY_TEAM_SYNC` ('0'/'1') as an override.
+   * Off by default since it mutates the repo and pushes. Inert in bare mode.
    */
   getTeamMemorySyncEnabled(): boolean {
     if (this.getBareMode()) {
       return false;
     }
-    return process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] === '1';
+    const override = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemorySync;
   }
 
   isManagedMemoryAvailable(): boolean {

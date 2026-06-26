@@ -1996,6 +1996,9 @@ export async function loadCliConfig(
     enableTeamMemory: bareMode
       ? false
       : (settings.memory?.enableTeamMemory ?? false),
+    enableTeamMemorySync: bareMode
+      ? false
+      : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill: bareMode
       ? false
       : (settings.memory?.enableAutoSkill ?? true),

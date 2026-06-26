@@ -2,6 +2,7 @@ export interface QwenMemorySettings {
   enableManagedAutoMemory: boolean;
   enableManagedAutoDream: boolean;
   enableTeamMemory: boolean;
+  enableTeamMemorySync: boolean;
   enableAutoSkill: boolean;
   autoSkillConfirm: boolean;
 }
@@ -18,6 +19,7 @@ export const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: false,
   enableTeamMemory: false,
+  enableTeamMemorySync: false,
   enableAutoSkill: false,
   autoSkillConfirm: true,
 };
@@ -45,6 +47,10 @@ export function normalizeQwenMemorySettings(
       typeof memoryRecord.enableTeamMemory === 'boolean'
         ? memoryRecord.enableTeamMemory
         : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemory,
+    enableTeamMemorySync:
+      typeof memoryRecord.enableTeamMemorySync === 'boolean'
+        ? memoryRecord.enableTeamMemorySync
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemorySync,
     enableAutoSkill:
       typeof memoryRecord.enableAutoSkill === 'boolean'
         ? memoryRecord.enableAutoSkill

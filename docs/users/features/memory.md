@@ -148,6 +148,21 @@ It is **off by default**. Keep these caveats in mind:
 
 `QWEN_CODE_MEMORY_TEAM=1` / `=0` overrides the setting for a single run.
 
+### Automatic git sync (optional)
+
+By default you share team memory with the normal git workflow (`pull` to receive, `commit`/`push` to share). To have Qwen do it for you, enable sync:
+
+```json
+{
+  "memory": {
+    "enableTeamMemory": true,
+    "enableTeamMemorySync": true
+  }
+}
+```
+
+When on, at session start Qwen best-effort commits the `.qwen/team-memory/` directory, fast-forward-pulls collaborators' updates, and pushes yours — so the index you load reflects the latest. It requires a configured git upstream, only stages the team directory (never your other changes), and never blocks the session on a git failure. A diverged branch is skipped (`--ff-only`), not merged. Off by default. `QWEN_CODE_MEMORY_TEAM_SYNC=1` / `=0` overrides the setting for a single run.
+
 ---
 
 ## Commands

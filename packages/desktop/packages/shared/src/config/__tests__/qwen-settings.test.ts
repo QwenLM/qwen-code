@@ -7,6 +7,7 @@ describe('Qwen memory settings', () => {
       enableManagedAutoMemory: true,
       enableManagedAutoDream: false,
       enableTeamMemory: false,
+      enableTeamMemorySync: false,
       enableAutoSkill: false,
       autoSkillConfirm: true,
     })
@@ -18,6 +19,7 @@ describe('Qwen memory settings', () => {
         enableManagedAutoMemory: false,
         enableManagedAutoDream: 'yes',
         enableTeamMemory: true,
+        enableTeamMemorySync: true,
         enableAutoSkill: true,
         autoSkillConfirm: false,
       }),
@@ -25,6 +27,7 @@ describe('Qwen memory settings', () => {
       enableManagedAutoMemory: false,
       enableManagedAutoDream: false,
       enableTeamMemory: true,
+      enableTeamMemorySync: true,
       enableAutoSkill: true,
       autoSkillConfirm: false,
     })

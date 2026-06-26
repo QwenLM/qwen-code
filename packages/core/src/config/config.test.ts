@@ -460,19 +460,36 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('is off by default and on only when QWEN_CODE_MEMORY_TEAM_SYNC=1', () => {
+    it('is off by default and follows the enableTeamMemorySync setting', () => {
       delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
       expect(new Config(baseParams).getTeamMemorySyncEnabled()).toBe(false);
-      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
-      expect(new Config(baseParams).getTeamMemorySyncEnabled()).toBe(true);
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemorySync: true,
+        }).getTeamMemorySyncEnabled(),
+      ).toBe(true);
     });
 
-    it('stays off in bare mode', () => {
+    it('QWEN_CODE_MEMORY_TEAM_SYNC overrides the setting', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+      expect(new Config(baseParams).getTeamMemorySyncEnabled()).toBe(true);
+      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '0';
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemorySync: true,
+        }).getTeamMemorySyncEnabled(),
+      ).toBe(false);
+    });
+
+    it('stays off in bare mode even with the setting and env both on', () => {
       process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
       expect(
         new Config({
           ...baseParams,
           bareMode: true,
+          enableTeamMemorySync: true,
         }).getTeamMemorySyncEnabled(),
       ).toBe(false);
     });
