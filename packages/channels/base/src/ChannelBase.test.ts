@@ -216,6 +216,21 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session cleared');
     });
 
+    it('/clear in a user-scoped group clears the sender session directly', async () => {
+      const ch = createChannel({ sessionScope: 'user', groupPolicy: 'open' });
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      await ch.handleInbound({ ...g, text: 'hello' });
+      ch.sent = [];
+
+      await ch.handleInbound({ ...g, text: '/help' });
+      expect(ch.sent[0]!.text).toContain('/clear — Clear your session');
+      expect(ch.sent[0]!.text).not.toContain('/clear confirm');
+      ch.sent = [];
+
+      await ch.handleInbound({ ...g, text: '/clear' });
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+    });
+
     it('/who reports workspace + shared scope without creating a session', async () => {
       const ch = createChannel({
         sessionScope: 'thread',

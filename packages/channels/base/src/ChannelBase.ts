@@ -163,11 +163,17 @@ export abstract class ChannelBase {
       }
     };
 
-    // In a group the session is shared ('thread' scope), so a bare /clear would
-    // reset it for everyone — require explicit "/clear confirm" there. DMs clear
-    // directly.
+    const isSharedGroupSession = (envelope: Envelope): boolean =>
+      envelope.isGroup && this.config.sessionScope === 'thread';
+
+    // In a thread-scoped group the session is shared, so a bare /clear would
+    // reset it for everyone — require explicit "/clear confirm" there. DMs and
+    // user-scoped groups clear only the sender's session directly.
     const clearHandler: CommandHandler = async (envelope, args) => {
-      if (envelope.isGroup && args.trim().toLowerCase() !== 'confirm') {
+      if (
+        isSharedGroupSession(envelope) &&
+        args.trim().toLowerCase() !== 'confirm'
+      ) {
         await this.sendMessage(
           envelope.chatId,
           'This clears the shared session for the whole group. Send "/clear confirm" to proceed.',
@@ -209,7 +215,7 @@ export abstract class ChannelBase {
       const lines = [
         'Commands:',
         '/help — Show this help',
-        envelope.isGroup
+        isSharedGroupSession(envelope)
           ? '/clear confirm — Clear the shared group session (aliases: /reset, /new)'
           : '/clear — Clear your session (aliases: /reset, /new)',
         '/who — Show current session & workspace',
