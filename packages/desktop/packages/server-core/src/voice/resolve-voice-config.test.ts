@@ -179,4 +179,16 @@ describe('normalizeBaseUrl', () => {
       'https://proxy.example.com/v1/dashscope',
     )
   })
+
+  // Credentials must never be sent. `real-host@evil.com` already parses with
+  // host evil.com, so stripping userinfo would hide that the configured host is
+  // attacker-controlled — reject the URL outright instead.
+  it('rejects base URLs that embed credentials instead of stripping them', () => {
+    expect(() =>
+      normalizeBaseUrl('https://dashscope.aliyuncs.com@evil.com/compatible-mode'),
+    ).toThrow('must not contain embedded credentials')
+    expect(() =>
+      normalizeBaseUrl('https://user:pass@proxy.example.com/v1'),
+    ).toThrow('must not contain embedded credentials')
+  })
 })

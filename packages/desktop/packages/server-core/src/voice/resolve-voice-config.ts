@@ -40,25 +40,31 @@ interface ResolveDesktopVoiceConfigDeps {
 /**
  * Normalize a base URL: prepend `https://` when no scheme is present (an explicit
  * `http://` is preserved here and rejected later by the cleartext guard), strip
- * trailing slashes, and ensure a `/v1` suffix. Exported for tests.
+ * trailing slashes, and ensure a `/v1` suffix. Throws on embedded credentials
+ * (`user:pass@host`), which a legitimate endpoint never carries. Exported for tests.
  */
 export function normalizeBaseUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, '');
   const withProto = /^https?:\/\//i.test(trimmed)
     ? trimmed
     : `https://${trimmed}`;
+  let url: URL;
   try {
-    const url = new URL(withProto);
-    // Drop any userinfo so a user:pass@host base URL can't leak credentials.
-    url.username = '';
-    url.password = '';
-    if (!url.pathname.split('/').includes('v1')) {
-      url.pathname = `${url.pathname.replace(/\/$/, '')}/v1`;
-    }
-    return url.toString().replace(/\/$/, '');
+    url = new URL(withProto);
   } catch {
     return withProto.includes('/v1') ? withProto : `${withProto}/v1`;
   }
+  // Reject embedded credentials rather than stripping them: for
+  // `https://real-host@evil.com/...` the parser has already resolved `evil.com`
+  // as the host, so clearing userinfo afterward would silently proceed with the
+  // attacker-controlled host. A legitimate voice base URL never carries creds.
+  if (url.username || url.password) {
+    throw new Error('Voice base URL must not contain embedded credentials.');
+  }
+  if (!url.pathname.split('/').includes('v1')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/v1`;
+  }
+  return url.toString().replace(/\/$/, '');
 }
 
 /**

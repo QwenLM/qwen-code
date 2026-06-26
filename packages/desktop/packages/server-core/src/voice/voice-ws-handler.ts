@@ -343,7 +343,12 @@ export function createVoiceConnectionHandler(
         await ensureStarted();
         if (isClosed() || !ctx) return;
         bufferedBytes += data.byteLength;
-        if (bufferedBytes > MAX_AUDIO_BYTES) {
+        // MAX_AUDIO_BYTES is the batch file ceiling (Qwen-ASR caps each WAV at
+        // 10 MB / ~5 min). Streaming forwards frames immediately and is bounded
+        // by MAX_CONNECTION_MS (the 6-min hard timer) + queuedBytes, so counting
+        // already-forwarded frames toward the batch cap would cut a legit stream
+        // off ~30 s early — enforce the file cap for batch only.
+        if (!ctx.streaming && bufferedBytes > MAX_AUDIO_BYTES) {
           fail('Recording is too long for transcription (max ~5 minutes).');
           return;
         }

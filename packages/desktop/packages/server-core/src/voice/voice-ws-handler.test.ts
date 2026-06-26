@@ -261,4 +261,62 @@ describe('createVoiceConnectionHandler', () => {
       message: 'Too many pending voice messages.',
     })
   })
+
+  // Streaming frames are forwarded immediately, so the batch 10 MB/~5-min file
+  // cap must not cut a stream off before the 6-min hard timer. Two 6 MB frames
+  // exceed MAX_AUDIO_BYTES cumulatively while each stays under the queued-bytes
+  // limit (drained between flushes).
+  it('keeps forwarding streaming audio past the batch byte cap', async () => {
+    const pushed: Uint8Array[] = []
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+      openStream: async () => ({
+        pushAudio: (pcm) => pushed.push(pcm),
+        finish: async () => 'final transcript',
+        abort: () => {},
+      }),
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+    ws.emitMessage(Buffer.alloc(6 * 1024 * 1024), true)
+    await flush()
+    ws.emitMessage(Buffer.alloc(6 * 1024 * 1024), true)
+    await flush()
+
+    expect(pushed).toHaveLength(2)
+    expect(ws.sentJson()).not.toContainEqual({
+      type: 'error',
+      message: 'Recording is too long for transcription (max ~5 minutes).',
+    })
+  })
+
+  // The batch file cap stays intact: an 11 MB batch frame (over MAX_AUDIO_BYTES
+  // but under the 20 MB queued-bytes limit) must be rejected.
+  it('still rejects batch audio that exceeds the file byte cap', async () => {
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+      transcribeBatch: async () => 'unused',
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+    ws.emitMessage(Buffer.alloc(11 * 1024 * 1024), true)
+    await flush()
+
+    expect(ws.sentJson()).toContainEqual({
+      type: 'error',
+      message: 'Recording is too long for transcription (max ~5 minutes).',
+    })
+  })
 })
