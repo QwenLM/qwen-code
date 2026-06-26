@@ -223,12 +223,10 @@ jobs:
                   > "${comments_file}"; then
                   if ! jq -c --slurpfile comments "${comments_file}" \
                     '. + {comments: $comments}' <<< "${issue}" >> "${ndjson}"; then
-                    echo "::warning::Failed to assemble refreshed comments for issue #${number}; using issue-list comments."
-                    printf '%s\n' "${issue}" >> "${ndjson}"
+                    echo "::warning::Failed to assemble refreshed comments for issue #${number}; skipping tier-2 issue."
                   fi
                 else
-                  echo "::warning::Failed to refresh comments for issue #${number}; using issue-list comments."
-                  printf '%s\n' "${issue}" >> "${ndjson}"
+                  echo "::warning::Failed to refresh comments for issue #${number}; skipping tier-2 issue."
                 fi
               done < <(jq -c '.[]' "${input_file}")
 
