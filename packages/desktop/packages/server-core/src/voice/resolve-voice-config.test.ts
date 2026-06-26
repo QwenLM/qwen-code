@@ -12,8 +12,8 @@ describe('resolveDesktopVoiceConfig', () => {
       getVoiceModel: () => 'qwen3-asr-flash',
       now: () => 1_700_000_000_000,
       env: { DASHSCOPE_API_KEY: 'env-key' },
-      readQwenJson: async (file) =>
-        file === 'oauth_creds.json'
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'oauth_creds.json'
           ? {
               access_token: 'oauth-token',
               resource_url: 'dashscope.aliyuncs.com/compatible-mode',
@@ -30,7 +30,7 @@ describe('resolveDesktopVoiceConfig', () => {
                   },
                 ],
               },
-            },
+            }) as T | undefined,
     })
 
     expect(config.apiKey).toBe('oauth-token')
@@ -44,8 +44,8 @@ describe('resolveDesktopVoiceConfig', () => {
       getVoiceModel: () => 'qwen3-asr-flash',
       now: () => 1_700_000_000_000,
       env: { DASHSCOPE_API_KEY: 'env-key' },
-      readQwenJson: async (file) =>
-        file === 'oauth_creds.json'
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'oauth_creds.json'
           ? { access_token: 'expired', expiry_date: 1 }
           : {
               env: { DASH_KEY: 'settings-key' },
@@ -58,7 +58,7 @@ describe('resolveDesktopVoiceConfig', () => {
                   },
                 ],
               },
-            },
+            }) as T | undefined,
     })
 
     expect(config.apiKey).toBe('settings-key')
@@ -89,7 +89,7 @@ describe('resolveDesktopVoiceConfig', () => {
         env: { OPENAI_API_KEY: 'openai-key' },
         readQwenJson: async () => undefined,
       }),
-    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+    ).rejects.toThrow('Set OPENAI_BASE_URL')
 
     const config = await resolveDesktopVoiceConfig({
       getVoiceModel: () => 'qwen3-asr-flash',

@@ -49,6 +49,9 @@ export function normalizeBaseUrl(raw: string): string {
     : `https://${trimmed}`;
   try {
     const url = new URL(withProto);
+    // Drop any userinfo so a user:pass@host base URL can't leak credentials.
+    url.username = '';
+    url.password = '';
     if (!url.pathname.split('/').includes('v1')) {
       url.pathname = `${url.pathname.replace(/\/$/, '')}/v1`;
     }
@@ -60,9 +63,8 @@ export function normalizeBaseUrl(raw: string): string {
 
 async function readQwenJsonFromDisk<T>(file: string): Promise<T | undefined> {
   try {
-    return JSON.parse(
-      await readFile(join(homedir(), '.qwen', file), 'utf-8'),
-    ) as T;
+    const baseDir = process.env.QWEN_HOME ?? join(homedir(), '.qwen');
+    return JSON.parse(await readFile(join(baseDir, file), 'utf-8')) as T;
   } catch {
     return undefined;
   }
@@ -158,6 +160,13 @@ function fromEnv(env: NodeJS.ProcessEnv): ResolvedCredentials | undefined {
   const openaiBaseUrl = env['OPENAI_BASE_URL']?.trim();
   if (openaiKey && openaiBaseUrl) {
     return { apiKey: openaiKey, baseUrl: normalizeBaseUrl(openaiBaseUrl) };
+  }
+  // An OPENAI_API_KEY alone is never sent to DashScope; tell the user the
+  // base URL is required rather than failing with a generic credentials error.
+  if (openaiKey) {
+    throw new Error(
+      'Set OPENAI_BASE_URL alongside OPENAI_API_KEY to use it for voice dictation.',
+    );
   }
   return undefined;
 }

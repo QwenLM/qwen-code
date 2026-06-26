@@ -5,7 +5,7 @@ describe('transcribeQwenAsrBatch', () => {
   it('posts audio chat completions and returns trimmed text', async () => {
     let requestUrl = ''
     let requestBody: unknown
-    let requestHeaders: HeadersInit | undefined
+    let requestHeaders: RequestInit['headers']
     let requestInit: RequestInit | undefined
     const fetchFn = async (url: string | URL | Request, init?: RequestInit) => {
       requestUrl = String(url)
@@ -26,7 +26,7 @@ describe('transcribeQwenAsrBatch', () => {
           apiKey: 'secret-key',
         },
         { language: 'en' },
-        fetchFn as typeof fetch,
+        fetchFn as unknown as typeof fetch,
       ),
     ).resolves.toBe('hello desktop')
 
@@ -76,7 +76,7 @@ describe('transcribeQwenAsrBatch', () => {
         apiKey: 'leaked-token',
       },
       {},
-      fetchFn as typeof fetch,
+      fetchFn as unknown as typeof fetch,
     )
 
     await expect(promise).rejects.toThrow('Bearer [REDACTED]')
