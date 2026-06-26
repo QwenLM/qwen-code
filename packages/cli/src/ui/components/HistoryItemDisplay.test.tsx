@@ -79,7 +79,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output.startsWith('\n')).toBe(true);
-    expect(output).toContain('✦ Hello');
+    expect(output).toContain('◆ Hello');
   });
 
   it('renders tool summaries without a leading spacer row', () => {
