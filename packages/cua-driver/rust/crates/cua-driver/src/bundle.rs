@@ -5,16 +5,16 @@
 //! whether `cua-driver-rs mcp` was spawned from an IDE terminal as a
 //! bare CLI symlinked into our .app bundle. When true and the parent
 //! isn't launchd, we re-launch the daemon via `open -n -g -a
-//! CuaDriver --args serve` so it picks up the bundle's TCC grants,
+//! QwenCuaDriver --args serve` so it picks up the bundle's TCC grants,
 //! then proxy stdio MCP traffic through the daemon's Unix socket.
 //!
 //! Non-macOS targets compile to no-ops so the cross-platform call
 //! sites stay tidy.
 
 /// Returns `true` when the currently-running binary resolves into an
-/// installed `CuaDriver.app` bundle (Rust port). The check is the
+/// installed `QwenCuaDriver.app` bundle (Rust port). The check is the
 /// same shape as the Swift driver's `isExecutableInsideCuaDriverApp`
-/// (`/CuaDriver.app/Contents/MacOS/`) but keyed on the Rust port's
+/// (`/QwenCuaDriver.app/Contents/MacOS/`) but keyed on the Rust port's
 /// distinct bundle name so the two installs don't collide.
 ///
 /// `false` for raw `cargo run` / `target/release/cua-driver` dev
@@ -25,8 +25,8 @@
 ///   1. Resolve `std::env::current_exe()` (preferred; absolute path
 ///      to the running image).
 ///   2. Walk symlinks via `std::fs::canonicalize` — the install layout
-///      is `~/.local/bin/cua-driver` → `/Applications/CuaDriver.app/
-///      Contents/MacOS/cua-driver`, so without the canonicalize step
+///      is `~/.local/bin/cua-driver` → `/Applications/QwenCuaDriver.app/
+///      Contents/MacOS/qwen-cua-driver`, so without the canonicalize step
 ///      we'd see the bare symlink path and miss the bundle.
 ///   3. Substring-match the canonical path for the bundle marker.
 #[cfg(target_os = "macos")]
@@ -43,7 +43,7 @@ pub fn is_executable_inside_cuadriver_app() -> bool {
         Some(s) => s,
         None => return false,
     };
-    s.contains("/CuaDriver.app/Contents/MacOS/")
+    s.contains("/QwenCuaDriver.app/Contents/MacOS/")
 }
 
 #[cfg(not(target_os = "macos"))]

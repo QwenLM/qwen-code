@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# _install-rust.sh — private helper invoked by libs/cua-driver/scripts/install.sh
+# _install-rust.sh — private helper invoked by packages/cua-driver/scripts/install.sh
 # (the canonical user-facing installer) for the default Rust implementation.
 # Not intended for direct
 # invocation; user-facing one-liners always go through the parent
@@ -15,7 +15,7 @@
 # helper is hard-pinned to `cua-driver-rs-v*` and will never pick it up.
 #
 # Canonical user-facing invocation (forwards here by default):
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 #
 # Flags:
 #   --bin-dir <path>     install the visible binary/symlink to <path>
@@ -49,10 +49,10 @@
 #   $CUA_DRIVER_RS_HOME/
 #     packages/
 #       releases/
-#         0.1.3-x86_64-unknown-linux-gnu/cua-driver   (per-version binary)
-#         0.1.4-x86_64-unknown-linux-gnu/cua-driver
-#       current/cua-driver -> ../releases/<active>/cua-driver  (active version)
-#   $CUA_DRIVER_RS_INSTALL_DIR/cua-driver -> $HOME/packages/current/cua-driver
+#         0.1.3-x86_64-unknown-linux-gnu/qwen-cua-driver   (per-version binary)
+#         0.1.4-x86_64-unknown-linux-gnu/qwen-cua-driver
+#       current/qwen-cua-driver -> ../releases/<active>/qwen-cua-driver  (active version)
+#   $CUA_DRIVER_RS_INSTALL_DIR/qwen-cua-driver -> $HOME/packages/current/qwen-cua-driver
 #
 # Atomic upgrade: a new install drops the binary into a fresh per-version
 # dir, then rename(2)-swaps the `current` symlink to point at it. A
@@ -82,7 +82,7 @@ set -euo pipefail
 # Failure here is non-fatal: the daemon-stop is a best-effort upgrade
 # nicety, not load-bearing. If we can't load the helpers, define
 # no-op stubs so the rest of the script can call them unconditionally.
-_CUA_INSTALL_COMMON_URL="https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/_install-common.sh"
+_CUA_INSTALL_COMMON_URL="https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/_install-common.sh"
 _cua_install_common_loaded=0
 if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "-" && -f "${BASH_SOURCE[0]}" ]]; then
     _CUA_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,8 +109,8 @@ if [[ "$_cua_install_common_loaded" == "0" ]]; then
     show_cua_driver_daemon_survivors() { :; }
 fi
 
-REPO="trycua/cua"
-BINARY_NAME="cua-driver"
+REPO="QwenLM/qwen-code"
+BINARY_NAME="qwen-cua-driver"
 TAG_PREFIX="cua-driver-rs-v"
 # CUA_DRIVER_RS_INSTALL_DIR is the documented name; CUA_DRIVER_RS_BIN_DIR is
 # the legacy alias kept for users with the old env in their shell rc.
@@ -135,13 +135,13 @@ KEEP_VERSIONS="${CUA_DRIVER_RS_KEEP_VERSIONS:-$KEEP_VERSIONS_DEFAULT}"
 
 # macOS-only: name and install location of the .app bundle that wraps
 # the bare binary so the TCC auto-relaunch path in `cua-driver mcp` has
-# a stable bundle id (com.trycua.driver) to attribute the daemon to.
-# See libs/cua-driver/rust/scripts/CuaDriverBundle/Contents/Info.plist and
+# a stable bundle id (com.qwencode.cua-driver) to attribute the daemon to.
+# See packages/cua-driver/rust/scripts/CuaDriverBundle/Contents/Info.plist and
 # the matching docs on `cua-driver mcp`'s auto-relaunch behavior.
-# Identical to the Swift driver's CuaDriver.app + com.trycua.driver
+# Identical to the Swift driver's QwenCuaDriver.app + com.qwencode.cua-driver
 # pair — the Rust port replaces the Swift install at this path,
 # preserving TCC grants (they're keyed on bundle id, which we share).
-APP_NAME="CuaDriver.app"
+APP_NAME="QwenCuaDriver.app"
 APP_DEST="/Applications/$APP_NAME"
 
 while [[ $# -gt 0 ]]; do
@@ -373,7 +373,7 @@ prune_old_releases() {
 # SAME canonical home this release installer now writes to (~/.cua-driver, see
 # the HOME_DIR reconciliation above), under a `*-local-*` versioned release dir
 # (VERSION_TAG="0.0.0-local-<config>"). On macOS it also cert-signs the shared
-# /Applications/CuaDriver.app with a self-signed identity recorded at
+# /Applications/QwenCuaDriver.app with a self-signed identity recorded at
 # `~/.cua-driver/.tcc-signing-identity`.
 #
 # A user who ran install-local and then runs this release installer would
@@ -393,7 +393,7 @@ prune_old_releases() {
 # prior local install is a clean no-op.
 #
 # TCC is preserved deliberately: we do NOT `tccutil reset` here. The bundle at
-# /Applications/CuaDriver.app is shared (bundle id com.trycua.driver) and the
+# /Applications/QwenCuaDriver.app is shared (bundle id com.qwencode.cua-driver) and the
 # subsequent release `ditto` re-points the binary in place; grants keyed on the
 # bundle id survive (macOS may re-prompt once on the cdhash change, same as any
 # upgrade). Churning the signing identity would gratuitously invalidate
@@ -485,7 +485,7 @@ case "$OS-$ARCH_RAW" in
     *)
         err "unsupported platform: $OS / $ARCH_RAW"
         err "  cua-driver-rs ships prebuilts for: darwin-arm64, darwin-x86_64, linux-x86_64, linux-arm64."
-        err "  Windows users: install via install.ps1 (irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex)."
+        err "  Windows users: install via install.ps1 (irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex)."
         exit 1
         ;;
 esac
@@ -547,10 +547,10 @@ VERSION="${TAG#${TAG_PREFIX}}"
 # Tarball selection:
 #
 # macOS — fetch the directory tarball (cua-driver-rs-vN-darwin-universal.tar.gz).
-#   The directory layout includes `CuaDriver.app/` alongside the bare
+#   The directory layout includes `QwenCuaDriver.app/` alongside the bare
 #   binary, which we need to install into /Applications so the TCC
 #   auto-relaunch path in `cua-driver-rs mcp` can resolve
-#   `com.trycua.driver` via `open -n -g -a CuaDriver`. The
+#   `com.qwencode.cua-driver` via `open -n -g -a QwenCuaDriver`. The
 #   directory variant carries the same universal binary as the
 #   bare-binary tarball, so users on both Apple Silicon and Intel
 #   get a working install from one download.
@@ -575,12 +575,12 @@ tar -xzf "$TMP_DIR/$TARBALL" -C "$TMP_DIR"
 # Layout detection:
 #   macOS dir tarball expands to:
 #     cua-driver-rs-${VERSION}-darwin-universal/
-#       ├── cua-driver           (bare universal binary)
-#       ├── CuaDriver.app/     (minimal bundle; copy of the same binary
-#       │                         lives at Contents/MacOS/cua-driver)
+#       ├── qwen-cua-driver      (bare universal binary)
+#       ├── QwenCuaDriver.app/     (minimal bundle; copy of the same binary
+#       │                         lives at Contents/MacOS/qwen-cua-driver)
 #       └── LICENSE
 #   Linux bare-binary tarball expands to:
-#     cua-driver               (single file at the archive root)
+#     qwen-cua-driver          (single file at the archive root)
 case "$LABEL" in
     darwin-*)
         STAGE="cua-driver-rs-${VERSION}-darwin-universal"
@@ -608,12 +608,12 @@ cleanup_prior_local_install
 mkdir -p "$BIN_DIR"
 
 # macOS: install the .app to /Applications first, then symlink the
-# bin into the bundle so `~/.local/bin/cua-driver` resolves into
-# `/Applications/CuaDriver.app/Contents/MacOS/cua-driver`. The
+# bin into the bundle so `~/.local/bin/qwen-cua-driver` resolves into
+# `/Applications/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver`. The
 # `realpath` walk in `is_executable_inside_cuadriver_app()` keys on
 # that resolved path to know whether the auto-relaunch heuristic
 # should fire. Same path and same bundle id as the Swift `cua-driver`
-# install (`/Applications/CuaDriver.app`, `com.trycua.driver`), so an
+# install (`/Applications/QwenCuaDriver.app`, `com.qwencode.cua-driver`), so an
 # install over an existing Swift bundle is an in-place takeover —
 # TCC grants attributed to the shared bundle id survive the swap and
 # the new binary inherits them (macOS may re-prompt once on first
@@ -621,7 +621,7 @@ mkdir -p "$BIN_DIR"
 #
 # The macOS path intentionally does NOT use the
 # $HOME_DIR/packages/releases/<v>/ + current symlink layout used on
-# Linux. Reason: /Applications/CuaDriver.app placement is the
+# Linux. Reason: /Applications/QwenCuaDriver.app placement is the
 # anchor for both TCC attribution (cdhash + bundle id) and
 # LaunchServices' `open -a CuaDriver` discovery — symlinking the
 # .app from /Applications to a versioned dir under $HOME_DIR breaks
@@ -630,7 +630,7 @@ mkdir -p "$BIN_DIR"
 #
 # Linux: drop the binary into the per-version dir under
 # $HOME_DIR/packages/releases/<version>-<target>/ and swap the
-# `current` symlink atomically. The visible $BIN_DIR/cua-driver
+# `current` symlink atomically. The visible $BIN_DIR/qwen-cua-driver
 # symlinks into `current` so PATH consumers (and MCP client configs)
 # never need to change when the active version moves.
 #
@@ -640,7 +640,7 @@ mkdir -p "$BIN_DIR"
 if [[ "$OS" == "Darwin" ]]; then
     if [[ -z "${SRC_APP:-}" || ! -d "$SRC_APP" ]]; then
         err "macOS install requires the .app bundle (SRC_APP not found at ${SRC_APP:-<unset>})"
-        err "  This usually means the downloaded tarball is missing CuaDriver.app — re-run the installer or"
+        err "  This usually means the downloaded tarball is missing QwenCuaDriver.app — re-run the installer or"
         err "  pin a known-good release via CUA_DRIVER_RS_VERSION=<version>."
         exit 1
     fi
@@ -652,7 +652,7 @@ if [[ "$OS" == "Darwin" && -n "$SRC_APP" && -d "$SRC_APP" ]]; then
         exit 1
     fi
     # The Rust port and the legacy Swift driver both live at
-    # /Applications/CuaDriver.app with bundle id `com.trycua.driver` —
+    # /Applications/QwenCuaDriver.app with bundle id `com.qwencode.cua-driver` —
     # bundle-id-identical so TCC grants survive the upgrade. When we
     # detect a prior Swift bundle at the install path we log it for
     # transparency, but no `tccutil reset` is needed; grants transfer
@@ -664,7 +664,7 @@ if [[ "$OS" == "Darwin" && -n "$SRC_APP" && -d "$SRC_APP" ]]; then
     if [[ -e "$APP_DEST" ]]; then
         PREV_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_DEST/Contents/Info.plist" 2>/dev/null || true)
         PREV_BUNDLE_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DEST/Contents/Info.plist" 2>/dev/null || true)
-        if [[ "$PREV_BUNDLE_ID" == "com.trycua.driver" ]] && [[ -n "$PREV_BUNDLE_VERSION" ]]; then
+        if [[ "$PREV_BUNDLE_ID" == "com.qwencode.cua-driver" ]] && [[ -n "$PREV_BUNDLE_VERSION" ]]; then
             log "replacing existing cua-driver at $APP_DEST (${PREV_BUNDLE_ID}, version ${PREV_BUNDLE_VERSION})"
             REPLACED_SWIFT=1
         elif [[ -n "$PREV_BUNDLE_ID" ]]; then
@@ -690,14 +690,14 @@ else
     # Linux: versioned-dirs + atomic `current` symlink swap.
     #
     # Layout under $HOME_DIR/packages/:
-    #   releases/<version>-<target>/cua-driver   (this install)
-    #   releases/<older>-<target>/cua-driver     (kept for rollback)
-    #   current/cua-driver -> ../releases/<active>-<target>/cua-driver
+    #   releases/<version>-<target>/qwen-cua-driver   (this install)
+    #   releases/<older>-<target>/qwen-cua-driver     (kept for rollback)
+    #   current/qwen-cua-driver -> ../releases/<active>-<target>/qwen-cua-driver
     #
     # Swap mechanics: write the new symlink to `current.tmp`, then
     # `mv -Tf current.tmp current` so the rename is a single
     # filesystem call. A daemon that already mmap'd the previous
-    # `current/cua-driver` keeps using the open file handle — Unix
+    # `current/qwen-cua-driver` keeps using the open file handle — Unix
     # only invalidates path-based lookups, not held fds.
     PACKAGES_DIR="$HOME_DIR/packages"
     RELEASES_DIR="$PACKAGES_DIR/releases"
@@ -761,7 +761,7 @@ fi
 #
 # Mirror of install.ps1's `Stop-CuaDriverDaemons` call sequence. The
 # new binary is now in place under packages/current/ (Linux) or
-# /Applications/CuaDriver.app (macOS) — kill any in-memory daemon
+# /Applications/QwenCuaDriver.app (macOS) — kill any in-memory daemon
 # that was holding the OLD binary so the next `cua-driver` invocation
 # picks up the freshly-installed code. Without this, an autostart
 # LaunchAgent / systemd user unit / manual `serve` shell keeps serving
@@ -802,7 +802,7 @@ if [[ "$NO_MODIFY_PATH" != "1" ]] && [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     esac
     if [[ -n "$SHELL_RC" ]]; then
         {
-            printf '\n# Added by cua-driver-rs installer — see https://github.com/trycua/cua\n'
+            printf '\n# Added by cua-driver-rs installer — see https://github.com/QwenLM/qwen-code\n'
             printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
         } >> "$SHELL_RC"
         log "appended PATH update to $SHELL_RC — open a new shell or run \`source $SHELL_RC\`"
@@ -818,7 +818,7 @@ echo ""
 if [[ "${REPLACED_SWIFT:-0}" == "1" ]]; then
     echo "Upgraded the cua-driver bundle that was previously at $APP_DEST."
     echo "TCC grants (Accessibility, Screen Recording) are keyed on the bundle id"
-    echo "(com.trycua.driver) — which is preserved — so they transfer to the new"
+    echo "(com.qwencode.cua-driver) — which is preserved — so they transfer to the new"
     echo "binary automatically. macOS may surface a one-time re-grant prompt on"
     echo "first action because the new binary's cdhash doesn't match the old"
     echo "one's; approve once and the grants persist."
@@ -831,7 +831,7 @@ fi
 # (Try-it / skill pack / MCP setup / docs link) with {{BINARY}}
 # placeholders; OS-specific bits (autostart / TCC) stay inline below
 # in each installer where they're per-shell natural.
-HINTS_URL="https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/post-install-hints.txt"
+HINTS_URL="https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/post-install-hints.txt"
 HINTS_TXT="$TMP_DIR/post-install-hints.txt"
 if curl -fsSL "$HINTS_URL" -o "$HINTS_TXT" 2>/dev/null && [ -s "$HINTS_TXT" ]; then
     sed "s|{{BINARY}}|$BIN_LINK|g" "$HINTS_TXT"
@@ -847,7 +847,7 @@ case "$(uname -s)" in
     Darwin)
         echo ""
         echo "macOS TCC: grant Accessibility + Screen Recording on first run:"
-        echo "  open -n -g -a CuaDriver --args serve"
+        echo "  open -n -g -a QwenCuaDriver --args serve"
         echo "  $BIN_LINK check_permissions"
         ;;
     Linux)

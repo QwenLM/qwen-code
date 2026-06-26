@@ -56,19 +56,19 @@
 #      Linux: `systemctl --user stop cua-driver-rs.service` for the
 #      install-local --autostart path. Same shape — politely stop the
 #      supervisor first so it doesn't restart the process.
-#   2. `pkill -x cua-driver` as the backstop for processes that weren't
-#      launchd/systemd-supervised (e.g. a manual `cua-driver serve`
-#      from a dev shell, or `cua-driver mcp` spawned by an editor that
+#   2. `pkill -x qwen-cua-driver` as the backstop for processes that weren't
+#      launchd/systemd-supervised (e.g. a manual `qwen-cua-driver serve`
+#      from a dev shell, or `qwen-cua-driver mcp` spawned by an editor that
 #      isn't aware we're swapping the binary out from under it).
 #
 # Daemon-name coverage:
-#   The Rust binary and the Swift binary BOTH exec as `cua-driver` (same
-#   product name — see build-app.sh `--identifier com.trycua.driver`
-#   and _install-rust.sh `BINARY_NAME="cua-driver"`). One `pkill -x
-#   cua-driver` covers both, so callers don't need a per-backend
-#   variant — the kill is naturally symmetric across the Rust/Swift
-#   split. `cua-driver-uia` is a Windows-only helper (see
-#   libs/cua-driver/rust/crates/cua-driver-uia/) and never exists on
+#   This vendored fork's binary execs as `qwen-cua-driver` (a distinct
+#   product name so it coexists with any upstream `cua-driver` install —
+#   see build-app.sh `--identifier com.qwencode.cua-driver` and
+#   _install-rust.sh `BINARY_NAME="qwen-cua-driver"`). One `pkill -x
+#   qwen-cua-driver` targets exactly this fork's daemon. `cua-driver-uia`
+#   is a Windows-only helper (see
+#   packages/cua-driver/rust/crates/cua-driver-uia/) and never exists on
 #   macOS/Linux, so no pkill for it here.
 #
 # Returns: always 0. Caller threads this through unconditionally; the
@@ -119,11 +119,11 @@ stop_cua_driver_daemons() {
 
         if command -v pkill >/dev/null 2>&1; then
             # `-x` = exact match on process name so we don't kill a
-            # user's `cua-driver-rs-foo` test harness or any script
-            # named "cua-driver-something". The Rust + Swift binaries
-            # both exec as exactly `cua-driver` so a single pkill
-            # covers both.
-            pkill -x cua-driver >/dev/null 2>&1 || true
+            # user's `qwen-cua-driver-foo` test harness or any script
+            # named "qwen-cua-driver-something". This vendored fork's
+            # binary execs as exactly `qwen-cua-driver` (distinct from
+            # the upstream `cua-driver` so the two coexist).
+            pkill -x qwen-cua-driver >/dev/null 2>&1 || true
         fi
     ) || true
 
@@ -155,7 +155,7 @@ stop_cua_driver_daemons() {
 show_cua_driver_daemon_survivors() {
     # `pgrep -x` matches the exact process name the same way `pkill -x`
     # did above, so the survivor list is exactly what the kill couldn't
-    # reach (not random other cua-driver-* binaries).
+    # reach (not random other qwen-cua-driver-* binaries).
     if ! command -v pgrep >/dev/null 2>&1; then
         # No pgrep, no way to check. Bail quietly — the install can
         # still succeed; worst case the user notices a stale binary
@@ -164,7 +164,7 @@ show_cua_driver_daemon_survivors() {
     fi
 
     local survivor_pids
-    survivor_pids=$(pgrep -x cua-driver 2>/dev/null || true)
+    survivor_pids=$(pgrep -x qwen-cua-driver 2>/dev/null || true)
     if [ -z "$survivor_pids" ]; then
         return 0
     fi
@@ -190,7 +190,7 @@ show_cua_driver_daemon_survivors() {
         "$yellow" "$normal"
     printf '%s      To force-kill (needs root if owned by another user):%s\n' \
         "$yellow" "$normal"
-    printf '%s        sudo pkill -9 -x cua-driver%s\n' \
+    printf '%s        sudo pkill -9 -x qwen-cua-driver%s\n' \
         "$yellow" "$normal"
     printf '%s      Or log out and back in. Until they exit, the OLD binary keeps running.%s\n' \
         "$yellow" "$normal"

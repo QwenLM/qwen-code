@@ -30,11 +30,11 @@ fn screen_recording_capturable() -> bool {
 /// macOS attributes Accessibility / Screen-Recording to the *responsible
 /// process* (the LaunchServices launching app), not the executable path.
 /// So `check_permissions` answered in-process reflects:
-///   - the **CuaDriver daemon** (`com.trycua.driver`) when this process is
+///   - the **Qwen Cua Driver daemon** (`com.qwencode.cua-driver`) when this process is
 ///     its own responsible process — the real driver status.
 ///   - the **calling app** otherwise — e.g. the terminal/IDE that spawned
 ///     `cua-driver call …`. That grant is NOT the driver's, which is why a
-///     standalone check can read `true` while `tccutil … com.trycua.driver`
+///     standalone check can read `true` while `tccutil … com.qwencode.cua-driver`
 ///     reports no record.
 fn permission_source() -> serde_json::Value {
     let pid = unsafe { libc::getpid() };
@@ -45,7 +45,7 @@ fn permission_source() -> serde_json::Value {
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
     // The trustworthy, non-spoofable signal is the executable path: a caller
-    // can't run from inside the code-signed `CuaDriver.app` bundle without
+    // can't run from inside the code-signed `QwenCuaDriver.app` bundle without
     // controlling that install. The disclaim env var is caller-controlled, so
     // it is treated only as a corroborating signal that explains why a
     // bundle-resident daemon has `ppid != 1` (it re-exec'd itself with
@@ -53,7 +53,7 @@ fn permission_source() -> serde_json::Value {
     // — outside the bundle — the env var must NOT grant daemon attribution, or
     // a caller could pre-set it and spoof the TCC source. Fail closed to
     // "caller" whenever the bundle signal is absent.
-    let inside_bundle = exe.contains("/CuaDriver.app/Contents/MacOS/");
+    let inside_bundle = exe.contains("/QwenCuaDriver.app/Contents/MacOS/");
     let disclaimed =
         std::env::var_os(cua_driver_core::RESPONSIBILITY_DISCLAIMED_ENV).is_some();
     let is_driver_daemon = inside_bundle && (ppid == 1 || disclaimed);
@@ -61,18 +61,18 @@ fn permission_source() -> serde_json::Value {
     let (attribution, note) = if is_driver_daemon {
         (
             "driver-daemon",
-            "These booleans reflect the CuaDriver daemon's own TCC identity \
-             (com.trycua.driver) because this process is its own responsible \
+            "These booleans reflect the Qwen Cua Driver daemon's own TCC identity \
+             (com.qwencode.cua-driver) because this process is its own responsible \
              process.",
         )
     } else {
         (
             "caller",
             "These booleans reflect the TCC identity of the app that launched \
-             this process (e.g. your terminal/IDE), NOT the CuaDriver daemon \
-             (com.trycua.driver). A standalone check can read `true` here while \
-             `tccutil … com.trycua.driver` reports no record. To grant for the \
-             driver, run `cua-driver permissions grant`.",
+             this process (e.g. your terminal/IDE), NOT the Qwen Cua Driver daemon \
+             (com.qwencode.cua-driver). A standalone check can read `true` here while \
+             `tccutil … com.qwencode.cua-driver` reports no record. To grant for the \
+             driver, run `qwen-cua-driver permissions grant`.",
         )
     };
 
@@ -100,7 +100,7 @@ fn def() -> &'static ToolDef {
             preflight APIs), `screen_recording_capturable` (a live ScreenCaptureKit \
             probe — if it disagrees with `screen_recording`, the preflight grant \
             belongs to a different process), and `source` (which TCC identity the \
-            booleans reflect: the CuaDriver daemon vs the launching terminal/IDE). \
+            booleans reflect: the Qwen Cua Driver daemon vs the launching terminal/IDE). \
             macOS attributes grants to the responsible process, so a standalone call \
             from a terminal reports the terminal's grants, not the driver's.".into(),
         input_schema: serde_json::json!({
@@ -161,8 +161,8 @@ impl Tool for CheckPermissionsTool {
         // Make the attribution explicit when answering for the caller (not the daemon).
         if is_caller {
             summary.push_str(
-                "\nℹ️  Status reflects the launching app's TCC identity, not the CuaDriver \
-                 daemon (com.trycua.driver). See `source` for details.",
+                "\nℹ️  Status reflects the launching app's TCC identity, not the Qwen Cua Driver \
+                 daemon (com.qwencode.cua-driver). See `source` for details.",
             );
         }
 
@@ -185,7 +185,7 @@ mod tests {
         // The disclaim env var is caller-controlled, so on its own it must not
         // make `check_permissions` claim the booleans reflect the daemon's TCC
         // identity. Daemon attribution additionally requires the binary to live
-        // inside the code-signed `CuaDriver.app` bundle — the test runner does
+        // inside the code-signed `QwenCuaDriver.app` bundle — the test runner does
         // not, so even with the env var present we must fail closed to "caller".
         let name = cua_driver_core::RESPONSIBILITY_DISCLAIMED_ENV;
         let original = std::env::var_os(name);

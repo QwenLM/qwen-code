@@ -12,8 +12,8 @@
 #   Linux/other + --backend=swift   → no-op (still allowed for compatibility)
 #
 # Swift uninstall removes:
-#   - ~/.local/bin/cua-driver symlink (+ legacy /usr/local/bin/cua-driver)
-#   - /Applications/CuaDriver.app bundle
+#   - ~/.local/bin/qwen-cua-driver symlink (+ legacy /usr/local/bin/qwen-cua-driver)
+#   - /Applications/QwenCuaDriver.app bundle
 #   - ~/.cua-driver/ (telemetry id + install marker)
 #   - ~/Library/Application Support/Cua Driver/ (config.json)
 #   - ~/Library/Caches/cua-driver/ (daemon/cache state)
@@ -24,8 +24,8 @@
 #
 # Rust uninstall removes:
 #   Linux:
-#     - ~/.local/bin/cua-driver symlink (only when it resolves to a
-#       cua-driver path — a Swift-driver symlink is left in place)
+#     - ~/.local/bin/qwen-cua-driver symlink (only when it resolves to a
+#       qwen-cua-driver path — a Swift-driver symlink is left in place)
 #     - ~/.cua-driver/ (current package home) + legacy ~/.cua-driver-rs/
 #       (telemetry id, config.json, versioned releases, current symlink)
 #     - ~/.config/systemd/user/cua-driver-rs.service (if --autostart
@@ -33,16 +33,16 @@
 #     - Skill symlinks under ~/.claude/skills/cua-driver(-rs), ~/.agents/
 #       skills/…, ~/.openclaw/skills/…, ~/.config/opencode/skills/…
 #   macOS:
-#     - /Applications/CuaDriver.app bundle (+ legacy CuaDriverRs.app)
-#     - ~/.local/bin/cua-driver symlink (only when it resolves into
-#       /Applications/CuaDriver.app)
+#     - /Applications/QwenCuaDriver.app bundle (+ legacy CuaDriverRs.app)
+#     - ~/.local/bin/qwen-cua-driver symlink (only when it resolves into
+#       /Applications/QwenCuaDriver.app)
 #     - ~/.cua-driver/ (current package home) + legacy ~/.cua-driver-rs/
 #     - ~/Library/LaunchAgents/com.trycua.cua-driver-rs.plist (if
 #       --autostart was used via install-local.sh — unload + remove)
 #     - Skill symlinks under ~/.claude/skills/cua-driver(-rs), etc.
 #
-# Shared-path safety: /Applications/CuaDriver.app + its ~/.local/bin
-# symlink use the same bundle id (com.trycua.driver) as the Swift driver,
+# Shared-path safety: /Applications/QwenCuaDriver.app + its ~/.local/bin
+# symlink use the same bundle id (com.qwencode.cua-driver) as the Swift driver,
 # so they're only removed when an unambiguous Rust marker is on disk
 # (~/.cua-driver/packages/, legacy ~/.cua-driver-rs/, CuaDriverRs.app,
 # or the LaunchAgent/systemd unit).
@@ -55,7 +55,7 @@
 # re-install flow.
 #
 # Usage:
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/uninstall.sh)"
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)"
 #
 # Env overrides (mirror install side):
 #   CUA_DRIVER_RS_HOME    Rust package home to remove (default ~/.cua-driver-rs)
@@ -106,11 +106,11 @@ fi
 log() { printf '==> %s\n' "$*"; }
 
 # Opt-in TCC revocation (`--reset-tcc`). Off by default: the bundle id
-# com.trycua.driver is shared with the retired Swift driver, and keeping
+# com.qwencode.cua-driver is shared with the retired Swift driver, and keeping
 # grants across a reinstall avoids a re-prompt — so wiping privacy state
 # is a deliberate, explicit choice, not a side effect of uninstall.
 # When the flag is set, revoke Accessibility + Screen-Recording +
-# Automation for com.trycua.driver. macOS-only; no-op elsewhere.
+# Automation for com.qwencode.cua-driver. macOS-only; no-op elsewhere.
 maybe_reset_tcc() {
     [[ "$RESET_TCC" == "1" ]] || return 0
     if [[ "$OS" != "Darwin" ]]; then
@@ -121,11 +121,11 @@ maybe_reset_tcc() {
         log "--reset-tcc: tccutil not found; skipping"
         return 0
     fi
-    log "revoking TCC grants for com.trycua.driver (--reset-tcc)"
-    log "  note: com.trycua.driver is shared with the retired Swift driver;"
+    log "revoking TCC grants for com.qwencode.cua-driver (--reset-tcc)"
+    log "  note: com.qwencode.cua-driver is shared with the retired Swift driver;"
     log "  this clears grants for both. The next launch will re-prompt."
     for SVC in Accessibility ScreenCapture AppleEvents; do
-        if tccutil reset "$SVC" com.trycua.driver >/dev/null 2>&1; then
+        if tccutil reset "$SVC" com.qwencode.cua-driver >/dev/null 2>&1; then
             log "  reset $SVC"
         else
             log "  $SVC: nothing to reset (or reset failed)"
@@ -158,11 +158,11 @@ resolve_link() {
 # Rust uninstall branch (default on Linux + macOS).
 # ----------------------------------------------------------------------
 if [[ "$USE_RUST_BACKEND" == "1" ]]; then
-    USER_BIN_LINK="$HOME/.local/bin/cua-driver"
-    # Canonical bundle path (post-rename — shares bundle id
-    # `com.trycua.driver` with the Swift driver). The Rust install
-    # replaces Swift here; both uninstallers target this path.
-    APP_BUNDLE="/Applications/CuaDriver.app"
+    USER_BIN_LINK="$HOME/.local/bin/qwen-cua-driver"
+    # Canonical bundle path for this vendored fork (distinct bundle id
+    # `com.qwencode.cua-driver` so it coexists with any upstream trycua
+    # install rather than sharing its path/identity).
+    APP_BUNDLE="/Applications/QwenCuaDriver.app"
     # Legacy bundle path from earlier Rust releases that coexisted with
     # Swift under a separate name. Cleaned up if found.
     LEGACY_APP_BUNDLE="/Applications/CuaDriverRs.app"
@@ -185,8 +185,8 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     # `uninstall.sh --backend=rust`.
     LEGACY_SKILL_PACK_NAME="cua-driver-rs"
 
-    # Rust-install marker. The Rust bundle path `/Applications/CuaDriver.app`
-    # is shared with the Swift driver (same bundle id `com.trycua.driver`),
+    # Rust-install marker. The Rust bundle path `/Applications/QwenCuaDriver.app`
+    # is shared with the Swift driver (same bundle id `com.qwencode.cua-driver`),
     # so we can't use that path alone as a discriminator — a Swift-only Mac
     # that runs `uninstall.sh --backend=rust` by mistake would lose its
     # Swift bundle, symlink, and Claude MCP registrations. This marker says
@@ -204,11 +204,11 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     fi
 
     # --- CLI symlink ---
-    # Only remove ~/.local/bin/cua-driver when it resolves into a
+    # Only remove ~/.local/bin/qwen-cua-driver when it resolves into a
     # cua-driver-rs install. Pre-rename installs at
     # /Applications/CuaDriverRs.app are unambiguously Rust and always
     # removed. Post-rename, the Rust install lives at
-    # /Applications/CuaDriver.app — the SAME path the Swift driver
+    # /Applications/QwenCuaDriver.app — the SAME path the Swift driver
     # uses — so we only remove that link when $RUST_INSTALL_PRESENT.
     if [[ -L "$USER_BIN_LINK" ]]; then
         RESOLVED="$(resolve_link "$USER_BIN_LINK")"
@@ -218,7 +218,7 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
                 rm -f "$USER_BIN_LINK"
                 log "removed $USER_BIN_LINK -> $RESOLVED"
                 ;;
-            *"/Applications/CuaDriver.app"*)
+            *"/Applications/QwenCuaDriver.app"*)
                 # Shared with the Swift driver — require a Rust marker.
                 if [[ "$RUST_INSTALL_PRESENT" == "1" ]]; then
                     rm -f "$USER_BIN_LINK"
@@ -271,9 +271,9 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
 
     # --- .app bundle (macOS only) ---
     # Legacy /Applications/CuaDriverRs.app is unambiguously Rust and
-    # always removed when present. /Applications/CuaDriver.app is the
+    # always removed when present. /Applications/QwenCuaDriver.app is the
     # current canonical Rust path BUT also where the Swift driver
-    # lives (same bundle id `com.trycua.driver`), so we only remove
+    # lives (same bundle id `com.qwencode.cua-driver`), so we only remove
     # it when $RUST_INSTALL_PRESENT — protects a Swift-only Mac from
     # losing its bundle if `uninstall.sh --experimental-rust` is run
     # by mistake.
@@ -423,16 +423,16 @@ def invokes_cua_driver_rs(server):
     joined = " ".join(parts)
     # Match the Rust-port-specific anchors: bundle name, package home,
     # explicit ".cua-driver-rs" segment. Plain "cua-driver" alone is
-    # ambiguous (the Swift binary uses the same filename). The shared
-    # /Applications/CuaDriver.app path is ALSO ambiguous (Rust took
-    # over the Swift bundle id) — only count it as Rust when a Rust
-    # install marker is on disk; otherwise it is almost certainly a
-    # Swift registration we should not scrub.
+    # ambiguous (the Swift binary uses the same filename). The
+    # /Applications/QwenCuaDriver.app path is this fork's bundle (distinct
+    # id) — only count it as Rust when a Rust install marker is on disk;
+    # otherwise it is almost certainly an unrelated registration we
+    # should not scrub.
     if home_dir and home_dir in joined:
         return True
     if "CuaDriverRs.app" in joined or ".cua-driver-rs" in joined or "cua-driver-rs" in joined:
         return True
-    if rust_install_present and "/Applications/CuaDriver.app" in joined:
+    if rust_install_present and "/Applications/QwenCuaDriver.app" in joined:
         return True
     return False
 
@@ -522,8 +522,8 @@ TCC grants (Accessibility + Screen Recording) remain in System
 Settings > Privacy & Security. Reset them explicitly — or re-run with
 --reset-tcc — if you want a clean re-install flow:
 
-  tccutil reset Accessibility com.trycua.driver
-  tccutil reset ScreenCapture com.trycua.driver
+  tccutil reset Accessibility com.qwencode.cua-driver
+  tccutil reset ScreenCapture com.qwencode.cua-driver
 FINALUNMSG
         fi
     else
@@ -543,9 +543,9 @@ if [[ "$OS" != "Darwin" ]]; then
     exit 0
 fi
 
-USER_BIN_LINK="$HOME/.local/bin/cua-driver"
-SYSTEM_BIN_LINK="/usr/local/bin/cua-driver"
-APP_BUNDLE="/Applications/CuaDriver.app"
+USER_BIN_LINK="$HOME/.local/bin/qwen-cua-driver"
+SYSTEM_BIN_LINK="/usr/local/bin/qwen-cua-driver"
+APP_BUNDLE="/Applications/QwenCuaDriver.app"
 USER_DATA="$HOME/.cua-driver"
 CONFIG_DIR="$HOME/Library/Application Support/Cua Driver"
 CACHE_DIR="$HOME/Library/Caches/cua-driver"
@@ -673,7 +673,7 @@ def invokes_cua_driver(server):
     parts.extend(text_parts(server.get("command")))
     parts.extend(text_parts(server.get("args")))
     joined = " ".join(parts)
-    return "cua-driver" in joined or "CuaDriver.app" in joined
+    return "cua-driver" in joined or "QwenCuaDriver.app" in joined
 
 def should_remove(name, server):
     return name in {"cua-driver", "cua-computer-use"} or invokes_cua_driver(server)
@@ -760,7 +760,7 @@ TCC grants (Accessibility + Screen Recording) remain in System
 Settings > Privacy & Security. Reset them explicitly — or re-run with
 --reset-tcc — if you want a clean re-install flow:
 
-  tccutil reset Accessibility com.trycua.driver
-  tccutil reset ScreenCapture com.trycua.driver
+  tccutil reset Accessibility com.qwencode.cua-driver
+  tccutil reset ScreenCapture com.qwencode.cua-driver
 FINALUNMSG
 fi

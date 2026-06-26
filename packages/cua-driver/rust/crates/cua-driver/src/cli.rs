@@ -3,7 +3,7 @@
 //! Subcommand dispatch (mirrors the Swift cua-driver CLI):
 //!
 //!   cua-driver                              → mcp server (default)
-//!   cua-driver mcp                          → mcp server (explicit)
+//!   qwen-cua-driver mcp                          → mcp server (explicit)
 //!   cua-driver list-tools                   → print all tool names + descriptions
 //!   cua-driver describe <tool>              → print tool schema
 //!   cua-driver call <tool> [json-args]      → invoke tool, print result
@@ -19,10 +19,10 @@ use cua_driver_core::{protocol::Content, tool::ToolRegistry};
 pub enum Command {
     Mcp {
         /// Force in-process MCP execution — skip the TCC auto-relaunch
-        /// path that would spawn a daemon via `open -n -g -a CuaDriver
+        /// path that would spawn a daemon via `open -n -g -a QwenCuaDriver
         /// --args serve` and proxy stdio MCP requests through its Unix
         /// socket. Useful when the calling context already has the right
-        /// TCC grants (CuaDriver.app launched us directly), or when
+        /// TCC grants (QwenCuaDriver.app launched us directly), or when
         /// diagnosing in-process failures. Also toggleable via
         /// `CUA_DRIVER_RS_MCP_NO_RELAUNCH=1`.
         no_daemon_relaunch: bool,
@@ -63,7 +63,7 @@ pub enum Command {
         /// proxy forwards this flag to the daemon it auto-launches (see
         /// `launch_daemon_and_wait`) so the proxy path registers the compat
         /// `screenshot` surface, not just the in-process path. Without it the
-        /// flag was a no-op for `cua-driver mcp --claude-code-computer-use-compat`,
+        /// flag was a no-op for `qwen-cua-driver mcp --claude-code-computer-use-compat`,
         /// which always routes through the proxy on an installed bundle.
         claude_code_compat: bool,
     },
@@ -82,7 +82,7 @@ pub enum Command {
     Diagnose,
     /// `cua-driver permissions status|grant [--json]` — report TCC status
     /// (with source attribution + a live capture probe) or raise the
-    /// correctly-attributed grant by launching CuaDriver via LaunchServices.
+    /// correctly-attributed grant by launching Qwen Cua Driver via LaunchServices.
     Permissions { subcommand: String, json: bool },
     Config {
         /// `show` | `get` | `set` | `reset` (None → show)
@@ -165,11 +165,11 @@ pub fn parse_command() -> Command {
         println!();
         println!("permissions options (macOS):");
         println!("  cua-driver permissions status   Report Accessibility + Screen Recording status. Read-only (no prompt).");
-        println!("                                  Answers via a running daemon, so the result carries the CuaDriver");
-        println!("                                  identity (com.trycua.driver). If no daemon is running it reports");
+        println!("                                  Answers via a running daemon, so the result carries the Qwen Cua Driver");
+        println!("                                  identity (com.qwencode.cua-driver). If no daemon is running it reports");
         println!("                                  `unknown` rather than your terminal's grants. Add --json for the payload.");
-        println!("  cua-driver permissions grant    Launch CuaDriver via LaunchServices so the permission dialog attributes");
-        println!("                                  to com.trycua.driver (not your terminal), wait for the grant, then");
+        println!("  cua-driver permissions grant    Launch Qwen Cua Driver via LaunchServices so the permission dialog attributes");
+        println!("                                  to com.qwencode.cua-driver (not your terminal), wait for the grant, then");
         println!("                                  confirm the driver's own status. This is the correct way to grant.");
         println!();
         println!("Updating cua-driver:");
@@ -199,7 +199,7 @@ pub fn parse_command() -> Command {
         println!("  --from main                     (install only) Fetch latest from main branch instead of the tagged release.");
         println!();
         println!("mcp options (macOS):");
-        println!("  --no-daemon-relaunch    Stay in-process; skip auto-launching the CuaDriver daemon.");
+        println!("  --no-daemon-relaunch    Stay in-process; skip auto-launching the Qwen Cua Driver daemon.");
         println!("                          Also: CUA_DRIVER_RS_MCP_NO_RELAUNCH=1");
         println!("  --socket <path>         Override the daemon UDS path used by the proxy fallback.");
         println!("  --claude-code-computer-use-compat");
@@ -278,7 +278,7 @@ pub fn parse_command() -> Command {
             // stdin is a TTY (i.e. interactive shell, no client piping
             // stdio), surface a hint and exit. Piped / redirected stdin —
             // the normal MCP client case — falls through to MCP mode.
-            // Explicit `cua-driver mcp` bypasses the check entirely.
+            // Explicit `qwen-cua-driver mcp` bypasses the check entirely.
             use std::io::IsTerminal as _;
             if std::io::stdin().is_terminal() {
                 eprintln!("cua-driver: bare invocation defaults to the MCP server, which reads");
@@ -287,11 +287,11 @@ pub fn parse_command() -> Command {
                 eprintln!("You probably meant one of:");
                 eprintln!("  cua-driver list-tools                           # available tools");
                 eprintln!("  cua-driver status                               # check the daemon");
-                eprintln!("  cua-driver mcp-config --client claude-code      # wire into a client");
+                eprintln!("  qwen-cua-driver mcp-config --client claude-code      # wire into a client");
                 eprintln!("  cua-driver --help                               # everything else");
                 eprintln!();
                 eprintln!("To run the MCP server explicitly (and pipe JSON-RPC by hand):");
-                eprintln!("  cua-driver mcp");
+                eprintln!("  qwen-cua-driver mcp");
                 std::process::exit(0);
             }
             Command::Mcp {
@@ -528,7 +528,7 @@ pub fn run_describe(registry: &ToolRegistry, name: &str) {
 ///
 /// Mirrors Swift `MCPCommand.shouldUseDaemonProxy` in spirit:
 /// the trigger is "shell-spawned bare binary that resolves into an
-/// installed `CuaDriver.app` bundle, with a non-launchd parent".
+/// installed `QwenCuaDriver.app` bundle, with a non-launchd parent".
 /// When any of those conditions fails — explicit opt-out, dev-mode
 /// `cargo run` invocation, already-relaunched-via-launchd — we stay
 /// in-process. The proxy path is purely additive.
@@ -545,7 +545,7 @@ pub fn should_use_daemon_proxy(no_daemon_relaunch: bool) -> bool {
         return false;
     }
     // Hidden test/escape hook: force proxy mode without requiring the
-    // executable to live inside CuaDriver.app. Used by the
+    // executable to live inside QwenCuaDriver.app. Used by the
     // integration test (which spawns a daemon manually) and by users
     // who've wrapped the binary in a custom bundle. Skips the
     // launch_daemon_and_wait `open -a` step too — caller is expected
@@ -584,7 +584,7 @@ pub fn should_use_daemon_proxy(no_daemon_relaunch: bool) -> bool {
 ///   * Otherwise we probe `is_daemon_listening` on the default
 ///     socket: a live daemon means proxy through it; nothing
 ///     listening means run in-process (no autospawn equivalent on
-///     Linux/Windows — there's no `open -a CuaDriver` analog).
+///     Linux/Windows — there's no `open -a QwenCuaDriver` analog).
 #[cfg(not(target_os = "macos"))]
 pub fn should_use_daemon_proxy(no_daemon_relaunch: bool) -> bool {
     use crate::bundle::is_env_truthy;
@@ -611,7 +611,7 @@ pub fn should_use_daemon_proxy(no_daemon_relaunch: bool) -> bool {
     crate::serve::is_daemon_listening(&crate::serve::default_socket_path())
 }
 
-/// Spawn `/usr/bin/open -n -g -a CuaDriver --args serve` to launch
+/// Spawn `/usr/bin/open -n -g -a QwenCuaDriver --args serve` to launch
 /// the daemon under `LaunchServices` (so it inherits the bundle's
 /// TCC attribution), then poll the socket for up to `timeout_secs`
 /// seconds. Returns Err with a diagnostic message if `open` failed
@@ -630,21 +630,21 @@ pub fn launch_daemon_and_wait(
     use std::time::{Duration, Instant};
 
     // Forward `--socket <path>` to the relaunched daemon when the caller
-    // passed a non-default socket via `cua-driver mcp --socket /path`.
+    // passed a non-default socket via `qwen-cua-driver mcp --socket /path`.
     // Without this the daemon would listen on `default_socket_path()`,
     // and the proxy would block forever waiting for a daemon on the
     // user-supplied path that never comes up. Only added when the path
     // actually differs from the default, so the common case keeps the
     // shorter `open` argv (and matches Swift's invocation byte-for-byte).
     let pass_socket = socket_path != crate::serve::default_socket_path();
-    let mut open_args: Vec<&str> = vec!["-n", "-g", "-a", "CuaDriver", "--args", "serve"];
+    let mut open_args: Vec<&str> = vec!["-n", "-g", "-a", "QwenCuaDriver", "--args", "serve"];
     if pass_socket {
         open_args.push("--socket");
         open_args.push(socket_path);
     }
     // Thread the Claude-Code compat flag through to the daemon. Without this
     // the proxy-spawned daemon always called build_macos_registry() (compat
-    // hardcoded false), so `cua-driver mcp --claude-code-computer-use-compat`
+    // hardcoded false), so `qwen-cua-driver mcp --claude-code-computer-use-compat`
     // SILENTLY DROPPED the flag on the proxy path — the path users actually
     // run on an installed bundle. Today this is latent: the compat screenshot
     // tool was removed in #1692, so `register_all(compat)` ignores the flag and
@@ -658,7 +658,7 @@ pub fn launch_daemon_and_wait(
     }
 
     let status = Cmd::new("/usr/bin/open")
-        // `-n` forces a new instance: CuaDriver.app might already be
+        // `-n` forces a new instance: QwenCuaDriver.app might already be
         // running from a previous MCP session, and without `-n`, `open
         // -a` would re-use it and drop our `--args serve`, leaving no
         // daemon up. `-g` keeps the new instance backgrounded —
@@ -677,8 +677,8 @@ pub fn launch_daemon_and_wait(
 
     if !status.success() {
         anyhow::bail!(
-            "`open -n -g -a CuaDriver --args serve{}` exited {:?}. \
-             Check that `/Applications/CuaDriver.app` is installed, or \
+            "`open -n -g -a QwenCuaDriver --args serve{}` exited {:?}. \
+             Check that `/Applications/QwenCuaDriver.app` is installed, or \
              pass --no-daemon-relaunch to bypass.",
             if pass_socket { format!(" --socket {socket_path}") } else { String::new() },
             status.code()
@@ -698,7 +698,7 @@ pub fn launch_daemon_and_wait(
     anyhow::bail!(
         "daemon did not appear on {socket_path} within {timeout_secs}s. If this \
          is the first launch, grant Accessibility + Screen Recording to \
-         CuaDriver.app in System Settings and retry. Pass --no-daemon-relaunch \
+         QwenCuaDriver.app in System Settings and retry. Pass --no-daemon-relaunch \
          to stay in-process."
     );
 }
@@ -737,7 +737,7 @@ pub fn run_mcp_via_daemon_proxy(
         // CUA_DRIVER_RS_MCP_FORCE_PROXY callers (test harness, custom
         // bundle setups) supply their own daemon — skip the auto-
         // launch step, since they don't have an installed
-        // CuaDriver.app to relaunch into. Fail fast if no daemon is
+        // QwenCuaDriver.app to relaunch into. Fail fast if no daemon is
         // up at this point.
         if crate::bundle::is_env_truthy("CUA_DRIVER_RS_MCP_FORCE_PROXY") {
             anyhow::bail!(
@@ -754,15 +754,15 @@ pub fn run_mcp_via_daemon_proxy(
                 String::new()
             };
             eprintln!(
-                "cua-driver-rs: mcp launched without CuaDriver.app's TCC grants; \
-                 auto-launching the daemon via `open -n -g -a CuaDriver --args serve{socket_suffix}` \
+                "cua-driver-rs: mcp launched without QwenCuaDriver.app's TCC grants; \
+                 auto-launching the daemon via `open -n -g -a QwenCuaDriver --args serve{socket_suffix}` \
                  and proxying MCP requests through it. Pass --no-daemon-relaunch to stay in-process."
             );
             launch_daemon_and_wait(&socket_path, 10, claude_code_compat)?;
         }
         #[cfg(not(target_os = "macos"))]
         let _ = claude_code_compat;
-        // On Linux / Windows there's no equivalent `open -a CuaDriver`
+        // On Linux / Windows there's no equivalent `open -a QwenCuaDriver`
         // mechanism to spawn a daemon attributed to the user's
         // interactive session. The caller is expected to have one
         // running already (e.g. via `cua-driver autostart enable && kick`
@@ -777,7 +777,7 @@ pub fn run_mcp_via_daemon_proxy(
                  your interactive session — on Windows run \
                  `cua-driver autostart enable && cua-driver autostart kick`; \
                  on Linux run `cua-driver serve &` in the user's session. \
-                 Then re-run `cua-driver mcp`. To skip the proxy and run \
+                 Then re-run `qwen-cua-driver mcp`. To skip the proxy and run \
                  in-process anyway (Session 0 attribution, GUI tools will \
                  return empty), pass --no-daemon-relaunch."
             );
@@ -1154,13 +1154,13 @@ pub fn run_call(
     };
     // macOS: `check_permissions` with prompt:true raises a TCC dialog. Run
     // in-process from a terminal, that dialog attributes to the *terminal*
-    // (LaunchServices' "responsible" process), not to com.trycua.driver —
+    // (LaunchServices' "responsible" process), not to com.qwencode.cua-driver —
     // so the grant lands on the wrong app and never sticks for the driver.
     // When we're a bundle CLI spawned from a terminal (should_use_daemon_proxy)
     // and there's no daemon to route through, DON'T raise the mis-attributed
     // prompt: degrade to report-only and tell the user the one launch that
-    // grants correctly (`open … CuaDriver --args serve`, which raises the
-    // dialog as CuaDriver and waits for the grant). We deliberately do NOT
+    // grants correctly (`open … QwenCuaDriver --args serve`, which raises the
+    // dialog as Qwen Cua Driver and waits for the grant). We deliberately do NOT
     // auto-spawn that daemon here — a `call` shouldn't leave a background
     // daemon behind, and the first-launch gate can lag socket creation.
     #[cfg(target_os = "macos")]
@@ -1178,10 +1178,10 @@ pub fn run_call(
         {
             eprintln!(
                 "cua-driver-rs: reporting permission status only. A prompt raised from \
-                 this terminal would attribute to the terminal, not CuaDriver, so the \
+                 this terminal would attribute to the terminal, not Qwen Cua Driver, so the \
                  grant wouldn't apply to the driver. To grant correctly, launch the \
-                 driver as its own app:\n  open -n -g -a CuaDriver --args serve\n\
-                 then approve the CuaDriver dialog in System Settings."
+                 driver as its own app:\n  open -n -g -a QwenCuaDriver --args serve\n\
+                 then approve the Qwen Cua Driver dialog in System Settings."
             );
             effective = Some(serde_json::json!({ "prompt": false }));
         }
@@ -1707,10 +1707,10 @@ pub fn run_permissions_cmd(
     }
 }
 
-/// Report the CuaDriver daemon's TCC status — reliably, or not at all.
+/// Report the Qwen Cua Driver daemon's TCC status — reliably, or not at all.
 ///
 /// macOS attributes Accessibility / Screen-Recording to the *responsible
-/// process*, so the ONLY process that can read `com.trycua.driver`'s real
+/// process*, so the ONLY process that can read `com.qwencode.cua-driver`'s real
 /// grants is the daemon running as its own responsible process. When the
 /// daemon is up we query it and report its
 /// `driver-daemon`-attributed answer. When it is NOT up we deliberately
@@ -1722,7 +1722,7 @@ pub fn run_permissions_cmd(
 fn run_permissions_status(json: bool) {
     let socket = crate::serve::default_socket_path();
 
-    // Only a listening daemon can answer for com.trycua.driver. A failed/!ok
+    // Only a listening daemon can answer for com.qwencode.cua-driver. A failed/!ok
     // response (e.g. daemon mid-re-exec during the gate's recheck window) is
     // treated the same as "no daemon" → unknown.
     let daemon_status: Option<serde_json::Value> = if crate::serve::is_daemon_listening(&socket) {
@@ -1760,8 +1760,8 @@ fn run_permissions_status(json: bool) {
             let payload = serde_json::json!({
                 "daemon_running": false,
                 "status": "unknown",
-                "reason": "no CuaDriver daemon is running under the driver's own identity \
-                           (com.trycua.driver), so its real TCC status can't be read from this \
+                "reason": "no Qwen Cua Driver daemon is running under the driver's own identity \
+                           (com.qwencode.cua-driver), so its real TCC status can't be read from this \
                            process. Run `cua-driver permissions grant` to grant + verify.",
             });
             println!(
@@ -1773,7 +1773,7 @@ fn run_permissions_status(json: bool) {
         println!("Accessibility:    ❓ unknown");
         println!("Screen Recording: ❓ unknown");
         println!(
-            "No CuaDriver daemon is running under the driver's own identity (com.trycua.driver), \
+            "No Qwen Cua Driver daemon is running under the driver's own identity (com.qwencode.cua-driver), \
              so its real TCC status can't be read."
         );
         println!(
@@ -1781,7 +1781,7 @@ fn run_permissions_status(json: bool) {
              driver's.)"
         );
         println!("  → Run `cua-driver permissions grant` to grant + verify, or start the daemon");
-        println!("    (`open -n -g -a CuaDriver --args serve`) and re-run this command.");
+        println!("    (`open -n -g -a QwenCuaDriver --args serve`) and re-run this command.");
         return;
     };
 
@@ -1817,8 +1817,8 @@ fn run_permissions_status(json: bool) {
     }
 }
 
-/// Launch CuaDriver via LaunchServices so the permission prompt attributes to
-/// com.trycua.driver, wait (user-paced) for the daemon to come up — its socket
+/// Launch Qwen Cua Driver via LaunchServices so the permission prompt attributes to
+/// com.qwencode.cua-driver, wait (user-paced) for the daemon to come up — its socket
 /// only appears once the permissions gate passes, i.e. the grant was given —
 /// then report the driver's own status.
 fn run_permissions_grant() {
@@ -1826,18 +1826,18 @@ fn run_permissions_grant() {
     {
         let socket = crate::serve::default_socket_path();
         if crate::serve::is_daemon_listening(&socket) {
-            println!("CuaDriver daemon already running — checking its permissions…");
+            println!("Qwen Cua Driver daemon already running — checking its permissions…");
         } else {
-            println!("Launching CuaDriver to request permissions.");
+            println!("Launching Qwen Cua Driver to request permissions.");
             println!(
-                "A dialog titled \u{201c}Cua Driver\u{201d} will appear — approve Accessibility \
+                "A dialog titled \u{201c}Qwen Cua Driver\u{201d} will appear — approve Accessibility \
                  and Screen Recording in System Settings, then this command continues."
             );
             // Permissions-grant launch never needs the compat screenshot surface.
             if let Err(e) = launch_daemon_and_wait(&socket, 180, false) {
-                eprintln!("\nDidn't detect the CuaDriver daemon: {e}");
+                eprintln!("\nDidn't detect the Qwen Cua Driver daemon: {e}");
                 eprintln!(
-                    "If you haven't yet, grant Accessibility + Screen Recording to CuaDriver \
+                    "If you haven't yet, grant Accessibility + Screen Recording to Qwen Cua Driver \
                      in System Settings, then re-run `cua-driver permissions grant`."
                 );
                 process::exit(1);
@@ -1884,7 +1884,7 @@ fn run_permissions_grant() {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
         if ax && sr {
-            println!("\n✅ CuaDriver has Accessibility + Screen Recording. You're set.");
+            println!("\n✅ Qwen Cua Driver has Accessibility + Screen Recording. You're set.");
         } else {
             let missing = match (ax, sr) {
                 (false, false) => "Accessibility + Screen Recording",
@@ -1894,7 +1894,7 @@ fn run_permissions_grant() {
             };
             println!("\n⚠️  Timed out waiting on: {missing}.");
             println!(
-                "Approve CuaDriver for \u{201c}Cua Driver\u{201d} in System Settings \u{2192} \
+                "Approve Qwen Cua Driver for \u{201c}Qwen Cua Driver\u{201d} in System Settings \u{2192} \
                  Privacy & Security, then re-run `cua-driver permissions grant`."
             );
         }
@@ -1975,7 +1975,7 @@ fn cli_docs_json() -> serde_json::Value {
             {
                 "name": "mcp",
                 "abstract": "Run the stdio MCP server.",
-                "discussion": "On macOS, shell-spawned MCP processes can auto-launch and proxy through a CuaDriver.app daemon so TCC grants attach to the bundle. On Windows and Linux, MCP proxies through an already-running daemon when one is listening.",
+                "discussion": "On macOS, shell-spawned MCP processes can auto-launch and proxy through a QwenCuaDriver.app daemon so TCC grants attach to the bundle. On Windows and Linux, MCP proxies through an already-running daemon when one is listening.",
                 "arguments": no_args,
                 "options": [
                     {"name":"socket","short_name":null,"help":"Override the daemon socket or named-pipe path used by the proxy fallback.","type":"String","default_value":null,"is_optional":true}
@@ -2254,8 +2254,8 @@ pub fn run_dump_docs_with_type(registry: &ToolRegistry, pretty: bool, doc_type: 
 ///   - running process identity (path, pid, version)
 ///   - codesign info (cdhash, team-id, authority) via `codesign -dvvv`
 ///   - AX + screen recording TCC status (check_permissions tool)
-///   - install layout (/Applications/CuaDriver.app, ~/.local/bin/cua-driver)
-///   - TCC DB rows for com.trycua.driver (sqlite3, best-effort)
+///   - install layout (/Applications/QwenCuaDriver.app, ~/.local/bin/cua-driver)
+///   - TCC DB rows for com.qwencode.cua-driver (sqlite3, best-effort)
 ///   - config + state paths with existence booleans
 pub fn run_diagnose_cmd(registry: std::sync::Arc<ToolRegistry>) {
     let sections = [
@@ -2364,7 +2364,7 @@ fn diagnose_install_layout_section() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let mut lines = vec!["## install layout".to_owned()];
 
-    let app_path = "/Applications/CuaDriver.app";
+    let app_path = "/Applications/QwenCuaDriver.app";
     let app_exists = std::path::Path::new(app_path).exists();
     lines.push(format!("bundle:  {app_path}   exists={app_exists}"));
     if app_exists {
@@ -2406,7 +2406,7 @@ fn diagnose_install_layout_section() -> String {
         }
     }
 
-    let stale = format!("{home}/Applications/CuaDriver.app");
+    let stale = format!("{home}/Applications/QwenCuaDriver.app");
     if std::path::Path::new(&stale).exists() {
         lines.push(format!(
             "stale:   {stale}   \u{2190} old install-local.sh path, consider removing"
@@ -2422,9 +2422,9 @@ fn diagnose_tcc_db_section() -> String {
         "{home}/Library/Application Support/com.apple.TCC/TCC.db"
     );
     let sql = "SELECT service, client, client_type, auth_value, auth_reason, \
-               hex(csreq) AS csreq_hex FROM access WHERE client='com.trycua.driver';";
+               hex(csreq) AS csreq_hex FROM access WHERE client='com.qwencode.cua-driver';";
 
-    let mut lines = vec!["## tcc database rows for com.trycua.driver".to_owned()];
+    let mut lines = vec!["## tcc database rows for com.qwencode.cua-driver".to_owned()];
     lines.push(format!("(reading {db} — best-effort; system TCC DB requires FDA)"));
     lines.push(String::new());
 

@@ -2,13 +2,13 @@
 # cua-driver local/debug installer — multi-backend dispatcher.
 #
 # Mirrors the shape of install.sh: a single user-visible entry point at
-# libs/cua-driver/scripts/install-local.sh that delegates to a per-backend
+# packages/cua-driver/scripts/install-local.sh that delegates to a per-backend
 # private helper based on host + flags.
 #
 # Helpers (private — do not invoke directly):
-#   _install-local-rust.sh    Builds cua-driver from libs/cua-driver/rust
+#   _install-local-rust.sh    Builds cua-driver from packages/cua-driver/rust
 #                             and installs the cross-platform binary
-#   _install-local-swift.sh   Builds CuaDriver.app from libs/cua-driver/swift
+#   _install-local-swift.sh   Builds CuaDriver.app from packages/cua-driver/swift
 #                             and installs to /Applications + ~/.local/bin
 #
 # Defaults:

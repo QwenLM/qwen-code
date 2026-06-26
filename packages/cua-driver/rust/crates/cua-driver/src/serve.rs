@@ -1532,7 +1532,7 @@ mod gate_tests {
         reg.register(Box::new(ProbeTool::new()));
         let registry = Arc::new(reg);
 
-        // Unique temp socket — never the default socket / CuaDriver.app daemon.
+        // Unique temp socket — never the default socket / QwenCuaDriver.app daemon.
         let socket = format!(
             "/tmp/cua-driver-gate-test-{}-{}.sock",
             std::process::id(),

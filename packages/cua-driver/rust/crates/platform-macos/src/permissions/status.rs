@@ -56,7 +56,7 @@ pub fn accessibility_granted() -> bool {
 /// titles are gated.  The fallback therefore returned `true` on any
 /// populated desktop regardless of grant state, which (a) made
 /// `check_permissions` report a false positive after `tccutil reset
-/// ScreenCapture com.trycua.driver`, and (b) short-circuited the
+/// ScreenCapture com.qwencode.cua-driver`, and (b) short-circuited the
 /// startup permissions gate's prompt for users who had never granted SR.
 pub fn screen_recording_granted() -> bool {
     #[link(name = "CoreGraphics", kind = "framework")]

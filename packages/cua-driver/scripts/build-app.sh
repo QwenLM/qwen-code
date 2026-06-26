@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build cua-driver and wrap it in a minimal CuaDriver.app bundle with a
+# Build cua-driver and wrap it in a minimal QwenCuaDriver.app bundle with a
 # stable CFBundleIdentifier. TCC keys its grants on the identifier so
 # grants survive every `swift build` rebuild.
 #
@@ -9,7 +9,7 @@
 # MouseInput.swift). Fall back to ad-hoc otherwise so `swift build`
 # still works on contributor machines without a cert.
 #
-# Bundle ends up at .build/CuaDriver.app — not production, just for dev
+# Bundle ends up at .build/QwenCuaDriver.app — not production, just for dev
 # + integration tests. The real signed cask build lives elsewhere.
 set -euo pipefail
 
@@ -24,7 +24,7 @@ echo "==> swift build ($CONFIG)"
 swift build -c "$CONFIG"
 
 BUILD_BIN=".build/$CONFIG/cua-driver"
-APP_BUNDLE=".build/CuaDriver.app"
+APP_BUNDLE=".build/QwenCuaDriver.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 # Entitlements stay at libs/cua-driver/scripts/ (cross-cutting); we're now
@@ -47,7 +47,7 @@ fi
 # Claude Code skill pack. install.sh symlinks ~/.claude/skills/cua-driver
 # to this path when a Claude Code install is detected on the user's
 # machine. Ships inside the bundle so it survives auto-updates and
-# relocations of CuaDriver.app.
+# relocations of QwenCuaDriver.app.
 if [[ -d "Skills/cua-driver" ]]; then
     mkdir -p "$APP_CONTENTS/Resources/Skills"
     cp -R Skills/cua-driver "$APP_CONTENTS/Resources/Skills/cua-driver"
@@ -79,17 +79,17 @@ if [[ -n "$CERT_SHA" ]]; then
         --force \
         --deep \
         --sign "$CERT_SHA" \
-        --identifier com.trycua.driver \
+        --identifier com.qwencode.cua-driver \
         --entitlements "$ENTITLEMENTS" \
         --options runtime \
         --timestamp=none \
         "$APP_BUNDLE"
 else
-    echo "==> codesign (ad-hoc fallback, identifier com.trycua.driver)"
+    echo "==> codesign (ad-hoc fallback, identifier com.qwencode.cua-driver)"
     codesign \
         --force \
         --sign - \
-        --identifier com.trycua.driver \
+        --identifier com.qwencode.cua-driver \
         --entitlements "$ENTITLEMENTS" \
         --options runtime \
         --timestamp=none \

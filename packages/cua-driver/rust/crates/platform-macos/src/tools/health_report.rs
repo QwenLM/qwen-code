@@ -36,7 +36,7 @@ pub const MACOS_CHECK_NAMES: &[&str] = &[
 /// The canonical bundle identifier whose TCC grants matter for the
 /// daemon. The `bundle_identity` check passes when the running process
 /// reports this id.
-pub const CANONICAL_BUNDLE_ID: &str = "com.trycua.driver";
+pub const CANONICAL_BUNDLE_ID: &str = "com.qwencode.cua-driver";
 
 pub struct MacosHealthProvider;
 
@@ -129,17 +129,17 @@ pub(crate) fn check_bundle_identity() -> CheckEntry {
         None | Some("") => (
             "Process has no CFBundleIdentifier.".to_owned(),
             format!(
-                "Run the binary inside CuaDriver.app so TCC grants attribute correctly. \
-                 Start the daemon with `open -n -g -a CuaDriver --args serve` and \
-                 connect via `cua-driver mcp`."
+                "Run the binary inside QwenCuaDriver.app so TCC grants attribute correctly. \
+                 Start the daemon with `open -n -g -a QwenCuaDriver --args serve` and \
+                 connect via `qwen-qwen-cua-driver mcp`."
             ),
         ),
         Some(other) => (
             format!("Bundle is {other}, not {CANONICAL_BUNDLE_ID}."),
             format!(
                 "TCC grants will be attributed to {other}, not the cua-driver daemon. \
-                 Run via `cua-driver mcp` (auto-relaunches inside CuaDriver.app) or \
-                 start the daemon manually: `open -n -g -a CuaDriver --args serve`."
+                 Run via `qwen-qwen-cua-driver mcp` (auto-relaunches inside QwenCuaDriver.app) or \
+                 start the daemon manually: `open -n -g -a QwenCuaDriver --args serve`."
             ),
         ),
     };
@@ -160,10 +160,10 @@ fn check_tcc_accessibility() -> CheckEntry {
     CheckEntry::fail(
         NAME_TCC_ACCESSIBILITY,
         "Accessibility is NOT granted for this process.",
-        "Grant Accessibility to CuaDriver.app in System Settings → Privacy & Security → \
-         Accessibility. If the process bundle is not com.trycua.driver (see bundle_identity), \
-         the grant must target the responsible app — restart via `cua-driver mcp` to relaunch \
-         inside CuaDriver.app.",
+        "Grant Accessibility to QwenCuaDriver.app in System Settings → Privacy & Security → \
+         Accessibility. If the process bundle is not com.qwencode.cua-driver (see bundle_identity), \
+         the grant must target the responsible app — restart via `qwen-qwen-cua-driver mcp` to relaunch \
+         inside QwenCuaDriver.app.",
     )
     .with_data(data)
 }
@@ -181,7 +181,7 @@ fn check_tcc_screen_recording() -> CheckEntry {
     CheckEntry::fail(
         NAME_TCC_SCREEN_RECORDING,
         "Screen Recording is NOT granted for this process.",
-        "Grant Screen Recording to CuaDriver.app in System Settings → Privacy & Security → \
+        "Grant Screen Recording to QwenCuaDriver.app in System Settings → Privacy & Security → \
          Screen Recording. The grant is attributed to the responsible process — see \
          bundle_identity to confirm the right binary is being prompted.",
     )
@@ -252,7 +252,7 @@ fn probe_shareable_displays() -> Result<u32, String> {
 
 /// Read the running process's `CFBundleIdentifier` via CoreFoundation.
 /// Returns `None` when the process has no associated bundle (e.g.
-/// running the bare binary outside `CuaDriver.app`).
+/// running the bare binary outside `QwenCuaDriver.app`).
 fn current_bundle_identifier() -> Option<String> {
     use core_foundation::base::TCFType;
     use core_foundation::bundle::{CFBundle, CFBundleGetMainBundle};
@@ -343,8 +343,8 @@ mod tests {
 
     #[test]
     fn bundle_identity_in_test_host_fails_with_full_shape() {
-        // The Rust test binary runs outside CuaDriver.app, so its
-        // bundle id is either absent or not com.trycua.driver. Either
+        // The Rust test binary runs outside QwenCuaDriver.app, so its
+        // bundle id is either absent or not com.qwencode.cua-driver. Either
         // way the documented fail-mode shape applies: message + hint
         // + data + (when bid is present) bundle_identifier surfaced.
         //

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # cua-driver installer — download the latest Rust implementation from
 # GitHub Releases and wire it into the user's PATH. On macOS this moves
-# CuaDriver.app to /Applications and symlinks the `cua-driver` binary
+# QwenCuaDriver.app to /Applications and symlinks the `qwen-cua-driver` binary
 # into ~/.local/bin. Sudo-free.
 #
 # Usage (from README + release body):
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 #
 # Flags:
 #   --bin-dir <path>     install the cua-driver wrapper to <path> instead of
@@ -28,12 +28,12 @@
 #   CUA_DRIVER_NO_MODIFY_PATH=1     same as --no-modify-path
 #
 # Uninstall:
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/uninstall.sh)"
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)"
 set -euo pipefail
 
-REPO="trycua/cua"
-APP_NAME="CuaDriver.app"
-BINARY_NAME="cua-driver"
+REPO="QwenLM/qwen-code"
+APP_NAME="QwenCuaDriver.app"
+BINARY_NAME="qwen-cua-driver"
 TAG_PREFIX="cua-driver-v"
 APP_DEST="/Applications/$APP_NAME"
 BIN_DIR="${CUA_DRIVER_BIN_DIR:-$HOME/.local/bin}"
@@ -45,7 +45,7 @@ NO_MODIFY_PATH="${CUA_DRIVER_NO_MODIFY_PATH:-0}"
 # The Rust path below either execs the on-disk helper (dev /
 # checked-out-tree case) or curls this URL and pipes it to bash
 # (`curl ... | bash` install case).
-RUST_INSTALLER_URL="https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/_install-rust.sh"
+RUST_INSTALLER_URL="https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/_install-rust.sh"
 
 # Lightweight flag parsing (avoid getopt; macOS getopt is GNU-incompatible).
 #
@@ -128,7 +128,7 @@ if [[ "$USE_RUST_BACKEND" == "1" ]]; then
     LOCAL_RUST_INSTALLER=""
     if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "-" && -f "${BASH_SOURCE[0]}" ]]; then
         SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-        # Helper lives next to this script under libs/cua-driver/scripts/.
+        # Helper lives next to this script under packages/cua-driver/scripts/.
         CANDIDATE="$SCRIPT_DIR/_install-rust.sh"
         if [[ -f "$CANDIDATE" ]]; then
             LOCAL_RUST_INSTALLER="$CANDIDATE"
@@ -286,7 +286,7 @@ log "symlinked $BIN_LINK -> $APP_BINARY"
 
 # Existing /usr/local/bin/cua-driver from older installs stays in place
 # so MCP client configs that reference it keep working — its target is the
-# same /Applications/CuaDriver.app/.../cua-driver binary that we just
+# same /Applications/QwenCuaDriver.app/.../qwen-cua-driver binary that we just
 # refreshed, so the link is still valid post-upgrade.
 LEGACY_BIN_LINK="/usr/local/bin/$BINARY_NAME"
 if [[ "$BIN_LINK" != "$LEGACY_BIN_LINK" ]] && [[ -L "$LEGACY_BIN_LINK" ]]; then
@@ -297,7 +297,7 @@ fi
 #
 # Drop a symlink for each detected agent that auto-loads Anthropic-format
 # SKILL.md skills from a folder. Auto-updates atomically replace
-# /Applications/CuaDriver.app so the symlinks stay valid across releases.
+# /Applications/QwenCuaDriver.app so the symlinks stay valid across releases.
 # We never overwrite an existing link or directory — dev users with a
 # symlink pointing at a working copy of the repo keep theirs.
 #
@@ -409,7 +409,7 @@ if [[ "$PATH_NEEDS_FIX" == "1" ]]; then
                 log "$BIN_DIR already referenced in $RC_FILE (skipping rc edit)"
             else
                 {
-                    printf '\n# Added by cua-driver installer — see https://github.com/trycua/cua\n'
+                    printf '\n# Added by cua-driver installer — see https://github.com/QwenLM/qwen-code\n'
                     printf '%s\n' "$EXPORT_LINE"
                 } >> "$RC_FILE"
                 log "appended PATH entry to $RC_FILE — restart your shell or run: source $RC_FILE"
@@ -428,7 +428,7 @@ cat <<FINALEOF
 Next steps:
 
   1. Grant macOS permissions (required either way):
-       open -n -g -a CuaDriver --args serve
+       open -n -g -a QwenCuaDriver --args serve
        cua-driver check_permissions
      macOS raises the Accessibility + Screen Recording dialogs.
      Grant both, then re-run check_permissions to confirm.

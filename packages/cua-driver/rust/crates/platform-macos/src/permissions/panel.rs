@@ -2,7 +2,7 @@
 //! auto-dismiss on all-green.
 //!
 //! Replaces the terminal banner when the daemon is launched from the
-//! bundled `/Applications/CuaDriver.app`. Mirrors the Swift gate at
+//! bundled `/Applications/QwenCuaDriver.app`. Mirrors the Swift gate at
 //! `libs/cua-driver/Sources/CuaDriverCore/Permissions/PermissionsGate.swift`.
 //!
 //! ## UX
@@ -10,9 +10,9 @@
 //! On first launch with missing grants the panel shows:
 //!
 //! ```text
-//! ┌─ CuaDriver Permissions ─────────────────────┐
-//! │  CuaDriver needs your permission            │
-//! │  Grant both so CuaDriver can …              │
+//! ┌─ Qwen Cua Driver Permissions ───────────────┐
+//! │  Qwen Cua Driver needs your permission      │
+//! │  Grant both so Qwen Cua Driver can …        │
 //! │                                             │
 //! │  ✗ Accessibility                            │
 //! │      lets cua-driver read the accessibility │
@@ -21,7 +21,7 @@
 //! │  ✗ Screen Recording                         │
 //! │      lets cua-driver capture per-window …   │
 //! │                                             │
-//! │  ✅ All set. CuaDriver is ready to use.      │
+//! │  ✅ All set. Qwen Cua Driver is ready to use.│
 //! │     (hidden until both grants flip green)   │
 //! │                                             │
 //! │  [ Continue anyway ]  [ Open Settings ]     │
@@ -271,7 +271,7 @@ unsafe fn show_modal_unsafe(opts: &PanelOpts) -> PanelOutcome {
     // NSFloatingWindowLevel (3) so it stays on top of System Settings
     // when the user navigates over to grant permissions.
     let _: () = msg_send![window, setLevel: 3i64];
-    let title = ns_string("CuaDriver Permissions");
+    let title = ns_string("Qwen Cua Driver Permissions");
     let _: () = msg_send![window, setTitle: title];
 
     let content_view: *mut AnyObject = msg_send![window, contentView];
@@ -559,9 +559,9 @@ unsafe fn update_row(row: RowHandles, granted: bool) {
 
 fn heading_for(s: PermissionsStatus) -> &'static str {
     match (s.accessibility, s.screen_recording) {
-        (true, true) => "CuaDriver is ready",
+        (true, true) => "Qwen Cua Driver is ready",
         (true, false) | (false, true) => "One more permission",
-        (false, false) => "CuaDriver needs your permission",
+        (false, false) => "Qwen Cua Driver needs your permission",
     }
 }
 
@@ -574,7 +574,7 @@ fn subheading_for(s: PermissionsStatus) -> &'static str {
         (false, true) =>
             "Screen Recording is granted. Now grant Accessibility in the System Settings window that just opened.",
         (false, false) =>
-            "Grant both so CuaDriver can inspect and drive native apps on your behalf. This window closes on its own once each item turns green.",
+            "Grant both so Qwen Cua Driver can inspect and drive native apps on your behalf. This window closes on its own once each item turns green.",
     }
 }
 
@@ -738,7 +738,7 @@ unsafe fn build_row(
 
 unsafe fn build_ready_strip(origin: NSPoint, width: f64) -> *mut AnyObject {
     let strip = build_label(
-        "✅  All set. CuaDriver is ready to use.",
+        "✅  All set. Qwen Cua Driver is ready to use.",
         12.0,
         /*bold=*/ false,
         origin,
@@ -883,12 +883,12 @@ mod tests {
             accessibility: a,
             screen_recording: sr,
         };
-        assert_eq!(heading_for(st(true, true)), "CuaDriver is ready");
+        assert_eq!(heading_for(st(true, true)), "Qwen Cua Driver is ready");
         assert_eq!(heading_for(st(true, false)), "One more permission");
         assert_eq!(heading_for(st(false, true)), "One more permission");
         assert_eq!(
             heading_for(st(false, false)),
-            "CuaDriver needs your permission"
+            "Qwen Cua Driver needs your permission"
         );
     }
 

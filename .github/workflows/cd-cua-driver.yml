@@ -14,7 +14,7 @@ name: "CD: cua-driver (relative-coordinate fork)"
 #
 # Artifact convention (matches the qwen-code computer-use downloader):
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
-#            (each contains the universal binary + signed CuaDriver.app)
+#            (each contains the universal binary + signed QwenCuaDriver.app)
 #            + *-binary.tar.gz (bare universal binary)
 #   Linux  : cua-driver-rs-<v>-linux-{x86_64,arm64}.tar.gz + *-binary.tar.gz
 #   Windows: cua-driver-rs-<v>-windows-{x86_64,arm64}.zip + *-binary.zip
@@ -98,10 +98,10 @@ jobs:
           TARGET="${{ matrix.target }}"
           STAGE="cua-driver-rs-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "release/${STAGE}"
-          cp "target/${TARGET}/release/cua-driver" "release/${STAGE}/"
+          cp "target/${TARGET}/release/qwen-cua-driver" "release/${STAGE}/"
           cp ../LICENSE.md "release/${STAGE}/LICENSE" 2>/dev/null || true
           (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
-          tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" cua-driver
+          tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
           ls -lh "release/${STAGE}.tar.gz" "release/${STAGE}-binary.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
@@ -156,10 +156,10 @@ jobs:
           $target  = "${{ matrix.target }}"
           $stage   = "cua-driver-rs-$version-windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path "release/$stage" | Out-Null
-          Copy-Item "target/$target/release/cua-driver.exe" "release/$stage/"
+          Copy-Item "target/$target/release/qwen-cua-driver.exe" "release/$stage/"
           Copy-Item "target/$target/release/cua-driver-uia.exe" "release/$stage/"
           Compress-Archive -Path "release/$stage" -DestinationPath "release/$stage.zip" -Force
-          Compress-Archive -Path "release/$stage/cua-driver.exe","release/$stage/cua-driver-uia.exe" -DestinationPath "release/$stage-binary.zip" -Force
+          Compress-Archive -Path "release/$stage/qwen-cua-driver.exe","release/$stage/cua-driver-uia.exe" -DestinationPath "release/$stage-binary.zip" -Force
           Get-ChildItem "release/$stage*.zip"
       - uses: actions/upload-artifact@v4
         with:
@@ -210,10 +210,10 @@ jobs:
         run: |
           mkdir -p release/universal
           lipo -create \
-            target/aarch64-apple-darwin/release/cua-driver \
-            target/x86_64-apple-darwin/release/cua-driver \
-            -output release/universal/cua-driver
-          lipo -info release/universal/cua-driver
+            target/aarch64-apple-darwin/release/qwen-cua-driver \
+            target/x86_64-apple-darwin/release/qwen-cua-driver \
+            -output release/universal/qwen-cua-driver
+          lipo -info release/universal/qwen-cua-driver
       - name: Import signing certificate + discover identity
         if: env.DO_NOTARIZE == 'true'
         env:
@@ -247,21 +247,21 @@ jobs:
         run: |
           codesign --force --timestamp --options runtime \
             --entitlements scripts/CuaDriver.entitlements \
-            --sign "$SIGN_IDENTITY" release/universal/cua-driver
-          codesign --verify --strict --verbose=2 release/universal/cua-driver
-      - name: Assemble CuaDriver.app bundle
+            --sign "$SIGN_IDENTITY" release/universal/qwen-cua-driver
+          codesign --verify --strict --verbose=2 release/universal/qwen-cua-driver
+      - name: Assemble QwenCuaDriver.app bundle
         working-directory: packages/cua-driver/rust
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          mkdir -p release/CuaDriver.app
-          cp -R scripts/CuaDriverBundle/Contents release/CuaDriver.app/Contents
-          cp release/universal/cua-driver release/CuaDriver.app/Contents/MacOS/cua-driver
-          chmod +x release/CuaDriver.app/Contents/MacOS/cua-driver
-          plutil -replace CFBundleShortVersionString -string "$VERSION" release/CuaDriver.app/Contents/Info.plist
-          plutil -replace CFBundleVersion -string "$VERSION" release/CuaDriver.app/Contents/Info.plist
-          rm -f release/CuaDriver.app/Contents/MacOS/.gitkeep
-          plutil -p release/CuaDriver.app/Contents/Info.plist | grep -E 'CFBundle(Short)?Version'
-      - name: Codesign + notarize + staple CuaDriver.app (App Store Connect API key)
+          mkdir -p release/QwenCuaDriver.app
+          cp -R scripts/CuaDriverBundle/Contents release/QwenCuaDriver.app/Contents
+          cp release/universal/qwen-cua-driver release/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver
+          chmod +x release/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver
+          plutil -replace CFBundleShortVersionString -string "$VERSION" release/QwenCuaDriver.app/Contents/Info.plist
+          plutil -replace CFBundleVersion -string "$VERSION" release/QwenCuaDriver.app/Contents/Info.plist
+          rm -f release/QwenCuaDriver.app/Contents/MacOS/.gitkeep
+          plutil -p release/QwenCuaDriver.app/Contents/Info.plist | grep -E 'CFBundle(Short)?Version'
+      - name: Codesign + notarize + staple QwenCuaDriver.app (App Store Connect API key)
         if: env.DO_NOTARIZE == 'true'
         working-directory: packages/cua-driver/rust
         env:
@@ -271,21 +271,21 @@ jobs:
         run: |
           codesign --force --deep --timestamp --options runtime \
             --entitlements scripts/CuaDriver.entitlements \
-            --sign "$SIGN_IDENTITY" release/CuaDriver.app
-          codesign --verify --strict --verbose=2 release/CuaDriver.app
+            --sign "$SIGN_IDENTITY" release/QwenCuaDriver.app
+          codesign --verify --strict --verbose=2 release/QwenCuaDriver.app
 
           # notarytool with App Store Connect API key (.p8). ditto a zip,
           # submit, wait, then staple the ticket into the bundle.
           echo "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 --decode > notary_key.p8
-          /usr/bin/ditto -c -k --keepParent release/CuaDriver.app release/CuaDriver.app.zip
-          xcrun notarytool submit release/CuaDriver.app.zip \
+          /usr/bin/ditto -c -k --keepParent release/QwenCuaDriver.app release/QwenCuaDriver.app.zip
+          xcrun notarytool submit release/QwenCuaDriver.app.zip \
             --key notary_key.p8 \
             --key-id "$APPLE_NOTARY_KEY_ID" \
             --issuer "$APPLE_NOTARY_ISSUER_ID" \
             --wait --timeout 20m
-          xcrun stapler staple release/CuaDriver.app
-          spctl -a -vv -t exec release/CuaDriver.app || true
-          rm -f release/CuaDriver.app.zip notary_key.p8
+          xcrun stapler staple release/QwenCuaDriver.app
+          spctl -a -vv -t exec release/QwenCuaDriver.app || true
+          rm -f release/QwenCuaDriver.app.zip notary_key.p8
       - name: Package
         working-directory: packages/cua-driver/rust
         run: |
@@ -295,11 +295,11 @@ jobs:
             mkdir -p "release/${STAGE}"
             # Same universal slice in all three named tarballs (matches the
             # upstream convention so arch-keyed downloaders still work).
-            cp release/universal/cua-driver "release/${STAGE}/"
-            cp -R release/CuaDriver.app "release/${STAGE}/CuaDriver.app"
+            cp release/universal/qwen-cua-driver "release/${STAGE}/"
+            cp -R release/QwenCuaDriver.app "release/${STAGE}/QwenCuaDriver.app"
             cp ../LICENSE.md "release/${STAGE}/LICENSE" 2>/dev/null || true
             (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
-            tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" cua-driver
+            tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
           done
           ls -lh release/cua-driver-rs-*-darwin-*.tar.gz
       - uses: actions/upload-artifact@v4
@@ -344,7 +344,7 @@ jobs:
             cua-driver prebuilt binaries — relative-coordinate fork
             (vendored under `packages/cua-driver`).
 
-            - **macOS**: codesigned + notarized universal binary + `CuaDriver.app`
+            - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
             - **Windows**: unsigned (x86_64 + arm64)
 

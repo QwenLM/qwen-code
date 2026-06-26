@@ -24,10 +24,10 @@
 # Linux layout produced (matches install.sh):
 #
 #   ${CUA_DRIVER_HOME:-$HOME/.cua-driver}/packages/
-#       releases/<version>-local-<config>-<target>/cua-driver
-#       current/cua-driver  -> ../releases/<active>/cua-driver
-#   ${CUA_DRIVER_INSTALL_DIR:-$HOME/.local/bin}/cua-driver
-#       -> ../current/cua-driver
+#       releases/<version>-local-<config>-<target>/qwen-cua-driver
+#       current/qwen-cua-driver  -> ../releases/<active>/qwen-cua-driver
+#   ${CUA_DRIVER_INSTALL_DIR:-$HOME/.local/bin}/qwen-cua-driver
+#       -> ../current/qwen-cua-driver
 #
 # Legacy env vars `CUA_DRIVER_RS_HOME` / `CUA_DRIVER_RS_INSTALL_DIR` /
 # `CUA_DRIVER_RS_BIN_DIR` are still accepted for backwards compat
@@ -35,8 +35,8 @@
 # initial rename and ported in PR #1717).
 #
 # macOS layout produced:
-#   /Applications/CuaDriver.app/Contents/MacOS/cua-driver  (bundle replaced wholesale)
-#   $HOME/.local/bin/cua-driver -> .../CuaDriver.app/Contents/MacOS/cua-driver
+#   /Applications/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver  (bundle replaced wholesale)
+#   $HOME/.local/bin/qwen-cua-driver -> .../QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver
 #
 # The version string carries `-local-debug` / `-local-release` so it
 # never collides with a real release dir and is trivial to GC.
@@ -44,8 +44,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Rust workspace root: scripts/ is the cross-cutting installer dir at
-# libs/cua-driver/scripts/; the Cargo workspace lives one level deeper
-# under libs/cua-driver/rust/.
+# packages/cua-driver/scripts/; the Cargo workspace lives one level deeper
+# under packages/cua-driver/rust/.
 REPO_ROOT="$(cd "$SCRIPT_DIR/../rust" && pwd)"
 
 # --- Load shared daemon-cleanup helpers ---------------------------------
@@ -101,7 +101,7 @@ while [ "$#" -gt 0 ]; do
             echo "                  macOS: LaunchAgent under ~/Library/LaunchAgents"
             echo "                  Linux: systemd --user unit"
             echo "                On macOS this also fixes TCC: a launchd-started daemon"
-            echo "                is attributed to com.trycua.driver (not your terminal),"
+            echo "                is attributed to com.qwencode.cua-driver (not your terminal),"
             echo "                so you grant Accessibility + Screen Recording once and"
             echo "                every cua-driver call/mcp routes through it correctly."
             echo "  --help        Show this help."
@@ -154,7 +154,7 @@ echo "${BOLD}${BLUE}cua-driver-rs local installer${NORMAL}"
 echo "  source:  ${BOLD}$REPO_ROOT${NORMAL}"
 echo "  config:  ${BOLD}$BUILD_CONFIG${NORMAL}"
 echo "  target:  ${BOLD}$TARGET_TRIPLE${NORMAL}"
-echo "  bin:     ${BOLD}$BIN_DIR/cua-driver${NORMAL}"
+echo "  bin:     ${BOLD}$BIN_DIR/qwen-cua-driver${NORMAL}"
 echo "  current: ${BOLD}$CURRENT_LINK${NORMAL}"
 echo ""
 
@@ -195,7 +195,7 @@ else
     cargo build -p cua-driver
 fi
 
-BUILT_BINARY="$REPO_ROOT/target/$BUILD_CONFIG/cua-driver"
+BUILT_BINARY="$REPO_ROOT/target/$BUILD_CONFIG/qwen-cua-driver"
 if [ ! -x "$BUILT_BINARY" ]; then
     echo "${RED}Error: build produced no binary at $BUILT_BINARY${NORMAL}"
     exit 1
@@ -206,8 +206,8 @@ echo ""
 
 echo "${BOLD}Staging into $VERSIONED_DIR${NORMAL}"
 mkdir -p "$VERSIONED_DIR"
-cp "$BUILT_BINARY" "$VERSIONED_DIR/cua-driver"
-chmod +x "$VERSIONED_DIR/cua-driver"
+cp "$BUILT_BINARY" "$VERSIONED_DIR/qwen-cua-driver"
+chmod +x "$VERSIONED_DIR/qwen-cua-driver"
 
 # Re-sign with a fresh ad-hoc signature.
 #
@@ -222,7 +222,7 @@ chmod +x "$VERSIONED_DIR/cua-driver"
 # accepts. Cheap (~50ms on a 40MB binary). macOS-only — no-op on Linux.
 if [ "$OS" = "Darwin" ]; then
     if command -v codesign >/dev/null 2>&1; then
-        codesign --force --sign - "$VERSIONED_DIR/cua-driver" 2>/dev/null \
+        codesign --force --sign - "$VERSIONED_DIR/qwen-cua-driver" 2>/dev/null \
             || echo "${YELLOW}warning: codesign --force --sign - failed; first run may fail with SIGKILL on macOS 26+${NORMAL}" >&2
     fi
 fi
@@ -307,10 +307,10 @@ ensure_local_signing_identity() {
     printf -- '-'
 }
 
-# --- macOS: wrap the binary in CuaDriver.app for a stable TCC identity ---
+# --- macOS: wrap the binary in QwenCuaDriver.app for a stable TCC identity ---
 #
 # TCC keys Accessibility / Screen-Recording grants on the bundle
-# identifier (com.trycua.driver), not the bare executable path. A loose
+# identifier (com.qwencode.cua-driver), not the bare executable path. A loose
 # binary gets grants attributed to its ad-hoc cdhash, which changes on
 # every rebuild — so permissions silently reset and never appear cleanly
 # under System Settings. Mirror the production path (install.sh) + the CD
@@ -318,19 +318,19 @@ ensure_local_signing_identity() {
 # CuaDriverBundle skeleton, install the bundle to /Applications, and point
 # the visible bin at the binary INSIDE the bundle. Linux/Windows have no
 # .app concept and keep the bare-binary symlink below.
-APP_DEST="/Applications/CuaDriver.app"
+APP_DEST="/Applications/QwenCuaDriver.app"
 if [ "$OS" = "Darwin" ]; then
     SKELETON="$REPO_ROOT/scripts/CuaDriverBundle"
     if [ ! -d "$SKELETON/Contents" ]; then
         echo "${RED}Error: bundle skeleton missing at $SKELETON${NORMAL}" >&2
         exit 1
     fi
-    APP_STAGE="$VERSIONED_DIR/CuaDriver.app"
+    APP_STAGE="$VERSIONED_DIR/QwenCuaDriver.app"
     rm -rf "$APP_STAGE"
     mkdir -p "$APP_STAGE/Contents/MacOS"
     cp -R "$SKELETON/Contents/." "$APP_STAGE/Contents/"
-    cp "$VERSIONED_DIR/cua-driver" "$APP_STAGE/Contents/MacOS/cua-driver"
-    chmod +x "$APP_STAGE/Contents/MacOS/cua-driver"
+    cp "$VERSIONED_DIR/qwen-cua-driver" "$APP_STAGE/Contents/MacOS/qwen-cua-driver"
+    chmod +x "$APP_STAGE/Contents/MacOS/qwen-cua-driver"
     rm -f "$APP_STAGE/Contents/MacOS/.gitkeep"
     # Stamp the local build version so the bundle reports something sane.
     if command -v plutil >/dev/null 2>&1; then
@@ -391,8 +391,8 @@ if [ "$OS" = "Darwin" ]; then
         case "$NEW_IDENTITY" in
             cert:*)
                 if [ "$NEW_IDENTITY" != "$OLD_IDENTITY" ]; then
-                    tccutil reset Accessibility com.trycua.driver >/dev/null 2>&1 || true
-                    tccutil reset ScreenCapture com.trycua.driver >/dev/null 2>&1 || true
+                    tccutil reset Accessibility com.qwencode.cua-driver >/dev/null 2>&1 || true
+                    tccutil reset ScreenCapture com.qwencode.cua-driver >/dev/null 2>&1 || true
                     echo "${BOLD}cleared any stale Accessibility / Screen-Recording grant pinned to a previous build.${NORMAL}"
                     echo "  Grant once more (System Settings → Privacy & Security) and it will${BOLD} stick across every future rebuild${NORMAL} — the grant now pins to a stable signing certificate, not the per-build cdhash."
                 fi
@@ -405,19 +405,19 @@ fi
 # --- Visible-bin symlink ------------------------------------------------
 #
 # On macOS point at the binary INSIDE the installed bundle so the process
-# that actually runs carries the com.trycua.driver identity (TCC keys
+# that actually runs carries the com.qwencode.cua-driver identity (TCC keys
 # grants on it). On Linux/Windows point at the versioned-store binary.
 mkdir -p "$BIN_DIR"
 if [ "$OS" = "Darwin" ]; then
-    BIN_TARGET="$APP_DEST/Contents/MacOS/cua-driver"
+    BIN_TARGET="$APP_DEST/Contents/MacOS/qwen-cua-driver"
 else
-    BIN_TARGET="$CURRENT_LINK/cua-driver"
+    BIN_TARGET="$CURRENT_LINK/qwen-cua-driver"
 fi
-ln -sf "$BIN_TARGET" "$BIN_DIR/cua-driver"
-echo "${GREEN}$BIN_DIR/cua-driver -> $BIN_TARGET${NORMAL}"
+ln -sf "$BIN_TARGET" "$BIN_DIR/qwen-cua-driver"
+echo "${GREEN}$BIN_DIR/qwen-cua-driver -> $BIN_TARGET${NORMAL}"
 echo ""
 
-INSTALLED_BIN="$BIN_DIR/cua-driver"
+INSTALLED_BIN="$BIN_DIR/qwen-cua-driver"
 
 # --- Stop any pre-swap cua-driver daemons ------------------------------
 #
@@ -527,7 +527,7 @@ if [ "$INSTALL_AUTOSTART" != true ]; then
     echo ""
     if [ "$OS" = "Darwin" ]; then
         echo "Auto-start (recommended on macOS): re-run with --autostart to register a LaunchAgent."
-        echo "  A launchd-started daemon is attributed to com.trycua.driver (not your terminal),"
+        echo "  A launchd-started daemon is attributed to com.qwencode.cua-driver (not your terminal),"
         echo "  so permission prompts say \"Cua Driver\" and grants stick — grant Accessibility +"
         echo "  Screen Recording once and every cua-driver call/mcp routes through it correctly."
         echo "  (Without it, a prompt raised from a terminal attributes to the terminal instead.)"

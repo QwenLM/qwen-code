@@ -501,7 +501,7 @@ fn reexec_self() {
     use std::os::unix::ffi::OsStringExt;
 
     // Resolve the path to ourselves. `current_exe` returns the actual
-    // binary path (e.g. /Applications/CuaDriver.app/Contents/MacOS/
+    // binary path (e.g. /Applications/QwenCuaDriver.app/Contents/MacOS/
     // cua-driver) which is what we want — execvp searches PATH for
     // bare names, and we don't want a stale `~/.local/bin/cua-driver`
     // symlink to win.

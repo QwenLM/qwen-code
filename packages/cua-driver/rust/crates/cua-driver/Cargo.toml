@@ -3,10 +3,10 @@ name = "cua-driver"
 version.workspace = true
 edition.workspace = true
 description = "Cross-platform background computer-use automation daemon (MCP server)"
-default-run = "cua-driver"
+default-run = "qwen-cua-driver"
 
 [[bin]]
-name = "cua-driver"
+name = "qwen-cua-driver"
 path = "src/main.rs"
 
 [dependencies]
