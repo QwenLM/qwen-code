@@ -31,7 +31,7 @@
     "build:bg:watch": "node scripts/sync-extension.js && node config/esbuild.background.config.js --watch",
     "build": "EXTENSION_OUT_DIR=dist/extension npm run clean && EXTENSION_OUT_DIR=dist/extension node scripts/sync-extension.js && EXTENSION_OUT_DIR=dist/extension node config/esbuild.background.config.js --production",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",
-    "package": "npm run build && cd dist && zip -r ../chrome-extension.zip extension/",
+    "package": "npm run build && cd dist/extension && zip -r ../../chrome-extension.zip .",
     "clean": "./scripts/clean.sh"
   },
   "engines": {

@@ -5,3 +5,6 @@
 # machines through a secure channel — not the repo.
 *.pem
 .extension-key.pem
+
+# Packaging output of `npm run package`; regenerated, never committed.
+chrome-extension.zip

@@ -18,27 +18,83 @@
         height: 100vh;
         display: none;
       }
-      #status {
+      #welcome {
+        display: none;
+        box-sizing: border-box;
+        height: 100vh;
+        padding: 20px;
+        overflow-y: auto;
         font:
-          13px/1.5 system-ui,
+          13px/1.55 system-ui,
           sans-serif;
-        color: #555;
-        padding: 16px;
+        color: #1f2328;
       }
-      #status code {
-        font-family: ui-monospace, monospace;
+      #welcome h1 {
+        margin: 0 0 8px;
+        font-size: 15px;
+      }
+      #welcome h1 code,
+      #welcome p code {
+        font-family: ui-monospace, SFMono-Regular, monospace;
+      }
+      #welcome p {
+        margin: 0 0 14px;
+        color: #555;
+      }
+      .cmd {
+        display: flex;
+        gap: 8px;
+        align-items: stretch;
+        padding: 10px 12px;
+        background: #f6f8fa;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+      }
+      .cmd code {
+        flex: 1;
+        align-self: center;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .cmd button {
+        flex: none;
+        padding: 4px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        background: #fff;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+      }
+      .cmd button:hover {
+        background: #f3f4f6;
+      }
+      .hint {
+        margin-top: 12px;
+        color: #8a8f98;
+        font-size: 12px;
       }
     </style>
   </head>
   <body>
-    <!-- The extension has no UI of its own; it hosts the daemon's Web Shell
-         (chat + tools) here so the side panel is the everyday entry point. -->
-    <div id="status">Connecting to <code>qwen serve</code>…</div>
+    <!-- The extension has no UI of its own; it frames the daemon's Web Shell
+         (chat + tools) once a reachable `qwen serve` permits framing. Until
+         then #welcome guides the user to start/allow the daemon. -->
+    <section id="welcome">
+      <h1 id="welcome-title">Start <code>qwen serve</code></h1>
+      <p id="welcome-desc"></p>
+      <div class="cmd">
+        <code id="cmd"></code>
+        <button id="copy" type="button">Copy</button>
+      </div>
+      <p class="hint">This panel keeps checking and connects on its own.</p>
+    </section>
     <iframe
       id="ui"
       title="Qwen Code"
       allow="clipboard-read; clipboard-write"
     ></iframe>
-    <script src="sidepanel.js"></script>
+    <script type="module" src="sidepanel.js"></script>
   </body>
 </html>
