@@ -461,7 +461,8 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler(
     (wc, permission, callback, details) => {
       if (!VOICE_PERMISSIONS.has(permission)) {
-        callback(true)
+        mainLog.debug(`defaultSession: denied non-voice permission '${permission}'`)
+        callback(false)
         return
       }
       const allowed = canUseVoicePermission(wc, permission, details)
@@ -473,7 +474,8 @@ app.whenReady().then(async () => {
   )
   session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => {
     if (!VOICE_PERMISSIONS.has(permission)) {
-      return true
+      mainLog.debug(`defaultSession: denied non-voice permission check '${permission}'`)
+      return false
     }
     const allowed = canUseVoicePermission(wc, permission, details)
     if (!allowed) {

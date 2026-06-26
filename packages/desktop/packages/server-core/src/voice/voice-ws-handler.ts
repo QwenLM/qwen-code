@@ -402,7 +402,12 @@ export function createVoiceConnectionHandler(
           releaseSlotWhenIdle();
         });
     });
-    ws.on('close', () => {
+    ws.on('close', (code: number, reason: Buffer) => {
+      log?.info('[voice-ws] close', {
+        code,
+        reason: reason?.toString(),
+        state,
+      });
       if (state !== 'closed') cleanup();
       releaseSlotWhenIdle();
     });

@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import { describe, expect, it } from 'bun:test'
 import {
+  closeVoiceClients,
   closeVoiceServerResources,
   isAllowedVoiceOrigin,
   terminateVoiceClients,
@@ -92,5 +93,25 @@ describe('terminateVoiceClients', () => {
 
     expect(firstTerminated).toBe(true)
     expect(secondTerminated).toBe(true)
+  })
+})
+
+describe('closeVoiceClients', () => {
+  it('gracefully closes active voice clients with a reason', () => {
+    const closes: Array<{ code?: number; reason?: string }> = []
+
+    const count = closeVoiceClients({
+      clients: new Set([
+        {
+          close: (code?: number, reason?: string) => {
+            closes.push({ code, reason })
+          },
+          terminate: () => undefined,
+        },
+      ]),
+    })
+
+    expect(count).toBe(1)
+    expect(closes).toEqual([{ code: 1000, reason: 'voice disabled' }])
   })
 })

@@ -18,6 +18,7 @@ import {
 
 const VOICE_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024;
 const CLOSE_TIMEOUT_MS = 3000;
+const DISABLED_CLOSE_GRACE_MS = 500;
 
 export interface VoiceServerOptions extends VoiceHandlerDeps {
   /** Voice-scoped token validated per upgrade. */
@@ -46,6 +47,7 @@ export function tokenMatches(
 }
 
 interface ClosableClient {
+  close?(code?: number, reason?: string): void;
   terminate(): void;
 }
 
@@ -81,6 +83,23 @@ export function terminateVoiceClients(
       // ignore
     }
   }
+}
+
+export function closeVoiceClients(
+  wss: Pick<ClosableWebSocketServer, 'clients'>,
+  code = 1000,
+  reason = 'voice disabled',
+): number {
+  let closed = 0;
+  for (const client of wss.clients) {
+    try {
+      client.close?.(code, reason);
+      closed++;
+    } catch {
+      // ignore
+    }
+  }
+  return closed;
 }
 
 export function closeVoiceServerResources(
@@ -121,10 +140,20 @@ export async function startVoiceServer(
     maxPayload: VOICE_MAX_PAYLOAD_BYTES,
   });
   const handle = createVoiceConnectionHandler(options);
+  let disabledCloseTimer: ReturnType<typeof setTimeout> | undefined;
   const enabledTimer = options.isEnabled
     ? setInterval(() => {
         if (!options.isEnabled?.()) {
-          terminateVoiceClients(wss);
+          if (disabledCloseTimer) return;
+          const closed = closeVoiceClients(wss);
+          if (closed > 0) {
+            log?.info('voice: closing active clients because voice is disabled');
+            disabledCloseTimer = setTimeout(() => {
+              disabledCloseTimer = undefined;
+              terminateVoiceClients(wss);
+            }, DISABLED_CLOSE_GRACE_MS);
+            disabledCloseTimer.unref?.();
+          }
         }
       }, 1000)
     : undefined;
@@ -193,6 +222,7 @@ export async function startVoiceServer(
     close: () => {
       if (!closePromise) {
         if (enabledTimer) clearInterval(enabledTimer);
+        clearTimeout(disabledCloseTimer);
         closePromise = closeVoiceServerResources(httpServer, wss);
       }
       return closePromise;
