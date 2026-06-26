@@ -337,6 +337,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
+        config: this.config,
       });
       return response;
     } catch (error) {
@@ -357,6 +358,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         errorStatusCode: getErrorStatus(error),
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
+        config: this.config,
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
@@ -449,6 +451,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         errorStatusCode: getErrorStatus(error),
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
+        config: this.config,
       });
       try {
         await this.safelyLogOpenAIInteraction(
@@ -583,6 +586,7 @@ export class LoggingContentGenerator implements ContentGenerator {
               responseId: firstResponseId || undefined,
               subagentName: subagentName || undefined,
               ...retrySnapshot,
+              config: this.config,
             });
             spanEndedByTimeout = true;
           }, STREAM_IDLE_TIMEOUT_MS);
@@ -730,6 +734,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           errorType: lastError ? getErrorType(lastError) : undefined,
           errorStatusCode: lastError ? getErrorStatus(lastError) : undefined,
           ...retrySnapshot,
+          config: this.config,
         });
       }
     }
