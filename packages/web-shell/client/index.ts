@@ -22,6 +22,7 @@ export type {
   WebShellMarkdownCustomization,
   WebShellFooterRenderInfo,
   FooterRenderer,
+  LoadingPhrasesResolver,
   WebShellTaskInfo,
   WebShellAgentTask,
   WebShellShellTask,

@@ -1,7 +1,7 @@
 .group {
   margin: 5px 0;
   padding: 8px 14px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   display: flex;
   flex-direction: column;
@@ -27,7 +27,7 @@
   border: none;
   border-radius: 0;
   background: transparent;
-  color: #a1a2a3;
+  color: var(--muted-foreground);
   display: flex;
   align-items: center;
   gap: 7px;
@@ -39,7 +39,7 @@
 
 .chatSummary:hover,
 .chatSummary:focus-visible {
-  color: var(--text-primary);
+  color: var(--muted-foreground);
   outline: none;
 }
 
@@ -58,8 +58,8 @@
 }
 
 .chatSummaryToolIcon {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   display: block;
 }
 
@@ -74,14 +74,14 @@
 }
 
 .chatSummaryTextActive {
-  color: #a1a2a3;
+  color: var(--muted-foreground);
   background-image: linear-gradient(
     105deg,
-    #a1a2a3 0%,
-    #a1a2a3 46%,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 46%,
     rgba(255, 255, 255, 0.92) 50%,
-    #a1a2a3 54%,
-    #a1a2a3 100%
+    var(--muted-foreground) 54%,
+    var(--muted-foreground) 100%
   );
   background-size: 300% 100%;
   background-position: 150% 0;
@@ -166,7 +166,7 @@
 }
 
 .iconPending {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .iconSpin {
@@ -183,13 +183,13 @@
 
 .lineName {
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 13px;
   flex-shrink: 0;
 }
 
 .lineArg {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 13px;
   min-width: 0;
   flex: 1;
@@ -200,7 +200,7 @@
 
 .lineElapsed {
   margin-left: auto;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   flex-shrink: 0;
 }
@@ -217,22 +217,13 @@
 }
 
 .lineExpandable:hover .lineName {
-  color: var(--accent-color);
-}
-
-.agentSummary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  margin-left: 22px;
-  margin-top: 2px;
+  color: var(--agent-blue-500);
 }
 
 .lineOutput {
   margin-left: 16px;
   font-size: 12px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.4;
@@ -246,7 +237,7 @@
   margin-top: 2px;
   font-size: 12px;
   line-height: 1.4;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
@@ -265,7 +256,7 @@
   padding: 0px 0px 0 16px;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
@@ -279,7 +270,7 @@
 }
 
 .expandedWrite {
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -297,18 +288,18 @@
   font-family: var(--font-mono);
   background: var(--subtle-bg);
   border: none;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   cursor: pointer;
   text-align: left;
 }
 
 .expandBtn:hover {
-  color: var(--accent-color);
-  background: var(--info-bg);
+  color: var(--agent-blue-500);
+  background: var(--agent-blue-100);
 }
 
 .todoProgress {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
@@ -321,7 +312,7 @@
 .compactGroup {
   margin-bottom: 12px;
   padding: 8px 14px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
 }
 
@@ -333,13 +324,13 @@
 }
 
 .compactCount {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 13px;
   flex-shrink: 0;
 }
 
 .compactHint {
   font-size: 12px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   margin-top: 4px;
 }

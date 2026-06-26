@@ -86,8 +86,30 @@ The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
-`GET /session/:id/context`, `GET /session/:id/supported-commands`, and
+`GET /session/:id/status`, `GET /session/:id/context`,
+`GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`, and `GET /session/:id/lsp`.
+
+`GET /session/:id/status` returns the live bridge summary for a single session:
+`sessionId`, `workspaceCwd`, `createdAt`, optional `displayName`, `clientCount`,
+and `hasActivePrompt`. It answers `200` with the summary when the daemon holds a
+live session with that id, and `404` (body `{ "error": …, "sessionId": … }`)
+otherwise. Use it to poll whether one known session is still running
+(`hasActivePrompt`) or how many clients are attached (`clientCount`) without
+fetching and scanning the whole paginated session list:
+
+```bash
+curl http://127.0.0.1:4170/session/$SESSION_ID/status
+# → {"sessionId":"…","workspaceCwd":"…","createdAt":"…","clientCount":1,"hasActivePrompt":false}
+```
+
+This is the raw live-session view, so `clientCount` and `hasActivePrompt` match
+the corresponding entry in `GET /workspace/:id/sessions` — but the two routes
+are not byte-identical. The list endpoint enriches each item with persisted
+session-store data: its `createdAt` is the persisted first-prompt time, and it
+adds `updatedAt` plus a `displayName` derived from the stored title or first
+prompt. `/status` instead reports the live session's own `createdAt`, omits
+`updatedAt`, and returns `displayName` only when one is set on the live session.
 
 `GET /session/:id/lsp` returns structured per-session LSP status. Start the
 daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;

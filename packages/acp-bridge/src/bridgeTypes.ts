@@ -26,6 +26,7 @@ import type {
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
+  ServeWorkspaceMcpResourcesStatus,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
@@ -418,6 +419,15 @@ export interface AcpSessionBridge {
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
 
   /**
+   * Live status summary for a single session by id — the same shape
+   * `listWorkspaceSessions` produces per item. Throws
+   * `SessionNotFoundError` when no live session with that id exists on
+   * this daemon. Lets a caller that already holds a session id poll
+   * `hasActivePrompt` / `clientCount` without scanning the whole list.
+   */
+  getSessionSummary(sessionId: string): BridgeSessionSummary;
+
+  /**
    * Record a client heartbeat for the session. Throws
    * `SessionNotFoundError` for unknown ids and `InvalidClientIdError`
    * when the supplied `clientId` is not registered for this session.
@@ -472,6 +482,16 @@ export interface AcpSessionBridge {
   getWorkspaceMcpToolsStatus(
     serverName: string,
   ): Promise<ServeWorkspaceMcpToolsStatus>;
+
+  /**
+   * Read discovered MCP resources (`resources/list`) for one server from
+   * the live ACP registry. Drill-down companion to
+   * `getWorkspaceMcpToolsStatus`; the per-server `resourceCount` rides
+   * the base `/workspace/mcp` status.
+   */
+  getWorkspaceMcpResourcesStatus(
+    serverName: string,
+  ): Promise<ServeWorkspaceMcpResourcesStatus>;
 
   /**
    * Read the live built-in tool registry for the bound workspace.

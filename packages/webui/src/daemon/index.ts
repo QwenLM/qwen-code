@@ -125,6 +125,8 @@ export type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourceStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceToolStatus,
