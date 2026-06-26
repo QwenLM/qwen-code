@@ -1,5 +1,5 @@
 import { memo, useContext } from 'react';
-import { CompactModeContext } from '../../App';
+import { CompactModeContext } from '@qwen-code/chat-panel';
 import { useI18n } from '../../i18n';
 import styles from './UserShellMessage.module.css';
 

@@ -6,15 +6,9 @@ import { I18nProvider } from '../../i18n';
 import type { TodoItem } from '../../adapters/types';
 import { todoStateKey, type TodoDetail } from '../../utils/todos';
 
-// TodoFullList reads TodoDetailContext from App; mock it so the unit test
-// doesn't pull the whole application graph and can inject its own detail map.
-vi.mock('../../App', async () => {
-  const { createContext } = await import('react');
-  return { TodoDetailContext: createContext(new Map()) };
-});
+import { TodoDetailContext } from '@qwen-code/chat-panel';
 
 const { TodoFullList } = await import('./TodoView');
-const { TodoDetailContext } = await import('../../App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }

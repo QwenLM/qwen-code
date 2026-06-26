@@ -19,7 +19,7 @@ import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
-import { CompactModeContext } from '../App';
+import { CompactModeContext } from '@qwen-code/chat-panel';
 import { useWebShellCustomization } from '../customization';
 import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';

@@ -17,7 +17,7 @@ import type {
   DaemonUserMessage,
   DaemonUserShellMessage,
 } from './messageTypes';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type { StreamingState as DaemonStreamingState } from '@qwen-code/chat-panel';
 
 export type Message = DaemonMessage;
 export type ACPToolCall = DaemonMessageToolCall;

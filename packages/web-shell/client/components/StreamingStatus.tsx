@@ -1,11 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useContext } from 'react';
 import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
-import { useStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
-import { useStreamingLoadingMetrics } from '../hooks/useStreamingLoadingMetrics';
+import {
+  StreamingStateContext,
+  useStreamingLoadingMetrics,
+} from '@qwen-code/chat-panel';
 import { formatTokenCount } from '../utils/formatTokenCount';
 import styles from './StreamingStatus.module.css';
 
@@ -14,9 +16,10 @@ interface StreamingStatusProps {
 }
 
 export function StreamingStatus({ startedAt }: StreamingStatusProps) {
-  const streamingState = useStreamingState();
+  const input = useContext(StreamingStateContext);
+  const streamingState = input.state;
   const { estimatedOutputTokens, isReceivingContent } =
-    useStreamingLoadingMetrics();
+    useStreamingLoadingMetrics(input);
   const { language, t } = useI18n();
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());

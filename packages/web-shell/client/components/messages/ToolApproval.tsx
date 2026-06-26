@@ -1,5 +1,12 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+  useContext,
+} from 'react';
+import { AgentToolContext } from '@qwen-code/chat-panel';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
@@ -216,6 +223,7 @@ export function ToolApproval({
     };
   }, [handleKeyDown]);
 
+  const isAgentTool = useContext(AgentToolContext);
   const isExec = isExecKind(request);
   const isAgent = isAgentTool(request.toolName);
   const command = getCommandFromRawInput(request);

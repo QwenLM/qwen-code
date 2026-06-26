@@ -49,9 +49,19 @@ export default defineConfig(({ command }) => ({
               __dirname,
               '../sdk-typescript/src/index.ts',
             ),
+            '@qwen-code/chat-panel': resolve(
+              __dirname,
+              '../chat-panel/src/index.ts',
+            ),
           }
         : {},
-    dedupe: ['react', 'react-dom', '@qwen-code/webui', '@qwen-code/sdk'],
+    dedupe: [
+      'react',
+      'react-dom',
+      '@qwen-code/webui',
+      '@qwen-code/sdk',
+      '@qwen-code/chat-panel',
+    ],
   },
   build: {
     outDir: '../dist',

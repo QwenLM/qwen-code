@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react';
 import { Markdown } from './Markdown';
-import { CompactModeContext } from '../../App';
+import { CompactModeContext } from '@qwen-code/chat-panel';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
 import styles from './AssistantMessage.module.css';

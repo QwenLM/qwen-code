@@ -1,5 +1,5 @@
 import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSettingDescriptor } from '@qwen-code/chat-panel';
 import type {
   ACPToolCall,
   PermissionRequest,
@@ -43,7 +43,7 @@ import {
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
-import { CompactModeContext, TodoTimelineContext } from '../../App';
+import { CompactModeContext, TodoTimelineContext } from '@qwen-code/chat-panel';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,

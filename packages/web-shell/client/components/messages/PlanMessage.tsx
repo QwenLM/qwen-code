@@ -1,6 +1,6 @@
 import { memo, useContext, useState } from 'react';
 import type { TodoItem } from '../../adapters/types';
-import { TodoTimelineContext } from '../../App';
+import { TodoTimelineContext } from '@qwen-code/chat-panel';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
 import styles from './PlanMessage.module.css';

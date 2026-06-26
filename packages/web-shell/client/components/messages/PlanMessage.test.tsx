@@ -1,23 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { TodoItem } from '../../adapters/types';
 
-// PlanMessage's expanded list reads TodoTimelineContext and (via TodoFullList)
-// TodoDetailContext from App; mock both so the unit test doesn't pull the whole
-// application graph.
-vi.mock('../../App', async () => {
-  const { createContext } = await import('react');
-  return {
-    TodoTimelineContext: createContext(new Map()),
-    TodoDetailContext: createContext(new Map()),
-  };
-});
+import { TodoTimelineContext } from '@qwen-code/chat-panel';
 
 const { PlanMessage } = await import('./PlanMessage');
-const { TodoTimelineContext } = await import('../../App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }

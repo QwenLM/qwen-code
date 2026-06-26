@@ -6,7 +6,7 @@ import {
   type TodoDetail,
   type TodoEvent,
 } from '../../utils/todos';
-import { TodoDetailContext } from '../../App';
+import { TodoDetailContext } from '@qwen-code/chat-panel';
 import { formatTimestamp } from '../MessageTimestamp';
 import { formatDuration } from './StatsMessage';
 import { useI18n } from '../../i18n';

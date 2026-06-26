@@ -3,6 +3,7 @@ import {
   memo,
   useImperativeHandle,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -11,7 +12,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
+import { ApprovalModeContext } from '@qwen-code/chat-panel';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
@@ -955,15 +956,16 @@ export const ChatEditor = memo(
       return () => resizeObserver.disconnect();
     }, [chatWidthToggleMin]);
 
+    const approvalModes = useContext(ApprovalModeContext);
     const modeItems = useMemo<DropdownItem[]>(
       () =>
-        DAEMON_APPROVAL_MODES.map((id) => ({
+        approvalModes.map((id) => ({
           id,
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
-      [t],
+      [approvalModes, t],
     );
     const visibleActionSet = useMemo(
       () => (visibleToolbarActions ? new Set(visibleToolbarActions) : null),

@@ -1,4 +1,11 @@
 import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
+import type {
+  TodoEvent,
+  TodoSnapshotDiff,
+  TodoResources,
+  TodoDetail,
+} from '@qwen-code/chat-panel';
+export type { TodoEvent, TodoSnapshotDiff, TodoResources, TodoDetail };
 
 /**
  * The todo tool is registered as `todo_write` on the wire, but older paths and
@@ -126,18 +133,6 @@ export function getFloatingTodos(
   // user sends the next prompt.
   if (allCompleted && userMessageAfter) return EMPTY_FLOATING_TODOS;
   return { todos, allCompleted, sourceMessageId, sourceCallId };
-}
-
-/** A status transition surfaced for a single todo snapshot. */
-export interface TodoEvent {
-  kind: 'started' | 'completed';
-  id: string;
-  content: string;
-}
-
-/** What changed in one todo snapshot relative to the conversation so far. */
-export interface TodoSnapshotDiff {
-  events: TodoEvent[];
 }
 
 interface TodoSnapshot {
@@ -377,36 +372,6 @@ export function extractTodoStats(
     candidateTokens,
     apiTimeMs: num('apiTimeMs') ?? 0,
   };
-}
-
-/**
- * Resource usage consumed during a single todo's [start, end] window. Every
- * field is optional: tokens/API time come from the snapshot diff (absent on
- * sessions whose agent didn't stamp snapshots; API time is also absent on
- * replay), while tool time comes from transcript tool durations and is shown
- * whenever any tool ran in the window.
- */
-export interface TodoResources {
-  inputTokens?: number;
-  cachedTokens?: number;
-  outputTokens?: number;
-  apiTimeMs?: number;
-  toolTimeMs?: number;
-}
-
-/** Per-todo timing and resource breakdown. */
-export interface TodoDetail {
-  /** Wall-clock ms when the item first became in_progress. */
-  startTs?: number;
-  /** Wall-clock ms when the item became completed. */
-  endTs?: number;
-  /**
-   * Tokens and time spent while this item was the active task. Tokens and API
-   * time come from diffing the cumulative-usage snapshots stamped on its start
-   * and end todo boundaries; tool time is summed from the transcript's tool
-   * durations in the window. Undefined when nothing could be measured.
-   */
-  resources?: TodoResources;
 }
 
 interface ToolSpan {
