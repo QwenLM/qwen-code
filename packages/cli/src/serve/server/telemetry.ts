@@ -18,6 +18,8 @@ import {
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
 
+// Route handlers are split across `routes/*.ts`; any added or renamed route
+// that needs daemon telemetry must keep these patterns in sync.
 export function resolveDaemonTelemetryRoute(
   req: Request,
 ):
