@@ -164,9 +164,12 @@ function createEmptyStream() {
  * be spied under ESM. Returns a restore function.
  */
 function setFakeHome(home: string): () => void {
-  const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
-  process.env.HOME = home;
-  process.env.USERPROFILE = home;
+  const prev = {
+    HOME: process.env['HOME'],
+    USERPROFILE: process.env['USERPROFILE'],
+  };
+  process.env['HOME'] = home;
+  process.env['USERPROFILE'] = home;
   return () => {
     for (const key of ['HOME', 'USERPROFILE'] as const) {
       if (prev[key] === undefined) delete process.env[key];
