@@ -62,7 +62,6 @@ export function registerWorkspaceExtensionRoutes(
     sendBridgeError,
   } = deps;
   const buildWorkspaceCtx = (
-    _req: Request,
     route: string,
     clientId?: string,
   ): WorkspaceRequestContext => ({
@@ -149,7 +148,7 @@ export function registerWorkspaceExtensionRoutes(
       });
       return false;
     }
-    buildWorkspaceCtx(req, route, clientId);
+    buildWorkspaceCtx(route, clientId);
     return true;
   };
   const parseExtensionScope = (
@@ -539,9 +538,9 @@ export function registerWorkspaceExtensionRoutes(
       return status;
     };
   // GET /workspace/extensions — read-only installed extension status.
-  app.get('/workspace/extensions', async (req, res) => {
+  app.get('/workspace/extensions', async (_req, res) => {
     try {
-      buildWorkspaceCtx(req, 'GET /workspace/extensions');
+      buildWorkspaceCtx('GET /workspace/extensions');
       res.status(200).json(await buildLocalExtensionsStatus());
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/extensions' });
@@ -550,10 +549,7 @@ export function registerWorkspaceExtensionRoutes(
 
   app.get('/workspace/extensions/operations/:operationId', async (req, res) => {
     try {
-      buildWorkspaceCtx(
-        req,
-        'GET /workspace/extensions/operations/:operationId',
-      );
+      buildWorkspaceCtx('GET /workspace/extensions/operations/:operationId');
       const operationId = req.params['operationId'];
       if (!operationId) {
         res.status(400).json({ error: 'Missing extension operation id' });

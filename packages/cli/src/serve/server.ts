@@ -702,7 +702,6 @@ export function createServeApp(
   app.use(daemonTelemetryMiddleware(boundWorkspace));
 
   function buildWorkspaceCtx(
-    req: import('express').Request,
     route: string,
     clientId?: string,
   ): WorkspaceRequestContext {
@@ -910,8 +909,8 @@ export function createServeApp(
     safeBody,
     // UI-server discovery uses the daemon's workspace MCP status, which
     // includes servers registered at runtime.
-    getMcpServers: async (req) => {
-      const ctx = buildWorkspaceCtx(req, 'POST /session/:id/a2ui-action');
+    getMcpServers: async () => {
+      const ctx = buildWorkspaceCtx('POST /session/:id/a2ui-action');
       const status = await workspace.getWorkspaceMcpStatus(ctx);
       return (status.servers ?? []) as Array<{
         name: string;
@@ -993,7 +992,6 @@ export function createServeApp(
       }
       try {
         const ctx = buildWorkspaceCtx(
-          req,
           'POST /workspace/mcp/:server/restart',
           clientId,
         );
@@ -1148,7 +1146,7 @@ export function createServeApp(
     const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
     if (clientId === null) return;
     try {
-      const ctx = buildWorkspaceCtx(req, 'POST /workspace/init', clientId);
+      const ctx = buildWorkspaceCtx('POST /workspace/init', clientId);
       const result = await workspace.initWorkspace(ctx, {
         force: force === true,
       });
@@ -1165,7 +1163,7 @@ export function createServeApp(
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
       try {
-        const ctx = buildWorkspaceCtx(req, 'POST /workspace/reload', clientId);
+        const ctx = buildWorkspaceCtx('POST /workspace/reload', clientId);
         const result = await workspace.reload(ctx);
         invalidateServeFeaturesCache();
         res.status(200).json(result);
@@ -1225,7 +1223,6 @@ export function createServeApp(
       if (clientId === null) return;
       try {
         const ctx = buildWorkspaceCtx(
-          req,
           'POST /workspace/tools/:name/enable',
           clientId,
         );
