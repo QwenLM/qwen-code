@@ -341,6 +341,7 @@ describe('standalone-update', () => {
       expect(isSafeTarEntryPath('qwen-code/release..notes.md')).toBe(true);
       expect(isSafeTarEntryPath('qwen-code/node/lib/foo..bar')).toBe(true);
       expect(isSafeTarEntryPath('qwen-code/.../file.txt')).toBe(true);
+      expect(isSafeTarEntryPath('./qwen-code/bin/qwen')).toBe(true);
     });
 
     it('rejects parent-directory segments and absolute paths', () => {
@@ -387,6 +388,9 @@ describe('standalone-update', () => {
       const dest = path.join(tempDir, 'extract');
       expect(
         isSafeTarLinkTarget('qwen-code/bin/qwen', '../../shared/node', dest),
+      ).toBe(false);
+      expect(
+        isSafeTarLinkTarget('./qwen-code/bin/qwen', '../../shared/node', dest),
       ).toBe(false);
     });
   });

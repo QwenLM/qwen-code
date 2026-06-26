@@ -203,6 +203,16 @@ function isPathInside(base: string, candidate: string): boolean {
   );
 }
 
+function normalizeTarEntryPath(entryPath: string): string | null {
+  const parts = entryPath
+    .split(/[\\/]+/)
+    .filter((part) => part && part !== '.');
+  if (parts.length === 0 || parts.includes('..')) {
+    return null;
+  }
+  return parts.join('/');
+}
+
 export function isSafeTarLinkTarget(
   entryPath: string,
   linkPath: string,
@@ -211,13 +221,14 @@ export function isSafeTarLinkTarget(
   if (path.posix.isAbsolute(linkPath) || path.win32.isAbsolute(linkPath)) {
     return false;
   }
-  const archiveRoot = entryPath.split(/[\\/]+/)[0];
-  if (!archiveRoot) {
+  const normalizedEntryPath = normalizeTarEntryPath(entryPath);
+  if (!normalizedEntryPath) {
     return false;
   }
+  const archiveRoot = normalizedEntryPath.split('/')[0];
   const linkTarget = path.resolve(
     resolvedDest,
-    path.dirname(entryPath),
+    path.posix.dirname(normalizedEntryPath),
     linkPath,
   );
   return isPathInside(path.join(resolvedDest, archiveRoot), linkTarget);
@@ -286,7 +297,7 @@ export function isSafeTarEntryPath(entryPath: string): boolean {
   if (path.posix.isAbsolute(entryPath) || path.win32.isAbsolute(entryPath)) {
     return false;
   }
-  return !entryPath.split(/[\\/]+/).includes('..');
+  return normalizeTarEntryPath(entryPath) !== null;
 }
 
 async function extractArchive(
@@ -802,6 +813,11 @@ export async function performStandaloneUpdate(
     debugLogger.info('Running smoke test...');
     await smokeTest(newInstallDir, target);
 
+    // Ensure the PATH wrapper can be created before mutating the active install.
+    // This is critical for npm→standalone migration: a wrapper failure should not
+    // be reported as a generic update failure after the install has been swapped.
+    ensureBinWrapper(standaloneDir, target);
+
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
 
@@ -837,9 +853,6 @@ export async function performStandaloneUpdate(
         }
       }
     }
-
-    // Ensure bin wrapper exists (critical for npm→standalone migration)
-    ensureBinWrapper(standaloneDir, target);
 
     debugLogger.info('Standalone update complete.');
     return updateResult;

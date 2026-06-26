@@ -2503,6 +2503,10 @@ export default {
     'Check for Qwen Code updates and install if available',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} is up to date!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Failed to check for updates. Please check your network or registry configuration.',
+  'Unable to check for updates: {{reason}}':
+    'Unable to check for updates: {{reason}}',
   'Update successful! The new version will be used on your next run.':
     'Update successful! The new version will be used on your next run.',
   'Update downloaded. It will be applied after you exit this session.':

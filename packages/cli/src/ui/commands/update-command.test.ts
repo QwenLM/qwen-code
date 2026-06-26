@@ -206,7 +206,8 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: 'Failed to check for updates: registry unavailable',
+      content:
+        'Failed to check for updates. Please check your network or registry configuration.',
     });
     expect(getInstallationInfo).not.toHaveBeenCalled();
   });

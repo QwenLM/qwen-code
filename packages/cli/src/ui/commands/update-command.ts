@@ -47,9 +47,9 @@ export const updateCommand: SlashCommand = {
       return {
         type: 'message' as const,
         messageType: 'error' as const,
-        content: t('Failed to check for updates: {{error}}', {
-          error: updateCheck.error.message,
-        }),
+        content: t(
+          'Failed to check for updates. Please check your network or registry configuration.',
+        ),
       };
     }
 

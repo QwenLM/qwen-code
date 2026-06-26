@@ -2063,6 +2063,10 @@ export default {
     'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} està actualitzat!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    "No s'han pogut comprovar les actualitzacions. Comproveu la xarxa o la configuració del registre.",
+  'Unable to check for updates: {{reason}}':
+    'No es poden comprovar les actualitzacions: {{reason}}',
   'Update successful! The new version will be used on your next run.':
     "Actualització correcta! La nova versió s'utilitzarà en la propera execució.",
   'Update downloaded. It will be applied after you exit this session.':

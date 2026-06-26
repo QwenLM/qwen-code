@@ -2107,6 +2107,10 @@ export default {
   'Check for Qwen Code updates and install if available':
     'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} ist aktuell!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Suche nach Updates fehlgeschlagen. Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
+  'Unable to check for updates: {{reason}}':
+    'Updates können nicht geprüft werden: {{reason}}',
   'Update successful! The new version will be used on your next run.':
     'Update erfolgreich! Die neue Version wird beim nächsten Start verwendet.',
   'Update downloaded. It will be applied after you exit this session.':

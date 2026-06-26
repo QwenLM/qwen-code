@@ -1866,6 +1866,10 @@ export default {
   'Check for Qwen Code updates and install if available':
     'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
+  'Unable to check for updates: {{reason}}':
+    'アップデートを確認できません: {{reason}}',
   'Update successful! The new version will be used on your next run.':
     'アップデート成功！新バージョンは次回起動時に使用されます。',
   'Update downloaded. It will be applied after you exit this session.':

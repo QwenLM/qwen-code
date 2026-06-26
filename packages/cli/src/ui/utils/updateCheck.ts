@@ -62,12 +62,12 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
 
     const { name, version } = packageJson;
     currentVersion = version;
-    const isNightly = currentVersion.includes('nightly');
+    const isNightly = version.includes('nightly');
     const createNotifier = (distTag: 'latest' | 'nightly') =>
       updateNotifier({
         pkg: {
           name,
-          version: currentVersion,
+          version,
         },
         updateCheckInterval: 0,
         shouldNotifyInNpmScript: true,
@@ -85,32 +85,32 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
         latestUpdateInfo,
       );
 
-      if (bestUpdate && semver.gt(bestUpdate.latest, currentVersion)) {
-        const message = `A new version of Qwen Code is available! ${currentVersion} → ${bestUpdate.latest}`;
+      if (bestUpdate && semver.gt(bestUpdate.latest, version)) {
+        const message = `A new version of Qwen Code is available! ${version} → ${bestUpdate.latest}`;
         return {
           status: 'update',
           info: {
             message,
-            update: { ...bestUpdate, current: currentVersion },
+            update: { ...bestUpdate, current: version },
           },
         };
       }
     } else {
       const updateInfo = await createNotifier('latest').fetchInfo();
 
-      if (updateInfo && semver.gt(updateInfo.latest, currentVersion)) {
-        const message = `Qwen Code update available! ${currentVersion} → ${updateInfo.latest}`;
+      if (updateInfo && semver.gt(updateInfo.latest, version)) {
+        const message = `Qwen Code update available! ${version} → ${updateInfo.latest}`;
         return {
           status: 'update',
           info: {
             message,
-            update: { ...updateInfo, current: currentVersion },
+            update: { ...updateInfo, current: version },
           },
         };
       }
     }
 
-    return { status: 'up-to-date', currentVersion };
+    return { status: 'up-to-date', currentVersion: version };
   } catch (e) {
     const error = e instanceof Error ? e : new Error(String(e));
     debugLogger.warn('Failed to check for updates: ' + error);

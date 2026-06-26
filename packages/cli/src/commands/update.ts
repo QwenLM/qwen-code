@@ -46,9 +46,9 @@ export const updateCommand: CommandModule = {
 
     if (updateCheck.status === 'error') {
       writeStderrLine(
-        t('Failed to check for updates: {{error}}', {
-          error: updateCheck.error.message,
-        }),
+        t(
+          'Failed to check for updates. Please check your network or registry configuration.',
+        ),
       );
       process.exitCode = 1;
       return;

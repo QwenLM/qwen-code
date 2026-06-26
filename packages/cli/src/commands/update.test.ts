@@ -205,7 +205,7 @@ describe('update command', () => {
     await updateCommand.handler(updateArgs);
 
     expect(writeStderrLine).toHaveBeenCalledWith(
-      'Failed to check for updates: registry unavailable',
+      'Failed to check for updates. Please check your network or registry configuration.',
     );
     expect(process.exitCode).toBe(1);
     expect(getInstallationInfo).not.toHaveBeenCalled();

@@ -2081,6 +2081,10 @@ export default {
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Не удалось проверить обновления. Проверьте сеть или настройки registry.',
+  'Unable to check for updates: {{reason}}':
+    'Невозможно проверить обновления: {{reason}}',
   'Update successful! The new version will be used on your next run.':
     'Обновление успешно! Новая версия будет использована при следующем запуске.',
   'Update downloaded. It will be applied after you exit this session.':

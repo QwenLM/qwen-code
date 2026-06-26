@@ -2095,6 +2095,9 @@ export default {
   'Check for Qwen Code updates and install if available':
     '檢查 Qwen Code 更新並安裝（如果可用）',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    '檢查更新失敗。請檢查網路或 registry 設定。',
+  'Unable to check for updates: {{reason}}': '無法檢查更新：{{reason}}',
   'Update successful! The new version will be used on your next run.':
     '更新成功！新版本將在下次執行時生效。',
   'Update downloaded. It will be applied after you exit this session.':
