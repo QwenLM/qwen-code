@@ -86,7 +86,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to toggle compact mode': 'переключить компактный режим',
+  'to view transcript': 'показать транскрипт',
 
   // ============================================================================
   // Поля системной информации
@@ -1659,8 +1659,6 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
   'Use /btw to ask a quick side question without disrupting the conversation.':

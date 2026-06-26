@@ -1997,7 +1997,7 @@ export default {
     'Afficher le détail de l’utilisation du contexte par élément.',
 
   // === Missing key backfill ===
-  'to toggle compact mode': 'basculer le mode compact',
+  'to view transcript': 'pour voir la transcription',
   'The name of the extension to update.':
     "Le nom de l'extension à mettre à jour.",
   'Session (temporary)': 'Session (temporaire)',
@@ -2023,8 +2023,6 @@ export default {
     "Demande de copie envoyée au terminal. Si le collage est vide, copiez manuellement l'URL ci-dessus.",
   'Cannot write to terminal — copy the URL above manually.':
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Appuyez sur Ctrl+O pour basculer le mode compact — masquer la sortie des outils et la réflexion pour une vue plus nette.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
   'Lock release warning': 'Avertissement de libération du verrou',

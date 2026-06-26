@@ -38,6 +38,7 @@ const getShortcuts = (): Shortcut[] => [
   { key: 'ctrl+c', description: t('to quit') },
   { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
   { key: 'ctrl+l', description: t('to clear screen') },
+  { key: 'ctrl+o', description: t('to view transcript') },
   { key: 'ctrl+r', description: t('to search history') },
   { key: 'ctrl+y', description: t('to retry last request') },
   { key: getPasteKey(), description: t('to paste images') },

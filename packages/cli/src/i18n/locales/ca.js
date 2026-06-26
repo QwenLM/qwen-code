@@ -56,7 +56,7 @@ export default {
   'to search history': "per cercar a l'historial",
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
-  'to toggle compact mode': 'per canviar el mode compacte',
+  'to view transcript': 'per veure la transcripció',
   'Jump through words in the input': "Saltar entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tancar diàlegs, cancel·lar peticions o sortir de l'aplicació",
@@ -1446,8 +1446,6 @@ export default {
     'Podeu canviar ràpidament el mode de permisos amb Tab o /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Proveu /insight per generar idees personalitzades a partir del vostre historial de xat.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Premeu Ctrl+O per canviar el mode compacte — amagueu la sortida de les eines i el pensament per a una vista més neta.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Afegiu un fitxer QWEN.md per donar a Qwen Code un context persistent del projecte.',
   'Use /btw to ask a quick side question without disrupting the conversation.':

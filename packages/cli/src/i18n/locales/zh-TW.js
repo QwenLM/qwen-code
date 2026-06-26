@@ -249,7 +249,7 @@ export default {
   'to search history': '搜索歷史',
   'to paste images': '粘貼圖片',
   'for external editor': '外部編輯器',
-  'to toggle compact mode': '切換緊湊模式',
+  'to view transcript': '檢視完整記錄',
   'Jump through words in the input': '在輸入中按單詞跳轉',
   'Close dialogs, cancel requests, or quit application':
     '關閉對話框、取消請求或退出應用程序',
@@ -1575,8 +1575,6 @@ export default {
     '按 Tab 或輸入 /approval-mode 可快速切換權限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '試試 /insight，從聊天記錄中生成個性化洞察。',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    '按 Ctrl+O 切換緊湊模式 ── 隱藏工具輸出和思考過程，界面更簡潔。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     '添加 QWEN.md 檔案，為 Qwen Code 提供持久的項目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
