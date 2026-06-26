@@ -32,12 +32,27 @@ export type LoopTaskFileResult =
 export interface ReadLoopTaskFileOptions {
   projectRoot: string;
   homeDir: string;
-  /**
-   * Pre-resolved `fs.realpath(projectRoot)`. projectRoot is stable for a
-   * resolver's lifetime, so the resolver resolves it once and passes it here
-   * to avoid a realpath syscall every tick. Omit to resolve inline.
-   */
-  realProjectRoot?: string;
+}
+
+/**
+ * Canonical `fs.realpath(projectRoot)` cache — the workspace-confinement
+ * boundary for the project loop.md. It is stable for the process, so resolve it
+ * once per root instead of every tick. Keyed by the TRUSTED projectRoot and
+ * never accepted from a caller, so an external caller of this re-exported
+ * function can't widen the boundary with a stale/broader path.
+ */
+const realProjectRootCache = new Map<string, Promise<string>>();
+
+function resolveRealProjectRoot(projectRoot: string): Promise<string> {
+  let real = realProjectRootCache.get(projectRoot);
+  if (real === undefined) {
+    real = fs.realpath(projectRoot);
+    // Don't pin a rejection: a transient failure (EACCES, ENOENT) must be
+    // retried next tick rather than cached, preserving per-tick error semantics.
+    real.catch(() => realProjectRootCache.delete(projectRoot));
+    realProjectRootCache.set(projectRoot, real);
+  }
+  return real;
 }
 
 /**
@@ -92,7 +107,6 @@ async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
 export async function readLoopTaskFile({
   projectRoot,
   homeDir,
-  realProjectRoot,
 }: ReadLoopTaskFileOptions): Promise<LoopTaskFileResult> {
   const candidates: ReadonlyArray<{
     source: LoopTaskFileSource;
@@ -106,7 +120,7 @@ export async function readLoopTaskFile({
     let buffer: Buffer | null;
     try {
       if (source === 'project') {
-        const realRoot = realProjectRoot ?? (await fs.realpath(projectRoot));
+        const realRoot = await resolveRealProjectRoot(projectRoot);
         const real = await fs.realpath(filePath);
         if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
           // Skip silently to the next candidate, but leave a debug trail so a

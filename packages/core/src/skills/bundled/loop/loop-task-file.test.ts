@@ -52,6 +52,32 @@ describe('readLoopTaskFile', () => {
         fs.writeFile(path.join(homeDir, '.qwen', 'loop.md'), content),
       );
 
+  // Wrap the next fs.open so each handle.read() length is recorded against a real
+  // handle. Lets a test prove the reader stays bounded: a "read the whole file,
+  // then slice" regression pulls the full file through these reads and trips the
+  // per-read / cumulative cap assertions. Returns the array, filled by reference.
+  const recordHandleReadLengths = async (): Promise<number[]> => {
+    const lengths: number[] = [];
+    const actual =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    vi.mocked(fs.open).mockImplementationOnce(async (p) => {
+      const handle = await actual.open(
+        p as Parameters<typeof actual.open>[0],
+        'r',
+      );
+      const realRead = handle.read.bind(handle);
+      handle.read = ((...readArgs: Parameters<typeof handle.read>) => {
+        // Impl calls read(buffer, offset, length, position); record length.
+        lengths.push((readArgs as unknown[])[2] as number);
+        return realRead(...(readArgs as Parameters<typeof handle.read>));
+      }) as typeof handle.read;
+      return handle;
+    });
+    return lengths;
+  };
+
   it('reads the project loop task file first', async () => {
     await writeProject('project tasks');
     await writeHome('user tasks');
@@ -222,12 +248,16 @@ describe('readLoopTaskFile', () => {
     }
   });
 
-  it('bounds the read for a very large file (reads at most cap + 1 bytes)', async () => {
-    // A multi-MB file must not be fully read/decoded every tick: the bounded
-    // reader caps the buffer, so content stays at the cap and truncated flips.
+  it('bounds the read for a very large file (never reads past the cap)', async () => {
+    // A multi-MB file must not be fully read/decoded every tick. Observe the
+    // actual handle.read() calls: neither any single read nor their sum may
+    // exceed the cap budget — so a "read the whole file, then slice" regression
+    // (which would pull all 2 MB through these reads) fails this test.
     await writeProject('x'.repeat(2_000_000));
+    const cap = LOOP_TASK_FILE_MAX_BYTES + 1;
     const openSpy = vi.mocked(fs.open);
     openSpy.mockClear();
+    const readLengths = await recordHandleReadLengths();
 
     const result = await readLoopTaskFile({ projectRoot, homeDir });
 
@@ -238,8 +268,35 @@ describe('readLoopTaskFile', () => {
         LOOP_TASK_FILE_MAX_BYTES,
       );
     }
-    // Read through a single bounded fs.open handle, not fs.readFile of the whole.
+    // A single bounded fs.open handle, not fs.readFile of the whole.
     expect(openSpy).toHaveBeenCalledTimes(1);
+    // Load-bearing: every read, and the total bytes requested, stay within cap.
+    expect(readLengths.length).toBeGreaterThan(0);
+    for (const length of readLengths) {
+      expect(length).toBeLessThanOrEqual(cap);
+    }
+    expect(readLengths.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(cap);
+  });
+
+  it('reads a short file fully via bounded reads that never exceed the cap', async () => {
+    // The EOF path: a sub-cap file is returned whole (not truncated), and the
+    // bounded reader still never requests past the cap on any read.
+    const body = 'short tasks\n';
+    await writeProject(body);
+    const cap = LOOP_TASK_FILE_MAX_BYTES + 1;
+    const readLengths = await recordHandleReadLengths();
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result).toMatchObject({
+      status: 'found',
+      content: body,
+      truncated: false,
+    });
+    expect(readLengths.length).toBeGreaterThan(0);
+    for (const length of readLengths) {
+      expect(length).toBeLessThanOrEqual(cap);
+    }
   });
 
   it('does not truncate task files at exactly the byte cap', async () => {

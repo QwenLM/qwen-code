@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs/promises';
 import {
   LOOP_TASK_FILE_MAX_BYTES,
   readLoopTaskFile,
@@ -122,20 +121,7 @@ export class LoopTickResolver {
   // sending a dangling short reminder next time.
   #pendingContent: string | null = null;
 
-  // fs.realpath(projectRoot) is stable for this resolver's lifetime (projectRoot
-  // only changes on /cd, which rebuilds the resolver), so resolve it once and
-  // reuse. On failure resolve to undefined → readLoopTaskFile recomputes inline
-  // and surfaces the real error, preserving per-tick error semantics.
-  #realProjectRoot: Promise<string | undefined> | undefined;
-
   constructor(private readonly deps: LoopTickResolverDeps) {}
-
-  #getRealProjectRoot(): Promise<string | undefined> {
-    this.#realProjectRoot ??= fs
-      .realpath(this.deps.projectRoot)
-      .catch(() => undefined);
-    return this.#realProjectRoot;
-  }
 
   /** Forget the delivered content so the next fire re-delivers the full block
    * — called when the conversation is compacted (fresh context). */
@@ -155,7 +141,6 @@ export class LoopTickResolver {
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
-      realProjectRoot: await this.#getRealProjectRoot(),
     });
 
     if (result.status === 'missing') {
