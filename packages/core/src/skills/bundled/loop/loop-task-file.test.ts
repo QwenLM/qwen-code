@@ -194,6 +194,47 @@ describe('readLoopTaskFile', () => {
     );
   });
 
+  it('evicts the cached project-root realpath after a transient failure and retries on the next tick', async () => {
+    // The project-root realpath is cached per process. A TRANSIENT failure
+    // (EACCES/ENOENT) must NOT be pinned: the entry is evicted on rejection so
+    // the next tick re-resolves instead of replaying a permanently-cached
+    // rejection. Drop that eviction and one transient error would break loop.md
+    // resolution for this root forever. Drive it purely via the realpath mock.
+    await writeProject('project tasks');
+
+    const eacces = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    const actual =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    const realpathSpy = vi.spyOn(fs, 'realpath');
+    // Fail the first project-root resolution, then resolve normally.
+    realpathSpy.mockRejectedValueOnce(eacces);
+    realpathSpy.mockImplementation((p) => actual.realpath(p as string));
+
+    // First tick: the transient error surfaces (current per-tick semantics).
+    await expect(readLoopTaskFile({ projectRoot, homeDir })).rejects.toThrow(
+      /EACCES/,
+    );
+
+    // Second tick: the poisoned entry was evicted, so realpath is retried and
+    // the project loop.md resolves — proving the rejection was not cached.
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(projectRoot, '.qwen', 'loop.md'),
+      source: 'project',
+      content: 'project tasks',
+      truncated: false,
+    });
+    // The root was re-resolved on the retry (call #2), not served from a
+    // poisoned cache entry; #3 is the loop.md realpath on the successful tick.
+    expect(realpathSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('skips an empty or whitespace-only file and falls through', async () => {
     await writeProject('   \n\t  \n');
     await writeHome('user tasks');
