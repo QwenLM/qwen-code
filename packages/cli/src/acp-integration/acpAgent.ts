@@ -458,7 +458,7 @@ const QWEN_HOOK_EVENTS = Object.values(HookEventName) as QwenHookEvent[];
 const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: true,
-  enableAutoSkill: true,
+  enableAutoSkill: false,
   autoSkillConfirm: true,
 };
 

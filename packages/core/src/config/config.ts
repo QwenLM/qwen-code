@@ -1611,7 +1611,7 @@ export class Config {
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
-    this.enableAutoSkill = params.enableAutoSkill ?? true;
+    this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;

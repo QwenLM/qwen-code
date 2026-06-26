@@ -1993,7 +1993,7 @@ export async function loadCliConfig(
       : (settings.memory?.enableManagedAutoDream ?? true),
     enableAutoSkill: bareMode
       ? false
-      : (settings.memory?.enableAutoSkill ?? true),
+      : (settings.memory?.enableAutoSkill ?? false),
     autoSkillConfirm: bareMode
       ? false
       : (settings.memory?.autoSkillConfirm ?? true),

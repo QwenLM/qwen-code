@@ -2530,13 +2530,26 @@ describe('loadCliConfig with includeDirectories', () => {
     ]);
   });
 
-  it('should default managed-memory toggles to enabled when not in bare mode', async () => {
+  it('should apply managed-memory defaults when not in bare mode', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
 
     expect(config.getManagedAutoMemoryEnabled()).toBe(true);
     expect(config.getManagedAutoDreamEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(false);
+  });
+
+  it('enableAutoSkill: passes memory.enableAutoSkill: true through to config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      memory: {
+        enableAutoSkill: true,
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
     expect(config.getAutoSkillEnabled()).toBe(true);
   });
 
@@ -2575,6 +2588,7 @@ describe('loadCliConfig with includeDirectories', () => {
       } as Record<string, unknown>,
       memory: {
         enableManagedAutoMemory: true,
+        enableAutoSkill: true,
       },
       security: {
         allowedHttpHookUrls: ['https://hooks.example.com/*'],

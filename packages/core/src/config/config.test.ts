@@ -4889,6 +4889,27 @@ describe('Model Switching and Config Updates', () => {
     });
   });
 
+  describe('getAutoSkillEnabled', () => {
+    it('defaults to false when enableAutoSkill is unset', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.getAutoSkillEnabled()).toBe(false);
+    });
+
+    it('returns true when enableAutoSkill is explicitly enabled', () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+      expect(config.getAutoSkillEnabled()).toBe(true);
+    });
+
+    it('is forced false in bare mode even when enableAutoSkill is true', () => {
+      const config = new Config({
+        ...baseParams,
+        enableAutoSkill: true,
+        bareMode: true,
+      });
+      expect(config.getAutoSkillEnabled()).toBe(false);
+    });
+  });
+
   describe('getAutoSkillConfirmEnabled', () => {
     it('defaults to true when autoSkillConfirm is unset', () => {
       const config = new Config({ ...baseParams });

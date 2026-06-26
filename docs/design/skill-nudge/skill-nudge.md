@@ -335,7 +335,7 @@ metadata:
 ```typescript
 // config schema 新增（在 memory 下）
 memory?: {
-  enableAutoSkill?: boolean;   // 默认 true
+  enableAutoSkill?: boolean;   // 默认 false
 }
 ```
 
@@ -397,7 +397,7 @@ memory?: {
 ### 7. 配置开关生效
 
 - 配置 `memory.enableAutoSkill: false`，即使工具调用次数超过阈值也不触发。
-- 验证默认开启时（`enableAutoSkill` 未配置或为 `true`），工具调用达到阈值后正常触发。
+- 验证默认关闭时（`enableAutoSkill` 未配置），工具调用达到阈值后不触发；显式配置为 `true` 时正常触发。
 
 ### 8. 本地构建产物验证
 
