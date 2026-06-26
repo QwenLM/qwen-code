@@ -50,14 +50,22 @@ export function getSourceGuidePath(workspaceRootPath: string, sourceSlug: string
  * Check if a source directory exists
  */
 export function sourceExists(workspaceRootPath: string, sourceSlug: string): boolean {
-  return existsSync(getSourcePath(workspaceRootPath, sourceSlug));
+  try {
+    return existsSync(getSourcePath(workspaceRootPath, sourceSlug));
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Check if a source config file exists
  */
 export function sourceConfigExists(workspaceRootPath: string, sourceSlug: string): boolean {
-  return existsSync(getSourceConfigPath(workspaceRootPath, sourceSlug));
+  try {
+    return existsSync(getSourceConfigPath(workspaceRootPath, sourceSlug));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -68,13 +76,12 @@ export function loadSourceConfig(
   workspaceRootPath: string,
   sourceSlug: string
 ): SourceConfig | null {
-  const configPath = getSourceConfigPath(workspaceRootPath, sourceSlug);
-
-  if (!existsSync(configPath)) {
-    return null;
-  }
-
   try {
+    const configPath = getSourceConfigPath(workspaceRootPath, sourceSlug);
+    if (!existsSync(configPath)) {
+      return null;
+    }
+
     const content = readFileSync(configPath, 'utf-8');
     const config = JSON.parse(stripBom(content)) as SourceConfig;
     return config;

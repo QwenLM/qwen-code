@@ -571,7 +571,11 @@ export function deleteSource(workspaceRootPath: string, sourceSlug: string): voi
  * Check if a source exists in a workspace
  */
 export function sourceExists(workspaceRootPath: string, sourceSlug: string): boolean {
-  return existsSync(join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json'));
+  try {
+    return existsSync(join(getSourcePath(workspaceRootPath, sourceSlug), 'config.json'));
+  } catch {
+    return false;
+  }
 }
 
 // ============================================================

@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { getSourceConfigPath, getSourceGuidePath, getSourcePath } from './source-helpers.ts';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import {
+  getSourceConfigPath,
+  getSourceGuidePath,
+  getSourcePath,
+  loadSourceConfig,
+  sourceConfigExists,
+  sourceExists,
+} from './source-helpers.ts';
 
 describe('session source helper slug validation', () => {
   it('resolves valid source helper paths', () => {
@@ -38,5 +47,16 @@ describe('session source helper slug validation', () => {
       expect(() => getSourceConfigPath(workspaceRoot, slug)).toThrow(message);
       expect(() => getSourceGuidePath(workspaceRoot, slug)).toThrow(message);
     }
+  });
+
+  it('preserves boolean and null-return contracts for invalid source slugs', () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'session-source-helpers-'));
+    const invalidDir = join(workspaceRoot, 'sources', 'legacy-source-');
+    mkdirSync(invalidDir, { recursive: true });
+    writeFileSync(join(invalidDir, 'config.json'), '{}');
+
+    expect(sourceExists(workspaceRoot, 'legacy-source-')).toBe(false);
+    expect(sourceConfigExists(workspaceRoot, 'legacy-source-')).toBe(false);
+    expect(loadSourceConfig(workspaceRoot, 'legacy-source-')).toBeNull();
   });
 });

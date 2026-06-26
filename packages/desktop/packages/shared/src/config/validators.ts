@@ -535,6 +535,22 @@ export function validateSourceConfigContent(jsonString: string): ValidationResul
 export function validateSource(workspaceId: string, slug: string): ValidationResult {
   const sourcesDir = getWorkspaceSourcesPath(workspaceId);
   const file = `sources/${slug}/config.json`;
+
+  try {
+    assertValidSourceSlug(slug);
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [{
+        file,
+        path: '',
+        message: error instanceof Error ? error.message : 'Invalid source slug',
+        severity: 'error',
+      }],
+      warnings: [],
+    };
+  }
+
   const configPath = join(sourcesDir, slug, 'config.json');
 
   if (!existsSync(join(sourcesDir, slug))) {
@@ -1466,7 +1482,22 @@ export function validateWorkspacePermissions(workspaceRoot: string): ValidationR
  * @param sourceSlug - Source slug
  */
 export function validateSourcePermissions(workspaceRoot: string, sourceSlug: string): ValidationResult {
-  const permissionsPath = getSourcePermissionsPath(workspaceRoot, sourceSlug);
+  let permissionsPath: string;
+  try {
+    permissionsPath = getSourcePermissionsPath(workspaceRoot, sourceSlug);
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [{
+        file: `sources/${sourceSlug}/permissions.json`,
+        path: '',
+        message: error instanceof Error ? error.message : 'Invalid source slug',
+        severity: 'error',
+      }],
+      warnings: [],
+    };
+  }
+
   return validatePermissionsFile(permissionsPath, `sources/${sourceSlug}/permissions.json`);
 }
 
@@ -1503,6 +1534,18 @@ export function validateAllPermissions(workspaceRoot: string): ValidationResult 
     for (const entry of entries) {
       const entryPath = join(sourcesDir, entry);
       if (statSync(entryPath).isDirectory()) {
+        try {
+          assertValidSourceSlug(entry);
+        } catch {
+          warnings.push({
+            file: `sources/${entry}/permissions.json`,
+            path: '',
+            message: `Source '${entry}' has invalid slug format, skipping permissions validation`,
+            severity: 'warning',
+          });
+          continue;
+        }
+
         const srcResult = validateSourcePermissions(workspaceRoot, entry);
         errors.push(...srcResult.errors);
         warnings.push(...srcResult.warnings);

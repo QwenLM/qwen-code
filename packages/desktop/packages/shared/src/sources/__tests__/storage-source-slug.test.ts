@@ -2,7 +2,15 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { deleteSource, generateSourceSlug, getSourcePath, loadSourceConfig, loadSourceGuide, loadWorkspaceSources } from '../storage.ts';
+import {
+  deleteSource,
+  generateSourceSlug,
+  getSourcePath,
+  loadSourceConfig,
+  loadSourceGuide,
+  loadWorkspaceSources,
+  sourceExists,
+} from '../storage.ts';
 
 describe('source storage slug validation', () => {
   it('resolves valid source slugs under the workspace sources directory', () => {
@@ -100,6 +108,7 @@ describe('source storage slug validation', () => {
 
     expect(loadSourceConfig(workspaceRoot, 'legacy-source-')).toBeNull();
     expect(loadSourceGuide(workspaceRoot, 'legacy-source-')).toBeNull();
+    expect(sourceExists(workspaceRoot, 'legacy-source-')).toBe(false);
     expect(loadWorkspaceSources(workspaceRoot).map((source) => source.config.slug)).toEqual(['valid-source']);
   });
 });

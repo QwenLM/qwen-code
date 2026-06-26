@@ -470,10 +470,10 @@ export function loadSourcePermissionsConfig(
   workspaceRootPath: string,
   sourceSlug: string
 ): PermissionsCustomConfig | null {
-  const path = getSourcePermissionsPath(workspaceRootPath, sourceSlug);
-  if (!existsSync(path)) return null;
-
   try {
+    const path = getSourcePermissionsPath(workspaceRootPath, sourceSlug);
+    if (!existsSync(path)) return null;
+
     const content = readFileSync(path, 'utf-8');
     const config = parsePermissionsJson(content);
     debug(`[Permissions] Loaded source config from ${path}:`, config);
@@ -507,12 +507,16 @@ export function loadRawWorkspacePermissions(workspaceRootPath: string): Permissi
  * Returns null if the file doesn't exist.
  */
 export function loadRawSourcePermissions(workspaceRootPath: string, sourceSlug: string): PermissionsConfigFile | null {
-  const filePath = getSourcePermissionsPath(workspaceRootPath, sourceSlug);
-  if (!existsSync(filePath)) return null;
-  const content = readFileSync(filePath, 'utf-8');
-  const json = safeJsonParse(content);
-  const result = PermissionsConfigSchema.safeParse(json);
-  return result.success ? result.data : null;
+  try {
+    const filePath = getSourcePermissionsPath(workspaceRootPath, sourceSlug);
+    if (!existsSync(filePath)) return null;
+    const content = readFileSync(filePath, 'utf-8');
+    const json = safeJsonParse(content);
+    const result = PermissionsConfigSchema.safeParse(json);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
