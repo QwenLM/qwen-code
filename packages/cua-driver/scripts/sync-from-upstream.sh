@@ -89,6 +89,11 @@ fi
 
 echo "$NEW_REF" > "$VENDORED_FILE"
 echo
+echo "NOTE: we carry some not-yet-merged upstream PRs as cherry-picks — see"
+echo "      packages/cua-driver/.vendored-patches.md. If <new-ref> is at/past"
+echo "      the point any of them merged upstream, expect .rej on those files"
+echo "      and drop the reconciled row from that table."
+echo
 echo "Review the result, then:"
 echo "  git -C \"$REPO_ROOT\" add -A"
 echo "  git -C \"$REPO_ROOT\" commit -m 'chore(cua-driver): sync vendored driver to $NEW_REF'"
