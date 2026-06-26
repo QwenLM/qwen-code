@@ -150,7 +150,9 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
   readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
-  readTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('../memory/indexer.js', () => ({
+  rebuildTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -440,6 +442,7 @@ describe('Server Config (config.ts)', () => {
       ).toBe(false);
     });
   });
+
 
   it('should store a system prompt override', () => {
     const config = new Config({

@@ -187,9 +187,9 @@ import {
 } from '../memory/paths.js';
 import {
   readAutoMemoryIndex,
-  readTeamAutoMemoryIndex,
   readUserAutoMemoryIndex,
 } from '../memory/store.js';
+import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -2240,7 +2240,9 @@ export class Config {
           // Best-effort like the user-level read: a failure to read the shared
           // team index must not strip the managed-memory section.
           teamMemoryEnabled
-            ? readTeamAutoMemoryIndex(this.getProjectRoot()).catch(() => null)
+            ? rebuildTeamAutoMemoryIndex(this.getProjectRoot()).catch(
+                () => null,
+              )
             : Promise.resolve(null),
         ]);
       // Always surface the user-level section so the main assistant knows the

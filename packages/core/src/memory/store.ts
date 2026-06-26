@@ -11,7 +11,6 @@ import {
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
-  getTeamAutoMemoryIndexPath,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from './paths.js';
@@ -20,9 +19,6 @@ import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
 } from './types.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
-
-const debugLogger = createDebugLogger('AUTO_MEMORY_STORE');
 
 export function createDefaultAutoMemoryMetadata(
   now = new Date(),
@@ -120,32 +116,6 @@ export async function readUserAutoMemoryIndex(): Promise<string | null> {
     if (nodeError.code === 'ENOENT') {
       return null;
     }
-    throw error;
-  }
-}
-
-/**
- * Read the team (in-repo, git-tracked) memory index. The team directory is
- * created lazily on first write (the write tool mkdirs it), so a missing file
- * is normal and returns null.
- */
-export async function readTeamAutoMemoryIndex(
-  projectRoot: string,
-): Promise<string | null> {
-  try {
-    return await fs.readFile(getTeamAutoMemoryIndexPath(projectRoot), 'utf-8');
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === 'ENOENT') {
-      return null;
-    }
-    // config.ts reads this via `.catch(() => null)`, so non-ENOENT errors
-    // (EACCES/EIO/ELOOP) would otherwise vanish — log before re-throwing.
-    debugLogger.debug(
-      `Failed to read team auto-memory index (${nodeError.code ?? 'unknown'}): ${
-        nodeError.path ?? getTeamAutoMemoryIndexPath(projectRoot)
-      }`,
-    );
     throw error;
   }
 }

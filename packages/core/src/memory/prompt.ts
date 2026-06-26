@@ -211,6 +211,7 @@ function buildTeamScopeSection(): string[] {
     '- `user` memories are always private — never save them to TEAM.',
     '- `project` memories stay private to you by default. Save to TEAM only for durable shared facts every contributor needs — not time-bound state like freezes or in-flight task status, which stays private and decays.',
     '- You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials. It is visible to everyone who can read the repository, and such writes are rejected automatically.',
+    '- For TEAM memory you only write the memory file (Step 1). Its `MEMORY.md` index is generated automatically from the saved files — do NOT hand-edit the team index (that two-step rule applies only to the private directories).',
     '',
   ];
 }

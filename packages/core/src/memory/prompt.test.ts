@@ -81,6 +81,8 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain('/tmp/project/.qwen/team-memory');
     expect(prompt).toContain('## Saving to team memory');
     expect(prompt).toContain('MUST NOT save sensitive data to TEAM memory');
+    // The team index is auto-generated; the model must not hand-edit it.
+    expect(prompt).toContain('generated automatically from the saved files');
     // The team index block is rendered with its own content.
     expect(prompt).toContain('## /tmp/project/.qwen/team-memory/MEMORY.md');
     expect(prompt).toContain('[Convention](feedback/tests.md)');

@@ -10,6 +10,7 @@ import { AUTO_MEMORY_TYPES, type AutoMemoryType } from './types.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
 
@@ -135,4 +136,14 @@ export async function scanUserAutoMemoryTopicDocuments(): Promise<
   ScannedAutoMemoryDocument[]
 > {
   return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot());
+}
+
+/**
+ * Scan the team (in-repo, git-tracked) auto-memory dir. Returns an empty
+ * array when the dir does not exist yet.
+ */
+export async function scanTeamAutoMemoryTopicDocuments(
+  projectRoot: string,
+): Promise<ScannedAutoMemoryDocument[]> {
+  return scanAutoMemoryDocumentsFromRoot(getTeamAutoMemoryRoot(projectRoot));
 }

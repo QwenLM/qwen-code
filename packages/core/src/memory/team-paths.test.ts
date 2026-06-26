@@ -15,8 +15,6 @@ import {
   isTeamAutoMemPath,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
-import { readTeamAutoMemoryIndex } from './store.js';
-
 describe('team auto-memory paths', () => {
   let projectRoot: string;
 
@@ -110,20 +108,5 @@ describe('team auto-memory paths', () => {
     } finally {
       fs.rmSync(fresh, { recursive: true, force: true });
     }
-  });
-
-  describe('readTeamAutoMemoryIndex', () => {
-    it('returns null when the index does not exist yet', async () => {
-      expect(await readTeamAutoMemoryIndex(projectRoot)).toBeNull();
-    });
-
-    it('reads back the team index once written', async () => {
-      const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
-      fs.mkdirSync(path.dirname(indexPath), { recursive: true });
-      fs.writeFileSync(indexPath, '- [Existing](x.md) — keep me.');
-      expect(await readTeamAutoMemoryIndex(projectRoot)).toBe(
-        '- [Existing](x.md) — keep me.',
-      );
-    });
   });
 });
