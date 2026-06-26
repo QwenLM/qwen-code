@@ -243,26 +243,30 @@ For directories scaffolded by `qwen extensions new` in the current session, run
 the build commands below. For pre-existing directories, only run the build
 commands after the trust review above is complete.
 
+Use `--ignore-scripts` so dependency install scripts cannot run before review.
+
 ```bash
-cd -- "$extension_path"
-npm install --ignore-scripts
-npm run build
+cd -- "$extension_path" && npm install --ignore-scripts
 ```
 
-Use `--ignore-scripts` so dependency install scripts cannot run before review.
 After `npm install --ignore-scripts`, re-check any lockfile that was created or
 modified before running `npm run build`. Confirm the lockfile changes match the
 reviewed dependency set, or stop and ask the user whether to continue. Before
 `npm run build`, audit the full lifecycle that npm will run: `prebuild`,
 `build`, and `postbuild`; if any are present, summarize them and require
-explicit user approval before running the build. If the build requires install
-scripts, stop and ask the user whether to run `npm install` without
-`--ignore-scripts`, which runs all dependency lifecycle scripts, or to run a
-reviewed project-level npm script, which runs the named script plus its matching
-`pre<script>` and `post<script>` hooks. Explain what each option would execute.
-If any step exits non-zero, stop and report the error to the user. Do not run
-the Before Handoff
-checklist or link an extension that failed to build.
+explicit user approval before running the build.
+
+```bash
+cd -- "$extension_path" && npm run build
+```
+
+If the build requires install scripts, stop and ask the user whether to run
+`npm install` without `--ignore-scripts`, which runs all dependency lifecycle
+scripts, or to run a reviewed project-level npm script, which runs the named
+script plus its matching `pre<script>` and `post<script>` hooks. Explain what
+each option would execute. If any step exits non-zero, stop and report the error
+to the user. Do not run the Before Handoff checklist or link an extension that
+failed to build.
 
 For context, commands, skills, or agent-only extensions, no build command is
 required. Do not link from this Local Test Flow section. Run the Before Handoff
