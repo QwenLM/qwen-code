@@ -80,6 +80,7 @@ import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   createAcpSessionBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -3324,6 +3325,74 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/cd', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const targetPath = body['path'];
+    if (
+      typeof targetPath !== 'string' ||
+      targetPath.length === 0 ||
+      !path.isAbsolute(targetPath)
+    ) {
+      res.status(400).json({
+        error: '`path` is required and must be an absolute path',
+        code: 'invalid_path',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.changeSessionCwd(
+        sessionId,
+        { path: targetPath },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      // Map ACP child errorKind codes to HTTP responses
+      if (err && typeof err === 'object') {
+        const data = (err as { data?: unknown }).data;
+        if (data && typeof data === 'object') {
+          const kind = (data as { errorKind?: unknown }).errorKind;
+          if (kind === 'restrictive_sandbox') {
+            res.status(403).json({
+              error:
+                (err as { message?: string }).message ??
+                'Restrictive sandbox mode active',
+              code: 'restrictive_sandbox',
+            });
+            return;
+          }
+          if (kind === 'directory_not_found') {
+            res.status(400).json({
+              error:
+                (err as { message?: string }).message ?? 'Directory not found',
+              code: 'directory_not_found',
+              path: (data as { path?: string }).path,
+            });
+            return;
+          }
+          if (kind === 'directory_not_trusted') {
+            res.status(403).json({
+              error:
+                (err as { message?: string }).message ??
+                'Directory not trusted',
+              code: 'directory_not_trusted',
+              path: (data as { path?: string }).path,
+            });
+            return;
+          }
+        }
+      }
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/cd',
+        sessionId,
+      });
+    }
+  });
+
   app.get('/session/:id/status', (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
@@ -5762,6 +5831,14 @@ function sendBridgeErrorImpl(
     res.status(409).json({
       error: err.message,
       code: 'branch_while_prompt_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof CdWhilePromptActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_busy',
       sessionId: err.sessionId,
     });
     return;

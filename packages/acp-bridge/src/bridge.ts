@@ -48,6 +48,7 @@ import {
 } from './status.js';
 import {
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
   InvalidSessionScopeError,
@@ -81,6 +82,8 @@ import type {
   AcpSessionBridge,
   MidTurnQueueEntry,
   BridgeDaemonStatusSnapshot,
+  ChangeSessionCwdRequest,
+  ChangeSessionCwdResult,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -3472,6 +3475,65 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () => undefined,
       );
       return branchResult;
+    },
+
+    async changeSessionCwd(
+      sessionId: string,
+      req: ChangeSessionCwdRequest,
+      context?: BridgeClientRequestContext,
+    ): Promise<ChangeSessionCwdResult> {
+      if (shuttingDown) throw new Error('AcpSessionBridge is shutting down');
+
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+
+      // Chain onto promptQueue and update tail — ensures:
+      // 1. cd waits for any in-flight prompt to complete
+      // 2. Subsequent prompts wait for cd to complete (prevents stale config.cwd)
+      const cdResult = entry.promptQueue.then(async () => {
+        if (entry.promptActive) {
+          throw new CdWhilePromptActiveError(sessionId);
+        }
+
+        const ci = await ensureChannel();
+        return (await withTimeout(
+          ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: req.path,
+          }),
+          initTimeoutMs,
+          'changeSessionCwd',
+        )) as { previousCwd: string; newCwd: string; warnings: string[] };
+      });
+
+      // Update queue tail (same pattern as sendPrompt L3090)
+      entry.promptQueue = cdResult.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      const result = await cdResult;
+
+      // Only update state and broadcast if directory actually changed
+      if (result.previousCwd !== result.newCwd) {
+        entry.workspaceCwd = result.newCwd;
+        entry.events.publish({
+          type: 'session_cwd_changed',
+          data: {
+            sessionId,
+            previousCwd: result.previousCwd,
+            newCwd: result.newCwd,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+
+      return { sessionId, ...result };
     },
 
     async closeSession(sessionId, context, closeOpts) {

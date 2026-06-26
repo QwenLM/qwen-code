@@ -172,7 +172,11 @@ import {
   getCurrentLanguage,
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
-import { isWorkspaceTrusted } from '../config/trustedFolders.js';
+import {
+  isWorkspaceTrusted,
+  isFolderTrustEnabled,
+  loadTrustedFolders,
+} from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -5510,6 +5514,106 @@ class QwenAgent implements Agent {
         }
         await this.closeStoredSession(sessionId);
         return { sessionId, closed: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionCd: {
+        const sessionId = params['sessionId'];
+        const targetPath = params['path'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing path (must be an absolute path)',
+          );
+        }
+
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+
+        // Restrictive sandbox check
+        if (config.isRestrictiveSandbox()) {
+          throw new RequestError(-32003, 'Restrictive sandbox mode active', {
+            errorKind: 'restrictive_sandbox',
+          });
+        }
+
+        // Verify directory exists
+        let stats;
+        try {
+          stats = await fs.stat(targetPath);
+        } catch {
+          throw new RequestError(-32002, `Directory not found: ${targetPath}`, {
+            errorKind: 'directory_not_found',
+            path: targetPath,
+          });
+        }
+        if (!stats.isDirectory()) {
+          throw new RequestError(-32002, `Not a directory: ${targetPath}`, {
+            errorKind: 'directory_not_found',
+            path: targetPath,
+          });
+        }
+
+        // Canonicalize path
+        const canonicalPath = await fs.realpath(targetPath);
+
+        // Noop check
+        const previousCwd = config.getTargetDir();
+        if (canonicalPath === previousCwd) {
+          return { previousCwd, newCwd: canonicalPath, warnings: [] };
+        }
+
+        // Trust check
+        if (isFolderTrustEnabled(this.settings.merged)) {
+          const trustedFolders = loadTrustedFolders();
+          if (trustedFolders.isPathTrusted(canonicalPath) !== true) {
+            throw new RequestError(
+              -32001,
+              `Directory not trusted: ${canonicalPath}`,
+              { errorKind: 'directory_not_trusted', path: canonicalPath },
+            );
+          }
+        }
+
+        // Relocate working directory (skip process.chdir for ACP)
+        const warnings: string[] = [];
+        const relocation = await config.relocateWorkingDirectory(
+          canonicalPath,
+          canonicalPath,
+          { skipProcessChdir: true },
+        );
+        if (relocation.memoryRefreshError) {
+          warnings.push(
+            `Memory refresh failed: ${
+              relocation.memoryRefreshError instanceof Error
+                ? relocation.memoryRefreshError.message
+                : String(relocation.memoryRefreshError)
+            }`,
+          );
+        }
+
+        // Update model context
+        try {
+          await config
+            .getGeminiClient()
+            ?.addWorkingDirectoryChangedContext(previousCwd, canonicalPath);
+        } catch (error) {
+          warnings.push(
+            `Model context refresh failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+
+        return { previousCwd, newCwd: canonicalPath, warnings };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         const sessionId = params['sessionId'];

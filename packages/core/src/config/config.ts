@@ -3091,8 +3091,11 @@ export class Config {
   async relocateWorkingDirectory(
     newDir: string,
     expectedCanonicalDir?: string,
+    opts?: { skipProcessChdir?: boolean },
   ): Promise<{ memoryRefreshError?: unknown }> {
-    const oldDir = fs.realpathSync(process.cwd());
+    const oldDir = opts?.skipProcessChdir
+      ? this.cwd
+      : fs.realpathSync(process.cwd());
     const targetPath = path.resolve(newDir);
     const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
     if (!fs.statSync(targetPath).isDirectory()) {
@@ -3103,13 +3106,15 @@ export class Config {
       this.explicitIncludeDirectories,
     );
 
-    process.chdir(targetPath);
-    const actualCwd = fs.realpathSync(process.cwd());
-    if (actualCwd !== expected) {
-      process.chdir(oldDir);
-      throw new Error(
-        `Changed directory to ${actualCwd}, expected ${expected}.`,
-      );
+    if (!opts?.skipProcessChdir) {
+      process.chdir(targetPath);
+      const actualCwd = fs.realpathSync(process.cwd());
+      if (actualCwd !== expected) {
+        process.chdir(oldDir);
+        throw new Error(
+          `Changed directory to ${actualCwd}, expected ${expected}.`,
+        );
+      }
     }
 
     const oldStorage = this.storage;

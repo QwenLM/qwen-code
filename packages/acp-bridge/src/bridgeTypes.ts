@@ -123,6 +123,17 @@ export interface BridgeForkAgentResult {
   launched: boolean;
 }
 
+export interface ChangeSessionCwdRequest {
+  path: string;
+}
+
+export interface ChangeSessionCwdResult {
+  sessionId: string;
+  previousCwd: string;
+  newCwd: string;
+  warnings: string[];
+}
+
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
 export interface BridgeSessionSummary {
   sessionId: string;
@@ -300,6 +311,21 @@ export interface AcpSessionBridge {
     req: BridgeBranchSessionRequest,
     context?: BridgeClientRequestContext,
   ): Promise<BridgeBranchedSession>;
+
+  /**
+   * Change the working directory of a live session. The session must be
+   * idle (no active prompt). Chains onto `entry.promptQueue` and updates
+   * the tail to prevent concurrent mutations.
+   *
+   * Throws `CdWhilePromptActiveError` when a prompt is running,
+   * `SessionNotFoundError` for unknown ids, and `InvalidClientIdError`
+   * when the caller's client id is not bound to the session.
+   */
+  changeSessionCwd(
+    sessionId: string,
+    req: ChangeSessionCwdRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<ChangeSessionCwdResult>;
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same

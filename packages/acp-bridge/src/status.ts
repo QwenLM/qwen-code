@@ -143,6 +143,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
+  sessionCd: 'qwen/control/session/cd',
 } as const;
 
 export type ServeStatus =
