@@ -402,6 +402,115 @@ describe('IdeClient', () => {
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     });
 
+    it('should not retry raw env port when its lock belongs to another workspace', async () => {
+      process.env['QWEN_CODE_IDE_SERVER_PORT'] = '1234';
+      const envConfig = {
+        port: '1234',
+        workspacePath: '/other/workspace',
+      };
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/home/test', '.qwen', 'ide', '1234.lock')) {
+            return JSON.stringify(envConfig);
+          }
+          if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
+            throw new Error('not found');
+          }
+          if (file === path.join('/tmp', 'qwen-code-ide-server-1234.json')) {
+            throw new Error('not found');
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue([]);
+
+      const ideClient = await IdeClient.getInstance();
+      await ideClient.connect();
+
+      expect(StreamableHTTPClientTransport).not.toHaveBeenCalled();
+      expect(mockClient.connect).not.toHaveBeenCalled();
+      expect(ideClient.getConnectionStatus().status).toBe(
+        IDEConnectionStatus.Disconnected,
+      );
+      delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+    });
+
+    it('should skip explicit workspace mismatches when trying fallback ports', async () => {
+      const primaryConfig = {
+        port: '1111',
+        workspacePath: '/test/workspace',
+        ppid: 12345,
+      };
+      const otherWorkspaceConfig = {
+        port: '2222',
+        workspacePath: '/other/workspace',
+      };
+      const legacyConfig = {
+        port: '3333',
+      };
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
+            return JSON.stringify(primaryConfig);
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '2222.lock')) {
+            return JSON.stringify(otherWorkspaceConfig);
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '3333.lock')) {
+            return JSON.stringify(legacyConfig);
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue(['2222.lock', '3333.lock']);
+      (
+        vi.mocked(fs.promises.stat) as Mock<
+          (path: fs.PathLike) => Promise<fs.Stats>
+        >
+      ).mockImplementation(async (filePath: fs.PathLike) => {
+        const now = Date.now();
+        const file = String(filePath);
+        return {
+          mtimeMs: file.endsWith('2222.lock') ? now : now - 1000,
+        } as fs.Stats;
+      });
+      mockClient.request.mockResolvedValue({ tools: [] });
+      mockClient.connect
+        .mockRejectedValueOnce(new Error('primary port failed'))
+        .mockResolvedValueOnce(undefined);
+
+      const ideClient = await IdeClient.getInstance();
+      await ideClient.connect();
+
+      expect(StreamableHTTPClientTransport).toHaveBeenNthCalledWith(
+        1,
+        new URL('http://127.0.0.1:1111/mcp'),
+        expect.any(Object),
+      );
+      expect(StreamableHTTPClientTransport).toHaveBeenNthCalledWith(
+        2,
+        new URL('http://127.0.0.1:3333/mcp'),
+        expect.any(Object),
+      );
+      expect(StreamableHTTPClientTransport).not.toHaveBeenCalledWith(
+        new URL('http://127.0.0.1:2222/mcp'),
+        expect.any(Object),
+      );
+      expect(ideClient.getConnectionStatus().status).toBe(
+        IDEConnectionStatus.Connected,
+      );
+    });
+
     it('should connect using stdio when stdio config is in environment variables', async () => {
       vi.mocked(fs.promises.readFile).mockRejectedValue(
         new Error('File not found'),
