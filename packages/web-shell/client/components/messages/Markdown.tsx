@@ -5,7 +5,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ErrorInfo,
   type ReactNode,
@@ -16,7 +15,12 @@ import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { highlightToHtml, highlightToHtmlSync } from './codeHighlighter';
+import {
+  getCachedHtml,
+  getCodeHighlighter,
+  highlightToHtmlSync,
+  isTooLargeToHighlight,
+} from './codeHighlighter';
 import { useI18n } from '../../i18n';
 import {
   useWebShellCustomization,
@@ -24,7 +28,6 @@ import {
 } from '../../customization';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import styles from './Markdown.module.css';
-import { StreamingCodeBlock } from './StreamingCodeBlock';
 
 interface MarkdownProps {
   content: string;
@@ -108,7 +111,7 @@ const LANGUAGE_ALIASES: Record<string, string> = {
 };
 
 export interface ResolvedFenceLanguage {
-  /** What the user typed (lowercased), shown in the code-block header. */
+  /** What the user typed, in its original case, shown in the code-block header. */
   label: string;
   /** Canonical language id (aliases resolved); also used to detect mermaid. */
   lang: string;
@@ -120,9 +123,16 @@ export function resolveFenceLanguage(
   rawLang: string | undefined,
 ): ResolvedFenceLanguage {
   const normalized = (rawLang || '').toLowerCase();
-  const lang = LANGUAGE_ALIASES[normalized] ?? normalized;
+  // `Object.hasOwn` guard: a bracket read like `LANGUAGE_ALIASES['__proto__']`
+  // would otherwise return an inherited prototype value (an object/function),
+  // violating the `lang: string` contract.
+  const lang = Object.hasOwn(LANGUAGE_ALIASES, normalized)
+    ? LANGUAGE_ALIASES[normalized]
+    : normalized;
   const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
-  return { label: normalized || 'text', lang, resolvedLang };
+  // Header label preserves the original case (` ```TypeScript ` shows
+  // "TypeScript", not "typescript"); alias resolution uses the lowercased form.
+  return { label: (rawLang || '').trim() || 'text', lang, resolvedLang };
 }
 
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
@@ -145,35 +155,6 @@ export function isSafeImageSrc(url: string | undefined): boolean {
   if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
   if (SAFE_IMAGE_DATA_URI.test(trimmed)) return true;
   return SAFE_HREF_SCHEMES.test(trimmed);
-}
-
-const SHIKI_CACHE_MAX = 128;
-const shikiCache = new Map<string, string>();
-
-function shikiCacheKey(code: string, lang: string, theme: string): string {
-  return `${lang}\0${theme}\0${code}`;
-}
-
-function setShikiCache(key: string, html: string): void {
-  if (shikiCache.size >= SHIKI_CACHE_MAX) {
-    const first = shikiCache.keys().next().value;
-    if (first !== undefined) shikiCache.delete(first);
-  }
-  shikiCache.set(key, html);
-}
-
-function cachedCodeToHtml(
-  code: string,
-  lang: string,
-  theme: string,
-): Promise<string> {
-  const key = shikiCacheKey(code, lang, theme);
-  const cached = shikiCache.get(key);
-  if (cached !== undefined) return Promise.resolve(cached);
-  return highlightToHtml(code, lang, theme).then((html) => {
-    setShikiCache(key, html);
-    return html;
-  });
 }
 
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
@@ -307,9 +288,6 @@ function CodeBlock({
   const appTheme = useTheme();
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  // True once this block has streamed at least once, so the settle hand-off can
-  // hold the colored streaming render until the static highlight is ready.
-  const hasStreamedRef = useRef(false);
 
   const match = className?.match(/language-(\w+)/);
   const { label, lang, resolvedLang } = resolveFenceLanguage(match?.[1]);
@@ -318,60 +296,79 @@ function CodeBlock({
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
   useEffect(() => {
-    if (lang === 'mermaid' || resolvedLang === 'text') {
+    // Don't highlight unsupported languages or blocks too large to tokenize
+    // without freezing the main thread — render them as plain text.
+    if (
+      lang === 'mermaid' ||
+      resolvedLang === 'text' ||
+      isTooLargeToHighlight(code)
+    ) {
       setHtml(null);
       return;
     }
 
-    // Streaming is painted live by <StreamingCodeBlock>; the static path only
-    // renders the settled content, so do nothing while the turn streams.
-    if (isStreaming) {
+    // Already-highlighted exact code/lang/theme (settled re-render, or a block
+    // that re-mounted): return it synchronously without needing the highlighter.
+    const cached = getCachedHtml(code, resolvedLang, shikiTheme);
+    if (cached !== null) {
+      setHtml(cached);
       return;
     }
 
-    const cacheKey = shikiCacheKey(code, resolvedLang, shikiTheme);
-    if (shikiCache.has(cacheKey)) {
-      setHtml(shikiCache.get(cacheKey)!);
-      return;
-    }
-
-    // Fast path: if the highlighter is already warm for this language (e.g. the
-    // block just finished streaming), highlight synchronously so the hand-off
-    // from the streaming renderer is instant — no grey flash, no debounce delay.
-    const warmHtml = highlightToHtmlSync(code, resolvedLang, shikiTheme);
+    // Re-highlight synchronously on every code change. With the Oniguruma
+    // engine a normal-sized block tokenizes in ~1–7ms, so there's no need to
+    // throttle or keep a stale snapshot around: `html` always matches the
+    // current `code`, so no streamed text is ever hidden and there's no flicker.
+    // `isTooLargeToHighlight` above bounds the worst-case per-chunk cost.
+    //
+    // Don't persist streaming intermediates: the growing block produces a new
+    // cache key every chunk and would otherwise evict other blocks from the LRU.
+    const persist = !isStreaming;
+    const warmHtml = highlightToHtmlSync(
+      code,
+      resolvedLang,
+      shikiTheme,
+      persist,
+    );
     if (warmHtml !== null) {
-      setShikiCache(cacheKey, warmHtml);
       setHtml(warmHtml);
       return;
     }
 
-    // Cold path: keep any previously-rendered HTML in place (don't clear to
-    // plain) and swap only once the new highlight is ready, avoiding a grey
-    // flash on recompute (e.g. theme change). Debounced to coalesce changes.
+    // Cold path: the grammar isn't loaded yet. Drop any HTML still held from a
+    // previous `code` (e.g. this reused CodeBlock instance just switched to a
+    // not-yet-loaded language on regeneration) so we render the current code as
+    // plain text — not the prior block's stale highlight — until the load
+    // resolves. Then re-check cancellation *before* the synchronous tokenization
+    // so superseded streaming snapshots that queued behind the same load don't
+    // each run codeToHtml.
+    setHtml(null);
     let cancelled = false;
-    const timer = setTimeout(() => {
-      cachedCodeToHtml(code, resolvedLang, shikiTheme)
-        .then((result) => {
-          if (!cancelled) setHtml(result);
-        })
-        .catch(() => {
-          if (!cancelled) setHtml(null);
-        });
-    }, 120);
+    getCodeHighlighter(resolvedLang)
+      .then(() => {
+        if (cancelled) return;
+        const cold = highlightToHtmlSync(
+          code,
+          resolvedLang,
+          shikiTheme,
+          persist,
+        );
+        if (cold !== null) setHtml(cold);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn(
+          '[web-shell] highlight failed for lang=%s',
+          resolvedLang,
+          err,
+        );
+        setHtml(null);
+      });
 
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
   }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
-
-  // Remember once this block has streamed, so the settle hand-off can hold the
-  // colored streaming render until the static highlight is ready.
-  useEffect(() => {
-    if (isStreaming && lang !== 'mermaid' && resolvedLang !== 'text') {
-      hasStreamedRef.current = true;
-    }
-  }, [isStreaming, lang, resolvedLang]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code).then(
@@ -387,19 +384,9 @@ function CodeBlock({
     return <MermaidBlock code={code} />;
   }
 
-  // While streaming a highlightable fence, paint it live via @shikijs/stream
-  // instead of waiting for the turn to settle. Plain/unknown languages and the
-  // settled (post-stream) render fall through to the static Shiki path below.
-  const highlightable = lang !== 'mermaid' && resolvedLang !== 'text';
-  const streamingHighlight = isStreaming && highlightable;
-
-  // After the turn settles, keep the (already-colored) streaming renderer
-  // mounted until the static highlight is ready, so the hand-off never flashes
-  // through a plain grey frame.
-  const showStreaming =
-    streamingHighlight ||
-    (hasStreamedRef.current && html === null && highlightable);
-
+  // `html` is always the highlight of the *current* `code` (re-highlighted
+  // synchronously per chunk), so it can be rendered directly — no prefix gate
+  // is needed to guard against showing a stale/previous block's HTML.
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
@@ -408,13 +395,7 @@ function CodeBlock({
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {showStreaming ? (
-        <StreamingCodeBlock
-          code={code}
-          lang={resolvedLang}
-          theme={shikiTheme}
-        />
-      ) : html ? (
+      {html !== null ? (
         <div
           className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}
@@ -476,8 +457,8 @@ class EnhancedMarkdownTableBoundary extends Component<
 // Carries the streaming flag to CodeBlock via context instead of a closure, so
 // the `code` renderer below can be a single stable reference. Toggling
 // isStreaming then no longer changes the `code` element type, so React reuses
-// the same CodeBlock/StreamingCodeBlock instances across the streaming→settled
-// transition (preserving their state) instead of unmounting and remounting.
+// the same CodeBlock instance across the streaming→settled transition
+// (preserving its highlighted `html` state) instead of remounting it.
 const IsStreamingContext = createContext(false);
 
 function MarkdownCode({

@@ -27,7 +27,6 @@
     "@codemirror/language": "^6.10.0",
     "@codemirror/state": "^6.5.0",
     "@codemirror/view": "^6.35.0",
-    "@shikijs/stream": "^4.3.0",
     "@tanstack/react-virtual": "^3.13.26",
     "codemirror": "^6.0.0",
     "katex": "^0.16.47",
@@ -36,7 +35,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
-    "shiki": "^4.3.0"
+    "shiki": "^1.29.2"
   },
   "peerDependencies": {
     "@qwen-code/sdk": ">=0.1.8",

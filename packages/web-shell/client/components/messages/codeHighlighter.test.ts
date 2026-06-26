@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   __resetForTesting,
+  getCachedHtml,
   getCodeHighlighter,
-  highlightToHtml,
   highlightToHtmlSync,
+  isTooLargeToHighlight,
+  MAX_HIGHLIGHT_LINE_CHARS,
+  MAX_HIGHLIGHT_TOTAL_CHARS,
 } from './codeHighlighter';
 
 const THEME = 'github-dark-default';
@@ -14,13 +17,34 @@ beforeEach(() => {
   __resetForTesting();
 });
 
-describe('codeHighlighter', () => {
-  it('highlightToHtml produces Shiki markup for a loaded language', async () => {
-    const html = await highlightToHtml('const x = 1;', 'typescript', THEME);
-    expect(html).toContain('<pre');
-    expect(html).toContain('shiki');
+describe('isTooLargeToHighlight', () => {
+  it('allows normal multi-line code', () => {
+    expect(isTooLargeToHighlight('const x = 1;\nconst y = 2;\n')).toBe(false);
   });
 
+  it('bails on any single line over the per-line limit (anywhere in the block)', () => {
+    expect(
+      isTooLargeToHighlight('x'.repeat(MAX_HIGHLIGHT_LINE_CHARS + 1)),
+    ).toBe(true);
+    // A long line earlier in the block (not just the trailing one) also bails.
+    expect(
+      isTooLargeToHighlight(
+        'x'.repeat(MAX_HIGHLIGHT_LINE_CHARS + 1) + '\nshort',
+      ),
+    ).toBe(true);
+  });
+
+  it('bails when the whole block exceeds the total limit (many short lines)', () => {
+    const line = 'a'.repeat(80) + '\n';
+    const block = line.repeat(
+      Math.ceil(MAX_HIGHLIGHT_TOTAL_CHARS / line.length) + 5,
+    );
+    expect(block.length).toBeGreaterThan(MAX_HIGHLIGHT_TOTAL_CHARS);
+    expect(isTooLargeToHighlight(block)).toBe(true);
+  });
+});
+
+describe('codeHighlighter', () => {
   it('highlightToHtmlSync is null until the language is warm, then returns HTML', async () => {
     // Cold: the language has not been loaded yet.
     expect(highlightToHtmlSync('SELECT 1', 'sql', THEME)).toBeNull();
@@ -28,11 +52,16 @@ describe('codeHighlighter', () => {
     expect(highlightToHtmlSync('SELECT 1', 'sql', THEME)).toContain('shiki');
   });
 
-  it('highlightToHtmlSync bails to null for oversized input even when warm', async () => {
-    await getCodeHighlighter('json');
-    const big = '"x",'.repeat(10_000); // > 30K chars
-    expect(big.length).toBeGreaterThan(30_000);
-    expect(highlightToHtmlSync(big, 'json', THEME)).toBeNull();
+  it('does not persist streaming intermediates when persist=false', async () => {
+    await getCodeHighlighter('sql');
+    // persist=false highlights but doesn't write the cache...
+    expect(highlightToHtmlSync('SELECT 2', 'sql', THEME, false)).toContain(
+      'shiki',
+    );
+    expect(getCachedHtml('SELECT 2', 'sql', THEME)).toBeNull();
+    // ...persist=true (default) does.
+    highlightToHtmlSync('SELECT 3', 'sql', THEME);
+    expect(getCachedHtml('SELECT 3', 'sql', THEME)).toContain('shiki');
   });
 
   it('dedupes concurrent loads of the same language without throwing', async () => {
