@@ -1718,6 +1718,24 @@ function mergeConsecutiveAssistantMessages(
           ).tool_calls = combinedToolCalls;
         }
 
+        // Combine reasoning_content the same way content is combined. Otherwise
+        // the merged-away turn's reasoning is silently dropped, while
+        // cleanOrphanedToolCalls (which also merges assistant turns) keeps it.
+        const lastReasoning = (
+          lastMessage as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const currentReasoning = (
+          message as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const combinedReasoning = [lastReasoning, currentReasoning]
+          .filter(Boolean)
+          .join('');
+        if (combinedReasoning) {
+          (
+            lastMessage as ExtendedChatCompletionAssistantMessageParam
+          ).reasoning_content = combinedReasoning;
+        }
+
         continue; // Skip adding the current message since it's been merged
       }
     }

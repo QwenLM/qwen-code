@@ -32,6 +32,8 @@ import {
   ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
+  markDuplicateProviderToolCallResponseSent,
+  findRepeatedDuplicateProviderToolCall,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -127,7 +129,8 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   // it for those always-on loop types.
   const isAlwaysOn =
     loopType === LoopType.TURN_TOOL_CALL_CAP ||
-    loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
+    loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
+    loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
   const hint = isAlwaysOn
     ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
     : ' Set the `model.skipLoopDetection` setting to true to disable.';
@@ -797,15 +800,29 @@ export async function runNonInteractive(
        */
       const handledProviderToolCallIds =
         geminiClient.getHistoryFunctionResponseIds();
+      // Tracks duplicate-error responses emitted during this headless run.
+      // Once a provider id reaches this set, seeing it again is terminal for
+      // the current tool batch so we do not send partial tool responses.
+      const duplicateProviderToolCallResponseIds = new Set<string>();
+
+      type ToolCallBatchResult = {
+        responseParts: Part[];
+        repeatedDuplicateProviderToolCall: boolean;
+      };
 
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
-      ): Promise<Part[]> => {
+      ): Promise<ToolCallBatchResult> => {
         const toolResponseParts: Part[] = [];
         const structuredOutputActive =
           config.getJsonSchema() &&
           batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
+        const getProviderResponseId = (
+          request: ToolCallRequestInfo,
+        ): string | undefined =>
+          request.providerCallId ??
+          (structuredOutputActive ? undefined : request.callId || undefined);
         const seenBatchCallIds = new Set<string>();
         const duplicateBatchRequests: ToolCallRequestInfo[] = [];
         const uniqueBatchRequests = batchRequests.filter((request) => {
@@ -827,26 +844,51 @@ export async function runNonInteractive(
           }
           return true;
         });
+        const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
+          [...uniqueBatchRequests, ...duplicateBatchRequests],
+          getProviderResponseId,
+          handledProviderToolCallIds,
+          duplicateProviderToolCallResponseIds,
+        );
+        if (repeatedDuplicateRequest) {
+          const providerCallId =
+            repeatedDuplicateRequest.providerCallId ??
+            repeatedDuplicateRequest.callId;
+          debugLogger.debug(
+            `[runNonInteractive] Dropping batch after repeated duplicate provider tool-call id: ${providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
+          );
+          return {
+            responseParts: [],
+            repeatedDuplicateProviderToolCall: true,
+          };
+        }
+
         const respondedRequests = new Set<ToolCallRequestInfo>();
         const executableBatchRequests: ToolCallRequestInfo[] = [];
         const duplicatePendingResponses: Part[] = [];
 
         for (const requestInfo of uniqueBatchRequests) {
-          if (!requestInfo.providerCallId) {
+          const providerCallId = getProviderResponseId(requestInfo);
+          if (!providerCallId) {
             executableBatchRequests.push(requestInfo);
             continue;
           }
 
-          if (!handledProviderToolCallIds.has(requestInfo.providerCallId)) {
-            handledProviderToolCallIds.add(requestInfo.providerCallId);
+          if (!handledProviderToolCallIds.has(providerCallId)) {
+            handledProviderToolCallIds.add(providerCallId);
             executableBatchRequests.push(requestInfo);
             continue;
           }
+
+          markDuplicateProviderToolCallResponseSent(
+            providerCallId,
+            duplicateProviderToolCallResponseIds,
+          );
 
           const toolResponse =
             createDuplicateProviderToolCallResponse(requestInfo);
           debugLogger.debug(
-            `[runNonInteractive] Suppressing duplicate provider tool-call id: ${requestInfo.providerCallId} (tool: ${requestInfo.name})`,
+            `[runNonInteractive] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${requestInfo.name})`,
           );
           respondedRequests.add(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
@@ -1029,13 +1071,23 @@ export async function runNonInteractive(
         }
 
         for (const requestInfo of duplicateBatchRequests) {
+          const providerCallId = getProviderResponseId(requestInfo);
+          if (!providerCallId) continue;
+          markDuplicateProviderToolCallResponseSent(
+            providerCallId,
+            duplicateProviderToolCallResponseIds,
+          );
+
           const toolResponse =
             createDuplicateProviderToolCallResponse(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
           toolResponseParts.push(...toolResponse.responseParts);
         }
 
-        return toolResponseParts;
+        return {
+          responseParts: toolResponseParts,
+          repeatedDuplicateProviderToolCall: false,
+        };
       };
 
       while (true) {
@@ -1176,12 +1228,12 @@ export async function runNonInteractive(
           // `modelOverride` so the next turn's sendMessageStream sees
           // it; the drain turn updates a per-item `itemModelOverride`
           // scoped to that drain item.
-          const toolResponseParts = await processToolCallBatch(
-            toolCallRequests,
-            (override) => {
-              modelOverride = override;
-            },
-          );
+          const {
+            responseParts: toolResponseParts,
+            repeatedDuplicateProviderToolCall,
+          } = await processToolCallBatch(toolCallRequests, (override) => {
+            modelOverride = override;
+          });
 
           if (structuredSubmission !== undefined) {
             // Single-shot terminal contract; aborts in-flight background
@@ -1190,6 +1242,16 @@ export async function runNonInteractive(
             // structured success envelope. Same helper as the drain-turn
             // post-loop branch — see emitStructuredSuccess above.
             return emitStructuredSuccess();
+          }
+          if (
+            repeatedDuplicateProviderToolCall &&
+            toolResponseParts.length === 0
+          ) {
+            loopDetectedMessage = emitLoopDetectedMessage(
+              config,
+              LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+            );
+            return emitLoopDetectedResult();
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
           hasUnsentToolResponse = true;
@@ -1402,7 +1464,10 @@ export async function runNonInteractive(
                 // sendMessageStream picks up the per-item override),
                 // while the main loop binds to the session-scoped
                 // `modelOverride`.
-                const itemToolResponseParts = await processToolCallBatch(
+                const {
+                  responseParts: itemToolResponseParts,
+                  repeatedDuplicateProviderToolCall,
+                } = await processToolCallBatch(
                   itemToolCallRequests,
                   (override) => {
                     itemModelOverride = override;
@@ -1412,6 +1477,17 @@ export async function runNonInteractive(
                 if (structuredSubmission !== undefined) {
                   // Stop processing further turns for this drain item;
                   // the post-drain code will emit the terminal result.
+                  return;
+                }
+                if (
+                  repeatedDuplicateProviderToolCall &&
+                  itemToolResponseParts.length === 0
+                ) {
+                  loopDetectedMessage = emitLoopDetectedMessage(
+                    config,
+                    LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+                  );
+                  loopDetected = true;
                   return;
                 }
                 itemMessages = [{ role: 'user', parts: itemToolResponseParts }];

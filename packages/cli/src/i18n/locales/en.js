@@ -212,6 +212,7 @@ export default {
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
+  'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -725,6 +726,8 @@ export default {
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'Show skill-specific usage statistics.':
+    'Show skill-specific usage statistics.',
   'Show daily token usage statistics.': 'Show daily token usage statistics.',
   'Show monthly token usage statistics.':
     'Show monthly token usage statistics.',
@@ -1476,8 +1479,10 @@ export default {
     'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
   'Voice: recording': 'Voice: recording',
   'Voice: transcribing': 'Voice: transcribing',
+  'Voice: refining': 'Voice: refining',
   'listening…': 'listening…',
   'transcribing…': 'transcribing…',
+  'refining…': 'refining…',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
@@ -1918,6 +1923,8 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'rejected — edit config to re-approve':
+    'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
   Running: 'Running',

@@ -47,6 +47,8 @@ export function VoiceIndicator({
             <Text color="cyan">{meter(audioLevel)}</Text>
             <Text color="gray">{'  ' + t('listening…')}</Text>
           </>
+        ) : status === 'refining' ? (
+          <Text color="yellow">{'✦ ' + t('refining…')}</Text>
         ) : (
           <Text color="yellow">{'✦ ' + t('transcribing…')}</Text>
         )}

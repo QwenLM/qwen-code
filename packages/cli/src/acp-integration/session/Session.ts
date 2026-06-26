@@ -38,6 +38,8 @@ import {
   LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
+  findRepeatedDuplicateProviderToolCall,
+  markDuplicateProviderToolCallResponseSent,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -187,6 +189,7 @@ type AutoCompressionSendResult =
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
+  repeatedDuplicateProviderToolCall?: boolean;
 };
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
@@ -680,6 +683,10 @@ export class Session implements SessionContext {
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
+  // ACP can continue one logical conversation through prompt, cron, and
+  // background loops, so keep this with the session instead of a single
+  // runToolCalls invocation.
+  private readonly duplicateProviderToolCallResponseIds = new Set<string>();
   // Messages from a drain that the daemon answered but we timed out waiting for
   // (the daemon already spliced + SSE-published them). Re-injected on the next
   // batch so a transient stall can't silently lose them. See
@@ -1124,6 +1131,8 @@ export class Session implements SessionContext {
     if (pendingSend.signal.aborted) {
       return { stopReason: 'cancelled' };
     }
+
+    this.duplicateProviderToolCallResponseIds.clear();
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -1601,15 +1610,10 @@ export class Session implements SessionContext {
                     );
                     return { stopReason: 'end_turn' };
                   }
-                  nextMessage = {
-                    role: 'user',
-                    parts: [
-                      ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages(
-                        pendingSend.signal,
-                      )),
-                    ],
-                  };
+                  nextMessage = await this.#buildNextMessageAfterToolRun(
+                    toolRun,
+                    pendingSend.signal,
+                  );
                 }
               }
 
@@ -1875,13 +1879,10 @@ export class Session implements SessionContext {
               );
               return { stopReason: 'end_turn' };
             }
-            nextMessage = {
-              role: 'user',
-              parts: [
-                ...toolRun.parts,
-                ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
-              ],
-            };
+            nextMessage = await this.#buildNextMessageAfterToolRun(
+              toolRun,
+              pendingSend.signal,
+            );
           }
         }
 
@@ -2061,6 +2062,23 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
+  }
+
+  async #buildNextMessageAfterToolRun(
+    toolRun: RunToolResult,
+    abortSignal: AbortSignal,
+  ): Promise<Content | null> {
+    if (toolRun.repeatedDuplicateProviderToolCall) {
+      debugLogger.debug(
+        'Stopping ACP turn after dropping repeated duplicate provider tool-call response.',
+      );
+      return null;
+    }
+    const parts = [
+      ...toolRun.parts,
+      ...(await this.#drainMidTurnUserMessages(abortSignal)),
+    ];
+    return { role: 'user', parts };
   }
 
   #recordCompressionTokenCount(info: ChatCompressionInfo): void {
@@ -2626,13 +2644,10 @@ export class Session implements SessionContext {
                     );
                     return;
                   }
-                  nextMessage = {
-                    role: 'user',
-                    parts: [
-                      ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages(ac.signal)),
-                    ],
-                  };
+                  nextMessage = await this.#buildNextMessageAfterToolRun(
+                    toolRun,
+                    ac.signal,
+                  );
                 }
               }
             } catch (error) {
@@ -2945,13 +2960,10 @@ export class Session implements SessionContext {
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
-              nextMessage = {
-                role: 'user',
-                parts: [
-                  ...toolRun.parts,
-                  ...(await this.#drainMidTurnUserMessages(ac.signal)),
-                ],
-              };
+              nextMessage = await this.#buildNextMessageAfterToolRun(
+                toolRun,
+                ac.signal,
+              );
             }
           }
 
@@ -3309,12 +3321,38 @@ export class Session implements SessionContext {
     const handledProviderToolCallIds = new Set(
       this.#getCurrentChat().getHistoryFunctionResponseIds(),
     );
+    const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
+      dedupedFunctionCalls,
+      (fc) => getProviderToolCallId(fc) ?? fc.id,
+      handledProviderToolCallIds,
+      this.duplicateProviderToolCallResponseIds,
+    );
+    if (repeatedDuplicateCall) {
+      const providerCallId =
+        getProviderToolCallId(repeatedDuplicateCall) ??
+        repeatedDuplicateCall.id;
+      debugLogger.debug(
+        `[Session.runToolCalls] Dropping batch after repeated duplicate provider tool-call id: ` +
+          `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'})`,
+      );
+      return {
+        parts: [],
+        stopAfterPermissionCancel: false,
+        repeatedDuplicateProviderToolCall: true,
+      };
+    }
 
     const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+      const providerCallId = request.providerCallId ?? request.callId;
+      markDuplicateProviderToolCallResponseSent(
+        providerCallId,
+        this.duplicateProviderToolCallResponseIds,
+      );
+
       const response = createDuplicateProviderToolCallResponse(request);
       debugLogger.debug(
         `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
-          `${request.providerCallId} (tool: ${request.name})`,
+          `${providerCallId} (tool: ${request.name})`,
       );
       batches.push({ kind: 'duplicate', request, response });
     };
@@ -3520,7 +3558,11 @@ export class Session implements SessionContext {
         }
         if (shouldStop) {
           await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
-          return { parts, stopAfterPermissionCancel: true };
+          return {
+            parts,
+            stopAfterPermissionCancel: true,
+            repeatedDuplicateProviderToolCall: false,
+          };
         }
       } else {
         for (const fc of batch.calls) {
@@ -3528,12 +3570,20 @@ export class Session implements SessionContext {
           parts.push(...r.parts);
           if (r.stopAfterPermissionCancel) {
             await appendSkippedAfter(parts, fc);
-            return { parts, stopAfterPermissionCancel: true };
+            return {
+              parts,
+              stopAfterPermissionCancel: true,
+              repeatedDuplicateProviderToolCall: false,
+            };
           }
         }
       }
     }
-    return { parts, stopAfterPermissionCancel: false };
+    return {
+      parts,
+      stopAfterPermissionCancel: false,
+      repeatedDuplicateProviderToolCall: false,
+    };
   }
 
   /**

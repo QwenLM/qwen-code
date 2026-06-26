@@ -80,7 +80,7 @@ interface RegisterA2uiActionRoutesOptions {
   mutate: () => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   /** Workspace MCP status from the daemon (includes runtime-registered servers). */
-  getMcpServers: (req: Request) => Promise<McpServerCell[]>;
+  getMcpServers: () => Promise<McpServerCell[]>;
   /** Injectable for unit tests; defaults to the real one-shot MCP call. */
   callAction?: (
     cfg: McpServerConfigLike,
@@ -241,7 +241,7 @@ export function registerA2uiActionRoutes(
       // registration), settings file as fallback.
       let cfg: McpServerConfigLike | null = null;
       try {
-        const servers = (await getMcpServers(req)).filter(
+        const servers = (await getMcpServers()).filter(
           (s) =>
             s.name.toLowerCase().includes('a2ui') &&
             usableServerConfig(s.config),

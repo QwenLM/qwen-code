@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`; the current set has 43 known event types. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `server.ts`; see [Envelope-level metadata](#envelope-level-metadata).
+Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`; the current set has 43 known event types. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts`; see [Envelope-level metadata](#envelope-level-metadata).
 
 The SDK exposes `asKnownDaemonEvent(evt)`. It returns a discriminated `KnownDaemonEvent` for known event types and `undefined` for other types. SDK consumers can therefore handle forward compatibility without requiring a lockstep SDK upgrade when a newer daemon adds an event type; the session reducer records those as `unrecognizedKnownEventCount`.
 
@@ -192,7 +192,7 @@ Beyond each event's `data` payload, the daemon stamps two envelope-level fields.
 
 ### `_meta.serverTimestamp` - daemon clock
 
-`formatSseFrame()` in `packages/cli/src/serve/server.ts` stamps this at the SSE write boundary, **not** inside `EventBus.publish`. The in-memory `BridgeEvent` type stays unchanged; internal daemon consumers do not see `_meta`, while wire SSE frames do.
+`formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts` stamps this at the SSE write boundary, **not** inside `EventBus.publish`. The in-memory `BridgeEvent` type stays unchanged; internal daemon consumers do not see `_meta`, while wire SSE frames do.
 
 ```jsonc
 {

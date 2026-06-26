@@ -25,11 +25,31 @@ const SECTION_TIMEOUT_MS = 1_000;
 const CAPACITY_WARNING_RATIO = 0.8;
 
 export type DaemonStatusDetail = 'summary' | 'full';
-type DaemonStatusLevel = 'ok' | 'warning' | 'error';
+export type DaemonStatusLevel = 'ok' | 'warning' | 'error';
 type SectionStatus = DaemonStatusLevel | 'unavailable';
 type IssueSeverity = 'warning' | 'error';
 type SectionSummary = Record<string, string | number | boolean | null>;
 type StatusRecord = Record<string, unknown>;
+
+export type DaemonStartupPreheatStatus =
+  | 'external_bridge'
+  | 'not_scheduled'
+  | 'scheduled'
+  | 'running'
+  | 'succeeded'
+  | 'failed';
+
+export interface DaemonStartupSnapshot {
+  processStartedAt: string;
+  listenerReadyAt?: string;
+  processToListenMs?: number;
+  runQwenServeToListenMs?: number;
+  preheat: {
+    status: DaemonStartupPreheatStatus;
+    durationMs?: number;
+    error?: string;
+  };
+}
 
 export interface DaemonStatusIssue {
   code:
@@ -41,7 +61,9 @@ export interface DaemonStatusIssue {
     | 'mcp_budget_warning'
     | 'mcp_budget_exhausted'
     | 'rate_limit_hits'
-    | 'workspace_status_unavailable';
+    | 'workspace_status_unavailable'
+    | 'daemon_runtime_starting'
+    | 'daemon_runtime_failed';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -67,6 +89,7 @@ export interface BuildDaemonStatusOptions {
   supportedDeviceFlowProviders: readonly string[];
   deviceFlowRegistry: DeviceFlowRegistry;
   sessionShellCommandEnabled: boolean;
+  startup?: DaemonStartupSnapshot;
 }
 
 interface DaemonStatusSection<T> {
@@ -94,6 +117,77 @@ interface FullDaemonStatus {
   };
 }
 
+interface DaemonStatusSecurity {
+  tokenConfigured: boolean;
+  requireAuth: boolean;
+  loopbackBind: boolean;
+  allowOriginConfigured: boolean;
+  allowOriginMode: string;
+  sessionShellCommandEnabled: boolean;
+}
+
+interface DaemonStatusLimits {
+  maxSessions: number | null;
+  maxPendingPromptsPerSession: number | null;
+  listenerMaxConnections: number | null;
+  eventRingSize: number;
+  promptDeadlineMs: number | null;
+  writerIdleTimeoutMs: number | null;
+  channelIdleTimeoutMs: number;
+  sessionIdleTimeoutMs: number;
+  acpConnectionCap: number | null;
+}
+
+interface DaemonStatusRuntime {
+  loading?: boolean;
+  error?: string;
+  sessions: { active: number };
+  permissions: {
+    pending: number;
+    policy: string;
+  };
+  channel: { live: boolean };
+  transport: {
+    restSseActive: number;
+    acp: {
+      enabled: boolean;
+      connections: number;
+      connectionStreams: number;
+      sessionStreams: number;
+      sseStreams: number;
+      wsStreams: number;
+      pendingClientRequests: number;
+    };
+  };
+  rateLimit: {
+    enabled: boolean;
+    rejectedSinceStart: Record<RateLimitTier, number>;
+  };
+  process: NodeJS.MemoryUsage;
+}
+
+export interface DaemonStatusResponse {
+  v: 1;
+  detail: DaemonStatusDetail;
+  generatedAt: string;
+  status: DaemonStatusLevel;
+  issues: DaemonStatusIssue[];
+  daemon: StatusRecord & {
+    pid: number;
+    uptimeMs: number;
+    mode: ServeOptions['mode'];
+    workspaceCwd: string;
+  };
+  security: DaemonStatusSecurity;
+  limits: DaemonStatusLimits;
+  capabilities: {
+    protocolVersions: ServeProtocolVersions;
+    features: string[];
+  };
+  runtime: DaemonStatusRuntime;
+  full?: FullDaemonStatus;
+}
+
 class SectionTimeoutError extends Error {
   constructor(
     readonly section: string,
@@ -117,7 +211,7 @@ export function parseDaemonStatusDetail(
 export async function buildDaemonStatusResponse(
   detail: DaemonStatusDetail,
   input: BuildDaemonStatusOptions,
-): Promise<Record<string, unknown>> {
+): Promise<DaemonStatusResponse> {
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
@@ -142,6 +236,7 @@ export async function buildDaemonStatusResponse(
       uptimeMs: Math.round(process.uptime() * 1000),
       mode: input.opts.mode,
       workspaceCwd: input.boundWorkspace,
+      ...(input.startup ? { startup: cloneStartup(input.startup) } : {}),
       ...(input.qwenCodeVersion
         ? { qwenCodeVersion: input.qwenCodeVersion }
         : {}),
@@ -204,6 +299,28 @@ export async function buildDaemonStatusResponse(
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),
+  };
+}
+
+function cloneStartup(startup: DaemonStartupSnapshot): DaemonStartupSnapshot {
+  return {
+    processStartedAt: startup.processStartedAt,
+    ...(startup.listenerReadyAt
+      ? { listenerReadyAt: startup.listenerReadyAt }
+      : {}),
+    ...(startup.processToListenMs !== undefined
+      ? { processToListenMs: startup.processToListenMs }
+      : {}),
+    ...(startup.runQwenServeToListenMs !== undefined
+      ? { runQwenServeToListenMs: startup.runQwenServeToListenMs }
+      : {}),
+    preheat: {
+      status: startup.preheat.status,
+      ...(startup.preheat.durationMs !== undefined
+        ? { durationMs: startup.preheat.durationMs }
+        : {}),
+      ...(startup.preheat.error ? { error: startup.preheat.error } : {}),
+    },
   };
 }
 
@@ -545,20 +662,22 @@ function rollupStatus(issues: readonly DaemonStatusIssue[]): DaemonStatusLevel {
   return 'ok';
 }
 
-function allowOriginMode(
+export function allowOriginMode(
   allowOrigins: readonly string[] | undefined,
 ): 'none' | 'specific' | 'any' {
   if (!allowOrigins || allowOrigins.length === 0) return 'none';
   return allowOrigins.includes('*') ? 'any' : 'specific';
 }
 
-function listenerMaxConnections(value: number | undefined): number | null {
+export function listenerMaxConnections(
+  value: number | undefined,
+): number | null {
   if (value === undefined) return DEFAULT_LISTENER_MAX_CONNECTIONS;
   if (value === 0 || value === Infinity) return null;
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function positiveFiniteOrNull(value: number | undefined): number | null {
+export function positiveFiniteOrNull(value: number | undefined): number | null {
   return value !== undefined && Number.isFinite(value) && value > 0
     ? value
     : null;

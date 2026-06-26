@@ -1,13 +1,11 @@
 .themeDark {
-  --app-bg: #111;
-  --bg-primary: #0d0d0d;
-  --bg-secondary: #161616;
-  --bg-tertiary: #1e1e1e;
-  --border-color: #2a2a2a;
-  --text-primary: #e4e4e4;
-  --text-secondary: #a0a0a0;
-  --text-dimmed: #666;
-  --accent-color: #4a9eff;
+  --background: #0d0d0d;
+  --foreground: #fafafa;
+  --muted: #161616;
+  --muted-foreground: #808598;
+  --secondary: #1e1e1e;
+  --border: #2a2a2a;
+  --agent-blue-500: #6785ff;
   --success-color: #48bb78;
   --warning-color: #ecc94b;
   --error-color: #fc8181;
@@ -19,15 +17,13 @@
 }
 
 .themeLight {
-  --app-bg: #fff;
-  --bg-primary: #ffffff;
-  --bg-secondary: #f7f7f2;
-  --bg-tertiary: #f2f2f3;
-  --border-color: #d8d6cc;
-  --text-primary: #22231f;
-  --text-secondary: #5f6259;
-  --text-dimmed: #8b8d84;
-  --accent-color: #0b66c3;
+  --background: #ffffff;
+  --foreground: #0a0a0b;
+  --muted: #f3f3f5;
+  --muted-foreground: #a3a3a5;
+  --secondary: #f3f3f5;
+  --border: #e3e4e6;
+  --agent-blue-500: #0033ff;
   --success-color: #1f7a3a;
   --warning-color: #9a6a00;
   --error-color: #c0362c;
@@ -46,8 +42,8 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: color-mix(in srgb, var(--app-bg) 72%, transparent);
-  color: var(--text-primary);
+  background: color-mix(in srgb, var(--background) 72%, transparent);
+  color: var(--foreground);
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.5;
@@ -64,9 +60,9 @@
   width: min(100%, 560px);
   max-height: min(80vh, calc(100vh - 48px));
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--border-color) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
   border-radius: 10px;
-  background: var(--bg-primary);
+  background: var(--background);
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.24);
 }
 
@@ -92,7 +88,7 @@
   gap: 10px;
   min-height: 46px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
 }
 
 .titleWrap {
@@ -101,7 +97,7 @@
 }
 
 .title {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.35;
@@ -109,7 +105,7 @@
 
 .subtitle {
   margin-top: 2px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -125,14 +121,14 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
 }
 
 .close:hover,
 .close:focus-visible {
-  background: var(--bg-secondary);
-  color: var(--text-primary);
+  background: var(--muted);
+  color: var(--foreground);
 }
 
 .close::before,
