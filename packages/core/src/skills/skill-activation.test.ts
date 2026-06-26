@@ -5,7 +5,7 @@
  */
 
 import * as path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   SkillActivationRegistry,
   resolveProjectRelativePath,
@@ -245,7 +245,6 @@ describe('extractToolFilePaths → SkillActivationRegistry integration', () => {
   // These tests `await import('../core/coreToolScheduler.js')` just to reach
   // one pure helper, but that drags in the whole scheduler module graph cold.
   // Under a contended CI runner, that can cross the 5s default timeout.
-  vi.setConfig({ testTimeout: 30_000 });
 
   // Regression: feed the real candidate output for a `glob` call into
   // the registry and assert end-to-end activation. The earlier per-field
@@ -271,7 +270,7 @@ describe('extractToolFilePaths → SkillActivationRegistry integration', () => {
       for (const n of reg.matchAndConsume(c)) activated.add(n);
     }
     expect(Array.from(activated)).toEqual(['tsx-helper']);
-  });
+  }, 30_000);
 
   it('does NOT activate from external glob.path (project-root guard wins)', async () => {
     const { extractToolFilePaths } = await import(
@@ -290,5 +289,5 @@ describe('extractToolFilePaths → SkillActivationRegistry integration', () => {
       for (const n of reg.matchAndConsume(c)) activated.add(n);
     }
     expect(activated.size).toBe(0);
-  });
+  }, 30_000);
 });
