@@ -1560,6 +1560,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ]),
       getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getResourceRegistry: vi.fn().mockReturnValue({
+        getResourcesByServer: (name: string) =>
+          name === 'docs'
+            ? [
+                {
+                  uri: 'file:///docs/intro.md',
+                  name: 'Intro',
+                  title: 'Introduction',
+                  description: 'Getting started',
+                  mimeType: 'text/markdown',
+                  size: 1024,
+                  serverName: 'docs',
+                },
+                { uri: 'file:///docs/api.md', serverName: 'docs' },
+              ]
+            : [],
+      }),
+      getPromptRegistry: vi.fn().mockReturnValue({
+        getPromptsByServer: (name: string) =>
+          name === 'docs' ? [{ name: 'summarize', serverName: 'docs' }] : [],
+      }),
     } as unknown as Config;
 
     const agentPromise = runAcpAgent(
@@ -1578,6 +1599,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const mcp = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceMcp,
       {},
+    );
+    const mcpResources = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
+      { serverName: 'docs' },
+    );
+    const mcpResourcesMissing = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceMcpResources,
+      { serverName: 'not-configured' },
     );
     const skills = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceSkills,
@@ -1603,6 +1632,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           disabled: false,
           description: 'Docs server',
           extensionName: 'docs-ext',
+          resourceCount: 2,
+          promptCount: 1,
         },
         {
           kind: 'mcp_server',
@@ -1611,6 +1642,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           mcpStatus: 'connected',
           transport: 'http',
           disabled: false,
+          resourceCount: 0,
+          promptCount: 0,
         },
         {
           kind: 'mcp_server',
@@ -1633,6 +1666,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(JSON.stringify(mcp)).not.toContain('secret-token');
     expect(JSON.stringify(mcp)).not.toContain('Authorization');
     expect(JSON.stringify(mcp)).not.toContain('bad-ext');
+
+    // The resources drill-down returns metadata-only entries (serverName is
+    // implied by the request, not echoed into each item).
+    expect(mcpResources).toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      serverName: 'docs',
+      initialized: true,
+      acpChannelLive: true,
+      resources: [
+        {
+          uri: 'file:///docs/intro.md',
+          name: 'Intro',
+          title: 'Introduction',
+          description: 'Getting started',
+          mimeType: 'text/markdown',
+          size: 1024,
+        },
+        { uri: 'file:///docs/api.md' },
+      ],
+    });
+    expect(
+      (mcpResources as { resources: Array<Record<string, unknown>> })
+        .resources[1],
+    ).not.toHaveProperty('serverName');
+
+    // An unconfigured server name returns an error cell and does NOT fall
+    // back to scanning other servers/sessions.
+    expect(mcpResourcesMissing).toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      serverName: 'not-configured',
+      initialized: true,
+      acpChannelLive: true,
+      resources: [],
+      errors: [{ kind: 'mcp_resources', status: 'error' }],
+    });
 
     expect(skills).toMatchObject({
       v: 1,

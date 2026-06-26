@@ -108,6 +108,7 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/voice',
   '_qwen/workspace/tools',
   '_qwen/workspace/mcp/tools',
+  '_qwen/workspace/mcp/resources',
   '_qwen/workspace/agents/list',
   '_qwen/workspace/agents/get',
   '_qwen/workspace/memory',

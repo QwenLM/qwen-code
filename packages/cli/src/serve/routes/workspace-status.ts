@@ -59,6 +59,33 @@ export function registerWorkspaceStatusRoutes(
     }
   });
 
+  app.get('/workspace/mcp/:server/resources', async (req, res) => {
+    const serverName = req.params['server'];
+    if (!serverName || typeof serverName !== 'string') {
+      res.status(400).json({
+        error: 'Server name path parameter is required',
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+      res.status(400).json({
+        error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    try {
+      res
+        .status(200)
+        .json(await bridge.getWorkspaceMcpResourcesStatus(serverName));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /workspace/mcp/:server/resources',
+      });
+    }
+  });
+
   app.get('/workspace/skills', async (_req, res) => {
     try {
       const ctx = buildWorkspaceCtx('GET /workspace/skills');

@@ -34,7 +34,9 @@ const rootDir = join(__dirname, '..');
 // Bumped from 126KB to 127KB for prompt clientId self-heal.
 // Bumped from 127KB to 130KB for daemon workspace voice, trust, permissions,
 // session LSP helper APIs, and the full daemon route table.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 130 * 1024;
+// Bumped from 130KB to 131KB for the workspace MCP resources drill-down
+// (workspaceMcpResources client method + route + resource status types).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 131 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

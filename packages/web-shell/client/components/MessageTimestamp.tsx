@@ -61,10 +61,10 @@ export function MessageTimestamp({
       {children}
       {chatMode ? (
         <span className={styles.chatActions}>
-          {copyButton}
           <span className={styles.chatTip} aria-hidden="true">
             {formatTimestamp(timestamp)}
           </span>
+          {copyButton}
         </span>
       ) : (
         <span className={styles.tip} aria-hidden="true">

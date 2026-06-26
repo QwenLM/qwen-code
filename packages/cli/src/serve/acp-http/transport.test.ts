@@ -332,6 +332,9 @@ class FakeBridge {
   async getWorkspaceMcpToolsStatus(serverName: string) {
     return { v: 1, serverName, tools: [] };
   }
+  async getWorkspaceMcpResourcesStatus(serverName: string) {
+    return { v: 1, serverName, resources: [] };
+  }
   async addRuntimeMcpServer(name: string) {
     return {
       name,
@@ -3348,6 +3351,36 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({
         result: { serverName: 'fs', tools: [] },
+      });
+    });
+
+    it('_qwen/workspace/mcp/resources rejects missing serverName', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 64,
+        method: '_qwen/workspace/mcp/resources',
+        params: {},
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/workspace/mcp/resources returns resources', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 65,
+        method: '_qwen/workspace/mcp/resources',
+        params: { serverName: 'fs' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { serverName: 'fs', resources: [] },
       });
     });
 

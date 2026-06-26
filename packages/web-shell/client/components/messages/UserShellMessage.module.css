@@ -1,10 +1,10 @@
 .message {
-  color: var(--text-primary);
+  color: var(--foreground);
   overflow: scroll;
   margin-bottom: 12px;
   margin-left: 14px;
   padding: 8px 14px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   display: flex;
   flex-direction: column;
@@ -22,7 +22,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   line-height: 1.4;
   min-width: 0;
 }
@@ -33,15 +33,14 @@
 }
 
 .name {
-  color: var(--text-primary);
+  color: var(--foreground);
   flex: 0 0 auto;
   font-weight: 700;
   font-size: 13px;
-
 }
 
 .command {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -52,7 +51,7 @@
 .output {
   margin: 0;
   padding: 8px 14px 10px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
@@ -61,7 +60,7 @@
 }
 
 .compactHint {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.35;
 }

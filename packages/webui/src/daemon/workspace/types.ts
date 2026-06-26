@@ -42,6 +42,7 @@ import type {
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
@@ -152,6 +153,9 @@ export interface DaemonWorkspaceActions {
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
+  loadMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus>;
   restartMcpServer(serverName: string): Promise<DaemonMcpRestartResult>;
   manageMcpServer(
     serverName: string,

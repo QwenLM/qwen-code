@@ -103,32 +103,35 @@ export const SystemMessage = memo(function SystemMessage({
   }
 
   const preserveWhitespace =
-    variant === 'info' && content.startsWith('● authType:');
+    variant === 'info' && source === 'model_switch_summary';
+  const isRecap = variant === 'info' && source === 'recap';
 
   return (
     <div
       className={`${styles.message} ${styles[variant]} ${
         preserveWhitespace ? styles.modelSwitch : ''
-      }`}
+      } ${isRecap ? styles.recap : ''}`}
     >
-      {preserveWhitespace ? (
-        <pre>{content}</pre>
-      ) : variant === 'info' ? (
-        <Markdown content={content} />
-      ) : (
-        <pre>{content}</pre>
-      )}
-      {showRetryHint && onRetryClick && (
-        <div className={styles.retryHint}>
-          <button
-            type="button"
-            className={styles.retryButton}
-            onClick={onRetryClick}
-          >
-            {t('retry.hint')}
-          </button>
-        </div>
-      )}
+      <div className={styles.content}>
+        {preserveWhitespace ? (
+          <pre>{content}</pre>
+        ) : variant === 'info' ? (
+          <Markdown content={content} />
+        ) : (
+          <pre>{content}</pre>
+        )}
+        {showRetryHint && onRetryClick && (
+          <div className={styles.retryHint}>
+            <button
+              type="button"
+              className={styles.retryButton}
+              onClick={onRetryClick}
+            >
+              {t('retry.hint')}
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 });
