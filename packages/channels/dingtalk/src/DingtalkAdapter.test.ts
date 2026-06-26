@@ -109,3 +109,21 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(recallReaction).not.toHaveBeenCalled();
   });
 });
+
+describe('DingtalkChannel.isUnroutableGroupMessage', () => {
+  it('drops group messages with no conversationId', () => {
+    expect(DingtalkChannel.isUnroutableGroupMessage(true, undefined)).toBe(
+      true,
+    );
+    expect(DingtalkChannel.isUnroutableGroupMessage(true, '')).toBe(true);
+  });
+
+  it('keeps routable group messages and all DMs', () => {
+    expect(DingtalkChannel.isUnroutableGroupMessage(true, 'cid123')).toBe(
+      false,
+    );
+    expect(DingtalkChannel.isUnroutableGroupMessage(false, undefined)).toBe(
+      false,
+    );
+  });
+});

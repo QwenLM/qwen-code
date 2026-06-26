@@ -166,19 +166,27 @@ export abstract class ChannelBase {
     const isSharedGroupSession = (envelope: Envelope): boolean =>
       envelope.isGroup && this.config.sessionScope === 'thread';
 
-    // In a thread-scoped group the session is shared, so a bare /clear would
-    // reset it for everyone — require explicit "/clear confirm" there. DMs and
-    // user-scoped groups clear only the sender's session directly.
+    // In a thread-scoped group the session is shared, so clearing it affects
+    // everyone: restrict it to authorized senders (config.allowedUsers, when
+    // set) and require an explicit "confirm". DMs and per-user groups clear
+    // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
-      if (
-        isSharedGroupSession(envelope) &&
-        args.trim().toLowerCase() !== 'confirm'
-      ) {
-        await this.sendMessage(
-          envelope.chatId,
-          'This clears the shared session for the whole group. Send "/clear confirm" to proceed.',
-        );
-        return true;
+      if (isSharedGroupSession(envelope)) {
+        const authorized = this.config.allowedUsers;
+        if (authorized.length > 0 && !authorized.includes(envelope.senderId)) {
+          await this.sendMessage(
+            envelope.chatId,
+            'Only authorized members can clear this group session.',
+          );
+          return true;
+        }
+        if (args.toLowerCase() !== 'confirm') {
+          await this.sendMessage(
+            envelope.chatId,
+            'This clears the shared session for everyone in this group. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+          );
+          return true;
+        }
       }
       await doClear(envelope);
       return true;
@@ -368,12 +376,14 @@ export abstract class ChannelBase {
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
 
-    // Multiplayer attribution: in a shared ('thread'-scoped) group every member
-    // feeds one session, so tag each turn with the speaker. Fires every turn
-    // (the speaker changes per message); skipped for 1:1 chats and for
-    // already-prefixed synthetic re-entries (collect-mode coalescing).
+    // Multiplayer attribution: in a group, tag each turn with the speaker so a
+    // shared session can tell members apart. Sanitize the name so a crafted nick
+    // can't break out of the [..] tag or inject newlines. Skipped for 1:1 chats
+    // and for already-prefixed re-entries (collect-mode coalescing).
     if (envelope.isGroup && !envelope.alreadyPrefixed) {
-      const who = envelope.senderName || envelope.senderId || 'unknown';
+      const who = (envelope.senderName || envelope.senderId || 'unknown')
+        .replace(/[[\]\r\n]/g, ' ')
+        .slice(0, 64);
       promptText = `[${who}] ${promptText}`;
     }
 
@@ -509,6 +519,7 @@ export abstract class ChannelBase {
         const buffer = this.collectBuffers.get(sessionId);
         if (buffer && buffer.length > 0) {
           this.collectBuffers.delete(sessionId);
+          const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
           // Re-enter handleInbound with the coalesced message
@@ -523,8 +534,15 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
-          // Queue the coalesced prompt (don't await to avoid deadlock on the queue)
-          this.handleInbound(syntheticEnvelope).catch(() => {});
+          // Queue the coalesced prompt (don't await to avoid deadlock on the queue).
+          // Surface a drain failure instead of silently losing buffered turns.
+          this.handleInbound(syntheticEnvelope).catch((err) => {
+            process.stderr.write(
+              `[${this.name}] dropped ${lost} buffered message(s) on collect re-entry: ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
+            );
+          });
         }
       }
     });

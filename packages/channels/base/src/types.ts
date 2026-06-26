@@ -87,7 +87,7 @@ export interface Envelope {
    * Set on a synthetic re-entry envelope whose text already carries per-message
    * [sender] prefixes (collect-mode coalescing) — suppresses re-prefixing.
    */
-  alreadyPrefixed?: boolean;
+  alreadyPrefixed?: true;
 }
 
 export interface SessionTarget {

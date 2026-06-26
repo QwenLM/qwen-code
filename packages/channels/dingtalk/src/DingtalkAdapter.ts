@@ -131,6 +131,18 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(`[DingTalk:${this.name}] Connected via stream.\n`);
   }
 
+  /**
+   * A group message with no conversationId can't be routed to a stable shared
+   * session (chatId would fall back to the expiring sessionWebhook), so it is
+   * dropped on ingestion. Exposed for testing the drop rule.
+   */
+  static isUnroutableGroupMessage(
+    isGroup: boolean,
+    conversationId: string | undefined,
+  ): boolean {
+    return isGroup && !conversationId;
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
@@ -512,10 +524,10 @@ export class DingtalkChannel extends ChannelBase {
         return;
       }
 
-      // A 'thread'-scoped group shares one session keyed by conversationId;
-      // without it, chatId would fall back to the expiring sessionWebhook and
-      // the shared-session key would churn — drop rather than fragment the group.
-      if (isGroup && !conversationId) {
+      // A group message with no conversationId can't be routed to a stable
+      // session — chatId would fall back to the expiring sessionWebhook and the
+      // shared-session key would churn. Drop it rather than fragment the group.
+      if (DingtalkChannel.isUnroutableGroupMessage(isGroup, conversationId)) {
         process.stderr.write(
           `[DingTalk:${this.name}] Group message has no conversationId, skipping.\n`,
         );
