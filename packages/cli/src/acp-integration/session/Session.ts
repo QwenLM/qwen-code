@@ -29,7 +29,6 @@ import type {
   GoalTerminalEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
-  LoopMode,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
