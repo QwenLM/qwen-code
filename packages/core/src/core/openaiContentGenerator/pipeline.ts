@@ -77,7 +77,10 @@ function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
   //    - NaN/Infinity/non-integer are invalid.
   const fromConfig = config.streamIdleTimeoutMs;
   if (typeof fromConfig === 'number') {
-    if (Number.isInteger(fromConfig) && fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS) {
+    if (
+      Number.isInteger(fromConfig) &&
+      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
+    ) {
       return fromConfig;
     }
     // eslint-disable-next-line no-console
