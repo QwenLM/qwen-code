@@ -46,17 +46,11 @@ export enum ToolErrorType {
   //      view, so the model has not seen the full text content the
   //      mutation could touch.
   //   3. The file is a structural dead end that no amount of
-  //      re-reading can change:
-  //        - non-text payloads (binary / image / audio / video /
-  //          PDF / notebook) — read_file returns these as
-  //          structured values that Edit / WriteFile cannot mutate
-  //          safely; the rejection message tells the model to use
-  //          a different tool (shell with a binary-aware writer).
-  //        - special files (FIFO / socket / character or block
-  //          device) — read_file rejects these as "not a regular
-  //          file", so an enforcement loop on read_file would
-  //          never terminate; the rejection points the model at
-  //          shell instead.
+  //      re-reading can change: non-text payloads (binary / image /
+  //      audio / video / PDF / notebook). read_file returns these as
+  //      structured values that Edit / WriteFile cannot mutate safely;
+  //      the rejection message tells the model to use a different tool
+  //      (shell with a binary-aware writer).
   //
   // Despite the `EDIT_` prefix this code is shared between EditTool
   // and WriteFileTool: the boundary it guards is "the model is about
@@ -88,6 +82,15 @@ export enum ToolErrorType {
   // cannot verify. Operators monitoring on error codes can route this
   // separately.
   PRIOR_READ_VERIFICATION_FAILED = 'prior_read_verification_failed',
+  // Returned when a path resolves but is not a regular file (FIFO / socket /
+  // character or block device). Re-reading cannot make these editable, so this
+  // is distinct from EDIT_REQUIRES_PRIOR_READ to avoid read/edit retry loops.
+  TARGET_NOT_REGULAR_FILE = 'target_not_regular_file',
+
+  // Notebook-specific Errors
+  NOTEBOOK_EDIT_FAILURE = 'notebook_edit_failure',
+  NOTEBOOK_INVALID_JSON = 'notebook_invalid_json',
+  NOTEBOOK_CELL_NOT_FOUND = 'notebook_cell_not_found',
 
   // Glob-specific Errors
   GLOB_EXECUTION_ERROR = 'glob_execution_error',

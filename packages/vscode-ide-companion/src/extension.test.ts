@@ -7,18 +7,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
 import { activate } from './extension.js';
-import {
-  IDE_DEFINITIONS,
-  detectIdeFromEnv,
-} from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
+import { IDE_DEFINITIONS, detectIdeFromEnv } from '@qwen-code/qwen-code-core';
 
-vi.mock('@qwen-code/qwen-code-core/src/ide/detect-ide.js', async () => {
-  const actual = await vi.importActual(
-    '@qwen-code/qwen-code-core/src/ide/detect-ide.js',
-  );
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
-    detectIdeFromEnv: vi.fn(() => IDE_DEFINITIONS.vscode),
+    detectIdeFromEnv: vi.fn(() => actual.IDE_DEFINITIONS.vscode),
   };
 });
 
@@ -138,20 +134,16 @@ describe('activate', () => {
     expect(vscode.workspace.onDidGrantWorkspaceTrust).toHaveBeenCalled();
   });
 
-  it('should register webview view providers for sidebar and secondary positions', async () => {
+  it('should register the webview view provider for the sidebar position', async () => {
     await activate(context);
 
-    // Verify registerWebviewViewProvider was called 2 times (sidebar + secondary)
     const registerCalls = vi.mocked(vscode.window.registerWebviewViewProvider)
       .mock.calls;
-    expect(registerCalls).toHaveLength(2);
+    expect(registerCalls).toHaveLength(1);
 
-    // Extract view IDs from the calls
     const viewIds = registerCalls.map((call) => call[0]);
 
-    // Only sidebar and secondary are registered; panel view was removed
     expect(viewIds).toContain('qwen-code.chatView.sidebar');
-    expect(viewIds).toContain('qwen-code.chatView.secondary');
   });
 
   it('should launch the Qwen Code when the user clicks the button', async () => {

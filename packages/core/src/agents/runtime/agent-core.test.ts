@@ -15,6 +15,13 @@ import {
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  getAgentName,
+  getTeammateContext,
+  isTeammate,
+  runWithTeammateIdentity,
+} from '../team/identity.js';
+import type { TeammateIdentity } from '../team/types.js';
 import type { Config } from '../../config/config.js';
 import type {
   ModelConfig,
@@ -213,6 +220,48 @@ describe('AgentCore.runInAgentFrames', () => {
     expect(observedAgentId).toBe('agent-123');
   });
 
+  it('restores the teammate identity for deferred-approval continuations', async () => {
+    // Regression: a teammate's `send_message`/`task_update` that requires
+    // confirmation resumes from the UI's async chain, outside the
+    // teammate identity frame TeamManager established. Before the fix,
+    // `getAgentName()` returned undefined there and send_message fell back
+    // to the leader — forging a `from="leader"` envelope and slipping past
+    // the leader-only `isTeammate()` guard. The respond closure must carry
+    // the identity captured at emit time back into the resumed tool body.
+    const core = makeCore('approval-agent');
+    const teammateIdentity: TeammateIdentity = {
+      agentId: 'scribe@demo',
+      agentName: 'scribe',
+      teamName: 'demo',
+      isTeamLead: false,
+    };
+
+    let respondClosure: (() => Promise<void>) | undefined;
+    let observedAgentName: string | undefined;
+    let observedIsTeammate: boolean | undefined;
+    const onConfirm = async () => {
+      observedAgentName = getAgentName();
+      observedIsTeammate = isTeammate();
+    };
+
+    // Simulate the teammate's loop frame being live at emit time.
+    await runWithTeammateIdentity(teammateIdentity, async () => {
+      const inherited = getTeammateContext();
+      respondClosure = () =>
+        core.runInAgentFrames(onConfirm, undefined, undefined, inherited);
+    });
+
+    // Teammate frame is gone; jump to a fresh microtask chain to be sure.
+    expect(getAgentName()).toBeUndefined();
+    expect(isTeammate()).toBe(false);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await respondClosure!();
+
+    expect(observedAgentName).toBe('scribe');
+    expect(observedIsTeammate).toBe(true);
+  });
+
   it("prefers the agent's own view over inheritedView when both are present", async () => {
     // Defensive: if a future caller wires both, the agent's explicit view
     // wins — we never want a captured snapshot to override the agent's
@@ -251,9 +300,7 @@ describe('AgentCore.prepareTools', () => {
   // toolConfig entirely — must inherit DEFERRED tools too. Otherwise a
   // subagent configured with `tools: ['*']` against a registry that
   // includes MCP / lsp / cron_* tools would silently lose them once
-  // ToolSearch was introduced (the main chat sees them via the
-  // "Deferred Tools" prompt + ToolSearch flow, but subagents don't get
-  // either of those scaffolds).
+  // ToolSearch was introduced.
   function buildAgentForTools(
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],

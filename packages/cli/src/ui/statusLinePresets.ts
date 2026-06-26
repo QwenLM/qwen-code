@@ -8,21 +8,21 @@ import nodePath from 'node:path';
 import { StreamingState } from './types.js';
 
 export const STATUS_LINE_PRESET_ITEM_IDS = [
-  'model-with-reasoning',
-  'context-remaining',
-  'current-dir',
-  'context-used',
-  'git-branch',
-  'model',
   'project-name',
+  'git-branch',
+  'model-with-reasoning',
+  'model',
+  'context-remaining',
+  'total-input-tokens',
+  'total-output-tokens',
+  'current-dir',
   'pull-request-number',
   'branch-changes',
+  'context-used',
   'run-state',
   'qwen-version',
   'context-window-size',
   'used-tokens',
-  'total-input-tokens',
-  'total-output-tokens',
   'session-id',
 ] as const;
 
@@ -40,12 +40,21 @@ export interface StatusLinePresetConfig {
   type: 'preset';
   items: StatusLinePresetItemId[];
   useThemeColors?: boolean;
+  hideContextIndicator?: boolean;
 }
+
+export type StatusLinePresetReasoning =
+  | false
+  | {
+      effort?: 'low' | 'medium' | 'high' | 'max';
+    }
+  | undefined;
 
 export interface StatusLinePresetData {
   sessionId: string;
   version: string;
   modelDisplayName: string;
+  reasoning: StatusLinePresetReasoning;
   currentDir: string;
   projectName: string | undefined;
   branch: string | undefined;
@@ -75,27 +84,9 @@ export function aggregateModelTokens(metrics: {
 
 export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
   {
-    id: 'model-with-reasoning',
-    label: 'model-with-reasoning',
-    description: 'Current model name with reasoning level when available',
-    defaultSelected: true,
-  },
-  {
-    id: 'context-remaining',
-    label: 'context-remaining',
-    description: 'Percentage of context window remaining',
-    defaultSelected: true,
-  },
-  {
-    id: 'current-dir',
-    label: 'current-dir',
-    description: 'Current working directory',
-    defaultSelected: true,
-  },
-  {
-    id: 'context-used',
-    label: 'context-used',
-    description: 'Percentage of context window used',
+    id: 'project-name',
+    label: 'project-name',
+    description: 'Project name when available',
     defaultSelected: true,
   },
   {
@@ -105,14 +96,35 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     defaultSelected: true,
   },
   {
-    id: 'model',
-    label: 'model',
-    description: 'Current model name',
+    id: 'model-with-reasoning',
+    label: 'model-with-reasoning',
+    description: 'Current model name with reasoning level when available',
+    defaultSelected: true,
   },
   {
-    id: 'project-name',
-    label: 'project-name',
-    description: 'Project name when available',
+    id: 'model',
+    label: 'model-only',
+    description: 'Current model name without reasoning level',
+  },
+  {
+    id: 'context-remaining',
+    label: 'context-remaining',
+    description: 'Percentage of context window remaining',
+  },
+  {
+    id: 'total-input-tokens',
+    label: 'total-input-tokens',
+    description: 'Total input tokens used in session',
+  },
+  {
+    id: 'total-output-tokens',
+    label: 'total-output-tokens',
+    description: 'Total output tokens used in session',
+  },
+  {
+    id: 'current-dir',
+    label: 'current-dir',
+    description: 'Current working directory',
   },
   {
     id: 'pull-request-number',
@@ -123,6 +135,12 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     id: 'branch-changes',
     label: 'branch-changes',
     description: 'Session file changes added and removed',
+  },
+  {
+    id: 'context-used',
+    label: 'context-used',
+    description: 'Percentage of context window used',
+    defaultSelected: true,
   },
   {
     id: 'run-state',
@@ -145,16 +163,6 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     description: 'Current prompt tokens used',
   },
   {
-    id: 'total-input-tokens',
-    label: 'total-input-tokens',
-    description: 'Total input tokens used in session',
-  },
-  {
-    id: 'total-output-tokens',
-    label: 'total-output-tokens',
-    description: 'Total output tokens used in session',
-  },
-  {
     id: 'session-id',
     label: 'session-id',
     description: 'Current session identifier',
@@ -165,11 +173,26 @@ const STATUS_LINE_PRESET_ITEM_ID_SET = new Set<string>(
   STATUS_LINE_PRESET_ITEM_IDS,
 );
 
+export function orderStatusLinePresetItems(
+  items: readonly unknown[],
+): StatusLinePresetItemId[] {
+  const selectedItems = new Set(
+    items.filter(
+      (item): item is StatusLinePresetItemId =>
+        typeof item === 'string' && STATUS_LINE_PRESET_ITEM_ID_SET.has(item),
+    ),
+  );
+
+  return STATUS_LINE_PRESET_ITEM_IDS.filter((item) => selectedItems.has(item));
+}
+
 export const DEFAULT_STATUS_LINE_PRESET_CONFIG: StatusLinePresetConfig = {
   type: 'preset',
   useThemeColors: true,
-  items: STATUS_LINE_PRESET_ITEMS.filter((item) => item.defaultSelected).map(
-    (item) => item.id,
+  items: orderStatusLinePresetItems(
+    STATUS_LINE_PRESET_ITEMS.filter((item) => item.defaultSelected).map(
+      (item) => item.id,
+    ),
   ),
 };
 
@@ -186,12 +209,8 @@ export function normalizeStatusLinePresetConfig(
   }
 
   const hasItemsArray = Array.isArray(candidate['items']);
-  const rawItems = hasItemsArray ? (candidate['items'] as unknown[]) : [];
   const items = hasItemsArray
-    ? rawItems.filter(
-        (item): item is StatusLinePresetItemId =>
-          typeof item === 'string' && STATUS_LINE_PRESET_ITEM_ID_SET.has(item),
-      )
+    ? orderStatusLinePresetItems(candidate['items'] as unknown[])
     : [];
 
   return {
@@ -200,9 +219,11 @@ export function normalizeStatusLinePresetConfig(
       typeof candidate['useThemeColors'] === 'boolean'
         ? candidate['useThemeColors']
         : true,
-    items: hasItemsArray
-      ? [...new Set(items)]
-      : [...DEFAULT_STATUS_LINE_PRESET_CONFIG.items],
+    items: hasItemsArray ? items : [...DEFAULT_STATUS_LINE_PRESET_CONFIG.items],
+    hideContextIndicator:
+      typeof candidate['hideContextIndicator'] === 'boolean'
+        ? candidate['hideContextIndicator']
+        : undefined,
   };
 }
 
@@ -240,6 +261,24 @@ export function getRunStateLabel(state: StreamingState): string {
   }
 }
 
+function stripProviderPrefix(name: string): string {
+  return name.replace(/^\[[^\]]*\]\s*/, '');
+}
+
+export function formatModelWithReasoning(
+  modelDisplayName: string,
+  reasoning: StatusLinePresetReasoning,
+): string {
+  const cleanName = stripProviderPrefix(modelDisplayName);
+  if (reasoning === false) {
+    return `${cleanName} reasoning off`;
+  }
+  if (reasoning?.effort) {
+    return `${cleanName} ${reasoning.effort}`;
+  }
+  return cleanName;
+}
+
 export function inferPullRequestNumber(
   branch: string | undefined,
 ): string | undefined {
@@ -256,6 +295,7 @@ export function buildStatusLinePresetData(params: {
   sessionId: string;
   version: string | undefined;
   modelDisplayName: string | undefined;
+  reasoning?: StatusLinePresetReasoning;
   currentDir: string;
   branch: string | undefined;
   pullRequestNumber?: string | undefined;
@@ -284,6 +324,7 @@ export function buildStatusLinePresetData(params: {
     sessionId: params.sessionId,
     version: params.version || 'unknown',
     modelDisplayName: params.modelDisplayName || 'unknown',
+    reasoning: params.reasoning,
     currentDir: params.currentDir,
     projectName: nodePath.basename(params.currentDir) || undefined,
     branch: params.branch,
@@ -300,96 +341,88 @@ export function buildStatusLinePresetData(params: {
   };
 }
 
+function formatPresetItem(
+  item: StatusLinePresetItemId,
+  data: StatusLinePresetData,
+): string | undefined {
+  switch (item) {
+    case 'model-with-reasoning':
+      return formatModelWithReasoning(data.modelDisplayName, data.reasoning);
+    case 'model':
+      return stripProviderPrefix(data.modelDisplayName);
+    case 'context-remaining':
+      if (data.contextWindowSize > 0) {
+        return `Context ${formatPercent(data.remainingPercentage)} left`;
+      }
+      return undefined;
+    case 'current-dir':
+      return data.currentDir;
+    case 'context-used':
+      if (data.contextWindowSize > 0 && data.usedPercentage > 0) {
+        return `${formatTokenCount(data.contextWindowSize)} Context ${formatPercent(data.usedPercentage)} used`;
+      }
+      return undefined;
+    case 'git-branch':
+      if (data.branch) {
+        return `git:(${data.branch})`;
+      }
+      return undefined;
+    case 'project-name':
+      if (data.projectName) {
+        return `\u279c ${data.projectName}`;
+      }
+      return undefined;
+    case 'pull-request-number': {
+      const prNumber =
+        data.pullRequestNumber ?? inferPullRequestNumber(data.branch);
+      if (prNumber) {
+        return `#${prNumber}`;
+      }
+      return undefined;
+    }
+    case 'branch-changes':
+      if (data.totalLinesAdded > 0 || data.totalLinesRemoved > 0) {
+        return `+${data.totalLinesAdded} -${data.totalLinesRemoved}`;
+      }
+      return undefined;
+    case 'run-state':
+      return getRunStateLabel(data.streamingState);
+    case 'qwen-version':
+      return `v${data.version}`;
+    case 'context-window-size':
+      if (data.contextWindowSize > 0) {
+        return `${formatTokenCount(data.contextWindowSize)} window`;
+      }
+      return undefined;
+    case 'used-tokens':
+      if (data.currentUsage > 0) {
+        return `${formatTokenCount(data.currentUsage)} used`;
+      }
+      return undefined;
+    case 'total-input-tokens':
+      return `${formatTokenCount(data.totalInputTokens)} total in`;
+    case 'total-output-tokens':
+      return `${formatTokenCount(data.totalOutputTokens)} total out`;
+    case 'session-id':
+      return data.sessionId || undefined;
+    default: {
+      item satisfies never;
+      return undefined;
+    }
+  }
+}
+
 export function buildStatusLinePresetParts(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
   const parts: string[] = [];
-  const seen = new Set<StatusLinePresetItemId>();
-
-  for (const item of config.items) {
-    if (seen.has(item)) {
-      continue;
-    }
-    seen.add(item);
-
-    switch (item) {
-      case 'model-with-reasoning':
-      case 'model':
-        parts.push(data.modelDisplayName);
-        seen.add('model');
-        seen.add('model-with-reasoning');
-        break;
-      case 'context-remaining':
-        if (data.contextWindowSize > 0) {
-          parts.push(`Context ${formatPercent(data.remainingPercentage)} left`);
-        }
-        break;
-      case 'current-dir':
-        parts.push(data.currentDir);
-        break;
-      case 'context-used':
-        if (data.contextWindowSize > 0 && data.usedPercentage > 0) {
-          parts.push(`Context ${formatPercent(data.usedPercentage)} used`);
-        }
-        break;
-      case 'git-branch':
-        if (data.branch) {
-          parts.push(data.branch);
-        }
-        break;
-      case 'project-name':
-        if (data.projectName) {
-          parts.push(data.projectName);
-        }
-        break;
-      case 'pull-request-number': {
-        const prNumber =
-          data.pullRequestNumber ?? inferPullRequestNumber(data.branch);
-        if (prNumber) {
-          parts.push(`#${prNumber}`);
-        }
-        break;
-      }
-      case 'branch-changes':
-        if (data.totalLinesAdded > 0 || data.totalLinesRemoved > 0) {
-          parts.push(`+${data.totalLinesAdded} -${data.totalLinesRemoved}`);
-        }
-        break;
-      case 'run-state':
-        parts.push(getRunStateLabel(data.streamingState));
-        break;
-      case 'qwen-version':
-        parts.push(`v${data.version}`);
-        break;
-      case 'context-window-size':
-        if (data.contextWindowSize > 0) {
-          parts.push(`${formatTokenCount(data.contextWindowSize)} window`);
-        }
-        break;
-      case 'used-tokens':
-        if (data.currentUsage > 0) {
-          parts.push(`${formatTokenCount(data.currentUsage)} used`);
-        }
-        break;
-      case 'total-input-tokens':
-        parts.push(`${formatTokenCount(data.totalInputTokens)} in`);
-        break;
-      case 'total-output-tokens':
-        parts.push(`${formatTokenCount(data.totalOutputTokens)} out`);
-        break;
-      case 'session-id':
-        if (data.sessionId) {
-          parts.push(data.sessionId);
-        }
-        break;
-      default: {
-        item satisfies never;
-        break;
-      }
+  for (const item of orderStatusLinePresetItems(config.items)) {
+    const text = formatPresetItem(item, data);
+    if (text) {
+      parts.push(text);
     }
   }
-
   return parts;
 }
 
@@ -397,6 +430,6 @@ export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
-  const line = buildStatusLinePresetParts(config, data).join(' | ');
+  const line = buildStatusLinePresetParts(config, data).join(' \u00b7 ');
   return line ? [line] : [];
 }

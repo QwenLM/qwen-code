@@ -135,7 +135,6 @@ When the `Turn` class receives a RETRY event, it clears accumulated state to pre
 
 - `pendingToolCalls` — cleared to avoid duplicate tool calls if the first truncated response contained completed tool calls that are repeated in the escalated response
 - `pendingCitations` — cleared to avoid duplicate citations
-- `debugResponses` — cleared to avoid stale debug data
 - `finishReason` — reset to `undefined` so the new response's finish reason is used
 
 The `isContinuation` flag is passed through to the UI so it can decide whether to reset text buffers (escalation) or keep them (recovery).

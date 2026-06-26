@@ -28,11 +28,13 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
-import { useCompactMode } from '../../contexts/CompactModeContext.js';
+
 import {
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
@@ -225,10 +227,25 @@ const useResultDisplayRenderer = (
       };
     }
 
-    // Default to string
+    // TeamResultDisplay / TaskListResultDisplay — handled by their tools'
+    // returnDisplay text; don't render the structured object inline.
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      (resultDisplay.type === 'team_result' ||
+        resultDisplay.type === 'task_list')
+    ) {
+      return { type: 'none' };
+    }
+
+    // Default to string — safeguard against non-string objects
     return {
       type: 'string',
-      data: resultDisplay as string,
+      data:
+        typeof resultDisplay === 'string'
+          ? resultDisplay
+          : JSON.stringify(resultDisplay),
     };
   }, [resultDisplay]);
 
@@ -651,13 +668,18 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  // Use the custom hook to determine the display type
-  const displayRenderer = useResultDisplayRenderer(resultDisplay);
-  const { compactMode } = useCompactMode();
-  const effectiveDisplayRenderer =
-    !compactMode || forceShowResult
-      ? displayRenderer
-      : { type: 'none' as const };
+  const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
+
+  // Collapse text/ANSI output for completed collapsible tools (read/search/list)
+  // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)
+  // always show results — their output IS the answer. Canceled tools keep partial
+  // output visible. Diff, plan, todo, task results always render regardless.
+  const shouldCollapseResult =
+    !forceShowResult &&
+    status === ToolCallStatus.Success &&
+    isCollapsibleTool(name) &&
+    (effectiveDisplayRenderer.type === 'string' ||
+      effectiveDisplayRenderer.type === 'ansi');
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -683,8 +705,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
-      {effectiveDisplayRenderer.type !== 'none' && (
-        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
+      {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">
             {effectiveDisplayRenderer.type === 'todo' && (
               <TodoResultRenderer data={effectiveDisplayRenderer.data} />
@@ -785,7 +807,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
         strikethrough={status === ToolCallStatus.Canceled}
       >
         <Text color={nameColor} bold>
-          {name}
+          {localizeToolDisplayName(name)}
         </Text>{' '}
         <Text color={theme.text.secondary}>{description}</Text>
       </Text>

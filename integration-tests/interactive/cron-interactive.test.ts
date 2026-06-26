@@ -26,7 +26,6 @@ function makeEnv(): NodeJS.ProcessEnv {
   delete env['NO_COLOR'];
   return {
     ...env,
-    QWEN_CODE_ENABLE_CRON: '1',
     FORCE_COLOR: '1',
     TERM: 'xterm-256color',
     NODE_NO_WARNINGS: '1',

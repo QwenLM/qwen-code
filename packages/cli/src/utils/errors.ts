@@ -11,9 +11,11 @@ import {
   parseAndFormatApiError,
   FatalTurnLimitedError,
   FatalCancellationError,
+  FatalBudgetExceededError,
   ToolErrorType,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import type { BudgetExceeded } from './runBudget.js';
 import { runExitCleanup } from './cleanup.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -277,4 +279,32 @@ export async function handleMaxTurnsExceededError(
     writeStderrLine(maxTurnsError.message);
   }
   return exitAfterCleanup(maxTurnsError.exitCode);
+}
+
+/**
+ * Emits the structured "run aborted by budget" error and exits. Used by
+ * the non-interactive run loop when `--max-wall-time` or `--max-tool-calls`
+ * fires (see `RunBudgetEnforcer`). Exit code is 55, distinct from the
+ * turn-cap exit code 53 and SIGINT's 130 so CI scripts can branch on the
+ * reason.
+ *
+ * The output shape intentionally mirrors `handleMaxTurnsExceededError` /
+ * `handleCancellationError`: structured JSON only on `OutputFormat.JSON`
+ * and plain stderr for everything else (incl. STREAM_JSON). Emitting a
+ * structured envelope on STREAM_JSON too is a real gap, but it's a
+ * codebase-wide convention question that affects cancel / max-turns
+ * equally, not a budget-specific decision.
+ */
+export async function handleBudgetExceededError(
+  config: Config,
+  exceeded: BudgetExceeded,
+): Promise<never> {
+  const fatal = new FatalBudgetExceededError(exceeded.message);
+  if (config.getOutputFormat() === OutputFormat.JSON) {
+    const formatter = new JsonFormatter();
+    writeStderrLine(formatter.formatError(fatal, fatal.exitCode));
+  } else {
+    writeStderrLine(fatal.message);
+  }
+  return exitAfterCleanup(fatal.exitCode);
 }

@@ -185,9 +185,30 @@ describe('tokenLimit', () => {
   });
 
   describe('Zhipu GLM', () => {
-    it('should return 200K for GLM-5 and GLM-4.7 (latest)', () => {
+    it('should default GLM-5.2+ and GLM-6.x onward to 1M (forward default)', () => {
+      expect(tokenLimit('glm-5.2')).toBe(1000000);
+      expect(tokenLimit('GLM-5.2')).toBe(1000000);
+      expect(tokenLimit('glm-5.3')).toBe(1000000);
+      expect(tokenLimit('glm-6')).toBe(1000000);
+      expect(tokenLimit('glm-6.5')).toBe(1000000);
+      expect(tokenLimit('glm-10')).toBe(1000000); // two-digit major
+    });
+
+    it('should strip third-party deploy prefixes before matching', () => {
+      expect(tokenLimit('zai/GLM-5.2')).toBe(1000000);
+      expect(tokenLimit('pai/glm-5.3')).toBe(1000000);
+      expect(tokenLimit('pai/glm-5.1')).toBe(202752);
+    });
+
+    it('should pin GLM-5 / 5.1 and GLM-4.x to 200K', () => {
       expect(tokenLimit('glm-5')).toBe(202752);
+      expect(tokenLimit('glm-5.0')).toBe(202752);
+      expect(tokenLimit('glm-5.1')).toBe(202752);
       expect(tokenLimit('glm-4.7')).toBe(202752);
+    });
+
+    it('should keep non-numeric GLM names on the conservative fallback', () => {
+      expect(tokenLimit('glm-z1')).toBe(202752);
     });
 
     it('should return 200K for legacy GLM (fallback)', () => {
@@ -198,6 +219,10 @@ describe('tokenLimit', () => {
   });
 
   describe('MiniMax', () => {
+    it('should return 1M for MiniMax-M3', () => {
+      expect(tokenLimit('MiniMax-M3')).toBe(1000000);
+    });
+
     it('should return 196608 for MiniMax-M2.5 (latest)', () => {
       expect(tokenLimit('MiniMax-M2.5')).toBe(196608);
     });
@@ -310,7 +335,11 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for GLM', () => {
-      expect(tokenLimit('glm-5', 'output')).toBe(16384);
+      expect(tokenLimit('glm-5.2', 'output')).toBe(131072);
+      expect(tokenLimit('GLM-5.2', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5.1', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5-turbo', 'output')).toBe(131072);
       expect(tokenLimit('glm-4.7', 'output')).toBe(16384);
     });
 

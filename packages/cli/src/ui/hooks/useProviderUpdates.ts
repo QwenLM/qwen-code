@@ -5,11 +5,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ProviderModelConfig, Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
-import { t } from '../../i18n/index.js';
-import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
+import type {
+  ProviderModelConfig,
+  Config,
+  ProviderConfig,
+} from '@qwen-code/qwen-code-core';
 import {
+  ALL_PROVIDERS,
+  applyProviderInstallPlan,
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
@@ -18,9 +21,10 @@ import {
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
-  type ProviderConfig,
-} from '../../auth/providerConfig.js';
-import { ALL_PROVIDERS } from '../../auth/allProviders.js';
+} from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
+import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 // ---------------------------------------------------------------------------
@@ -148,7 +152,7 @@ interface PendingUpdate {
   diff: ModelUpdateDiff;
 }
 
-function getInstalledOwnedModelIds(
+function readInstalledOwnedIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
 ): string[] {
@@ -161,8 +165,22 @@ function getInstalledOwnedModelIds(
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
-  if (!ownsFn) return allModels.map((m) => m.id);
-  return allModels.filter(ownsFn).map((m) => m.id);
+  return ownsFn
+    ? allModels.filter(ownsFn).map((m) => m.id)
+    : allModels.map((m) => m.id);
+}
+
+function getInstalledOwnedModelIds(
+  settings: LoadedSettings,
+  provider: ProviderConfig,
+): string[] {
+  // Only compare built-in model IDs — user-added custom models should not
+  // appear as "removed" in the diff since they were never part of the
+  // provider's built-in list.
+  const builtinIds = new Set(getDefaultModelIds(provider));
+  return readInstalledOwnedIds(settings, provider).filter((id) =>
+    builtinIds.has(id),
+  );
 }
 
 function findAllPendingUpdates(
@@ -218,10 +236,17 @@ export function useProviderUpdates(
     async (providerCfg: ProviderConfig, baseUrl?: string) => {
       try {
         const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        // An update only refreshes built-in models — user-added custom IDs
+        // must be carried through so they are not deleted by the
+        // prepend-and-remove-owned merge.
+        const defaultIds = getDefaultModelIds(providerCfg);
+        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
+          (id) => !defaultIds.includes(id),
+        );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
-          modelIds: getDefaultModelIds(providerCfg),
+          modelIds: [...defaultIds, ...customIds],
         });
         delete installPlan.env;
         const previousModel = config.getModel();
@@ -234,9 +259,14 @@ export function useProviderUpdates(
         }
 
         await applyProviderInstallPlan(installPlan, {
-          settings,
-          config,
-          refreshAuth: false,
+          settings: createLoadedSettingsAdapter(settings),
+          reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
+          syncAuthState: (authType, modelId, baseUrl) =>
+            config
+              .getModelsConfig()
+              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+          refreshAuth: (authType) => config.refreshAuth(authType),
+          doRefreshAuth: false,
         });
 
         const activeModel = config.getModel();

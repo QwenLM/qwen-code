@@ -24,6 +24,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
+import {
+  atomicWriteFile,
+  atomicWriteFileSync,
+} from '../utils/atomicFileWrite.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
@@ -36,20 +40,40 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
+  downloadFromArchiveUrl,
   downloadFromGitHubRelease,
+  extractArchiveFile,
+  isSupportedArchivePath,
   parseGitHubRepoForReleases,
 } from './github.js';
 import { downloadFromNpmRegistry } from './npm.js';
+import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
-  isGeminiExtensionConfig,
-  convertGeminiExtensionPackage,
-} from './gemini-converter.js';
-import { convertClaudePluginPackage } from './claude-converter.js';
+  ExtensionPreferencesStore,
+  type ExtensionScope,
+} from './extensionPreferences.js';
+import {
+  SourceRegistryStore,
+  discoverPlugins,
+  parseExtensionSourceType,
+  type ExtensionSource,
+  type DiscoveredPlugin,
+} from './sourceRegistry.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseInstallSource,
+} from './marketplace.js';
+import { convertGeminiOrClaudeExtension } from './extension-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
+import {
+  resolveExtensionConfigLocale,
+  type RawExtensionConfig,
+  type LocalizableString,
+} from './i18n.js';
 import {
   getEnvContents,
   maybePromptForSettings,
@@ -100,6 +124,7 @@ export interface ExtensionChannelConfig {
 export interface Extension {
   id: string;
   name: string;
+  displayName?: string;
   version: string;
   isActive: boolean;
   path: string;
@@ -120,6 +145,13 @@ export interface Extension {
 export interface ExtensionConfig {
   name: string;
   version: string;
+  displayName?: string;
+  description?: string;
+  /** Original localizable values before resolution, for runtime re-resolution on language change. */
+  _rawLocalizable?: {
+    displayName?: LocalizableString;
+    description?: LocalizableString;
+  };
   mcpServers?: Record<string, MCPServerConfig>;
   lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
@@ -172,6 +204,8 @@ export interface ExtensionManagerOptions {
   /** Override list of enabled extension names (from CLI -e flag) */
   enabledExtensionOverrides?: string[];
   isWorkspaceTrusted: boolean;
+  /** Locale code for resolving localizable fields (e.g., 'en', 'zh'). Defaults to 'en'. */
+  locale?: string;
   telemetrySettings?: TelemetrySettings;
   config?: Config;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
@@ -234,19 +268,16 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   };
 
   try {
-    const mdFiles = await glob('**/*.md', {
+    const allFiles = await glob('**/*.{md,toml}', {
       ...globOptions,
       cwd: dir,
     });
 
-    const commandNames = mdFiles.map((file) => {
-      const relativePathWithExt = path.relative(dir, path.join(dir, file));
-      const relativePath = relativePathWithExt.substring(
-        0,
-        relativePathWithExt.length - 3,
-      );
+    const commandNames = allFiles.map((file) => {
+      const ext = path.extname(file);
+      const relativePath = file.substring(0, file.length - ext.length);
       const commandName = relativePath
-        .split(path.sep)
+        .split(/[/\\]/)
         .map((segment) => segment.replaceAll(':', '_'))
         .join(':');
 
@@ -264,29 +295,6 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   }
 }
 
-async function convertGeminiOrClaudeExtension(
-  extensionDir: string,
-  pluginName?: string,
-): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
-  let newExtensionDir = extensionDir;
-  let originSource: ExtensionOriginSource = 'QwenCode';
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-  if (fs.existsSync(configFilePath)) {
-    newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-    originSource = 'Gemini';
-  } else if (pluginName) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(extensionDir, pluginName)
-    ).convertedDir;
-    originSource = 'Claude';
-  }
-  // Claude plugin conversion not yet implemented
-  return { extensionDir: newExtensionDir, originSource };
-}
-
 // ============================================================================
 // ExtensionManager Class
 // ============================================================================
@@ -299,10 +307,14 @@ export class ExtensionManager {
   private readonly configFilePath: string;
   private readonly enabledExtensionNamesOverride: string[];
   private readonly workspaceDir: string;
+  private readonly preferencesStore: ExtensionPreferencesStore;
+  private readonly sourceRegistryStore: SourceRegistryStore;
+  private discoverCache: DiscoveredPlugin[] | null = null;
 
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
   private isWorkspaceTrusted: boolean;
+  private readonly locale: string;
   private requestConsent: (options?: ExtensionRequestOptions) => Promise<void>;
   private requestSetting?: (setting: ExtensionSetting) => Promise<string>;
   private requestChoicePlugin: (
@@ -311,6 +323,7 @@ export class ExtensionManager {
 
   constructor(options: ExtensionManagerOptions) {
     this.workspaceDir = options.workspaceDir ?? process.cwd();
+    this.locale = options.locale ?? 'en';
     this.enabledExtensionNamesOverride =
       options.enabledExtensionOverrides?.map((name) => name.toLowerCase()) ??
       [];
@@ -318,6 +331,14 @@ export class ExtensionManager {
     this.configFilePath = path.join(
       this.configDir,
       'extension-enablement.json',
+    );
+    this.preferencesStore = new ExtensionPreferencesStore(
+      path.join(this.configDir, 'extension-preferences.json'),
+    );
+    this.sourceRegistryStore = new SourceRegistryStore(
+      // Keep the on-disk filename as marketplaces.json for backward
+      // compatibility with sources added before the source/* rename.
+      path.join(this.configDir, 'marketplaces.json'),
     );
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =
@@ -478,6 +499,160 @@ export class ExtensionManager {
     }
   }
 
+  // ==========================================================================
+  // Favorites & scope preferences (Installed view grouping)
+  // ==========================================================================
+
+  isFavorite(name: string): boolean {
+    return this.preferencesStore.isFavorite(name);
+  }
+
+  getFavorites(): string[] {
+    return this.preferencesStore.getFavorites();
+  }
+
+  /** Toggles favorite state for an extension/MCP server; returns new state. */
+  toggleFavorite(name: string): boolean {
+    return this.preferencesStore.toggleFavorite(name);
+  }
+
+  getExtensionScope(name: string): ExtensionScope | undefined {
+    return this.preferencesStore.getScope(name);
+  }
+
+  getExtensionScopes(): Record<string, ExtensionScope> {
+    return this.preferencesStore.getScopes();
+  }
+
+  setExtensionScope(name: string, scope: ExtensionScope): void {
+    this.preferencesStore.setScope(name, scope);
+  }
+
+  /** MCP servers individually disabled inside the given extension. */
+  getDisabledMcpServers(extensionName: string): string[] {
+    return this.preferencesStore.getDisabledMcpServers(extensionName);
+  }
+
+  setMcpServerDisabled(
+    extensionName: string,
+    serverName: string,
+    disabled: boolean,
+  ): void {
+    this.preferencesStore.setMcpServerDisabled(
+      extensionName,
+      serverName,
+      disabled,
+    );
+  }
+
+  // ==========================================================================
+  // Marketplace registry & discovery
+  // ==========================================================================
+
+  getSources(): ExtensionSource[] {
+    return this.sourceRegistryStore.read();
+  }
+
+  /**
+   * Adds a marketplace source. Loads the marketplace config to resolve a
+   * human-readable name (falling back to the raw source). Throws if no
+   * marketplace config can be resolved from the source.
+   */
+  async addSource(source: string): Promise<ExtensionSource> {
+    const trimmed = source.trim();
+    if (!trimmed) {
+      throw new Error('Marketplace source cannot be empty.');
+    }
+    const config = await loadMarketplaceConfigFromSource(trimmed);
+    if (!config) {
+      // A "marketplace" is a Claude-format collection (.claude-plugin/
+      // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
+      // not a marketplace — guide the user to install it directly instead.
+      let isInstallableExtension = false;
+      try {
+        await parseInstallSource(trimmed);
+        isInstallableExtension = true;
+      } catch {
+        // Not a recognizable install source either.
+      }
+      const redacted = redactUrlCredentials(trimmed);
+      if (isInstallableExtension) {
+        throw new Error(
+          `"${redacted}" looks like a single extension, not a marketplace. ` +
+            `Install it directly with: /extensions install ${redacted}`,
+        );
+      }
+      throw new Error(
+        `No marketplace found at "${redacted}". ` +
+          `Expected a .claude-plugin/marketplace.json.`,
+      );
+    }
+    const now = new Date().toISOString();
+    const entry: ExtensionSource = {
+      name: config.name || trimmed,
+      source: trimmed,
+      type: parseExtensionSourceType(trimmed),
+      addedAt: now,
+      lastUpdatedAt: now,
+    };
+    this.sourceRegistryStore.add(entry);
+    this.discoverCache = null; // sources changed -> refetch on next discover
+    return entry;
+  }
+
+  removeSource(name: string): boolean {
+    const removed = this.sourceRegistryStore.remove(name);
+    if (removed) {
+      this.discoverCache = null;
+    }
+    return removed;
+  }
+
+  /**
+   * Records a fresh "last updated" timestamp for a marketplace and invalidates
+   * the discovery cache so the next discover re-fetches it.
+   */
+  markSourceUpdated(name: string): ExtensionSource | undefined {
+    const entry = this.getSources().find((m) => m.name === name);
+    if (!entry) {
+      return undefined;
+    }
+    const updated: ExtensionSource = {
+      ...entry,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.sourceRegistryStore.add(updated); // add() replaces by name
+    this.discoverCache = null;
+    return updated;
+  }
+
+  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
+    return loadMarketplaceConfigFromSource(source);
+  }
+
+  /**
+   * Discovers all installable plugins across configured sources, marking
+   * which are already installed. The fetched listing is cached for the session;
+   * pass `{ refresh: true }` to force a re-fetch. The cheap `installed` flags are
+   * always recomputed against the current install state.
+   */
+  async discoverPlugins(options?: {
+    refresh?: boolean;
+  }): Promise<DiscoveredPlugin[]> {
+    const installedNames = new Set(
+      this.getLoadedExtensions().map((ext) => ext.name),
+    );
+    if (this.discoverCache && !options?.refresh) {
+      return this.discoverCache.map((plugin) => ({
+        ...plugin,
+        installed: installedNames.has(plugin.name),
+      }));
+    }
+    const result = await discoverPlugins(this.getSources(), installedNames);
+    this.discoverCache = result;
+    return result;
+  }
+
   private enableByPath(
     extensionName: string,
     includeSubdirs: boolean,
@@ -530,7 +705,7 @@ export class ExtensionManager {
 
   private writeEnablementConfig(config: AllExtensionsEnablementConfig): void {
     fs.mkdirSync(this.configDir, { recursive: true });
-    fs.writeFileSync(this.configFilePath, JSON.stringify(config, null, 2));
+    atomicWriteFileSync(this.configFilePath, JSON.stringify(config, null, 2));
   }
 
   /**
@@ -661,6 +836,7 @@ export class ExtensionManager {
       const extension: Extension = {
         id: getExtensionId(config, installMetadata),
         name: config.name,
+        displayName: config.displayName,
         version:
           config.version ||
           installMetadata?.marketplaceConfig?.metadata?.version ||
@@ -803,13 +979,15 @@ export class ExtensionManager {
     }
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const config = recursivelyHydrateStrings(JSON.parse(configContent), {
+      const rawConfig = recursivelyHydrateStrings(JSON.parse(configContent), {
         extensionPath: extensionDir,
         CLAUDE_PLUGIN_ROOT: extensionDir,
         workspacePath: workspaceDir,
         '/': path.sep,
         pathSeparator: path.sep,
-      }) as unknown as ExtensionConfig;
+      }) as unknown as RawExtensionConfig;
+
+      const config = resolveExtensionConfigLocale(rawConfig, this.locale);
 
       if (!config.name) {
         throw new Error(
@@ -847,15 +1025,18 @@ export class ExtensionManager {
       this.telemetrySettings,
     );
     let extension: Extension | null;
+    const redactedInstallSource = redactUrlCredentials(installMetadata.source);
 
     const isUpdate = !!previousExtensionConfig;
     let newExtensionConfig: ExtensionConfig | null = null;
     let localSourcePath: string | undefined;
+    let tempDir: string | undefined;
+    let convertedSourcePath: string | undefined;
 
     try {
       if (!this.isWorkspaceTrusted) {
         throw new Error(
-          `Could not install extension from untrusted folder at ${installMetadata.source}`,
+          `Could not install extension from untrusted folder at ${redactedInstallSource}`,
         );
       }
 
@@ -871,8 +1052,6 @@ export class ExtensionManager {
           installMetadata.source,
         );
       }
-
-      let tempDir: string | undefined;
 
       if (
         installMetadata.originSource === 'Claude' &&
@@ -909,10 +1088,21 @@ export class ExtensionManager {
           }
         }
         localSourcePath = tempDir;
+      } else if (installMetadata.type === 'archive-url') {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await downloadFromArchiveUrl(installMetadata, tempDir);
+        localSourcePath = tempDir;
       } else if (installMetadata.type === 'npm') {
         tempDir = await ExtensionStorage.createTmpDir();
         const result = await downloadFromNpmRegistry(installMetadata, tempDir);
         installMetadata.releaseTag = result.version;
+        localSourcePath = tempDir;
+      } else if (
+        installMetadata.type === 'local' &&
+        isSupportedArchivePath(installMetadata.source)
+      ) {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await extractArchiveFile(installMetadata.source, tempDir);
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
@@ -924,12 +1114,16 @@ export class ExtensionManager {
       }
 
       try {
+        const sourceBeforeConversion = localSourcePath;
         const { extensionDir, originSource } =
           await convertGeminiOrClaudeExtension(
-            localSourcePath,
+            sourceBeforeConversion,
             installMetadata.pluginName,
           );
 
+        if (extensionDir !== sourceBeforeConversion) {
+          convertedSourcePath = extensionDir;
+        }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
 
@@ -1070,7 +1264,7 @@ export class ExtensionManager {
           destinationPath,
           INSTALL_METADATA_FILENAME,
         );
-        await fs.promises.writeFile(metadataPath, metadataString);
+        await atomicWriteFile(metadataPath, metadataString);
 
         extension = await this.loadExtension({ extensionDir: destinationPath });
         if (!extension) {
@@ -1100,18 +1294,29 @@ export class ExtensionManager {
             new ExtensionInstallEvent(
               newExtensionConfig.name,
               newExtensionConfig!.version,
-              installMetadata.source,
+              redactUrlCredentials(installMetadata.source),
               'success',
             ),
           );
-          this.enableExtension(newExtensionConfig.name, SettingScope.User);
+          await this.enableExtension(
+            newExtensionConfig.name,
+            SettingScope.User,
+          );
         }
       } finally {
         if (tempDir) {
           await fs.promises.rm(tempDir, { recursive: true, force: true });
         }
+        if (convertedSourcePath && convertedSourcePath !== tempDir) {
+          await fs.promises.rm(convertedSourcePath, {
+            recursive: true,
+            force: true,
+          });
+        }
         if (
+          localSourcePath &&
           localSourcePath !== tempDir &&
+          localSourcePath !== convertedSourcePath &&
           installMetadata.type !== 'link' &&
           installMetadata.type !== 'local'
         ) {
@@ -1132,6 +1337,15 @@ export class ExtensionManager {
         } catch {
           // Ignore error
         }
+      }
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      if (convertedSourcePath && convertedSourcePath !== tempDir) {
+        await fs.promises.rm(convertedSourcePath, {
+          recursive: true,
+          force: true,
+        });
       }
       const config = newExtensionConfig ?? previousExtensionConfig;
       const extensionId = config
@@ -1155,7 +1369,7 @@ export class ExtensionManager {
           new ExtensionInstallEvent(
             newExtensionConfig?.name ?? '',
             newExtensionConfig?.version ?? '',
-            installMetadata.source,
+            redactUrlCredentials(installMetadata.source),
             'error',
           ),
         );
@@ -1206,6 +1420,7 @@ export class ExtensionManager {
     if (isUpdate) return;
 
     this.removeEnablementConfig(extension.name);
+    this.preferencesStore.clear(extension.name);
     await this.refreshTools();
 
     logExtensionUninstall(
@@ -1301,7 +1516,7 @@ export class ExtensionManager {
       } catch (e) {
         callback(extension.name, ExtensionUpdateState.ERROR);
         throw new Error(
-          `Updated extension not found after installation, got error:\n${e}`,
+          `Updated extension not found after installation, got error:\n${redactUrlCredentials(getErrorMessage(e))}`,
         );
       }
       const updatedVersion = updatedExtension.version;

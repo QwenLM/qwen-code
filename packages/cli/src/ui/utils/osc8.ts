@@ -108,6 +108,15 @@ export function isSafeOscScheme(url: string): boolean {
   return SAFE_OSC8_SCHEMES.has(match[1]!.toLowerCase());
 }
 
+function shouldForceHyperlinks(value: string): boolean {
+  if (value.length === 0) return true;
+
+  const trimmed = value.trim();
+  if (!/^[+-]?\d+$/.test(trimmed)) return false;
+
+  return Number(trimmed) !== 0;
+}
+
 interface ParsedVersion {
   major: number;
   minor: number;
@@ -173,8 +182,7 @@ export function supportsHyperlinks(
   // enables, `0` disables.
   const force = env['FORCE_HYPERLINK'];
   if (force !== undefined) {
-    if (force.length === 0) return true;
-    return parseInt(force, 10) !== 0;
+    return shouldForceHyperlinks(force);
   }
 
   if (env['CI']) return false;
@@ -237,9 +245,15 @@ export function supportsHyperlinks(
       case 'ghostty':
         return true;
       case 'mintty':
-        // mintty ≥ 3.3 supports OSC 8; older installs are extremely rare
-        // and still degrade safely (terminal just prints the visible bytes).
-        return true;
+        // mintty added OSC 8 in 3.1, hardened in 3.3. Older builds (still
+        // bundled with some Git-for-Windows distros and developer
+        // environments like Laragon) print the raw `\x1b]8;;url\x07`
+        // bytes as visible garbage instead of silently ignoring them,
+        // so gate on TERM_PROGRAM_VERSION. mintty has set
+        // TERM_PROGRAM_VERSION since 2.7 (2017), so a missing version
+        // means a very old build — refuse rather than guess.
+        if (!env['TERM_PROGRAM_VERSION']) return false;
+        return version.major > 3 || (version.major === 3 && version.minor >= 3);
       // Warp (TERM_PROGRAM=WarpTerminal) does NOT yet support OSC 8 — its
       // rendering engine ignores the envelope and prints visible garbage,
       // so we deliberately fall through to the legacy `label (url)` path.

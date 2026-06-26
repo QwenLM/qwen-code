@@ -8,6 +8,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { Content } from '@google/genai';
 import type { Storage } from '../config/storage.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 
 const LOG_FILE_NAME = 'logs.json';
@@ -187,7 +188,7 @@ export class Logger {
       }
       this.logs = await this._readLogFile();
       if (!fileExisted && this.logs.length === 0) {
-        await fs.writeFile(this.logFilePath, '[]', 'utf-8');
+        await atomicWriteFile(this.logFilePath, '[]', { encoding: 'utf-8' });
       }
       const sessionLogs = this.logs.filter(
         (entry) => entry.sessionId === this.sessionId,
@@ -258,10 +259,10 @@ export class Logger {
     currentLogsOnDisk.push(entryToAppend);
 
     try {
-      await fs.writeFile(
+      await atomicWriteFile(
         this.logFilePath,
         JSON.stringify(currentLogsOnDisk, null, 2),
-        'utf-8',
+        { encoding: 'utf-8' },
       );
       this.logs = currentLogsOnDisk;
       return entryToAppend; // Return the successfully appended entry
@@ -461,10 +462,10 @@ export class Logger {
       currentLogsOnDisk.splice(idx, 1);
 
       try {
-        await fs.writeFile(
+        await atomicWriteFile(
           logFilePath,
           JSON.stringify(currentLogsOnDisk, null, 2),
-          'utf-8',
+          { encoding: 'utf-8' },
         );
         this.logs = currentLogsOnDisk;
         // Roll back this instance's nextMessageId so a subsequent log doesn't
@@ -539,7 +540,9 @@ export class Logger {
     // Always save with the new encoded path.
     const path = this._checkpointPath(tag);
     try {
-      await fs.writeFile(path, JSON.stringify(conversation, null, 2), 'utf-8');
+      await atomicWriteFile(path, JSON.stringify(conversation, null, 2), {
+        encoding: 'utf-8',
+      });
     } catch (error) {
       this.debugLogger.error('Error writing to checkpoint file:', error);
     }

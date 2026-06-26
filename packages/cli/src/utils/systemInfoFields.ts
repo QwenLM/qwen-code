@@ -6,8 +6,10 @@
 
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
-import { findProviderByCredentials } from '../auth/allProviders.js';
-import { resolveMetadataKey } from '../auth/providerConfig.js';
+import {
+  findProviderByCredentials,
+  resolveMetadataKey,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Field configuration for system information display

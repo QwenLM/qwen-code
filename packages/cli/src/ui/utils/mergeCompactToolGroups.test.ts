@@ -392,9 +392,7 @@ describe('mergeCompactToolGroups', () => {
     // Single-batch turn: one tool_group, then its summary arrives. The group
     // is non-force-expanded (compact-mode candidate), so its callId is in
     // absorbedCallIds — the summary is consumed by the compact header and
-    // dropped from merged output. Without this drop, mergedHistory.length
-    // would grow lock-step with history.length and MainContent's
-    // refreshStatic heuristic would never fire.
+    // dropped from merged output to avoid double-displaying the label.
     const items: HistoryItem[] = [
       createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
       {
@@ -588,14 +586,14 @@ describe('compactToggleHasVisualEffect', () => {
     expect(compactToggleHasVisualEffect(history)).toBe(false);
   });
 
-  it('returns true when any tool_group is present', () => {
+  it('returns false when only tool_group is present (no compact mode effect)', () => {
     const history: HistoryItem[] = [
       { type: 'user', id: 1, text: 'run' },
       createToolGroup(2, [
         createTool('c1', 'shell', ToolCallStatus.Success),
       ]) as HistoryItem,
     ];
-    expect(compactToggleHasVisualEffect(history)).toBe(true);
+    expect(compactToggleHasVisualEffect(history)).toBe(false);
   });
 
   it('returns true when any gemini_thought is present', () => {

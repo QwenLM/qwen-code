@@ -230,7 +230,7 @@ export interface SDKPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'yolo';
+export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * Authentication types supported by the CLI.
@@ -334,6 +334,9 @@ export type WireSDKMcpServerConfig = Omit<SDKMcpServerConfig, 'instance'>;
 export interface CLIControlInitializeRequest {
   subtype: 'initialize';
   hooks?: HookRegistration[] | null;
+  timeout?: {
+    canUseTool?: number;
+  };
   /**
    * SDK MCP servers config
    * These are MCP servers running in the SDK process, connected via control plane.

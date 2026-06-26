@@ -18,85 +18,143 @@
 // limitations under the License.
 
 import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
-import { dirname, join, basename } from 'node:path';
+import { dirname, join, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, '..');
-const distDir = join(root, 'dist');
-const coreVendorDir = join(root, 'packages', 'core', 'vendor');
+const defaultRoot = join(__dirname, '..');
 
-// Create the dist directory if it doesn't exist
-if (!existsSync(distDir)) {
-  mkdirSync(distDir);
-}
+export function copyBundleAssets({ root = defaultRoot } = {}) {
+  const distDir = join(root, 'dist');
+  const coreVendorDir = join(root, 'packages', 'core', 'vendor');
 
-// Find and copy all .sb files from packages to the root of the dist directory
-const sbFiles = glob.sync('packages/**/*.sb', { cwd: root });
-for (const file of sbFiles) {
-  copyFileSync(join(root, file), join(distDir, basename(file)));
-}
+  // Create the dist directory if it doesn't exist
+  if (!existsSync(distDir)) {
+    mkdirSync(distDir);
+  }
 
-console.log('Copied sandbox profiles to dist/');
+  // Find and copy all .sb files from packages to the root of the dist directory
+  const sbFiles = glob.sync('packages/**/*.sb', { cwd: root });
+  for (const file of sbFiles) {
+    copyFileSync(join(root, file), join(distDir, basename(file)));
+  }
 
-// Copy vendor directory (contains ripgrep binaries)
-console.log('Copying vendor directory...');
-if (existsSync(coreVendorDir)) {
-  const destVendorDir = join(distDir, 'vendor');
-  copyRecursiveSync(coreVendorDir, destVendorDir);
-  console.log('Copied vendor directory to dist/');
-} else {
-  console.warn(`Warning: Vendor directory not found at ${coreVendorDir}`);
-}
+  console.log('Copied sandbox profiles to dist/');
 
-// Copy bundled skills (e.g. /review) so they are available at runtime.
-// In the esbuild bundle, import.meta.url resolves to dist/cli.js, so
-// SkillManager looks for bundled skills at dist/bundled/.
-const bundledSkillsDir = join(
-  root,
-  'packages',
-  'core',
-  'src',
-  'skills',
-  'bundled',
-);
-if (existsSync(bundledSkillsDir)) {
-  const destBundledDir = join(distDir, 'bundled');
-  copyRecursiveSync(bundledSkillsDir, destBundledDir);
-  console.log('Copied bundled skills to dist/bundled/');
-} else {
-  console.warn(
-    `Warning: Bundled skills directory not found at ${bundledSkillsDir}`,
+  // Copy vendor directory (contains ripgrep binaries)
+  console.log('Copying vendor directory...');
+  if (existsSync(coreVendorDir)) {
+    const destVendorDir = join(distDir, 'vendor');
+    copyRecursiveSync(coreVendorDir, destVendorDir);
+    console.log('Copied vendor directory to dist/');
+  } else {
+    console.warn(`Warning: Vendor directory not found at ${coreVendorDir}`);
+  }
+
+  // Copy bundled skills (e.g. /review) so they are available at runtime.
+  // In the esbuild bundle, import.meta.url resolves to dist/cli.js, so
+  // SkillManager looks for bundled skills at dist/bundled/.
+  const bundledSkillsDir = join(
+    root,
+    'packages',
+    'core',
+    'src',
+    'skills',
+    'bundled',
   );
+  if (existsSync(bundledSkillsDir)) {
+    const destBundledDir = join(distDir, 'bundled');
+    copyRecursiveSync(bundledSkillsDir, destBundledDir);
+    console.log('Copied bundled skills to dist/bundled/');
+  } else {
+    console.warn(
+      `Warning: Bundled skills directory not found at ${bundledSkillsDir}`,
+    );
+  }
+
+  // Copy user docs into qc-helper bundled skill so it can reference them at runtime.
+  // The qc-helper skill reads docs from a `docs/` subdirectory relative to its own
+  // directory. In the esbuild bundle this becomes dist/bundled/qc-helper/docs/.
+  const userDocsDir = join(root, 'docs', 'users');
+  if (existsSync(userDocsDir)) {
+    const destDocsDir = join(distDir, 'bundled', 'qc-helper', 'docs');
+    copyRecursiveSync(userDocsDir, destDocsDir);
+    console.log('Copied docs/users/ to dist/bundled/qc-helper/docs/');
+  } else {
+    console.warn(`Warning: User docs directory not found at ${userDocsDir}`);
+  }
+
+  // Copy builtin locales so bundled dist/cli.js can load UI translations at runtime.
+  // Published packages already include these via prepare-package.js; bundle output
+  // should mirror that behavior for local `node dist/cli.js` runs.
+  const localesDir = join(root, 'packages', 'cli', 'src', 'i18n', 'locales');
+  if (existsSync(localesDir)) {
+    const destLocalesDir = join(distDir, 'locales');
+    copyRecursiveSync(localesDir, destLocalesDir);
+    console.log('Copied builtin locales to dist/locales/');
+  } else {
+    console.warn(`Warning: Locales directory not found at ${localesDir}`);
+  }
+
+  // Copy extension templates so bundled dist/cli.js can scaffold
+  // `/extensions new` from the runtime examples directory.
+  const extensionExamplesDir = join(
+    root,
+    'packages',
+    'cli',
+    'src',
+    'commands',
+    'extensions',
+    'examples',
+  );
+  if (existsSync(extensionExamplesDir)) {
+    const destExtensionExamplesDir = join(distDir, 'examples');
+    copyRecursiveSync(extensionExamplesDir, destExtensionExamplesDir);
+    console.log('Copied extension examples to dist/examples/');
+  } else {
+    console.warn(
+      `Warning: Extension examples directory not found at ${extensionExamplesDir}`,
+    );
+  }
+
+  // Copy the built Web Shell SPA (index.html + assets/) so the bundled
+  // `qwen serve` can serve the browser UI at its root path. The library
+  // build outputs (dist/index.js, dist/types) are for npm consumers and are
+  // intentionally NOT copied. Source only exists after the web-shell
+  // workspace is built (npm run build); when absent (e.g. a --cli-only
+  // build, or bundling without a prior full build) we warn and skip so the
+  // bundle step never fails — the daemon then runs API-only at runtime.
+  const webShellDistDir = join(root, 'packages', 'web-shell', 'dist');
+  const webShellIndexHtml = join(webShellDistDir, 'index.html');
+  const webShellAssetsDir = join(webShellDistDir, 'assets');
+  if (existsSync(webShellIndexHtml) && existsSync(webShellAssetsDir)) {
+    const destWebShellDir = join(distDir, 'web-shell');
+    mkdirSync(destWebShellDir, { recursive: true });
+    copyFileSync(webShellIndexHtml, join(destWebShellDir, 'index.html'));
+    copyRecursiveSync(webShellAssetsDir, join(destWebShellDir, 'assets'));
+    console.log('Copied Web Shell UI to dist/web-shell/');
+  } else {
+    console.warn(
+      `Warning: Web Shell assets not found at ${webShellDistDir}; ` +
+        'dist/web-shell/ will be absent and `qwen serve` runs API-only. ' +
+        'Run a full `npm run build` before bundling to include the UI.',
+    );
+  }
+
+  console.log('\n✅ All bundle assets copied to dist/');
 }
 
-// Copy user docs into qc-helper bundled skill so it can reference them at runtime.
-// The qc-helper skill reads docs from a `docs/` subdirectory relative to its own
-// directory. In the esbuild bundle this becomes dist/bundled/qc-helper/docs/.
-const userDocsDir = join(root, 'docs', 'users');
-if (existsSync(userDocsDir)) {
-  const destDocsDir = join(distDir, 'bundled', 'qc-helper', 'docs');
-  copyRecursiveSync(userDocsDir, destDocsDir);
-  console.log('Copied docs/users/ to dist/bundled/qc-helper/docs/');
-} else {
-  console.warn(`Warning: User docs directory not found at ${userDocsDir}`);
+if (isDirectRun()) {
+  copyBundleAssets();
 }
 
-// Copy builtin locales so bundled dist/cli.js can load UI translations at runtime.
-// Published packages already include these via prepare-package.js; bundle output
-// should mirror that behavior for local `node dist/cli.js` runs.
-const localesDir = join(root, 'packages', 'cli', 'src', 'i18n', 'locales');
-if (existsSync(localesDir)) {
-  const destLocalesDir = join(distDir, 'locales');
-  copyRecursiveSync(localesDir, destLocalesDir);
-  console.log('Copied builtin locales to dist/locales/');
-} else {
-  console.warn(`Warning: Locales directory not found at ${localesDir}`);
+function isDirectRun() {
+  return process.argv[1]
+    ? fileURLToPath(import.meta.url) === resolve(process.argv[1])
+    : false;
 }
-
-console.log('\n✅ All bundle assets copied to dist/');
 
 /**
  * Recursively copy directory

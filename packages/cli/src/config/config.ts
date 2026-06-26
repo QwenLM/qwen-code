@@ -12,6 +12,7 @@ import {
   FileDiscoveryService,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
@@ -36,7 +37,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
-import type { Settings } from './settings.js';
+import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
+import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -59,6 +61,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
+import { sessionsCommand } from '../commands/sessions.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -74,14 +77,31 @@ export function isValidSessionId(value: string): boolean {
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { assembleMcpServers } from './mcpServers.js';
+import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  parseDurationSeconds,
+  validateMaxToolCalls,
+  validateMaxWallTimeSetting,
+} from '../utils/runBudget.js';
+import { detectSystemLanguage } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('CONFIG');
+
+function resolveLocaleForExtensions(settings: Settings): string {
+  const envLang = process.env['QWEN_CODE_LANG'];
+  if (envLang) return envLang;
+  const settingsLang = settings.general?.language as string | undefined;
+  if (settingsLang && settingsLang !== 'auto') return settingsLang;
+  return detectSystemLanguage();
+}
 
 const VALID_APPROVAL_MODE_VALUES = [
   'plan',
   'default',
   'auto-edit',
+  'auto',
   'yolo',
 ] as const;
 
@@ -106,6 +126,8 @@ function parseApprovalModeValue(value: string): ApprovalMode {
     case 'autoedit':
     case 'auto-edit':
       return ApprovalMode.AUTO_EDIT;
+    case 'auto':
+      return ApprovalMode.AUTO;
     default:
       throw formatApprovalModeError(value);
   }
@@ -125,7 +147,6 @@ export interface CliArgs {
   bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
-  checkpointing: boolean | undefined;
   telemetryTarget: string | undefined;
   telemetryOtlpEndpoint: string | undefined;
   telemetryOtlpProtocol: string | undefined;
@@ -167,7 +188,20 @@ export interface CliArgs {
   forkSession?: boolean | undefined;
   /** Internal: preserve the outer session ID when relaunching in a sandbox */
   sandboxSessionId?: string | undefined;
+  /**
+   * Start the session inside a git worktree. Accepted forms:
+   * - bare `--worktree` (empty string from yargs) → auto-generated slug
+   * - `--worktree foo` / `--worktree=foo` → explicit slug
+   * - `--worktree=#123` / `--worktree https://github.com/o/r/pull/123` → PR ref
+   *
+   * Consumed by `setupStartupWorktree()` before `loadCliConfig()`. When set,
+   * the CLI chdirs into `<repoRoot>/.qwen/worktrees/<slug>/` and the entire
+   * session runs inside that worktree.
+   */
+  worktree?: string | undefined;
   maxSessionTurns: number | undefined;
+  maxWallTime: string | undefined;
+  maxToolCalls: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -641,14 +675,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['plan', 'default', 'auto-edit', 'yolo'],
+          choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
           description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
-        })
-        .option('checkpointing', {
-          type: 'boolean',
-          description: 'Enables checkpointing of file edits',
-          default: false,
+            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })
         .option('acp', {
           type: 'boolean',
@@ -674,8 +703,8 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -821,9 +850,27 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           hidden: true,
         })
+        .option('worktree', {
+          type: 'string',
+          description:
+            'Start the session inside a git worktree at <repoRoot>/.qwen/worktrees/<slug>/. ' +
+            'Pass a slug (`--worktree my-feature`), a PR reference (`--worktree=#123` or a full ' +
+            'GitHub pull-request URL), or use bare `--worktree` to auto-generate a slug. ' +
+            'On exit, the WorktreeExitDialog prompts to keep or remove the worktree.',
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
+        })
+        .option('max-wall-time', {
+          type: 'string',
+          description:
+            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Aborts the run with exit code 55 when exceeded.',
+        })
+        .option('max-tool-calls', {
+          type: 'number',
+          description:
+            'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
         })
         .option('core-tools', {
           type: 'array',
@@ -871,10 +918,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .deprecateOption(
           'sandbox-image',
           'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
-          'checkpointing',
-          'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'prompt',
@@ -1001,8 +1044,10 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
-    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
-    .command(serveCommand);
+    // Register `qwen serve` (Stage 1 daemon)
+    .command(serveCommand)
+    // Register sessions subcommands
+    .command(sessionsCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1026,7 +1071,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'auth' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
-      result._[0] === 'review')
+      result._[0] === 'review' ||
+      result._[0] === 'sessions')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
@@ -1091,6 +1137,7 @@ export async function loadHierarchicalGeminiMemory(
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
   contextRuleExcludes: string[] = [],
+  options: LoadServerHierarchicalMemoryOptions = {},
 ): Promise<LoadServerHierarchicalMemoryResponse> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
@@ -1110,15 +1157,78 @@ export async function loadHierarchicalGeminiMemory(
     folderTrust,
     memoryImportFormat,
     contextRuleExcludes,
+    options,
   );
 }
 
+/**
+ * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
+ * unlimited). Order of precedence: `--max-wall-time` flag, then
+ * `model.maxWallTimeSeconds` from settings, else unlimited.
+ *
+ * The CLI flag is a duration string (`30s` / `5m` / `1h` / `90`); the
+ * settings entry is a plain number of seconds (parity with
+ * `model.maxSessionTurns`). Both layers reject `0` and out-of-range
+ * values up front — a typo in a CI guardrail should fail loud at startup,
+ * not silently disable the budget.
+ */
+function resolveMaxWallTimeSeconds(argv: CliArgs, settings: Settings): number {
+  if (argv.maxWallTime !== undefined && argv.maxWallTime !== null) {
+    try {
+      return parseDurationSeconds(String(argv.maxWallTime));
+    } catch (err) {
+      throw new Error(`--max-wall-time: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxWallTimeSeconds;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxWallTimeSetting(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
+}
+
+/**
+ * Resolves the tool-call budget for a run. Returns the validated count
+ * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
+ * `model.maxToolCalls` from settings, else unlimited.
+ *
+ * Symmetric with `resolveMaxWallTimeSeconds`: yargs accepts `NaN` from
+ * non-numeric flag values, and the enforcer's `>= 0` gate would silently
+ * disable the budget for `NaN` / negatives. Validate up front so a typo
+ * in a CI guardrail fails loudly.
+ */
+function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
+  if (argv.maxToolCalls !== undefined && argv.maxToolCalls !== null) {
+    try {
+      return validateMaxToolCalls(argv.maxToolCalls);
+    } catch (err) {
+      throw new Error(`--max-tool-calls: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxToolCalls;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxToolCalls(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
+}
+
 export function isDebugMode(argv: CliArgs): boolean {
+  if (argv.debug) return true;
+  const debugVal = process.env['DEBUG'];
+  const debugModeVal = process.env['DEBUG_MODE'];
   return (
-    argv.debug ||
-    [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-      (v) => v === 'true' || v === '1',
-    )
+    debugVal === 'true' ||
+    debugVal === '1' ||
+    debugModeVal === 'true' ||
+    debugModeVal === '1'
   );
 }
 
@@ -1200,6 +1310,45 @@ function parseMcpConfig(
   }
 }
 
+/**
+ * Builds the live-read closure for `Config.getDisabledSkillNames()`.
+ *
+ * The returned function reads through `loadedSettings.merged` on every
+ * call, so `LoadedSettings.setValue('skills.disabled', ...)` invocations
+ * are reflected without rebuilding `Config`. The closure is over the
+ * `LoadedSettings` instance, NOT over its `.merged` snapshot — that
+ * distinction matters because `LoadedSettings.setValue` replaces the
+ * internal `_merged` object on every call. A closure over `.merged` would
+ * stay frozen at construction time.
+ *
+ * Use this from every `loadCliConfig` call site (interactive entry, ACP
+ * session start, etc.) so all surfaces — `<available_skills>` in the
+ * model description, `/skill-name` slash commands, `/skills` listing and
+ * completion — agree on which skills are currently disabled.
+ */
+export function buildDisabledSkillNamesProvider(
+  loadedSettings: LoadedSettings,
+): () => ReadonlySet<string> {
+  return () => {
+    // Defensive: settings.json is user-editable, so the `disabled` slot
+    // could be a non-array (e.g. `"disabled": "all"` or `"disabled": 42`)
+    // OR an array containing non-strings (e.g. `[42, null]`). The `??`
+    // fallback only catches `null`/`undefined`, so we MUST also guard
+    // against non-array values before `.filter()` — otherwise calling
+    // `"all".filter` throws `TypeError: list.filter is not a function`
+    // and bricks every skill invocation (validateToolParams + execute
+    // both call this provider without a try/catch).
+    const raw = loadedSettings.merged.skills?.disabled;
+    const list = Array.isArray(raw) ? raw : [];
+    return new Set(
+      list
+        .filter((n): n is string => typeof n === 'string')
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean),
+    );
+  };
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1213,6 +1362,37 @@ export async function loadCliConfig(
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
+  /**
+   * Live-read provider for the set of disabled skill names. Forwarded to
+   * `ConfigParameters` so that `Config.getDisabledSkillNames()` reflects
+   * `LoadedSettings.merged.skills?.disabled` even after `setValue`
+   * mutations within the same process.
+   *
+   * Callers MUST close over the live `LoadedSettings` instance, NOT over
+   * the `settings: Settings` snapshot passed as the first argument here —
+   * `LoadedSettings.setValue` replaces `_merged`, so any closure over a
+   * snapshot would only see cold data and the dialog/subcommand toggles
+   * would not take effect on the model side. Use
+   * `buildDisabledSkillNamesProvider(loadedSettings)` to construct it
+   * correctly.
+   */
+  disabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * MCP servers injected by the embedding session (e.g. ACP / IDE clients).
+   * Treated as a session-level source at the TOP of the precedence stack — above
+   * settings and `.mcp.json`, below `--mcp-config` — and never approval-gated:
+   * they are explicit, per-session, and not checked into the repo. Routing them
+   * here (rather than merging into `settings.mcpServers`) keeps them from being
+   * demoted below a project `.mcp.json` by `assembleMcpServers`. See issue #4615.
+   */
+  sessionMcpServers?: Record<string, MCPServerConfig>,
+  /**
+   * Lifecycle handle for the settings file watcher started in `gemini.tsx`
+   * before `Config.initialize()`. Passed through to `Config` so it can be
+   * stopped during shutdown — only `stopWatching()` is exposed here to keep
+   * core decoupled from the CLI-owned `SettingsWatcher` implementation.
+   */
+  settingsWatcher?: { stopWatching(): void },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
@@ -1258,7 +1438,10 @@ export async function loadCliConfig(
     }
   }
 
-  const fileService = new FileDiscoveryService(cwd);
+  const fileService = new FileDiscoveryService(
+    cwd,
+    settings.context?.fileFiltering?.customIgnoreFiles,
+  );
 
   const includeDirectories = (
     bareMode ? [] : (settings.context?.includeDirectories ?? [])
@@ -1419,6 +1602,11 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
+  // Resolve the per-workspace tool denylist. De-duplicate while preserving
+  // original casing; shared helper since the MCP restart refresh path
+  // must agree byte-for-byte with this.
+  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
+
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
   // to preserve the original behaviour where "ShellTool", "Shell", and
@@ -1458,6 +1646,17 @@ export async function loadCliConfig(
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
+        denyUnlessAllowed(ToolNames.EDIT as ToolName);
+        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
+        break;
+      case ApprovalMode.AUTO:
+        // AUTO uses an LLM classifier to gate Shell/Monitor/Edit/WriteFile at
+        // call time; but non-interactive mode has no UI for the classifier's
+        // fallback path, so apply the same denylist as DEFAULT to keep parity
+        // with the interactive AUTO safety guarantees (no zero-denial drift
+        // toward YOLO behavior).
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
         denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
@@ -1610,6 +1809,27 @@ export async function loadCliConfig(
   }
 
   const modelProvidersConfig = settings.modelProviders;
+  const providerProtocolConfig = settings.providerProtocol;
+
+  // Assemble MCP servers across all sources in precedence order (user/default
+  // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
+  // and compute which gated (project/workspace) servers are still pending
+  // approval (#4615), so the discovery layer can skip them with no connection
+  // side effect. Loading `.mcp.json` is a pure read.
+  // Top tier = session-injected (ACP/IDE) servers plus `--mcp-config`; CLI wins
+  // over the session source on a name clash. Both sit above settings/`.mcp.json`
+  // and are never gated (#4615).
+  const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const topTierMcpServers =
+    sessionMcpServers || cliMcpServers
+      ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
+      : undefined;
+  const mcpServers = bareMode
+    ? {}
+    : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  const pendingMcpServers = bareMode
+    ? undefined
+    : getPendingGatedMcpServers(mcpServers, cwd);
 
   const configParams: ConfigParameters = {
     sessionId,
@@ -1636,11 +1856,14 @@ export async function loadCliConfig(
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
+    disabledSkillNamesProvider,
+    disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+      autoMode: settings.permissions?.autoMode,
     },
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
@@ -1661,15 +1884,16 @@ export async function loadCliConfig(
       : settings.tools?.discoveryCommand,
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode
-      ? {}
-      : (() => {
-          const base = settings.mcpServers || {};
-          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
-          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
-        })(),
+    mcpServers,
+    topTierMcpServers,
+    pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
+      : undefined,
+    // The flag ONLY (not the settings-derived list) — the hot-reload upper
+    // bound. Undefined when `--allowed-mcp-server-names` was not passed.
+    cliAllowedMcpServerNames: argv.allowedMcpServerNames
+      ? argv.allowedMcpServerNames.filter(Boolean)
       : undefined,
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)
@@ -1679,12 +1903,14 @@ export async function loadCliConfig(
       ...settings.ui?.accessibility,
       screenReader,
     },
+    showResponseTokensPerSecond:
+      settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
+    outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
-    checkpointing:
-      argv.checkpointing || settings.general?.checkpointing?.enabled,
+    plansDirectory: settings.plansDirectory,
     proxy:
       argv.proxy ||
       settings.proxy ||
@@ -1700,10 +1926,36 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
+    maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
+    maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    cronEnabled: settings.experimental?.cron ?? false,
+    cronEnabled: settings.experimental?.cron ?? true,
+    agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    artifactEnabled: settings.experimental?.artifact ?? false,
+    artifactAutoOpen: settings.artifact?.autoOpen ?? true,
+    artifactPublisher: settings.artifact?.publisher ?? 'local',
+    artifactHost: settings.artifact?.host
+      ? {
+          uploadCommand: settings.artifact?.host?.uploadCommand ?? '',
+          urlTemplate: settings.artifact?.host?.urlTemplate ?? '',
+          keyPrefix: settings.artifact?.host?.keyPrefix,
+        }
+      : undefined,
+    artifactOss: settings.artifact?.oss
+      ? {
+          bucket: settings.artifact?.oss?.bucket ?? '',
+          endpoint: settings.artifact?.oss?.endpoint ?? '',
+          keyPrefix: settings.artifact?.oss?.keyPrefix,
+          acl: settings.artifact?.oss?.acl,
+          publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
+        }
+      : undefined,
+    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
+    computerUseMaxImageDimension:
+      settings.tools?.computerUse?.maxImageDimension,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
+    locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
     authType: selectedAuthType,
@@ -1711,6 +1963,7 @@ export async function loadCliConfig(
     outputFormat,
     includePartialMessages,
     modelProvidersConfig,
+    providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
@@ -1727,11 +1980,14 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
+    skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
+    toolOutputBatchBudget: settings.tools?.toolOutputBatchBudget,
     eventEmitter: appEvents,
     gitCoAuthor: settings.general?.gitCoAuthor,
     output: {
@@ -1740,10 +1996,15 @@ export async function loadCliConfig(
     enableManagedAutoMemory: bareMode
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableManagedAutoDream: bareMode
+      ? false
+      : (settings.memory?.enableManagedAutoDream ?? true),
     enableAutoSkill: bareMode
       ? false
-      : (settings.memory?.enableAutoSkill ?? false),
+      : (settings.memory?.enableAutoSkill ?? true),
+    autoSkillConfirm: bareMode
+      ? false
+      : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
@@ -1783,6 +2044,12 @@ export async function loadCliConfig(
             : undefined,
         }
       : undefined,
+    worktree: settings.worktree
+      ? {
+          symlinkDirectories: settings.worktree.symlinkDirectories,
+        }
+      : undefined,
+    settingsWatcher,
   };
 
   const config = new Config(configParams);

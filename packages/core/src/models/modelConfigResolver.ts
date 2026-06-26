@@ -21,6 +21,7 @@
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -35,6 +36,7 @@ import {
   type ConfigSources,
   type ConfigLayer,
 } from '../utils/configResolver.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   AUTH_ENV_MAPPINGS,
   DEFAULT_MODELS,
@@ -121,9 +123,9 @@ function applyTimeoutEnvOverride(
   const raw = env['QWEN_CODE_API_TIMEOUT_MS'];
   if (raw === undefined) return;
 
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) {
-    generationConfig.timeout = Math.floor(parsed);
+  const parsed = parsePositiveIntegerEnv(raw, 0);
+  if (parsed > 0) {
+    generationConfig.timeout = parsed;
     sources['timeout'] = {
       kind: 'env',
       envKey: 'QWEN_CODE_API_TIMEOUT_MS',
@@ -268,7 +270,7 @@ export function resolveModelConfig(
     settings?.generationConfig,
     modelProvider?.generationConfig,
     authType,
-    modelProvider?.id,
+    modelProvider?.id ?? modelResult.value,
     sources,
   );
 
@@ -394,6 +396,23 @@ function resolveGenerationConfig(
       (result as any)[field] = settingsConfig[field];
       sources[field] = settingsSource(`model.generationConfig.${field}`);
     }
+  }
+
+  // modalities fallback: auto-detect from model when neither modelProvider nor
+  // settings supplied it. Mirrors modelRegistry.resolveModelConfig and
+  // modelsConfig.applyResolvedModelDefaults so all paths agree on which models
+  // are multimodal — without this, env-var-only setups silently drop @image
+  // attachments for image-capable models (issue #4219).
+  //
+  // Invariant: defaultModalities() returns `{}` (text-only) for unknown
+  // models, never `undefined`. After this fallback runs with a known modelId,
+  // `result.modalities` is always defined. Downstream code must NOT branch
+  // on `modalities === undefined` to mean "unresolved" — use the sources map
+  // (kind === 'computed' vs 'modelProviders'/'settings') if that distinction
+  // matters.
+  if (result.modalities === undefined && modelId) {
+    result.modalities = defaultModalities(modelId);
+    sources['modalities'] = computedSource('auto-detected from model');
   }
 
   return result;

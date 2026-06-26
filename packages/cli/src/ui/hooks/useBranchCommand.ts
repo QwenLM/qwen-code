@@ -8,23 +8,19 @@ import { useCallback } from 'react';
 import { randomUUID } from 'node:crypto';
 import {
   type Config,
-  type SessionService,
   type ChatRecord,
   type ResumedSessionData,
   SessionStartSource,
+  computeUniqueBranchTitle,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
+import {
+  buildResumedHistoryItems,
+  applyCollapsePolicyAndSummary,
+} from '../utils/resumeHistoryUtils.js';
 import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
-
-/**
- * Cap for the `(Branch N)` collision suffix. We scan all matching titles
- * once via `findSessionTitlesByPrefix` and then pick the first free slot
- * in memory; 99 is generous for realistic use and bounds the timestamp-
- * fallback path on pathologically dense title spaces.
- */
-const MAX_BRANCH_COLLISION_SCAN = 99;
 
 /**
  * Derives a short one-line title from the first *real* user message in the
@@ -57,39 +53,9 @@ function deriveFirstPrompt(messages: ChatRecord[]): string {
   return 'Branched conversation';
 }
 
-/**
- * Appends ` (Branch)` to `baseName`, bumping to ` (Branch 2)`, ` (Branch 3)`,
- * ... when the exact name is already taken by another session's customTitle
- * in the current project. Mirrors Claude's `getUniqueForkName`.
- *
- * Does ONE prefix scan instead of probing each candidate via
- * `findSessionsByTitle`: in dense title spaces the per-probe scanner could
- * walk the project's chat directory up to {@link MAX_BRANCH_COLLISION_SCAN}
- * times, and `/branch` would visibly stall. We collect every existing
- * `${trimmed} (Branch...` title once, then pick the first free slot in memory.
- */
-async function computeUniqueBranchTitle(
-  baseName: string,
-  sessionService: SessionService,
-): Promise<string> {
-  const trimmed = baseName.trim();
-  const taken = new Set(
-    (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
-      (t) => t.toLowerCase().trim(),
-    ),
-  );
-  const first = `${trimmed} (Branch)`;
-  if (!taken.has(first.toLowerCase())) return first;
-  for (let n = 2; n <= MAX_BRANCH_COLLISION_SCAN; n++) {
-    const candidate = `${trimmed} (Branch ${n})`;
-    if (!taken.has(candidate.toLowerCase())) return candidate;
-  }
-  // Pathological density — timestamp fallback keeps the fork unique.
-  return `${trimmed} (Branch ${Date.now()})`;
-}
-
 export interface UseBranchCommandOptions {
   config: Config | null;
+  settings: LoadedSettings;
   historyManager: Pick<
     UseHistoryManagerReturn,
     'clearItems' | 'loadHistory' | 'addItem'
@@ -134,6 +100,7 @@ export function useBranchCommand(
 
       let coreSwapped = false;
       let uiSwapped = false;
+      let forkCreated = false;
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
@@ -161,6 +128,7 @@ export function useBranchCommand(
 
         // 3. Fork the JSONL on disk.
         await sessionService.forkSession(oldSessionId, newSessionId);
+        forkCreated = true;
 
         // 4. Load the new file.
         const resumed = await sessionService.loadSession(newSessionId);
@@ -186,7 +154,13 @@ export function useBranchCommand(
         //    set immediately after the UI commits so any subsequent
         //    failure (title, hook, remount, announce) skips the catch
         //    block's core rollback.
-        const uiHistoryItems = buildResumedHistoryItems(resumed, config);
+        const rawItems = buildResumedHistoryItems(resumed, config);
+        const collapseOnResume =
+          options.settings.merged.ui?.history?.collapseOnResume ?? false;
+        const uiHistoryItems = applyCollapsePolicyAndSummary(
+          rawItems,
+          collapseOnResume,
+        );
         startNewSession(newSessionId);
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
@@ -275,6 +249,15 @@ export function useBranchCommand(
               );
           }
         }
+        if (forkCreated && !uiSwapped) {
+          try {
+            await sessionService.removeSession(newSessionId);
+          } catch (cleanupErr) {
+            config
+              .getDebugLogger()
+              .warn(`Failed to clean up failed branch session: ${cleanupErr}`);
+          }
+        }
         historyManager.addItem(
           {
             type: 'error',
@@ -286,7 +269,14 @@ export function useBranchCommand(
         );
       }
     },
-    [config, historyManager, startNewSession, setSessionName, remount],
+    [
+      config,
+      historyManager,
+      startNewSession,
+      setSessionName,
+      remount,
+      options.settings.merged.ui?.history?.collapseOnResume,
+    ],
   );
 
   return { handleBranch };

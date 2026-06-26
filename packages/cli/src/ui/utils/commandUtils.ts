@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { writeOsc52 } from './clipboardUtils.js';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -42,7 +43,7 @@ export const isAtCommand = (query: string): boolean =>
 const SLASH_PATH_SEPARATOR_RE = /[/\\]/;
 
 const getSlashCommandFirstToken = (query: string): string =>
-  query.slice(1).trimStart().split(/\s+/)[0] ?? '';
+  query.slice(1).trimStart().split(/\s+/u)[0] ?? '';
 
 export const hasSlashCommandPathSeparator = (query: string): boolean =>
   SLASH_PATH_SEPARATOR_RE.test(getSlashCommandFirstToken(query));
@@ -51,6 +52,10 @@ export const hasSlashCommandPathSeparator = (query: string): boolean =>
  * Checks if a query string potentially represents an '/' command.
  * It triggers if the query starts with '/' but excludes code comments like '//'
  * and '/*', and file paths where the first token contains a path separator.
+ *
+ * WARNING: This lexical classifier is also used as the legacy fallback for
+ * UI history items that do not have explicit sentToModel metadata. Coordinate
+ * changes here with isRealUserTurn in historyMapping.ts.
  *
  * @param query The input query string.
  * @returns True if the query looks like an '/' command, false otherwise.
@@ -144,9 +149,14 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackError instanceof Error &&
             (fallbackError as NodeJS.ErrnoException).code === 'ENOENT';
           if (xclipNotFound && xselNotFound) {
-            throw new Error(
-              'Please ensure xclip or xsel is installed and configured.',
-            );
+            // Neither xclip nor xsel available — try OSC 52 escape sequence
+            // (works over SSH without X11 display server).
+            if (!writeOsc52(text)) {
+              throw new Error(
+                'Clipboard unavailable: xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.',
+              );
+            }
+            return;
           }
 
           let primaryMsg =
@@ -164,8 +174,11 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackMsg = `xsel not found`;
           }
 
+          // Tools exist but failed — try OSC 52 before giving up
+          if (writeOsc52(text)) return;
+
           throw new Error(
-            `All copy commands failed. "${primaryMsg}", "${fallbackMsg}". `,
+            `Clipboard unavailable: xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }

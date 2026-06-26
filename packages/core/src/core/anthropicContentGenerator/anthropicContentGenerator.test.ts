@@ -22,7 +22,10 @@ vi.mock('../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
 }));
 
-type AnthropicCreateArgs = [unknown, { signal?: AbortSignal }?];
+type AnthropicCreateArgs = [
+  unknown,
+  { signal?: AbortSignal; headers?: Record<string, string> }?,
+];
 
 const anthropicMockState: {
   constructorOptions?: Record<string, unknown>;
@@ -67,16 +70,20 @@ const importConverter = async (): Promise<{
 }> => import('./converter.js');
 
 describe('AnthropicContentGenerator', () => {
+  const MAX_OUTPUT_TOKENS_ENV = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
   let mockConfig: Config;
   let anthropicState: {
     constructorOptions?: Record<string, unknown>;
     lastCreateArgs?: AnthropicCreateArgs;
     createImpl: ReturnType<typeof vi.fn>;
   };
+  let savedMaxOutputTokensEnv: string | undefined;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
+    delete process.env[MAX_OUTPUT_TOKENS_ENV];
 
     mockTokenizer.calculateTokens.mockResolvedValue({
       totalTokens: 50,
@@ -97,10 +104,17 @@ describe('AnthropicContentGenerator', () => {
     mockConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.2.3'),
       getProxy: vi.fn().mockReturnValue(undefined),
+      getTelemetryEnabled: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('test-session'),
     } as unknown as Config;
   });
 
   afterEach(() => {
+    if (savedMaxOutputTokensEnv === undefined) {
+      delete process.env[MAX_OUTPUT_TOKENS_ENV];
+    } else {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = savedMaxOutputTokensEnv;
+    }
     vi.restoreAllMocks();
   });
 
@@ -1011,9 +1025,16 @@ describe('AnthropicContentGenerator', () => {
       // generateContent(); make sure the per-request header attaches there
       // too so streaming Anthropic/DeepSeek requests stay consistent.
       const { AnthropicContentGenerator } = await importGenerator();
+      // Use message_delta (not bare message_stop) so the empty-stream
+      // fallback is not triggered — bare message_stop now indicates an empty
+      // stream and causes a non-streaming retry.
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
-          yield { type: 'message_stop' };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
         })(),
       );
 
@@ -1033,6 +1054,10 @@ describe('AnthropicContentGenerator', () => {
       for await (const _chunk of stream) {
         void _chunk;
       }
+
+      // Regression guard: normal streams must NOT trigger the empty-stream
+      // fallback (which would double latency + API cost).
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
 
       const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
       const headers = ((options as { headers?: Record<string, string> })
@@ -1601,6 +1626,75 @@ describe('AnthropicContentGenerator', () => {
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
           expect.objectContaining({ max_tokens: 8000 }),
+        );
+      });
+
+      it('ignores malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+
+        for (const envValue of ['1.5', '2k', 'abc']) {
+          process.env[MAX_OUTPUT_TOKENS_ENV] = envValue;
+          anthropicState.createImpl.mockResolvedValueOnce({
+            id: `anthropic-${envValue}`,
+            model: 'claude-sonnet-4',
+            content: [{ type: 'text', text: 'hi' }],
+          });
+
+          const generator = new AnthropicContentGenerator(
+            {
+              model: 'claude-sonnet-4',
+              apiKey: 'test-key',
+              timeout: 10_000,
+              maxRetries: 2,
+              samplingParams: {},
+              schemaCompliance: 'auto',
+            },
+            mockConfig,
+          );
+
+          await generator.generateContent({
+            model: 'models/ignored',
+            contents: 'Hello',
+          } as unknown as GenerateContentParameters);
+
+          const [anthropicRequest] =
+            anthropicState.lastCreateArgs as AnthropicCreateArgs;
+          expect(anthropicRequest).toEqual(
+            expect.objectContaining({ max_tokens: 8000 }),
+          );
+        }
+      });
+
+      it('respects a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        process.env[MAX_OUTPUT_TOKENS_ENV] = '9000';
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: {},
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 9000 }),
         );
       });
 
@@ -2413,6 +2507,98 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+    });
+
+    it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockResolvedValueOnce(
+          (async function* () {
+            // Empty stream: compatible gateways can return HTTP 200 with no SSE
+            // events when the real failure body is only available non-streaming.
+          })(),
+        )
+        .mockRejectedValueOnce(new Error('400 quota exceeded'));
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      await expect(async () => {
+        for await (const _chunk of stream) {
+          void _chunk;
+        }
+      }).rejects.toThrow('400 quota exceeded');
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      const [streamingRequest] = anthropicState.createImpl.mock
+        .calls[0] as AnthropicCreateArgs;
+      const [fallbackRequest] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
+      expect(streamingRequest).toEqual(
+        expect.objectContaining({ stream: true }),
+      );
+      expect(fallbackRequest).not.toHaveProperty('stream');
+    });
+
+    it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield { type: 'message_stop' };
+          })(),
+        )
+        .mockResolvedValueOnce({
+          id: 'msg-fallback',
+          model: 'claude-test',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'fallback ok' }],
+          usage: { input_tokens: 3, output_tokens: 2 },
+        });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.responseId).toBe('msg-fallback');
+      expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'fallback ok' },
+      ]);
+      expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
   });
 });

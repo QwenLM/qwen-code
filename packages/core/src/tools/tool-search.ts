@@ -58,7 +58,7 @@ interface ScoredTool {
 
 const toolSearchDescription = `Fetches function declarations for deferred tools and registers them with the active session so subsequent turns can call them.
 
-Deferred tools appear by name in the "Deferred Tools" section of the system prompt. Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' function declarations (name + description + parameter schema) inside a <functions> block.
+Deferred tools appear by name in the deferred-tools startup reminder. Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' function declarations (name + description + parameter schema) inside a <functions> block.
 
 The returned <functions> block is informational — it shows what the schema looks like. Calling the tool itself happens via the model's normal function-call mechanism on the NEXT turn, after the active session's declaration list has been updated. Tools fetched here remain available for the rest of the session.
 
@@ -112,8 +112,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const names: string[] = [];
       const truncated: string[] = [];
       for (const raw of query.slice('select:'.length).split(',')) {
-        // The deferred-tools system prompt section renders names as JSON
-        // string literals ("cron_list"), so models often paste them back
+        // The deferred-tools startup reminder renders names as JSON string
+        // literals ("cron_list"), so models often paste them back
         // verbatim with surrounding quotes. Strip a single layer of
         // matching `"…"` or `'…'` so `select:"foo"` and `select:foo`
         // resolve to the same tool. Without this the lookup would search
@@ -312,6 +312,22 @@ class ToolSearchInvocation extends BaseToolInvocation<
             `[ToolSearch] setTools() failed while revealing deferred tools: ${setToolsError}\n`,
           );
         }
+
+        if (!setToolsError) {
+          try {
+            await geminiClient.refreshStartupContextReminder();
+          } catch (err) {
+            const refreshError =
+              err instanceof Error ? err.message : String(err);
+            debugLogger.warn(
+              'refreshStartupContextReminder() failed after revealing deferred tools:',
+              err,
+            );
+            process.stderr.write(
+              `[ToolSearch] refreshStartupContextReminder() failed after revealing deferred tools: ${refreshError}\n`,
+            );
+          }
+        }
       }
 
       if (setToolsError) {
@@ -450,7 +466,7 @@ function clamp(n: number, lo: number, hi: number): number {
  * Strip a single layer of surrounding `"…"` or `'…'` if present.
  * Used to normalize `select:"foo"` → `foo` so models that paste tool
  * names back as JSON-quoted literals (the form they appear in the
- * deferred-tools section of the system prompt) resolve correctly.
+ * deferred-tools startup reminder) resolve correctly.
  * Mismatched / unbalanced quotes are returned unchanged.
  */
 function stripMatchingQuotes(s: string): string {

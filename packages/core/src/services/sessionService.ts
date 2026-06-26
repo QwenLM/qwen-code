@@ -15,16 +15,26 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
+import type { FileHistorySnapshot } from './fileHistoryService.js';
+import {
+  deserializeSnapshots,
+  FILE_HISTORY_DIR,
+  MAX_SNAPSHOTS,
+  serializeSnapshot,
+} from './fileHistoryService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
+import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -129,6 +139,8 @@ export interface ResumedSessionData {
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
   lastCompletedUuid: string | null;
+  /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
+  fileHistorySnapshots?: FileHistorySnapshot[];
 }
 
 /**
@@ -157,6 +169,57 @@ const MAX_PROMPT_SCAN_LINES = 10;
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
+async function copyFileHistoryBackups(
+  sourceSessionId: string,
+  targetSessionId: string,
+): Promise<void> {
+  const fsPromises = await import('node:fs/promises');
+  const sourceDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    sourceSessionId,
+  );
+  const targetDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    targetSessionId,
+  );
+
+  let entries: string[];
+  try {
+    entries = await fsPromises.readdir(sourceDir);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+    debugLogger.warn(`copyFileHistoryBackups: readdir failed: ${e}`);
+    return;
+  }
+  if (entries.length === 0) return;
+
+  try {
+    await fsPromises.mkdir(targetDir, { recursive: true });
+  } catch (e) {
+    debugLogger.warn(`copyFileHistoryBackups: mkdir failed: ${e}`);
+    return;
+  }
+  await Promise.all(
+    entries.map(async (name) => {
+      const src = path.join(sourceDir, name);
+      const dst = path.join(targetDir, name);
+      try {
+        await fsPromises.link(src, dst);
+      } catch {
+        try {
+          await fsPromises.copyFile(src, dst);
+        } catch (copyErr) {
+          debugLogger.warn(
+            `copyFileHistoryBackups: failed to copy ${name}: ${copyErr}`,
+          );
+        }
+      }
+    }),
+  );
+}
+
 /**
  * Service for managing chat sessions.
  *
@@ -171,14 +234,42 @@ const TAIL_READ_SIZE = 64 * 1024;
 export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
+  private readonly projectRoot: string;
 
   constructor(cwd: string) {
     this.storage = new Storage(cwd);
+    this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
   }
 
   private getChatsDir(): string {
     return path.join(this.storage.getProjectDir(), 'chats');
+  }
+
+  private async sessionBelongsToCurrentProject(
+    sessionId: string,
+    recordCwd: string,
+  ): Promise<boolean> {
+    if (getProjectHash(recordCwd) === this.projectHash) {
+      return true;
+    }
+
+    const status = await readRuntimeStatus(
+      this.storage.getRuntimeStatusPath(sessionId),
+    );
+    return (
+      status?.sessionId === sessionId &&
+      getProjectHash(status.workDir) === this.projectHash
+    );
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores
+   * worktree session state for the given session id. The file may not
+   * exist yet — consumers must handle ENOENT as "no active worktree".
+   */
+  getWorktreeSessionPath(sessionId: string): string {
+    return path.join(this.getChatsDir(), `${sessionId}.worktree.json`);
   }
 
   /**
@@ -393,7 +484,14 @@ export class SessionService {
     try {
       const firstRecords = await jsonl.readLines<ChatRecord>(filePath, 1);
       if (firstRecords.length === 0) return 0;
-      if (getProjectHash(firstRecords[0].cwd) !== this.projectHash) return 0;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          sessionId,
+          firstRecords[0].cwd,
+        ))
+      ) {
+        return 0;
+      }
     } catch {
       return 0;
     }
@@ -520,10 +618,14 @@ export class SessionService {
       if (records.length === 0) continue;
       const firstRecord = records[0];
 
-      // Skip if not matching current project
-      // We use cwd comparison since first record doesn't have projectHash
-      const recordProjectHash = getProjectHash(firstRecord.cwd);
-      if (recordProjectHash !== this.projectHash) continue;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          firstRecord.sessionId,
+          firstRecord.cwd,
+        ))
+      ) {
+        continue;
+      }
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
@@ -683,10 +785,13 @@ export class SessionService {
       return;
     }
 
-    // Verify this session belongs to the current project
     const firstRecord = records[0];
-    const recordProjectHash = getProjectHash(firstRecord.cwd);
-    if (recordProjectHash !== this.projectHash) {
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        firstRecord.sessionId,
+        firstRecord.cwd,
+      ))
+    ) {
       return;
     }
 
@@ -707,10 +812,48 @@ export class SessionService {
       messages,
     };
 
+    // Extract file history snapshots for /rewind across resume
+    const fileHistorySnapshots: FileHistorySnapshot[] = [];
+    const seenPromptIds = new Map<string, number>();
+    for (const msg of messages) {
+      if (
+        msg.type === 'system' &&
+        msg.subtype === 'file_history_snapshot' &&
+        msg.systemPayload
+      ) {
+        const payload = msg.systemPayload as FileHistorySnapshotRecordPayload;
+        if (!Array.isArray(payload?.snapshots)) continue;
+        let deserialized: FileHistorySnapshot[];
+        try {
+          deserialized = deserializeSnapshots(payload.snapshots);
+        } catch (e) {
+          debugLogger.warn(
+            `loadSession: skipping malformed file_history_snapshot: ${e}`,
+          );
+          continue;
+        }
+        for (const s of deserialized) {
+          const existingIdx = seenPromptIds.get(s.promptId);
+          if (existingIdx !== undefined) {
+            fileHistorySnapshots[existingIdx] = s;
+          } else {
+            seenPromptIds.set(s.promptId, fileHistorySnapshots.length);
+            fileHistorySnapshots.push(s);
+          }
+        }
+      }
+    }
+    const cappedSnapshots =
+      fileHistorySnapshots.length > MAX_SNAPSHOTS
+        ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
+        : fileHistorySnapshots;
+
     return {
       conversation,
       filePath,
       lastCompletedUuid: lastMessage.uuid,
+      fileHistorySnapshots:
+        cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
     };
   }
 
@@ -734,8 +877,9 @@ export class SessionService {
         return false;
       }
 
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      if (recordProjectHash !== this.projectHash) {
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, records[0].cwd))
+      ) {
         return false;
       }
 
@@ -819,8 +963,9 @@ export class SessionService {
         return false;
       }
 
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      if (recordProjectHash !== this.projectHash) {
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, records[0].cwd))
+      ) {
         return false;
       }
 
@@ -859,10 +1004,11 @@ export class SessionService {
   /**
    * Forks a session to a new sessionId.
    *
-   * Reads the source JSONL into memory, rewrites every record's `sessionId`
-   * to `newSessionId`, rebuilds the `parentUuid` chain in write order so the
-   * fork is a linear continuation, stamps `forkedFrom: { sessionId, messageUuid }`
-   * on every copied record for audit, and writes the result to `<newId>.jsonl`.
+   * Reads the source JSONL into memory, reconstructs the active record chain,
+   * rewrites every record's `sessionId` to `newSessionId`, stamps `cwd` to this
+   * service's project root, rebuilds the `parentUuid` chain so the fork is a
+   * linear continuation, stamps `forkedFrom: { sessionId, messageUuid }` on
+   * every copied record for audit, and writes the result to `<newId>.jsonl`.
    *
    * Mirrors Claude Code's `/branch` storage model: full in-memory copy + per-
    * message forkedFrom (see claude-code/src/commands/branch/branch.ts).
@@ -893,20 +1039,42 @@ export class SessionService {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
 
-    // Verify project ownership via the first record's cwd.
-    if (getProjectHash(records[0].cwd) !== this.projectHash) {
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        sourceSessionId,
+        records[0].cwd,
+      ))
+    ) {
       throw new Error(
         `Source session does not belong to current project: ${sourceSessionId}`,
       );
     }
 
-    // Rebuild the parentUuid chain in write order so the fork is a clean
-    // linear descendant. `forkedFrom` captures the origin of each message.
+    // Copy only the active branch. Rewind leaves old records in the JSONL as
+    // abandoned parentUuid branches; copying raw records would resurrect them.
+    const sourceRecords = this.reconstructHistory(records);
+    if (sourceRecords.length === 0) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+
+    // Rebuild the parentUuid chain in active-history order so the fork is a
+    // clean linear descendant. `forkedFrom` captures the origin of each
+    // message.
     let prevUuid: string | null = null;
-    const forked: ChatRecord[] = records.map((record) => {
+    const forked: ChatRecord[] = sourceRecords.map((record) => {
+      const systemPayload =
+        record.type === 'system' && record.subtype === 'file_history_snapshot'
+          ? remapFileHistorySnapshotPayload(
+              record.systemPayload,
+              sourceSessionId,
+              newSessionId,
+            )
+          : record.systemPayload;
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
+        cwd: this.projectRoot,
+        systemPayload,
         parentUuid: prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
@@ -916,6 +1084,36 @@ export class SessionService {
       prevUuid = record.uuid;
       return next;
     });
+
+    // File-history snapshots are side-channel system records used by /rewind.
+    // They may not sit on the active message leaf copied above, and copied
+    // records may still point at the source session's prompt ids. Remap and
+    // top up snapshots explicitly so /branch sessions expose /rewind/snapshots
+    // immediately after they become live.
+    const sourceSession = await this.loadSession(sourceSessionId);
+    const existingSnapshotPromptIds =
+      collectFileHistorySnapshotPromptIds(forked);
+    const remappedSnapshots = sourceSession?.fileHistorySnapshots
+      ?.map((snapshot) =>
+        remapSnapshotPromptId(snapshot, sourceSessionId, newSessionId),
+      )
+      .filter((snapshot) => !existingSnapshotPromptIds.has(snapshot.promptId));
+    if (remappedSnapshots?.length) {
+      const snapshotRecord: ChatRecord = {
+        uuid: randomUUID(),
+        parentUuid: prevUuid,
+        sessionId: newSessionId,
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        timestamp: new Date().toISOString(),
+        cwd: this.projectRoot,
+        version: records[0].version,
+        systemPayload: {
+          snapshots: remappedSnapshots.map(serializeSnapshot),
+        },
+      };
+      forked.push(snapshotRecord);
+    }
 
     fs.mkdirSync(chatsDir, { recursive: true });
     const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
@@ -938,6 +1136,8 @@ export class SessionService {
     } finally {
       fs.closeSync(fd);
     }
+
+    await copyFileHistoryBackups(sourceSessionId, newSessionId);
 
     return { filePath: targetPath, copiedCount: forked.length };
   }
@@ -1023,8 +1223,14 @@ export class SessionService {
       if (records.length === 0) continue;
       const firstRecord = records[0];
 
-      const recordProjectHash = getProjectHash(firstRecord.cwd);
-      if (recordProjectHash !== this.projectHash) continue;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          firstRecord.sessionId,
+          firstRecord.cwd,
+        ))
+      ) {
+        continue;
+      }
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
@@ -1096,7 +1302,14 @@ export class SessionService {
       try {
         const records = await jsonl.readLines<ChatRecord>(filePath, 1);
         if (records.length === 0) continue;
-        if (getProjectHash(records[0].cwd) !== this.projectHash) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
       } catch {
         continue;
       }
@@ -1139,8 +1352,7 @@ export class SessionService {
       if (records.length === 0) {
         return false;
       }
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      return recordProjectHash === this.projectHash;
+      return this.sessionBelongsToCurrentProject(sessionId, records[0].cwd);
     } catch {
       return false;
     }
@@ -1182,6 +1394,49 @@ function stripThoughtsFromContent(content: Content): Content | null {
   };
 }
 
+function copyContentForApiHistory(content: Content): Content {
+  return {
+    ...content,
+    parts: content.parts?.map((part) => {
+      if ('functionCall' in part && part.functionCall) {
+        return {
+          ...part,
+          functionCall: {
+            ...part.functionCall,
+            args: part.functionCall.args
+              ? { ...part.functionCall.args }
+              : part.functionCall.args,
+          },
+        };
+      }
+      if ('functionResponse' in part && part.functionResponse) {
+        return {
+          ...part,
+          functionResponse: {
+            ...part.functionResponse,
+          },
+        };
+      }
+      return { ...part };
+    }),
+  };
+}
+
+function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
+  if (!record.message) return;
+
+  const message = copyContentForApiHistory(record.message as Content);
+  if (record.subtype === 'mid_turn_user_message') {
+    const previous = history.at(-1);
+    if (previous?.role === 'user') {
+      previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      return;
+    }
+  }
+
+  history.push(message);
+}
+
 /**
  * Builds the model-facing chat history (Content[]) from a reconstructed
  * conversation. This keeps UI history intact while applying chat compression
@@ -1216,15 +1471,15 @@ export function buildApiHistoryFromConversation(
   });
 
   if (compressedHistory && lastCompressionIndex >= 0) {
-    const baseHistory: Content[] = structuredClone(compressedHistory);
+    const baseHistory: Content[] = compressedHistory.map(
+      copyContentForApiHistory,
+    );
 
     // Append everything after the compression record (newer turns)
     for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
       const record = messages[i];
       if (record.type === 'system') continue;
-      if (record.message) {
-        baseHistory.push(structuredClone(record.message as Content));
-      }
+      appendApiHistoryRecord(baseHistory, record);
     }
 
     if (stripThoughtsFromHistory) {
@@ -1236,10 +1491,10 @@ export function buildApiHistoryFromConversation(
   }
 
   // Fallback: return linear messages as Content[]
-  const result = messages
-    .map((record) => record.message)
-    .filter((message): message is Content => message !== undefined)
-    .map((message) => structuredClone(message));
+  const result: Content[] = [];
+  for (const record of messages) {
+    appendApiHistoryRecord(result, record);
+  }
 
   if (stripThoughtsFromHistory) {
     return result
@@ -1249,14 +1504,80 @@ export function buildApiHistoryFromConversation(
   return result;
 }
 
+function remapSnapshotPromptId(
+  snapshot: FileHistorySnapshot,
+  sourceSessionId: string,
+  newSessionId: string,
+): FileHistorySnapshot {
+  const sourcePrefix = `${sourceSessionId}########`;
+  if (!snapshot.promptId.startsWith(sourcePrefix)) {
+    return snapshot;
+  }
+  return {
+    ...snapshot,
+    promptId: `${newSessionId}########${snapshot.promptId.slice(sourcePrefix.length)}`,
+  };
+}
+
+function remapFileHistorySnapshotPayload(
+  payload: ChatRecord['systemPayload'],
+  sourceSessionId: string,
+  newSessionId: string,
+): ChatRecord['systemPayload'] {
+  const filePayload = payload as FileHistorySnapshotRecordPayload | undefined;
+  if (!Array.isArray(filePayload?.snapshots)) return payload;
+
+  try {
+    const snapshots = deserializeSnapshots(filePayload.snapshots).map(
+      (snapshot) =>
+        serializeSnapshot(
+          remapSnapshotPromptId(snapshot, sourceSessionId, newSessionId),
+        ),
+    );
+    return { snapshots };
+  } catch {
+    return payload;
+  }
+}
+
+function collectFileHistorySnapshotPromptIds(
+  records: ChatRecord[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const record of records) {
+    if (
+      record.type !== 'system' ||
+      record.subtype !== 'file_history_snapshot' ||
+      !record.systemPayload
+    ) {
+      continue;
+    }
+    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
+    if (!Array.isArray(payload.snapshots)) continue;
+    try {
+      for (const snapshot of deserializeSnapshots(payload.snapshots)) {
+        ids.add(snapshot.promptId);
+      }
+    } catch {
+      // Malformed snapshot records are ignored the same way loadSession does.
+    }
+  }
+  return ids;
+}
+
 /**
  * Replays stored UI telemetry events to rebuild metrics when resuming a session.
  * Also restores the last prompt token count from the best available source.
  */
 export function replayUiTelemetryFromConversation(
   conversation: ConversationRecord,
-): void {
-  uiTelemetryService.reset();
+  sessionId?: string,
+): ResumeTokenCounts | undefined {
+  if (sessionId) {
+    uiTelemetryService.resetSession(sessionId);
+  } else {
+    uiTelemetryService.reset();
+  }
 
   for (const record of conversation.messages) {
     if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
@@ -1267,14 +1588,22 @@ export function replayUiTelemetryFromConversation(
       | undefined;
     const uiEvent = payload?.uiEvent;
     if (uiEvent) {
-      uiTelemetryService.addEvent(uiEvent);
+      uiTelemetryService.addEvent(uiEvent, sessionId);
     }
   }
 
-  const resumePromptTokens = getResumePromptTokenCount(conversation);
-  if (resumePromptTokens !== undefined) {
-    uiTelemetryService.setLastPromptTokenCount(resumePromptTokens);
+  const resumeTokenCounts = getResumeTokenCounts(conversation);
+  if (resumeTokenCounts !== undefined) {
+    uiTelemetryService.setLastPromptTokenCount(
+      resumeTokenCounts.promptTokenCount,
+    );
   }
+  return resumeTokenCounts;
+}
+
+export interface ResumeTokenCounts {
+  promptTokenCount: number;
+  outputTokenCount: number;
 }
 
 /**
@@ -1286,6 +1615,18 @@ export function replayUiTelemetryFromConversation(
 export function getResumePromptTokenCount(
   conversation: ConversationRecord,
 ): number | undefined {
+  return getResumeTokenCounts(conversation)?.promptTokenCount;
+}
+
+/**
+ * Returns the prompt and previous-response output token counts used to seed a
+ * resumed chat. The prompt count restores the context anchor; the output
+ * count preserves the output tokens appended after that prompt count was
+ * reported, matching steady-state prompt estimation on the next send.
+ */
+export function getResumeTokenCounts(
+  conversation: ConversationRecord,
+): ResumeTokenCounts | undefined {
   for (let i = conversation.messages.length - 1; i >= 0; i--) {
     const record = conversation.messages[i];
 
@@ -1293,7 +1634,10 @@ export function getResumePromptTokenCount(
       const usage = record.usageMetadata;
       const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
       if (candidate) {
-        return candidate;
+        return {
+          promptTokenCount: candidate,
+          outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
+        };
       }
     }
 
@@ -1302,10 +1646,37 @@ export function getResumePromptTokenCount(
         | ChatCompressionRecordPayload
         | undefined;
       if (payload?.info) {
-        return payload.info.newTokenCount;
+        return {
+          promptTokenCount: payload.info.newTokenCount,
+          outputTokenCount: 0,
+        };
       }
     }
   }
 
   return undefined;
+}
+
+const MAX_BRANCH_COLLISION_SCAN = 99;
+
+export async function computeUniqueBranchTitle(
+  baseName: string,
+  sessionService: SessionService,
+): Promise<string> {
+  const maxSuffixLen = ' (Branch 1234567890123)'.length;
+  const trimmed = baseName
+    .trim()
+    .slice(0, SESSION_TITLE_MAX_LENGTH - maxSuffixLen);
+  const taken = new Set(
+    (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
+      (t) => t.toLowerCase().trim(),
+    ),
+  );
+  const first = `${trimmed} (Branch)`;
+  if (!taken.has(first.toLowerCase())) return first;
+  for (let n = 2; n <= MAX_BRANCH_COLLISION_SCAN; n++) {
+    const candidate = `${trimmed} (Branch ${n})`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${trimmed} (Branch ${Date.now()})`;
 }

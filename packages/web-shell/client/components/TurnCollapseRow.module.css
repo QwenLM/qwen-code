@@ -1,0 +1,88 @@
+.collapseRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  padding-bottom: 10px;
+  margin-bottom: 5px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--muted-foreground);
+}
+
+.collapseRowClickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.collapseRowClickable:hover .collapseLabel,
+.collapseRowClickable:focus-visible .collapseLabel {
+  color: var(--muted-foreground);
+}
+
+.collapseRowClickable:focus-visible {
+  outline: none;
+}
+
+.collapseLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted-foreground);
+}
+
+.processedLabel {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--muted-foreground);
+}
+
+.processedMeta {
+  color: var(--muted-foreground);
+}
+
+.hiddenMetrics {
+  display: none;
+}
+
+.summaryMetrics {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+}
+
+.collapseIcon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
+.collapseRowClickable:hover .collapseIcon,
+.collapseRowClickable:focus-visible .collapseIcon {
+  color: var(--muted-foreground);
+}
+
+.chevronRight,
+.chevronDown {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.chevronRight {
+  transform: rotate(-45deg);
+}
+
+.chevronDown {
+  transform: rotate(45deg);
+  margin-top: -3px;
+}

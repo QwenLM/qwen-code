@@ -49,11 +49,18 @@ export function buildPermissionCheckContext(
         : path.resolve(targetDir, toolParams['directory'])
       : undefined;
 
-  // Extract file path — tools use 'file_path' or 'path' (LS / grep / glob).
+  // Extract file path — tools use 'file_path', 'notebook_path', or
+  // 'path' (LS / grep / glob).
   let filePath =
     typeof toolParams['file_path'] === 'string'
       ? toolParams['file_path']
       : undefined;
+  if (
+    filePath === undefined &&
+    typeof toolParams['notebook_path'] === 'string'
+  ) {
+    filePath = toolParams['notebook_path'];
+  }
   if (filePath === undefined && typeof toolParams['path'] === 'string') {
     // LS uses absolute paths; grep/glob may be relative to targetDir.
     filePath = path.isAbsolute(toolParams['path'])
@@ -70,13 +77,16 @@ export function buildPermissionCheckContext(
     }
   }
 
-  // Generic specifier for literal matching (Skill name, Task subagent type, etc.)
+  // Generic specifier for literal matching (Skill name, Task subagent type,
+  // read_mcp_resource server name, etc.)
   const specifier =
     typeof toolParams['skill'] === 'string'
       ? toolParams['skill']
       : typeof toolParams['subagent_type'] === 'string'
         ? toolParams['subagent_type']
-        : undefined;
+        : typeof toolParams['server_name'] === 'string'
+          ? toolParams['server_name']
+          : undefined;
 
   return { toolName, command, cwd, filePath, domain, specifier };
 }

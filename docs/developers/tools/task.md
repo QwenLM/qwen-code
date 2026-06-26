@@ -1,24 +1,26 @@
-# Task Tool (`task`)
+# Agent Tool (`agent`)
 
-This document describes the `task` tool for Qwen Code.
+This document describes the `agent` tool for Qwen Code.
 
 ## Description
 
-Use `task` to launch a specialized subagent to handle complex, multi-step tasks autonomously. The Task tool delegates work to specialized agents that can work independently with access to their own set of tools, allowing for parallel task execution and specialized expertise.
+Use `agent` to launch a specialized subagent to handle complex, multi-step tasks autonomously. The Agent tool delegates work to specialized agents that can work independently with access to their own set of tools, allowing for parallel task execution and specialized expertise.
 
 ### Arguments
 
-`task` takes the following arguments:
+`agent` takes the following arguments:
 
 - `description` (string, required): A short (3-5 word) description of the task for user visibility and tracking purposes.
 - `prompt` (string, required): The detailed task prompt for the subagent to execute. Should contain comprehensive instructions for autonomous execution.
-- `subagent_type` (string, required): The type of specialized agent to use for this task. Must match one of the available configured subagents.
+- `subagent_type` (string, optional): The type of specialized agent to use for this task. Defaults to `general-purpose` if omitted.
+- `run_in_background` (boolean, optional): Set to `true` to run the agent in the background. You will be notified when it completes.
+- `isolation` (string, optional): Set to `"worktree"` to run the agent in an isolated git worktree.
 
-## How to use `task` with Qwen Code
+## How to use `agent` with Qwen Code
 
-The Task tool dynamically loads available subagents from your configuration and delegates tasks to them. Each subagent runs independently and can use its own set of tools, allowing for specialized expertise and parallel execution.
+The Agent tool dynamically loads available subagents from your configuration and delegates tasks to them. Each subagent runs independently and can use its own set of tools, allowing for specialized expertise and parallel execution.
 
-When you use the Task tool, the subagent will:
+When you use the Agent tool, the subagent will:
 
 1. Receive the task prompt with full autonomy
 2. Execute the task using its available tools
@@ -28,7 +30,7 @@ When you use the Task tool, the subagent will:
 Usage:
 
 ```
-task(description="Brief task description", prompt="Detailed task instructions for the subagent", subagent_type="agent_name")
+agent(description="Brief task description", prompt="Detailed task instructions for the subagent", subagent_type="agent_name")
 ```
 
 ## Available Subagents
@@ -42,11 +44,11 @@ The available subagents depend on your configuration. Common subagent types migh
 
 You can view available subagents by using the `/agents` command in Qwen Code.
 
-## Task Tool Features
+## Agent Tool Features
 
 ### Real-time Progress Updates
 
-The Task tool provides live updates showing:
+The Agent tool provides live updates showing:
 
 - Subagent execution status
 - Individual tool calls being made by the subagent
@@ -55,7 +57,7 @@ The Task tool provides live updates showing:
 
 ### Parallel Execution
 
-You can launch multiple subagents concurrently by calling the Task tool multiple times in a single message, allowing for parallel task execution and improved efficiency.
+You can launch multiple subagents concurrently by calling the Agent tool multiple times in a single message, allowing for parallel task execution and improved efficiency.
 
 ### Specialized Expertise
 
@@ -66,12 +68,12 @@ Each subagent can be configured with:
 - Custom model configurations
 - Domain-specific knowledge and capabilities
 
-## `task` examples
+## `agent` examples
 
 ### Delegating to a general-purpose agent
 
 ```
-task(
+agent(
   description="Code refactoring",
   prompt="Please refactor the authentication module in src/auth/ to use modern async/await patterns instead of callbacks. Ensure all tests still pass and update any related documentation.",
   subagent_type="general-purpose"
@@ -82,32 +84,32 @@ task(
 
 ```
 # Launch code review and test execution in parallel
-task(
+agent(
   description="Code review",
   prompt="Review the recent changes in the user management module for code quality, security issues, and best practices compliance.",
-  subagent_type="code-reviewer"
+  subagent_type="general-purpose"
 )
 
-task(
+agent(
   description="Run tests",
   prompt="Execute the full test suite and analyze any failures. Provide a summary of test coverage and recommendations for improvement.",
-  subagent_type="test-runner"
+  subagent_type="test-engineer"
 )
 ```
 
 ### Documentation generation
 
 ```
-task(
+agent(
   description="Update docs",
   prompt="Generate comprehensive API documentation for the newly implemented REST endpoints in the orders module. Include request/response examples and error codes.",
-  subagent_type="documentation-writer"
+  subagent_type="general-purpose"
 )
 ```
 
-## When to Use the Task Tool
+## When to Use the Agent Tool
 
-Use the Task tool when:
+Use the Agent tool when:
 
 1. **Complex multi-step tasks** - Tasks requiring multiple operations that can be handled autonomously
 2. **Specialized expertise** - Tasks that benefit from domain-specific knowledge or tools
@@ -115,9 +117,9 @@ Use the Task tool when:
 4. **Delegation needs** - When you want to hand off a complete task rather than micromanaging steps
 5. **Resource-intensive operations** - Tasks that might take significant time or computational resources
 
-## When NOT to Use the Task Tool
+## When NOT to Use the Agent Tool
 
-Don't use the Task tool for:
+Don't use the Agent tool for:
 
 - **Simple, single-step operations** - Use direct tools like Read, Edit, etc.
 - **Interactive tasks** - Tasks requiring back-and-forth communication

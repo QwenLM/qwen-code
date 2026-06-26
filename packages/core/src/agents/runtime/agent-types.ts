@@ -107,6 +107,8 @@ export enum AgentTerminateMode {
   GOAL = 'GOAL',
   /** The agent's execution terminated because it exceeded the maximum number of turns. */
   MAX_TURNS = 'MAX_TURNS',
+  /** The agent's execution terminated after detecting a tool-call loop. */
+  LOOP_DETECTED = 'LOOP_DETECTED',
   /** The agent's execution was cancelled via an abort signal. */
   CANCELLED = 'CANCELLED',
   /** The agent was gracefully shut down (e.g., arena/team session ended). */
@@ -165,6 +167,18 @@ export interface AgentInteractiveConfig {
   initialTask?: string;
   /** Max model round-trips per enqueued message (default: unlimited). */
   maxTurnsPerMessage?: number;
+  /**
+   * When true, the agent transitions to COMPLETED (terminal) instead of
+   * IDLE when its message queue empties — for truly one-shot agents that
+   * should not linger after finishing.
+   *
+   * Note: team teammates deliberately use `false` (the default). They
+   * settle to IDLE rather than COMPLETED so they stay alive to receive
+   * follow-up messages and auto-claim further tasks; the leader's wait
+   * loop relies on that (see `hasActiveTeammates` /
+   * `allTeammatesTerminated` in TeamManager).
+   */
+  completeOnIdle?: boolean;
   /** Max wall-clock minutes per enqueued message (default: unlimited). */
   maxTimeMinutesPerMessage?: number;
   /**

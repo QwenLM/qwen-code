@@ -22,7 +22,7 @@ import { isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import { extractPDFText, parsePDFPageRange } from './pdf.js';
-import { readNotebook } from './notebook.js';
+import { readNotebookWithMetadata } from './notebook.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -165,6 +165,49 @@ export interface FileReadResult {
   bom: boolean;
 }
 
+export function decodeBufferWithEncodingInfo(full: Buffer): FileReadResult {
+  if (full.length === 0) {
+    return { content: '', encoding: 'utf-8', bom: false };
+  }
+
+  const bomInfo = detectBOM(full);
+  if (bomInfo) {
+    return {
+      content: decodeBOMBuffer(full, bomInfo),
+      encoding: bomEncodingToName(bomInfo.encoding),
+      // Mark bom: true for all Unicode BOM variants (UTF-8/16/32) so that
+      // the BOM is re-written on save and the file's original format is preserved.
+      bom: true,
+    };
+  }
+
+  // No BOM — check if it's valid UTF-8 first (fast path for the common case)
+  if (isValidUtf8(full)) {
+    return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+  }
+
+  // Not valid UTF-8 — try chardet statistical detection
+  const detected = detectEncodingFromBuffer(full);
+  if (detected && !isUtf8CompatibleEncoding(detected)) {
+    try {
+      if (iconvEncodingExists(detected)) {
+        return {
+          content: iconvDecode(full, detected),
+          encoding: detected,
+          bom: false,
+        };
+      }
+    } catch (e) {
+      debugLogger.warn(
+        `Failed to decode buffer as ${detected}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  // Final fallback: UTF-8 with replacement characters
+  return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+}
+
 /**
  * Internal helper: decode a buffer given a BOMInfo.
  * Returns the decoded string for each supported BOM encoding.
@@ -222,44 +265,7 @@ export async function readFileWithEncodingInfo(
 ): Promise<FileReadResult> {
   // Read the file once; detect BOM and decode from the single buffer.
   const full = await fs.promises.readFile(filePath);
-  if (full.length === 0) return { content: '', encoding: 'utf-8', bom: false };
-
-  const bomInfo = detectBOM(full);
-  if (bomInfo) {
-    return {
-      content: decodeBOMBuffer(full, bomInfo),
-      encoding: bomEncodingToName(bomInfo.encoding),
-      // Mark bom: true for all Unicode BOM variants (UTF-8/16/32) so that
-      // the BOM is re-written on save and the file's original format is preserved.
-      bom: true,
-    };
-  }
-
-  // No BOM — check if it's valid UTF-8 first (fast path for the common case)
-  if (isValidUtf8(full)) {
-    return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
-  }
-
-  // Not valid UTF-8 — try chardet statistical detection
-  const detected = detectEncodingFromBuffer(full);
-  if (detected && !isUtf8CompatibleEncoding(detected)) {
-    try {
-      if (iconvEncodingExists(detected)) {
-        return {
-          content: iconvDecode(full, detected),
-          encoding: detected,
-          bom: false,
-        };
-      }
-    } catch (e) {
-      debugLogger.warn(
-        `Failed to decode file ${filePath} as ${detected}: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-  }
-
-  // Final fallback: UTF-8 with replacement characters
-  return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+  return decodeBufferWithEncodingInfo(full);
 }
 
 /**
@@ -812,7 +818,7 @@ export interface ProcessedFileReadResult {
   error?: string; // Optional error message for the LLM if file processing failed
   errorType?: ToolErrorType; // Structured error type
   originalLineCount?: number; // For text files, the total number of lines in the original file
-  isTruncated?: boolean; // For text files, indicates if content was truncated
+  isTruncated?: boolean; // Indicates if displayed content was truncated
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
   /**
    * The Stats taken at the start of the read pipeline, before the
@@ -822,6 +828,18 @@ export interface ProcessedFileReadResult {
    * mutated file rather than the file the read returned.
    */
   stats?: import('node:fs').Stats;
+}
+
+export interface ProcessSingleFileContentOptions {
+  offset?: number;
+  limit?: number;
+  pages?: string;
+  /**
+   * When true, keep an image inline for a text-only model instead of replacing
+   * it with an "unsupported" note. Only the interactive `@`-resolution path
+   * sets this after deciding the vision bridge should handle the image.
+   */
+  preserveUnsupportedImage?: boolean;
 }
 
 /**
@@ -860,18 +878,37 @@ function unsupportedModalityMessage(
  * Reads and processes a single file, handling text, images, PDFs, and notebooks.
  * @param filePath Absolute path to the file.
  * @param config Config instance for truncation settings.
- * @param offset Optional offset for text files (0-based line number).
- * @param limit Optional limit for text files (number of lines to read).
- * @param pages Optional page range for PDF files (e.g. "1-5", "3", "10-20").
+ * @param options Optional read behavior controls.
  * @returns ProcessedFileReadResult object.
  */
+export async function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  options?: ProcessSingleFileContentOptions,
+): Promise<ProcessedFileReadResult>;
 export async function processSingleFileContent(
   filePath: string,
   config: Config,
   offset?: number,
   limit?: number,
   pages?: string,
+): Promise<ProcessedFileReadResult>;
+export async function processSingleFileContent(
+  filePath: string,
+  config: Config,
+  optionsOrOffset?: ProcessSingleFileContentOptions | number,
+  legacyLimit?: number,
+  legacyPages?: string,
 ): Promise<ProcessedFileReadResult> {
+  const options =
+    typeof optionsOrOffset === 'object' && optionsOrOffset !== null
+      ? optionsOrOffset
+      : {
+          offset: optionsOrOffset,
+          limit: legacyLimit,
+          pages: legacyPages,
+        };
+  const { offset, limit, pages, preserveUnsupportedImage = false } = options;
   const rootDirectory = config.getTargetDir();
   try {
     let stats: import('node:fs').Stats;
@@ -962,15 +999,25 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
-        const message = unsupportedModalityMessage(modality, displayName);
-        debugLogger.warn(
-          `Model '${config.getModel()}' does not support ${modality} input. ` +
-            `Skipping file: ${relativePathForDisplay}`,
+        // On the interactive @-resolution path, the caller can keep image parts
+        // inline so the vision bridge can transcribe them downstream for a
+        // text-only model. Other media (audio/video) are always skipped.
+        const bridgeWillHandleImage =
+          modality === 'image' && preserveUnsupportedImage;
+        if (!bridgeWillHandleImage) {
+          const message = unsupportedModalityMessage(modality, displayName);
+          debugLogger.warn(
+            `Model '${config.getModel()}' does not support ${modality} input. ` +
+              `Skipping file: ${relativePathForDisplay}`,
+          );
+          return {
+            llmContent: message,
+            returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
+          };
+        }
+        debugLogger.debug(
+          `Preserving unsupported image for vision bridge: ${relativePathForDisplay}`,
         );
-        return {
-          llmContent: message,
-          returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
-        };
       }
     }
 
@@ -1166,10 +1213,13 @@ export async function processSingleFileContent(
       }
       case 'notebook': {
         try {
-          const content = await readNotebook(filePath);
+          const { content, isTruncated } =
+            await readNotebookWithMetadata(filePath);
           return {
             llmContent: content,
             returnDisplay: `Read notebook: ${relativePathForDisplay}`,
+            isTruncated,
+            stats,
           };
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);

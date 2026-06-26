@@ -10,6 +10,7 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   fireNotificationHook,
   appendAdditionalContext,
   firePermissionRequestHook,
@@ -17,6 +18,22 @@ import {
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { NotificationType } from '../hooks/types.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
+
+const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: debugLoggerWarnSpy,
+      error: vi.fn(),
+    }),
+  };
+});
 
 // Mock the MessageBus
 const createMockMessageBus = () =>
@@ -58,7 +75,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({ shouldProceed: true });
     });
 
-    it('should return shouldProceed: true when hook execution fails', async () => {
+    it('should return shouldProceed: true with sentinel hookError when hook execution fails without an error message', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -72,7 +89,38 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      expect(result).toEqual({ shouldProceed: true });
+      // #4321 review-7 SF-H1: runner contract violation (success:false
+      // with no error.message) used to silently return allow with no
+      // telemetry. Now synthesizes a sentinel hookError so the span
+      // records `success: false` + the description of what went wrong.
+      expect(result.shouldProceed).toBe(true);
+      expect(result.hookError).toMatch(/success: false/);
+    });
+
+    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
+      // #4321 review-9: pin the `||` (not `??`) semantics. A future
+      // regression back to `??` would preserve `hookError: ""` here
+      // which downstream `r.hookError ? ...` truthiness then silently
+      // drops — same allow-without-telemetry pathology SF-H1 closed.
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: { message: '' },
+      });
+
+      const result = await firePreToolUseHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'test-id',
+        'auto',
+      );
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.hookError).toMatch(/success: false/);
+      // Specifically NOT empty: an empty string would round-trip through
+      // a downstream truthiness check as missing.
+      expect(result.hookError).not.toBe('');
     });
 
     it('should return shouldProceed: true when hook output is empty', async () => {
@@ -215,7 +263,13 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      expect(result).toEqual({ shouldProceed: true });
+      // #4321 review: hookError surfaces the swallowed transport error so
+      // observers (telemetry spans, debug logs) can distinguish a failed
+      // hook from a successful "allow" decision.
+      expect(result).toEqual({
+        shouldProceed: true,
+        hookError: 'Network error',
+      });
     });
   });
 
@@ -233,7 +287,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({ shouldStop: false });
     });
 
-    it('should return shouldStop: false when hook execution fails', async () => {
+    it('should return shouldStop: false with sentinel hookError when hook execution fails without an error message', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -248,7 +302,31 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
-      expect(result).toEqual({ shouldStop: false });
+      // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toMatch(/success: false/);
+    });
+
+    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
+      // #4321 review-9 — see firePreToolUseHook counterpart.
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: { message: '' },
+      });
+
+      const result = await firePostToolUseHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        {},
+        'test-id',
+        'auto',
+      );
+
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toMatch(/success: false/);
+      expect(result.hookError).not.toBe('');
     });
 
     it('should return shouldStop: false when hook output is empty', async () => {
@@ -338,7 +416,149 @@ describe('toolHookTriggers', () => {
         'auto',
       );
 
+      // #4321 review: hookError now surfaced to caller (see PreToolUse parallel test).
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toBeDefined();
+    });
+  });
+
+  describe('firePostToolBatchHook', () => {
+    it('should return shouldStop: false when no messageBus is provided', async () => {
+      const result = await firePostToolBatchHook(undefined, []);
+
       expect(result).toEqual({ shouldStop: false });
+    });
+
+    it('should send resolved tool calls and return additional context', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            hookEventName: 'PostToolBatch',
+            additionalContext: 'batch note',
+          },
+        },
+      });
+
+      const result = await firePostToolBatchHook(
+        mockMessageBus,
+        [
+          {
+            tool_name: 'read_file',
+            tool_input: { path: 'README.md' },
+            tool_use_id: 'call-1',
+            status: 'success',
+            tool_response: { output: 'contents' },
+          },
+        ],
+        'auto',
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'PostToolBatch',
+          input: {
+            permission_mode: 'auto',
+            tool_calls: [
+              {
+                tool_name: 'read_file',
+                tool_input: { path: 'README.md' },
+                tool_use_id: 'call-1',
+                status: 'success',
+                tool_response: { output: 'contents' },
+              },
+            ],
+          },
+          signal: undefined,
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+        15_000,
+        undefined,
+      );
+      expect(result).toEqual({
+        shouldStop: false,
+        additionalContext: 'batch note',
+      });
+    });
+
+    it('should surface stop decisions', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          continue: false,
+          stopReason: 'stop after batch',
+        },
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result).toEqual({
+        shouldStop: true,
+        stopReason: 'stop after batch',
+        additionalContext: undefined,
+      });
+    });
+
+    it('should stop on deny decisions', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          decision: 'deny',
+          reason: 'blocked after batch',
+        },
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result).toEqual({
+        shouldStop: true,
+        stopReason: 'blocked after batch',
+        additionalContext: undefined,
+      });
+    });
+
+    it('should return hookError when hook execution fails without an error message', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toMatch(/success: false/);
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('PostToolBatch hook returned failure'),
+      );
+    });
+
+    it('should return hookError when hook returns success without output', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: undefined,
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toMatch(/no output/);
+    });
+
+    it('should return hookError when messageBus.request throws', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('bus timeout'),
+      );
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result.shouldStop).toBe(false);
+      expect(result.hookError).toContain('bus timeout');
     });
   });
 
@@ -355,7 +575,7 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({});
     });
 
-    it('should return empty object when hook execution fails', async () => {
+    it('should return sentinel hookError when hook execution fails without an error message', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: false,
@@ -369,7 +589,28 @@ describe('toolHookTriggers', () => {
         'error message',
       );
 
-      expect(result).toEqual({});
+      // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
+      expect(result.hookError).toMatch(/success: false/);
+    });
+
+    it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
+      // #4321 review-9 — see firePreToolUseHook counterpart.
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: { message: '' },
+      });
+
+      const result = await firePostToolUseFailureHook(
+        mockMessageBus,
+        'test-id',
+        'test-tool',
+        {},
+        'error message',
+      );
+
+      expect(result.hookError).toMatch(/success: false/);
+      expect(result.hookError).not.toBe('');
     });
 
     it('should return empty object when hook output is empty', async () => {
@@ -429,7 +670,9 @@ describe('toolHookTriggers', () => {
         'error message',
       );
 
-      expect(result).toEqual({});
+      // #4321 review: hookError now surfaced to caller.
+      expect(result.hookError).toBeDefined();
+      expect(result.additionalContext).toBeUndefined();
     });
   });
 
@@ -550,6 +793,22 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({
         additionalContext: 'Additional context from notification hook',
       });
+    });
+
+    it('should return terminal sequence when available', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: { terminalSequence: '\x07' },
+      });
+
+      const result = await fireNotificationHook(
+        mockMessageBus,
+        'Test notification',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(result).toEqual({ terminalSequence: '\x07' });
     });
 
     it('should send correct parameters to MessageBus for permission_prompt', async () => {

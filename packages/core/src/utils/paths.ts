@@ -44,7 +44,7 @@ export function _resetValidatePathCacheForTest(): void {
  * Includes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
  */
-export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
+export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~,]/;
 
 // Single shared list of path-argument keys used across file tools.
 // file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),
@@ -64,15 +64,18 @@ const UNESCAPE_REGEX = (() => {
 
 /**
  * Replaces the home directory with a tilde.
- * @param path - The path to tildeify.
+ * @param filePath - The path to tildeify.
  * @returns The tildeified path.
  */
-export function tildeifyPath(path: string): string {
+export function tildeifyPath(filePath: string): string {
   const homeDir = os.homedir();
-  if (path.startsWith(homeDir)) {
-    return path.replace(homeDir, '~');
+  if (filePath === homeDir) {
+    return '~';
   }
-  return path;
+  if (filePath.startsWith(`${homeDir}${path.sep}`)) {
+    return filePath.replace(homeDir, '~');
+  }
+  return filePath;
 }
 
 /**

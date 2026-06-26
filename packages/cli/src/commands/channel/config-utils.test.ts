@@ -69,6 +69,29 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow('requires "token"');
   });
 
+  it('throws a clear error when token is not a string', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'telegram', token: 123 }),
+    ).rejects.toThrow('Channel "bot" field "token" must be a string.');
+  });
+
+  it('throws a clear error when dingtalk credentials are not strings', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 123,
+        clientSecret: 'secret',
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientId" must be a string.');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: false,
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientSecret" must be a string.');
+  });
+
   it('parses minimal valid config with defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',

@@ -19,10 +19,17 @@ import type { ContentGenerator } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { resolveModelId, type ResolvedModelId } from '../utils/modelId.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from '../utils/modelId.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
+import { logApiRetry } from '../telemetry/loggers.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -42,6 +49,7 @@ const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
 export interface ResolvedGeneratorForModel {
   contentGenerator: ContentGenerator;
   retryAuthType: string | undefined;
+  retryErrorCodes?: readonly number[];
   model: string;
 }
 
@@ -76,6 +84,14 @@ export interface GenerateTextOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
+  /**
+   * Stream the response instead of awaiting the whole non-streaming body.
+   * Defaults to `false` (unchanged non-streaming behavior). Opt in to keep the
+   * HTTP connection alive against BFF gateways whose `proxy_read_timeout` would
+   * otherwise kill a slow inference before the first byte arrives. The streamed
+   * deltas are collected into the same `{ text, usage }` result.
+   */
+  stream?: boolean;
 }
 
 /**
@@ -172,6 +188,10 @@ export class BaseLlmClient {
     private readonly config: Config,
   ) {}
 
+  private getCurrentContentGenerator(): ContentGenerator {
+    return this.config.getContentGenerator?.() ?? this.contentGenerator;
+  }
+
   async generateJson(
     options: GenerateJsonOptions,
   ): Promise<Record<string, unknown>> {
@@ -207,6 +227,7 @@ export class BaseLlmClient {
     const {
       contentGenerator,
       retryAuthType,
+      retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model);
 
@@ -227,11 +248,26 @@ export class BaseLlmClient {
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
           process.stderr.write(
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
           );
         },
       });
@@ -297,6 +333,7 @@ export class BaseLlmClient {
       systemInstruction,
       promptId,
       maxAttempts,
+      stream,
     } = options;
 
     const requestConfig: GenerateContentConfig = {
@@ -308,23 +345,56 @@ export class BaseLlmClient {
     const {
       contentGenerator,
       retryAuthType,
+      retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model);
 
     try {
-      const apiCall = () =>
-        contentGenerator.generateContent(
-          {
-            model: requestModel,
-            config: requestConfig,
-            contents,
-          },
-          promptId ?? '',
-        );
+      const request = {
+        model: requestModel,
+        config: requestConfig,
+        contents,
+      };
+
+      // Both branches resolve to the same `{ text, usage }` shape so a single
+      // retryWithBackoff governs the whole request (a mid-stream failure retries
+      // the entire call — side queries are idempotent). Streaming keeps the HTTP
+      // connection alive so a slow inference can't be killed by a gateway's
+      // `proxy_read_timeout`; non-streaming is the unchanged default.
+      const apiCall: () => Promise<GenerateTextResult> = stream
+        ? async () => {
+            const responseStream = await contentGenerator.generateContentStream(
+              request,
+              promptId ?? '',
+            );
+            // Chunks are deltas, not cumulative snapshots, so concatenate.
+            // getResponseText already drops thought parts; usageMetadata rides
+            // the final chunk (last one wins), matching the non-streaming read.
+            let text = '';
+            let usage: GenerateContentResponseUsageMetadata | undefined;
+            for await (const chunk of responseStream) {
+              text += getResponseText(chunk) ?? '';
+              if (chunk.usageMetadata) {
+                usage = chunk.usageMetadata;
+              }
+            }
+            return { text, usage };
+          }
+        : async () => {
+            const result = await contentGenerator.generateContent(
+              request,
+              promptId ?? '',
+            );
+            return {
+              text: getResponseText(result) ?? '',
+              usage: result.usageMetadata,
+            };
+          };
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
@@ -332,11 +402,25 @@ export class BaseLlmClient {
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
           );
         },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
+          );
+        },
       });
 
       return {
-        text: (getResponseText(result) ?? '').trim(),
-        usage: result.usageMetadata,
+        text: result.text.trim(),
+        usage: result.usage,
       };
     } catch (error) {
       if (abortSignal.aborted) {
@@ -345,7 +429,9 @@ export class BaseLlmClient {
 
       await reportError(
         error,
-        'Error generating text content via API.',
+        // Mark streaming failures so an oncall can tell a mid-stream error
+        // apart from the original non-streaming gateway timeout (#5861).
+        `Error generating text content via API${stream ? ' [streaming]' : ''}.`,
         contents,
         'generateText-api',
       );
@@ -409,15 +495,18 @@ export class BaseLlmClient {
     const selector = this.resolveModelSelector(model);
     const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
     const mainModel = this.config.getModel() ?? model;
-    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
+    const mainGeneratorConfig = this.config.getContentGeneratorConfig();
+    const mainAuthType = mainGeneratorConfig?.authType;
+    const mainRetryErrorCodes = mainGeneratorConfig?.retryErrorCodes;
 
     if (
       requestModel === mainModel &&
       (!selector?.authType || selector.authType === mainAuthType)
     ) {
       return {
-        contentGenerator: this.contentGenerator,
+        contentGenerator: this.getCurrentContentGenerator(),
         retryAuthType: mainAuthType,
+        retryErrorCodes: mainRetryErrorCodes,
         model: requestModel,
       };
     }
@@ -429,10 +518,13 @@ export class BaseLlmClient {
     const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
+    const retryErrorCodes =
+      resolvedModel?.generationConfig?.retryErrorCodes ?? mainRetryErrorCodes;
 
     return {
       contentGenerator,
       retryAuthType,
+      retryErrorCodes,
       model: resolvedModel?.id ?? requestModel,
     };
   }
@@ -496,17 +588,21 @@ export class BaseLlmClient {
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+
+    if (!resolvedModel) {
+      debugLogger.warn(
+        `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+      );
+      // Do not cache the fallback: getCurrentContentGenerator() reads the
+      // runtime view from AsyncLocalStorage, which can differ between calls
+      // (e.g. inside a subagent vs. on the main session). Caching here would
+      // pin the first-call view's generator under this selector key.
+      return this.getCurrentContentGenerator();
+    }
+
     const generatorPromise = (async () => {
       try {
-        const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
-
-        if (!resolvedModel) {
-          debugLogger.warn(
-            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
-          );
-          return this.contentGenerator;
-        }
-
         const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
@@ -527,7 +623,7 @@ export class BaseLlmClient {
           err instanceof Error ? err.message : String(err),
         );
         this.perModelGeneratorCache.delete(cacheKey);
-        return this.contentGenerator;
+        return this.getCurrentContentGenerator();
       }
     })();
 
@@ -536,12 +632,6 @@ export class BaseLlmClient {
   }
 
   private resolveModelSelector(model: string): ResolvedModelId | undefined {
-    return resolveModelId(model, {
-      currentModel: this.config.getModel(),
-      currentAuthType: this.config.getContentGeneratorConfig()?.authType,
-      fastModel:
-        this.config.getFastModelForSideQuery?.() ??
-        this.config.getFastModel?.(),
-    });
+    return resolveModelId(model, buildModelIdContext(this.config));
   }
 }

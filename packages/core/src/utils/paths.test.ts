@@ -186,8 +186,8 @@ describe('escapePath', () => {
   });
 
   it('should handle paths with only special characters', () => {
-    expect(escapePath(' ()[]{};&|*?$`\'"#!~<>')).toBe(
-      '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
+    expect(escapePath(' ()[]{};&|*?$`\'"#!~<>,')).toBe(
+      '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>\\,',
     );
   });
 });
@@ -667,8 +667,8 @@ describe('resolveAndValidatePath', () => {
 describe('tildeifyPath', () => {
   it('replaces home directory with tilde', () => {
     const homeDir = os.homedir();
-    const result = tildeifyPath(`${homeDir}/documents/file.txt`);
-    expect(result).toBe('~/documents/file.txt');
+    const result = tildeifyPath(path.join(homeDir, 'documents', 'file.txt'));
+    expect(result).toBe(`~${path.sep}documents${path.sep}file.txt`);
   });
 
   it('returns path unchanged if it does not start with home directory', () => {
@@ -680,6 +680,13 @@ describe('tildeifyPath', () => {
     const homeDir = os.homedir();
     const result = tildeifyPath(homeDir);
     expect(result).toBe('~');
+  });
+
+  it('does not replace paths that only share the home directory prefix', () => {
+    const homeDir = os.homedir();
+    const siblingPath = `${homeDir}2${path.sep}project${path.sep}file.txt`;
+    const result = tildeifyPath(siblingPath);
+    expect(result).toBe(siblingPath);
   });
 
   it('handles paths with home directory in the middle', () => {

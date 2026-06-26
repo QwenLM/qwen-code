@@ -39,6 +39,167 @@ import {
 const logger = createDebugLogger('DataProcessor');
 
 const CONCURRENCY_LIMIT = 4;
+const SESSION_OUTCOMES = [
+  'fully_achieved',
+  'mostly_achieved',
+  'partially_achieved',
+  'not_achieved',
+  'unclear_from_transcript',
+] as const;
+const OUTCOME_FALLBACK = 'unclear_from_transcript';
+const QWEN_HELPFULNESS_LEVELS = [
+  'unhelpful',
+  'slightly_helpful',
+  'moderately_helpful',
+  'very_helpful',
+  'essential',
+] as const;
+const SESSION_TYPES = [
+  'single_task',
+  'multi_task',
+  'iterative_refinement',
+  'exploration',
+  'quick_question',
+] as const;
+const PRIMARY_SUCCESS_VALUES = [
+  'none',
+  'fast_accurate_search',
+  'correct_code_edits',
+  'good_explanations',
+  'proactive_help',
+  'multi_file_changes',
+  'good_debugging',
+] as const;
+const PRIMARY_SUCCESS_FALLBACK = 'none';
+
+// Keep in sync with packages/web-templates/src/insight/src/App.tsx.
+function hasMeaningfulInsightValue(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value !== 0;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((item) => hasMeaningfulInsightValue(item));
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.values(value).some((item) => hasMeaningfulInsightValue(item));
+  }
+
+  return false;
+}
+
+function normalizeInsightText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeInsightCountRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.entries(value).reduce<Record<string, number>>(
+    (acc, [key, count]) => {
+      if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
+        acc[key] = count;
+      }
+      return acc;
+    },
+    {},
+  );
+}
+
+function getInsightCountEntries(value: unknown): Array<[string, number]> {
+  return Object.entries(normalizeInsightCountRecord(value));
+}
+
+function normalizeInsightEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (trimmed) {
+    const match = allowed.find(
+      (item) => String(item).toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (match) return match;
+  }
+
+  logger.debug(
+    `Normalized unknown insight enum value "${String(value)}" to fallback "${fallback}"`,
+  );
+  return fallback;
+}
+
+function normalizeSessionFacet(
+  facet: unknown,
+  sessionId: string,
+): SessionFacets | null {
+  if (!facet || typeof facet !== 'object' || Array.isArray(facet)) {
+    return null;
+  }
+
+  const rawFacet = facet as Record<string, unknown>;
+  const normalizedFacet: SessionFacets = {
+    session_id: sessionId,
+    underlying_goal: normalizeInsightText(rawFacet['underlying_goal']),
+    goal_categories: normalizeInsightCountRecord(rawFacet['goal_categories']),
+    outcome: normalizeInsightEnum(
+      rawFacet['outcome'],
+      SESSION_OUTCOMES,
+      OUTCOME_FALLBACK,
+    ),
+    user_satisfaction_counts: normalizeInsightCountRecord(
+      rawFacet['user_satisfaction_counts'],
+    ),
+    Qwen_helpfulness: normalizeInsightEnum(
+      rawFacet['Qwen_helpfulness'],
+      QWEN_HELPFULNESS_LEVELS,
+      'moderately_helpful',
+    ),
+    session_type: normalizeInsightEnum(
+      rawFacet['session_type'],
+      SESSION_TYPES,
+      'single_task',
+    ),
+    friction_counts: normalizeInsightCountRecord(rawFacet['friction_counts']),
+    friction_detail: normalizeInsightText(rawFacet['friction_detail']),
+    primary_success: normalizeInsightEnum(
+      rawFacet['primary_success'],
+      PRIMARY_SUCCESS_VALUES,
+      PRIMARY_SUCCESS_FALLBACK,
+    ),
+    brief_summary: normalizeInsightText(rawFacet['brief_summary']),
+  };
+
+  const meaningfulContent = {
+    underlying_goal: normalizedFacet.underlying_goal,
+    goal_categories: normalizedFacet.goal_categories,
+    outcome:
+      normalizedFacet.outcome === OUTCOME_FALLBACK
+        ? ''
+        : normalizedFacet.outcome,
+    user_satisfaction_counts: normalizedFacet.user_satisfaction_counts,
+    friction_counts: normalizedFacet.friction_counts,
+    friction_detail: normalizedFacet.friction_detail,
+    primary_success:
+      normalizedFacet.primary_success === PRIMARY_SUCCESS_FALLBACK
+        ? ''
+        : normalizedFacet.primary_success,
+    brief_summary: normalizedFacet.brief_summary,
+  };
+
+  return hasMeaningfulInsightValue(meaningfulContent) ? normalizedFacet : null;
+}
 
 export class DataProcessor {
   constructor(private config: Config) {}
@@ -213,10 +374,17 @@ export class DataProcessor {
         return null;
       }
 
-      return {
-        ...(result as unknown as SessionFacets),
-        session_id: records[0].sessionId,
-      };
+      const sessionId = records[0].sessionId;
+      const normalizedFacet = normalizeSessionFacet(result, sessionId);
+
+      if (!normalizedFacet) {
+        logger.warn(
+          `Ignoring malformed insight facet for session ${sessionId}`,
+        );
+        return null;
+      }
+
+      return normalizedFacet;
     } catch (error) {
       logger.error(
         `Failed to analyze session ${records[0]?.sessionId}:`,
@@ -343,28 +511,38 @@ export class DataProcessor {
 
     facets.forEach((facet) => {
       // Aggregate satisfaction
-      Object.entries(facet.user_satisfaction_counts).forEach(([sat, count]) => {
-        satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
-      });
+      getInsightCountEntries(facet.user_satisfaction_counts).forEach(
+        ([sat, count]) => {
+          satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
+        },
+      );
 
       // Aggregate friction
-      Object.entries(facet.friction_counts).forEach(([fric, count]) => {
+      getInsightCountEntries(facet.friction_counts).forEach(([fric, count]) => {
         frictionAgg[fric] = (frictionAgg[fric] || 0) + count;
       });
 
       // Aggregate primary success
-      if (facet.primary_success && facet.primary_success !== 'none') {
-        primarySuccessAgg[facet.primary_success] =
-          (primarySuccessAgg[facet.primary_success] || 0) + 1;
+      const primarySuccess = normalizeInsightEnum(
+        facet.primary_success,
+        PRIMARY_SUCCESS_VALUES,
+        PRIMARY_SUCCESS_FALLBACK,
+      );
+      if (primarySuccess !== PRIMARY_SUCCESS_FALLBACK) {
+        primarySuccessAgg[primarySuccess] =
+          (primarySuccessAgg[primarySuccess] || 0) + 1;
       }
 
       // Aggregate outcomes
-      if (facet.outcome) {
-        outcomesAgg[facet.outcome] = (outcomesAgg[facet.outcome] || 0) + 1;
-      }
+      const outcome = normalizeInsightEnum(
+        facet.outcome,
+        SESSION_OUTCOMES,
+        OUTCOME_FALLBACK,
+      );
+      outcomesAgg[outcome] = (outcomesAgg[outcome] || 0) + 1;
 
       // Aggregate goals
-      Object.entries(facet.goal_categories).forEach(([goal, count]) => {
+      getInsightCountEntries(facet.goal_categories).forEach(([goal, count]) => {
         goalsAgg[goal] = (goalsAgg[goal] || 0) + count;
       });
     });
@@ -671,7 +849,7 @@ export class DataProcessor {
         ),
       );
 
-      return {
+      const qualitative = {
         impressiveWorkflows,
         projectAreas,
         futureOpportunities,
@@ -681,6 +859,8 @@ export class DataProcessor {
         interactionStyle,
         atAGlance,
       };
+
+      return hasMeaningfulInsightValue(qualitative) ? qualitative : undefined;
     } catch (e) {
       logger.error('Error generating qualitative insights:', e);
       return undefined;
@@ -700,27 +880,38 @@ export class DataProcessor {
 
     facets.forEach((facet) => {
       // Aggregate goals
-      Object.entries(facet.goal_categories).forEach(([goal, count]) => {
+      getInsightCountEntries(facet.goal_categories).forEach(([goal, count]) => {
         goalsAgg[goal] = (goalsAgg[goal] || 0) + count;
       });
 
       // Aggregate outcomes
-      outcomesAgg[facet.outcome] = (outcomesAgg[facet.outcome] || 0) + 1;
+      const outcome = normalizeInsightEnum(
+        facet.outcome,
+        SESSION_OUTCOMES,
+        OUTCOME_FALLBACK,
+      );
+      outcomesAgg[outcome] = (outcomesAgg[outcome] || 0) + 1;
 
       // Aggregate satisfaction
-      Object.entries(facet.user_satisfaction_counts).forEach(([sat, count]) => {
-        satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
-      });
+      getInsightCountEntries(facet.user_satisfaction_counts).forEach(
+        ([sat, count]) => {
+          satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
+        },
+      );
 
       // Aggregate friction
-      Object.entries(facet.friction_counts).forEach(([fric, count]) => {
+      getInsightCountEntries(facet.friction_counts).forEach(([fric, count]) => {
         frictionAgg[fric] = (frictionAgg[fric] || 0) + count;
       });
 
       // Aggregate success (primary_success)
-      if (facet.primary_success && facet.primary_success !== 'none') {
-        successAgg[facet.primary_success] =
-          (successAgg[facet.primary_success] || 0) + 1;
+      const primarySuccess = normalizeInsightEnum(
+        facet.primary_success,
+        PRIMARY_SUCCESS_VALUES,
+        PRIMARY_SUCCESS_FALLBACK,
+      );
+      if (primarySuccess !== PRIMARY_SUCCESS_FALLBACK) {
+        successAgg[primarySuccess] = (successAgg[primarySuccess] || 0) + 1;
       }
     });
 
@@ -748,13 +939,16 @@ export class DataProcessor {
 
     // 2. SESSION SUMMARIES section
     const sessionSummaries = facets
-      .map((f) => `- ${f.brief_summary}`)
+      .map((f) => normalizeInsightText(f.brief_summary))
+      .filter((summary) => summary.length > 0)
+      .map((summary) => `- ${summary}`)
       .join('\n');
 
     // 3. FRICTION DETAILS section
     const frictionDetails = facets
-      .filter((f) => f.friction_detail && f.friction_detail.trim().length > 0)
-      .map((f) => `- ${f.friction_detail}`)
+      .map((f) => normalizeInsightText(f.friction_detail))
+      .filter((detail) => detail.length > 0)
+      .map((detail) => `- ${detail}`)
       .join('\n');
 
     return `DATA:
@@ -1072,6 +1266,31 @@ None captured`;
                   'utf-8',
                 );
                 const existingFacet = JSON.parse(existingData);
+                const normalizedFacet = normalizeSessionFacet(
+                  existingFacet,
+                  sessionId,
+                );
+                if (!normalizedFacet) {
+                  logger.warn(
+                    `Cached insight facet for ${sessionId} is malformed, regenerating.`,
+                  );
+                  throw new Error('Malformed cached insight facet');
+                }
+                const normalizedData = JSON.stringify(normalizedFacet, null, 2);
+                if (existingData !== normalizedData) {
+                  try {
+                    await fs.writeFile(
+                      existingFacetPath,
+                      normalizedData,
+                      'utf-8',
+                    );
+                  } catch (writeError) {
+                    logger.warn(
+                      `Failed to write back normalized facet for ${sessionId}:`,
+                      writeError,
+                    );
+                  }
+                }
                 completed++;
                 if (onProgress) {
                   const percent = 20 + Math.round((completed / total) * 60);
@@ -1081,7 +1300,7 @@ None captured`;
                     `${completed}/${total}`,
                   );
                 }
-                return existingFacet;
+                return normalizedFacet;
               } catch (readError) {
                 // File doesn't exist or is invalid, proceed to analyze
                 if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') {

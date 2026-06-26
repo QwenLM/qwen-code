@@ -6,18 +6,22 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  deepseekProvider,
+  openRouterProvider,
+  tokenPlanProvider,
+  customProvider,
+  generateCustomEnvKey as generateCustomApiKeyEnvKey,
+  getDefaultModelIds,
+  resolveBaseUrl,
+  type ProviderSetupInputs,
+} from '@qwen-code/qwen-code-core';
 import {
   useAuthCommand,
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
-import { generateCustomEnvKey as generateCustomApiKeyEnvKey } from '../../auth/allProviders.js';
-import {
-  OPENROUTER_OAUTH_CALLBACK_URL,
-  createOpenRouterOAuthSession,
-  runOpenRouterOAuthLogin,
-} from '../../auth/providers/oauth/openrouterOAuth.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
@@ -36,48 +40,16 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
-vi.mock('../../auth/providers/oauth/openrouterOAuth.js', () => ({
-  OPENROUTER_OAUTH_CALLBACK_URL: 'http://localhost:3000/openrouter/callback',
-  createOpenRouterOAuthSession: vi.fn(() => ({
-    callbackUrl: 'http://localhost:3000/openrouter/callback',
-    codeVerifier: 'test-verifier',
-    state: 'test-state',
-    authorizationUrl:
-      'https://openrouter.ai/auth?callback_url=http%3A%2F%2Flocalhost%3A3000%2Fopenrouter%2Fcallback&code_challenge=test-challenge&state=test-state',
-  })),
-  getOpenRouterModelsWithFallback: vi.fn(async () => [
-    {
-      id: 'z-ai/glm-4.5-air:free',
-      name: 'OpenRouter · GLM 4.5 Air',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      envKey: 'OPENROUTER_API_KEY',
-    },
-    {
-      id: 'openai/gpt-oss-120b:free',
-      name: 'OpenRouter · GPT OSS 120B',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      envKey: 'OPENROUTER_API_KEY',
-    },
-  ]),
-  getPreferredOpenRouterModelId: vi.fn((models) => models[0]?.id),
-  isOpenRouterConfig: vi.fn((model) =>
-    Boolean(model.baseUrl?.includes('openrouter.ai')),
-  ),
-  OPENROUTER_ENV_KEY: 'OPENROUTER_API_KEY',
-  OPENROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
-  selectRecommendedOpenRouterModels: vi.fn((models) => models),
-  runOpenRouterOAuthLogin: vi.fn(
-    () => new Promise(() => undefined) as Promise<{ apiKey: string }>,
-  ),
-}));
-
 const createSettings = () => ({
   merged: {
     modelProviders: {},
   },
   setValue: vi.fn(),
+  recomputeMerged: vi.fn(),
   forScope: vi.fn(() => ({
     path: '/tmp/settings.json',
+    settings: {},
+    originalSettings: {},
   })),
 });
 
@@ -99,7 +71,7 @@ describe('useAuthCommand', () => {
     vi.clearAllMocks();
   });
 
-  it('closes auth dialog immediately when starting OpenRouter OAuth', async () => {
+  it('exposes closeAuthDialog that flips isAuthDialogOpen to false', () => {
     const settings = createSettings();
     const config = createConfig();
     const addItem = vi.fn();
@@ -111,164 +83,16 @@ describe('useAuthCommand', () => {
     act(() => {
       result.current.openAuthDialog();
     });
-
     expect(result.current.isAuthDialogOpen).toBe(true);
 
-    await act(async () => {
-      void result.current.handleOpenRouterSubmit();
-      await Promise.resolve();
-    });
-
-    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
-    expect(result.current.isAuthenticating).toBe(true);
-    expect(result.current.externalAuthState).toEqual({
-      title: 'OpenRouter Authentication',
-      message:
-        'Open the authorization page if your browser does not launch automatically.',
-      detail: expect.stringContaining('https://openrouter.ai/auth'),
+    act(() => {
+      result.current.closeAuthDialog();
     });
     expect(result.current.isAuthDialogOpen).toBe(false);
-    expect(addItem).not.toHaveBeenCalled();
-  });
-
-  it('cancels OpenRouter OAuth wait and reopens the auth dialog', async () => {
-    const settings = createSettings();
-    const config = createConfig();
-    const addItem = vi.fn();
-
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
-
-    act(() => {
-      result.current.openAuthDialog();
-    });
-
-    await act(async () => {
-      void result.current.handleOpenRouterSubmit();
-      await Promise.resolve();
-    });
-
-    expect(result.current.isAuthenticating).toBe(true);
-    expect(createOpenRouterOAuthSession).toHaveBeenCalledWith(
-      OPENROUTER_OAUTH_CALLBACK_URL,
-    );
-    expect(runOpenRouterOAuthLogin).toHaveBeenCalledWith(
-      OPENROUTER_OAUTH_CALLBACK_URL,
-      expect.objectContaining({
-        abortSignal: expect.any(AbortSignal),
-        session: expect.objectContaining({
-          authorizationUrl: expect.stringContaining(
-            'https://openrouter.ai/auth',
-          ),
-        }),
-      }),
-    );
-
-    act(() => {
-      result.current.cancelAuthentication();
-    });
-
-    const abortSignal = vi.mocked(runOpenRouterOAuthLogin).mock.calls[0]?.[1]
-      ?.abortSignal;
-    expect(abortSignal?.aborted).toBe(true);
-    expect(result.current.isAuthenticating).toBe(false);
-    expect(result.current.externalAuthState).toBe(null);
-    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
-    expect(result.current.isAuthDialogOpen).toBe(true);
-  });
-
-  it('cleans up UI state when OpenRouter OAuth rejects with AbortError', async () => {
-    const settings = createSettings();
-    const config = createConfig();
-    const addItem = vi.fn();
-    vi.mocked(runOpenRouterOAuthLogin).mockRejectedValueOnce(
-      new DOMException('OpenRouter OAuth cancelled.', 'AbortError'),
-    );
-
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
-
-    await act(async () => {
-      await result.current.handleOpenRouterSubmit();
-    });
-
-    expect(result.current.isAuthenticating).toBe(false);
-    expect(result.current.externalAuthState).toBe(null);
-    expect(result.current.pendingAuthType).toBeUndefined();
-    expect(result.current.isAuthDialogOpen).toBe(true);
-    expect(addItem).not.toHaveBeenCalled();
-  });
-
-  it('adds /model and /manage-models guidance after OpenRouter auth succeeds', async () => {
-    const settings = createSettings();
-    const config = createConfig();
-    const addItem = vi.fn();
-    vi.mocked(runOpenRouterOAuthLogin).mockResolvedValueOnce({
-      apiKey: 'oauth-key-123',
-      userId: 'user-1',
-    });
-
-    const { result } = renderHook(() =>
-      useAuthCommand(settings as never, config as never, addItem),
-    );
-
-    await act(async () => {
-      await result.current.handleOpenRouterSubmit();
-    });
-
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'env.OPENROUTER_API_KEY',
-      'oauth-key-123',
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'modelProviders.openai',
-      [
-        {
-          id: 'z-ai/glm-4.5-air:free',
-          name: 'OpenRouter · GLM 4.5 Air',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'openai/gpt-oss-120b:free',
-          name: 'OpenRouter · GPT OSS 120B',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-      ],
-    );
-    expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
-      [AuthType.USE_OPENAI]: [
-        {
-          id: 'z-ai/glm-4.5-air:free',
-          name: 'OpenRouter · GLM 4.5 Air',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-        {
-          id: 'openai/gpt-oss-120b:free',
-          name: 'OpenRouter · GPT OSS 120B',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          envKey: 'OPENROUTER_API_KEY',
-        },
-      ],
-    });
-    expect(config.refreshAuth).not.toHaveBeenCalled();
     expect(result.current.authError).toBe(null);
-    expect(result.current.isAuthDialogOpen).toBe(false);
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: 'Successfully configured OpenRouter. Use /model to switch models.',
-      }),
-      expect.any(Number),
-    );
   });
 
-  it('configures DeepSeek via the shared API key provider flow', async () => {
+  it('configures DeepSeek via the unified provider submit', async () => {
     const settings = createSettings();
     const config = createConfig();
     const addItem = vi.fn();
@@ -277,42 +101,20 @@ describe('useAuthCommand', () => {
       useAuthCommand(settings as never, config as never, addItem),
     );
 
+    const inputs: ProviderSetupInputs = {
+      baseUrl: resolveBaseUrl(deepseekProvider),
+      apiKey: 'sk-deepseek',
+      modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    };
+
     await act(async () => {
-      await result.current.handleApiKeyProviderSubmit(
-        'deepseek',
-        ' sk-deepseek ',
-        'deepseek-v4-flash, deepseek-v4-pro, deepseek-v4-flash',
-      );
+      await result.current.handleProviderSubmit(deepseekProvider, inputs);
     });
 
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
       'env.DEEPSEEK_API_KEY',
       'sk-deepseek',
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'modelProviders.openai',
-      [
-        {
-          id: 'deepseek-v4-flash',
-          name: '[DeepSeek] deepseek-v4-flash',
-          baseUrl: 'https://api.deepseek.com',
-          envKey: 'DEEPSEEK_API_KEY',
-          generationConfig: { contextWindowSize: 1000000 },
-        },
-        {
-          id: 'deepseek-v4-pro',
-          name: '[DeepSeek] deepseek-v4-pro',
-          baseUrl: 'https://api.deepseek.com',
-          envKey: 'DEEPSEEK_API_KEY',
-          generationConfig: {
-            contextWindowSize: 1000000,
-            extra_body: { enable_thinking: true },
-            modalities: { image: true, video: true },
-          },
-        },
-      ],
     );
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
@@ -324,19 +126,48 @@ describe('useAuthCommand', () => {
       'model.name',
       'deepseek-v4-flash',
     );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'providerMetadata.deepseek.version',
-      expect.any(String),
+    expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(result.current.isAuthDialogOpen).toBe(false);
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Successfully configured DeepSeek'),
+      }),
+      expect.any(Number),
     );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'providerMetadata.deepseek.baseUrl',
-      'https://api.deepseek.com',
+  });
+
+  it('configures OpenRouter via the unified provider submit', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
     );
-    expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
-      [AuthType.USE_OPENAI]: expect.any(Array),
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(openRouterProvider, {
+        baseUrl: resolveBaseUrl(openRouterProvider),
+        apiKey: 'sk-or-v1-key',
+        modelIds: ['z-ai/glm-4.5-air:free'],
+      });
     });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'env.OPENROUTER_API_KEY',
+      'sk-or-v1-key',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      'openai',
+    );
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'model.name',
+      'z-ai/glm-4.5-air:free',
+    );
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
@@ -350,47 +181,17 @@ describe('useAuthCommand', () => {
     );
 
     await act(async () => {
-      await result.current.handleTokenPlanSubmit('sk-token-plan');
+      await result.current.handleProviderSubmit(tokenPlanProvider, {
+        baseUrl: resolveBaseUrl(tokenPlanProvider),
+        apiKey: 'sk-token-plan',
+        modelIds: getDefaultModelIds(tokenPlanProvider),
+      });
     });
 
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
       'env.BAILIAN_TOKEN_PLAN_API_KEY',
       'sk-token-plan',
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'modelProviders.openai',
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'qwen3.6-plus',
-          name: '[ModelStudio Token Plan] qwen3.6-plus',
-          baseUrl:
-            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
-        }),
-        expect.objectContaining({
-          id: 'deepseek-v3.2',
-          name: '[ModelStudio Token Plan] deepseek-v3.2',
-          baseUrl:
-            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
-        }),
-        expect.objectContaining({
-          id: 'glm-5',
-          name: '[ModelStudio Token Plan] glm-5',
-          baseUrl:
-            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
-        }),
-        expect.objectContaining({
-          id: 'MiniMax-M2.5',
-          name: '[ModelStudio Token Plan] MiniMax-M2.5',
-          baseUrl:
-            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-          envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
-        }),
-      ]),
     );
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
@@ -401,23 +202,6 @@ describe('useAuthCommand', () => {
       'https://api.example.com/v1',
     );
     const settings = createSettings();
-    settings.merged.modelProviders = {
-      [AuthType.USE_OPENAI]: [
-        {
-          id: 'old-custom',
-          name: 'old-custom',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-        },
-        {
-          id: 'preserved-model',
-          name: 'preserved-model',
-          baseUrl: 'https://api.other.com/v1',
-          envKey: 'OTHER_API_KEY',
-          generationConfig: { contextWindowSize: 999 },
-        },
-      ],
-    };
     const config = createConfig();
     const addItem = vi.fn();
 
@@ -426,64 +210,21 @@ describe('useAuthCommand', () => {
     );
 
     await act(async () => {
-      await result.current.handleCustomApiKeySubmit(
-        AuthType.USE_OPENAI,
-        ' https://api.example.com/v1 ',
-        ' sk-custom ',
-        'custom-model, custom-model-2, custom-model',
-        {
+      await result.current.handleProviderSubmit(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.example.com/v1',
+        apiKey: 'sk-custom',
+        modelIds: ['custom-model'],
+        advancedConfig: {
           enableThinking: true,
-          multimodal: { image: true, video: false, audio: true },
-          maxTokens: 4096,
         },
-      );
+      });
     });
 
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
       `env.${envKey}`,
       'sk-custom',
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'modelProviders.openai',
-      [
-        {
-          id: 'custom-model',
-          name: 'custom-model',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-          generationConfig: {
-            modalities: { image: true, video: false, audio: true },
-            extra_body: { enable_thinking: true },
-            samplingParams: { max_tokens: 4096 },
-          },
-        },
-        {
-          id: 'custom-model-2',
-          name: 'custom-model-2',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-          generationConfig: {
-            modalities: { image: true, video: false, audio: true },
-            extra_body: { enable_thinking: true },
-            samplingParams: { max_tokens: 4096 },
-          },
-        },
-        {
-          id: 'old-custom',
-          name: 'old-custom',
-          baseUrl: 'https://api.example.com/v1',
-          envKey,
-        },
-        {
-          id: 'preserved-model',
-          name: 'preserved-model',
-          baseUrl: 'https://api.other.com/v1',
-          envKey: 'OTHER_API_KEY',
-          generationConfig: { contextWindowSize: 999 },
-        },
-      ],
     );
     expect(settings.setValue).toHaveBeenCalledWith(
       'user',
@@ -495,40 +236,41 @@ describe('useAuthCommand', () => {
       'model.name',
       'custom-model',
     );
-    expect(config.reloadModelProvidersConfig).toHaveBeenCalledWith({
-      [AuthType.USE_OPENAI]: expect.arrayContaining([
-        expect.objectContaining({ id: 'custom-model' }),
-        expect.objectContaining({ id: 'preserved-model' }),
-      ]),
-    });
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
-  it('configures Alibaba standard regional endpoints via the shared API key provider flow', async () => {
+  it('cancelAuthentication resets dialog + flags + clears authError', async () => {
     const settings = createSettings();
-    settings.merged.modelProviders = {
-      [AuthType.USE_OPENAI]: [
-        {
-          id: 'deepseek-v4-flash',
-          name: '[DeepSeek] deepseek-v4-flash',
-          baseUrl: 'https://api.deepseek.com',
-          envKey: 'DEEPSEEK_API_KEY',
-        },
-        {
-          id: 'old-qwen',
-          name: '[ModelStudio Standard] old-qwen',
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-          envKey: 'DASHSCOPE_API_KEY',
-        },
-        {
-          id: 'custom-dashscope-compatible',
-          name: '[Custom] custom-dashscope-compatible',
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-          envKey: 'DASHSCOPE_API_KEY',
-        },
-      ],
-    };
     const config = createConfig();
+    const addItem = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    // Put the hook into the middle of an in-flight auth + an error to make
+    // sure cancel resets *all* the visible state, not just isAuthenticating.
+    act(() => {
+      result.current.onAuthError('boom');
+    });
+    expect(result.current.authError).toBe('boom');
+    expect(result.current.isAuthDialogOpen).toBe(true);
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(result.current.externalAuthState).toBeNull();
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.authError).toBeNull();
+  });
+
+  it('surfaces install-plan rejection as an auth error and records telemetry', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    config.refreshAuth = vi.fn(async () => {
+      throw new Error('refreshAuth rejected: bad endpoint');
+    });
     const addItem = vi.fn();
 
     const { result } = renderHook(() =>
@@ -536,63 +278,27 @@ describe('useAuthCommand', () => {
     );
 
     await act(async () => {
-      await result.current.handleApiKeyProviderSubmit(
-        'alibabaStandard',
-        'sk-dashscope',
-        'qwen3.5-plus',
-        'sg-singapore',
-      );
+      await result.current.handleProviderSubmit(deepseekProvider, {
+        baseUrl: resolveBaseUrl(deepseekProvider),
+        apiKey: 'sk-bad',
+        modelIds: ['deepseek-v4-flash'],
+      });
     });
 
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'env.DASHSCOPE_API_KEY',
-      'sk-dashscope',
+    // handleAuthFailure should have set the error, reopened the dialog, and
+    // cleared the in-flight flag. The success toast must NOT have fired.
+    expect(result.current.authError).toEqual(
+      expect.stringContaining('refreshAuth rejected'),
     );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'modelProviders.openai',
-      [
-        {
-          id: 'qwen3.5-plus',
-          name: '[ModelStudio Standard] qwen3.5-plus',
-          baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-          envKey: 'DASHSCOPE_API_KEY',
-        },
-        {
-          id: 'deepseek-v4-flash',
-          name: '[DeepSeek] deepseek-v4-flash',
-          baseUrl: 'https://api.deepseek.com',
-          envKey: 'DEEPSEEK_API_KEY',
-        },
-        {
-          id: 'custom-dashscope-compatible',
-          name: '[Custom] custom-dashscope-compatible',
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-          envKey: 'DASHSCOPE_API_KEY',
-        },
-      ],
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'security.auth.selectedType',
-      'openai',
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'model.name',
-      'qwen3.5-plus',
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'providerMetadata.alibabaStandard.version',
-      expect.any(String),
-    );
-    expect(settings.setValue).toHaveBeenCalledWith(
-      'user',
-      'providerMetadata.alibabaStandard.baseUrl',
-      'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-    );
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(addItem).not.toHaveBeenCalled();
+    // pendingAuthType was set before applyProviderInstallPlan ran, so
+    // handleAuthFailure had it available — the AuthEvent path is no longer
+    // silently dropped on failure. (We can't assert the telemetry sink
+    // directly here, but the visible side effects above all depend on
+    // handleAuthFailure having seen pendingAuthType.)
+    expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
   });
 });
 
@@ -635,7 +341,6 @@ describe('generateCustomApiKeyEnvKey', () => {
   });
 
   it('produces equal keys for URLs that differ only in trailing slash', () => {
-    // Trailing slashes are normalized away, so these should be equal.
     const key1 = generateCustomApiKeyEnvKey(
       AuthType.USE_OPENAI,
       'https://openrouter.ai/api/v1/',

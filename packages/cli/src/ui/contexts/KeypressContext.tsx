@@ -21,6 +21,11 @@ import {
 } from 'react';
 import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
+import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
+import {
+  parseSGRMouseEvent,
+  type MouseEvent as SgrMouseEvent,
+} from '../utils/mouse.js';
 import {
   BACKSLASH_ENTER_DETECTION_WINDOW_MS,
   CHAR_CODE_ESC,
@@ -41,6 +46,15 @@ import { clipboardHasImage } from '../utils/clipboardUtils.js';
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 
 const ESC = '\u001B';
+// On macOS, when the terminal's Option key is in its default "compose
+// character" mode (iTerm2 "Normal", VS Code without macOptionIsMeta), Option+t
+// is delivered to the app as the dagger glyph "†" (U+2020) with no modifier
+// metadata — so there is no way to tell Option was held. Terminals that speak
+// the Kitty keyboard protocol (e.g. Ghostty) instead report a real Alt+t event,
+// which is why the shortcut already works there. We treat a lone "†" as Alt+t so
+// the "expand thinking" shortcut works everywhere without requiring users to
+// reconfigure their terminal. See handleKeypress for where this is applied.
+const OPTION_T_COMPOSED_GLYPH = '†';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
 export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
@@ -109,10 +123,13 @@ export interface Key {
 }
 
 export type KeypressHandler = (key: Key) => void;
+export type MouseHandler = (event: SgrMouseEvent) => void;
 
 interface KeypressContextValue {
   subscribe: (handler: KeypressHandler) => void;
   unsubscribe: (handler: KeypressHandler) => void;
+  subscribeMouse: (handler: MouseHandler) => void;
+  unsubscribeMouse: (handler: MouseHandler) => void;
   pasteWorkaround: boolean;
 }
 
@@ -148,6 +165,7 @@ export function KeypressProvider({
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
+  const mouseSubscribers = useRef<Set<MouseHandler>>(new Set()).current;
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
@@ -163,11 +181,22 @@ export function KeypressProvider({
     [subscribers],
   );
 
+  const subscribeMouse = useCallback(
+    (handler: MouseHandler) => {
+      mouseSubscribers.add(handler);
+    },
+    [mouseSubscribers],
+  );
+
+  const unsubscribeMouse = useCallback(
+    (handler: MouseHandler) => {
+      mouseSubscribers.delete(handler);
+    },
+    [mouseSubscribers],
+  );
+
   useEffect(() => {
-    const wasRaw = stdin.isRaw;
-    if (wasRaw === false) {
-      setRawMode(true);
-    }
+    setRawMode(true);
 
     // Use pre-drained captured input passed from outside React.
     // Draining happens before render() so StrictMode's mount/cleanup/remount
@@ -195,6 +224,9 @@ export function KeypressProvider({
     let waitingForEnterAfterBackslash = false;
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
+    let swallowingSgrMouse = false;
+    let sgrMouseBuffer = '';
+    let sgrMouseTimeout: NodeJS.Timeout | null = null;
 
     const updateKittyBuffer = (value: string) => {
       kittySequenceBufferRef.current = value;
@@ -653,6 +685,11 @@ export function KeypressProvider({
     };
 
     const broadcast = (key: Key) => {
+      // Mark interaction so background housekeeping can defer work when the
+      // user is actively typing. Pre-filters above (DA1/DA2/Kitty queries,
+      // FOCUS_IN/OUT) early-return before reaching broadcast, so terminal
+      // protocol noise does not count as user activity.
+      noteInteraction();
       for (const handler of subscribers) {
         handler(key);
       }
@@ -669,6 +706,52 @@ export function KeypressProvider({
         return;
       }
       if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
+        return;
+      }
+
+      // SGR mouse sequences (\x1b[<...M or \x1b[<...m): readline's CSI
+      // parser treats `<` as a final byte, splitting the sequence into
+      // \x1b[< followed by individual character events. We buffer the
+      // fragments, reconstruct the full sequence, parse it, and forward
+      // to registered mouse handlers.
+      if (swallowingSgrMouse) {
+        if (key.ctrl && key.name === 'c') {
+          swallowingSgrMouse = false;
+          sgrMouseBuffer = '';
+          if (sgrMouseTimeout) {
+            clearTimeout(sgrMouseTimeout);
+            sgrMouseTimeout = null;
+          }
+        } else {
+          sgrMouseBuffer += key.sequence;
+          if (key.name === 'm' || key.sequence === 'M') {
+            swallowingSgrMouse = false;
+            if (sgrMouseTimeout) {
+              clearTimeout(sgrMouseTimeout);
+              sgrMouseTimeout = null;
+            }
+            const parsed = parseSGRMouseEvent(sgrMouseBuffer);
+            if (parsed) {
+              for (const handler of mouseSubscribers) {
+                handler(parsed.event);
+              }
+            }
+            sgrMouseBuffer = '';
+          }
+          return;
+        }
+      }
+      if (key.sequence === `${ESC}[<`) {
+        swallowingSgrMouse = true;
+        sgrMouseBuffer = `${ESC}[<`;
+        if (sgrMouseTimeout) {
+          clearTimeout(sgrMouseTimeout);
+        }
+        sgrMouseTimeout = setTimeout(() => {
+          swallowingSgrMouse = false;
+          sgrMouseBuffer = '';
+          sgrMouseTimeout = null;
+        }, KITTY_SEQUENCE_TIMEOUT_MS);
         return;
       }
 
@@ -974,6 +1057,22 @@ export function KeypressProvider({
       if (key.name === 'return' && key.sequence === `${ESC}\r`) {
         key.meta = true;
       }
+
+      // macOS "Option as compose character" terminals turn Option+t into the
+      // bare glyph "†" (U+2020) with no modifier metadata. Rewrite it to a
+      // synthetic Alt+t so the "expand thinking" shortcut fires; the meta flag
+      // also stops the glyph from being inserted into the input buffer (the
+      // text buffer skips printable input when meta/ctrl is set), so it looks
+      // exactly like Alt was pressed.
+      if (
+        process.platform === 'darwin' &&
+        !isPaste &&
+        key.sequence === OPTION_T_COMPOSED_GLYPH
+      ) {
+        key.name = 't';
+        key.meta = true;
+      }
+
       broadcast({ ...key, paste: isPaste });
     };
 
@@ -1142,10 +1241,7 @@ export function KeypressProvider({
 
       rl.close();
 
-      // Restore the terminal to its original state.
-      if (wasRaw === false) {
-        setRawMode(false);
-      }
+      setRawMode(false);
 
       if (backslashTimeout) {
         clearTimeout(backslashTimeout);
@@ -1154,6 +1250,13 @@ export function KeypressProvider({
 
       clearKittyBufferAndTimeout();
       clearPasteIdleTimeout();
+
+      if (sgrMouseTimeout) {
+        clearTimeout(sgrMouseTimeout);
+        sgrMouseTimeout = null;
+      }
+      swallowingSgrMouse = false;
+      sgrMouseBuffer = '';
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);
@@ -1181,12 +1284,19 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    mouseSubscribers,
     initialCapturedInput,
   ]);
 
   return (
     <KeypressContext.Provider
-      value={{ subscribe, unsubscribe, pasteWorkaround }}
+      value={{
+        subscribe,
+        unsubscribe,
+        subscribeMouse,
+        unsubscribeMouse,
+        pasteWorkaround,
+      }}
     >
       {children}
     </KeypressContext.Provider>

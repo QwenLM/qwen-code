@@ -10,6 +10,7 @@ import {
   expect,
   vi,
   beforeEach,
+  afterEach,
   type MockedFunction,
 } from 'vitest';
 import OpenAI from 'openai';
@@ -37,12 +38,16 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
 }));
 
 describe('DefaultOpenAICompatibleProvider', () => {
+  const MAX_OUTPUT_TOKENS_ENV = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
   let provider: DefaultOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
   let mockCliConfig: Config;
+  let savedMaxOutputTokensEnv: string | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
+    delete process.env[MAX_OUTPUT_TOKENS_ENV];
     const mockedBuildRuntimeFetchOptions =
       buildRuntimeFetchOptions as unknown as MockedFunction<
         (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
@@ -68,6 +73,14 @@ describe('DefaultOpenAICompatibleProvider', () => {
       mockContentGeneratorConfig,
       mockCliConfig,
     );
+  });
+
+  afterEach(() => {
+    if (savedMaxOutputTokensEnv === undefined) {
+      delete process.env[MAX_OUTPUT_TOKENS_ENV];
+    } else {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = savedMaxOutputTokensEnv;
+    }
   });
 
   describe('constructor', () => {
@@ -207,6 +220,33 @@ describe('DefaultOpenAICompatibleProvider', () => {
       // Should set capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS)
       // GPT-4 has 16K output limit, so min(16K, 8K) = 8K
       expect(result.max_tokens).toBe(8000);
+    });
+
+    it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      for (const envValue of ['1.5', '2k', 'abc']) {
+        process.env[MAX_OUTPUT_TOKENS_ENV] = envValue;
+
+        const result = provider.buildRequest(request, 'prompt-id');
+
+        expect(result.max_tokens).toBe(8000);
+      }
+    });
+
+    it('should respect a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', () => {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = '9000';
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(request, 'prompt-id');
+
+      expect(result.max_tokens).toBe(9000);
     });
 
     it('should respect user max_tokens for unknown models (deployment aliases, self-hosted)', () => {
@@ -424,6 +464,87 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result.temperature).toBe(0.7);
       expect(result.max_tokens).toBe(8000); // GPT-4 has 16K limit, min(16K, 8K) = 8K
       expect(result).not.toHaveProperty('custom_param');
+    });
+
+    it('mirrors reasoning_content into reasoning for Qwen3 assistant history turns without mutating the source request', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'Qwen/Qwen3.6-35B-A3B',
+        messages: [
+          { role: 'user', content: 'First turn' },
+          {
+            role: 'assistant',
+            content: 'Visible answer',
+            reasoning_content: 'Preserved chain of thought',
+          } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+            reasoning_content: string;
+            reasoning?: string;
+          },
+          { role: 'user', content: 'Second turn' },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, 'prompt-id');
+      const assistant = result.messages?.[1] as {
+        reasoning_content?: string;
+        reasoning?: string;
+      };
+
+      expect(assistant.reasoning_content).toBe('Preserved chain of thought');
+      expect(assistant.reasoning).toBe('Preserved chain of thought');
+      expect(
+        (originalRequest.messages[1] as { reasoning?: string }).reasoning,
+      ).toBeUndefined();
+    });
+
+    it('does not overwrite an explicit reasoning field on Qwen3 assistant history turns', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'Qwen3-32B',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'Visible answer',
+            reasoning_content: 'Legacy reasoning field',
+            reasoning: 'Canonical reasoning field',
+          } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+            reasoning_content: string;
+            reasoning: string;
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, 'prompt-id');
+      const assistant = result.messages?.[0] as {
+        reasoning_content?: string;
+        reasoning?: string;
+      };
+
+      expect(assistant.reasoning).toBe('Canonical reasoning field');
+      expect(assistant.reasoning_content).toBe('Legacy reasoning field');
+    });
+
+    it('does not mirror reasoning_content for non-Qwen3 OpenAI-compatible models', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'Visible answer',
+            reasoning_content: 'Preserved chain of thought',
+          } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+            reasoning_content: string;
+            reasoning?: string;
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, 'prompt-id');
+      const assistant = result.messages?.[0] as {
+        reasoning_content?: string;
+        reasoning?: string;
+      };
+
+      expect(assistant.reasoning_content).toBe('Preserved chain of thought');
+      expect(assistant.reasoning).toBeUndefined();
     });
   });
 });

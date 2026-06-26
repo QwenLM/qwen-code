@@ -224,3 +224,21 @@ describe('AcpConnection lastExitCode/lastExitSignal', () => {
     expect(conn.lastExitSignal).toBeNull();
   });
 });
+
+describe('AcpConnection extension notifications', () => {
+  it('parses end_turn reason and source', () => {
+    const conn = new AcpConnection();
+    const onEndTurn = vi.fn();
+    conn.onEndTurn = onEndTurn;
+
+    conn.handleExtNotification('_qwencode/end_turn', {
+      reason: 'end_turn',
+      source: 'background_notification',
+    });
+
+    expect(onEndTurn).toHaveBeenCalledWith(
+      'end_turn',
+      'background_notification',
+    );
+  });
+});

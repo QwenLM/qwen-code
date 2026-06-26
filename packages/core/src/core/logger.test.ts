@@ -22,6 +22,7 @@ import {
 } from './logger.js';
 import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import type { Content } from '@google/genai';
@@ -73,6 +74,26 @@ vi.mock('../utils/session.js', () => ({
   sessionId: 'test-session-id',
 }));
 
+// Re-export the real atomicWriteFile so tests can override individual
+// calls (e.g. .mockRejectedValueOnce) while preserving normal behavior.
+// The default implementation is re-attached in `beforeEach` because the
+// suite calls `vi.resetAllMocks()` which strips vi.fn(impl) back to no-op.
+vi.mock('../utils/atomicFileWrite.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../utils/atomicFileWrite.js')
+  >('../utils/atomicFileWrite.js');
+  return {
+    ...actual,
+    atomicWriteFile: vi.fn(actual.atomicWriteFile),
+  };
+});
+
+const realAtomicWriteFile = (
+  await vi.importActual<typeof import('../utils/atomicFileWrite.js')>(
+    '../utils/atomicFileWrite.js',
+  )
+).atomicWriteFile;
+
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('../utils/debugLogger.js')>();
@@ -93,6 +114,9 @@ describe('Logger', () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
+    // resetAllMocks blanks the vi.fn(actual) delegation — re-attach so the
+    // logger's initialize/append paths still hit the real disk.
+    vi.mocked(atomicWriteFile).mockImplementation(realAtomicWriteFile);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T12:00:00.000Z'));
     originalHome = process.env['HOME'];
@@ -440,7 +464,7 @@ describe('Logger', () => {
     });
 
     it('should not throw, not increment messageId, and log error if writing to file fails', async () => {
-      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('Disk full'));
       const initialMessageId = logger['messageId'];
       const initialLogCount = logger['logs'].length;
 
@@ -892,7 +916,7 @@ describe('Logger', () => {
       await logger.logMessage(MessageSenderType.USER, 'kept');
       vi.advanceTimersByTime(1000);
 
-      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('Disk full'));
       await logger.logMessage(MessageSenderType.USER, 'failed write');
 
       expect(logger['lastLoggedUserEntry']).toBeNull();
@@ -938,7 +962,7 @@ describe('Logger', () => {
         'cancelled prompt',
       ]);
 
-      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('Disk full'));
       const removed = await logger.removeLastUserMessage();
       expect(removed).toBe(false);
 
@@ -987,7 +1011,7 @@ describe('Logger', () => {
       const trackedAfterUser = logger['lastLoggedUserEntry'];
       expect(trackedAfterUser).not.toBeNull();
 
-      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('Disk full'));
       await logger.logMessage(MessageSenderType.MODEL_SWITCH, 'qwen→qwen-max');
 
       // Tracker is unchanged — the non-USER failure didn't shift which

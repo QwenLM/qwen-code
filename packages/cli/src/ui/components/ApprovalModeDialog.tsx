@@ -16,6 +16,11 @@ import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
+import {
+  formatApprovalModeDescription,
+  formatApprovalModeName,
+} from '../utils/approvalModeDisplay.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 interface ApprovalModeDialogProps {
   /** Callback function when an approval mode is selected */
@@ -31,26 +36,22 @@ interface ApprovalModeDialogProps {
   availableTerminalHeight?: number;
 }
 
-const formatModeDescription = (mode: ApprovalMode): string => {
-  switch (mode) {
-    case ApprovalMode.PLAN:
-      return t('Analyze only, do not modify files or execute commands');
-    case ApprovalMode.DEFAULT:
-      return t('Require approval for file edits or shell commands');
-    case ApprovalMode.AUTO_EDIT:
-      return t('Automatically approve file edits');
-    case ApprovalMode.YOLO:
-      return t('Automatically approve all tools');
-    default:
-      return t('{{mode}} mode', { mode });
-  }
-};
+const DEFAULT_MAX_MODE_ITEMS_TO_SHOW = 10;
+const MIN_HEIGHT_WITH_MODE_SPACER = 9;
+const MIN_HEIGHT_WITH_FOOTER_HINT = 10;
+// Rows consumed by the border, vertical padding, and title before the list.
+const MODE_LIST_CHROME_ROWS = 5;
+const MODE_SPACER_ROWS = 1;
+const FOOTER_HINT_ROWS = 2;
+// Warning margin plus up to two wrapped text rows at the normal dialog width.
+const WORKSPACE_PRIORITY_WARNING_ROWS = 3;
+const MIN_HEIGHT_WITH_WARNING_FOOTER_HINT = 12;
 
 export function ApprovalModeDialog({
   onSelect,
   settings,
   currentMode,
-  availableTerminalHeight: _availableTerminalHeight,
+  availableTerminalHeight,
 }: ApprovalModeDialogProps): React.JSX.Element {
   // Start with User scope by default
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
@@ -64,10 +65,86 @@ export function ApprovalModeDialog({
 
   // Generate approval mode items with inline descriptions
   const modeItems = APPROVAL_MODES.map((mode) => ({
-    label: `${mode} - ${formatModeDescription(mode)}`,
+    label: `${formatApprovalModeName(mode)} - ${formatApprovalModeDescription(
+      mode,
+    )}`,
     value: mode,
     key: mode,
   }));
+
+  // Generate scope message for approval mode setting
+  const otherScopeModifiedMessage = getScopeMessageForSetting(
+    'tools.approvalMode',
+    selectedScope,
+    settings,
+  );
+
+  // Check if user scope is selected but workspace has the setting
+  const showWorkspacePriorityWarning =
+    selectedScope === SettingScope.User &&
+    otherScopeModifiedMessage.toLowerCase().includes('workspace');
+
+  const constrainedHeight = clampDialogHeight(availableTerminalHeight);
+  const showModeSpacer =
+    constrainedHeight === undefined ||
+    constrainedHeight >= MIN_HEIGHT_WITH_MODE_SPACER;
+  const preferredShowFooterHint =
+    constrainedHeight === undefined ||
+    constrainedHeight >=
+      (showWorkspacePriorityWarning
+        ? MIN_HEIGHT_WITH_WARNING_FOOTER_HINT
+        : MIN_HEIGHT_WITH_FOOTER_HINT);
+  const warningRows = showWorkspacePriorityWarning
+    ? WORKSPACE_PRIORITY_WARNING_ROWS
+    : 0;
+  const modeListChromeHeightWithoutFooter =
+    MODE_LIST_CHROME_ROWS +
+    (showModeSpacer ? MODE_SPACER_ROWS : 0) +
+    warningRows;
+  const rowsWithPreferredFooter =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(
+          1,
+          constrainedHeight -
+            modeListChromeHeightWithoutFooter -
+            (preferredShowFooterHint ? FOOTER_HINT_ROWS : 0),
+        );
+  const rowsWithoutFooter =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(1, constrainedHeight - modeListChromeHeightWithoutFooter);
+  const footerWouldHideScrollArrows =
+    !showWorkspacePriorityWarning &&
+    preferredShowFooterHint &&
+    rowsWithPreferredFooter !== undefined &&
+    rowsWithoutFooter !== undefined &&
+    rowsWithPreferredFooter <= 2 &&
+    rowsWithoutFooter > 2 &&
+    rowsWithoutFooter < modeItems.length;
+  const showFooterHint =
+    preferredShowFooterHint && !footerWouldHideScrollArrows;
+  const modeListChromeHeight =
+    modeListChromeHeightWithoutFooter + (showFooterHint ? FOOTER_HINT_ROWS : 0);
+  const modeListRows =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(1, constrainedHeight - modeListChromeHeight);
+  const showModeScrollArrows =
+    modeListRows !== undefined &&
+    modeListRows > 2 &&
+    modeListRows < modeItems.length;
+  const maxModeItemsToShow =
+    constrainedHeight === undefined
+      ? DEFAULT_MAX_MODE_ITEMS_TO_SHOW
+      : Math.max(
+          1,
+          Math.min(
+            DEFAULT_MAX_MODE_ITEMS_TO_SHOW,
+            modeItems.length,
+            (modeListRows ?? 1) - (showModeScrollArrows ? 2 : 0),
+          ),
+        );
 
   // Find the index of the current mode
   const initialModeIndex = modeItems.findIndex(
@@ -109,18 +186,6 @@ export function ApprovalModeDialog({
     { isActive: true },
   );
 
-  // Generate scope message for approval mode setting
-  const otherScopeModifiedMessage = getScopeMessageForSetting(
-    'tools.approvalMode',
-    selectedScope,
-    settings,
-  );
-
-  // Check if user scope is selected but workspace has the setting
-  const showWorkspacePriorityWarning =
-    selectedScope === SettingScope.User &&
-    otherScopeModifiedMessage.toLowerCase().includes('workspace');
-
   return (
     <Box
       borderStyle="round"
@@ -128,6 +193,8 @@ export function ApprovalModeDialog({
       flexDirection="column"
       padding={1}
       width="100%"
+      height={constrainedHeight}
+      overflow="hidden"
     >
       {mode === 'mode' ? (
         <Box flexDirection="column" flexGrow={1}>
@@ -139,15 +206,15 @@ export function ApprovalModeDialog({
               {otherScopeModifiedMessage}
             </Text>
           </Text>
-          <Box height={1} />
+          {showModeSpacer && <Box height={1} />}
           <RadioButtonSelect
             items={modeItems}
             initialIndex={safeInitialModeIndex}
             onSelect={handleModeSelect}
             onHighlight={handleModeHighlight}
             isFocused={mode === 'mode'}
-            maxItemsToShow={10}
-            showScrollArrows={false}
+            maxItemsToShow={maxModeItemsToShow}
+            showScrollArrows={showModeScrollArrows}
             showNumbers={mode === 'mode'}
           />
           {/* Warning when workspace setting will override user setting */}
@@ -170,13 +237,15 @@ export function ApprovalModeDialog({
           initialScope={selectedScope}
         />
       )}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary} wrap="truncate">
-          {mode === 'mode'
-            ? t('(Use Enter to select, Tab to configure scope)')
-            : t('(Use Enter to apply scope, Tab to go back)')}
-        </Text>
-      </Box>
+      {showFooterHint && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} wrap="truncate">
+            {mode === 'mode'
+              ? t('(Use Enter to select, Tab to configure scope)')
+              : t('(Use Enter to apply scope, Tab to go back)')}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }

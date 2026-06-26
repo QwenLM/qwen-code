@@ -244,7 +244,7 @@ export class DingtalkChannel extends ChannelBase {
    * conversation ID — skip the webhook-URL fallback case.
    */
   private isConversationId(chatId: string): boolean {
-    return !!chatId && !chatId.startsWith('http');
+    return !!chatId && !/^https?:\/\//i.test(chatId);
   }
 
   protected override onPromptStart(

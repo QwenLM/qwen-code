@@ -119,6 +119,14 @@ vi.mock('../contexts/VimModeContext.js', async () => {
   const actual = await vi.importActual('../contexts/VimModeContext.js');
   return {
     ...actual,
+    useVimModeState: () => ({
+      vimEnabled: false,
+      vimMode: 'INSERT' as const,
+    }),
+    useVimModeActions: () => ({
+      toggleVimEnabled: mockToggleVimEnabled,
+      setVimMode: mockSetVimMode,
+    }),
     useVimMode: () => ({
       vimEnabled: false,
       vimMode: 'INSERT' as const,
@@ -134,6 +142,7 @@ vi.mock('../contexts/CompactModeContext.js', async () => {
     ...actual,
     useCompactMode: () => ({
       compactMode: false,
+      compactInline: false,
       setCompactMode: mockSetCompactMode,
     }),
   };
@@ -187,8 +196,10 @@ vi.mock('../../utils/languageUtils.js', async () => {
 // const originalConsoleError = console.error;
 
 describe('SettingsDialog', () => {
-  // Simple delay function for remaining tests that need gradual migration
-  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Yield to Ink/React updates without adding broad real-time sleeps.
+  // The string-editing path goes through ink-testing-library's stdin event
+  // stream, which needs a macrotask tick rather than only React microtasks.
+  const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // Custom waitFor utility for ink testing environment (not compatible with @testing-library/react)
   const waitFor = async (

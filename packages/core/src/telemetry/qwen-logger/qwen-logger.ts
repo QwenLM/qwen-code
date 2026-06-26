@@ -31,6 +31,7 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
@@ -649,6 +650,7 @@ export class QwenLogger {
         model: event.model,
         prompt_id: event.prompt_id,
         auth_type: event.auth_type,
+        loop_wakeups_cancelled: event.loop_wakeups_cancelled,
       },
     });
 
@@ -910,6 +912,7 @@ export class QwenLogger {
       properties: {
         skill_name: event.skill_name,
         success: event.success ? 1 : 0,
+        prompt_id: event.prompt_id,
       },
     });
 
@@ -950,6 +953,26 @@ export class QwenLogger {
         error_type: event.error_type,
         attempt_number: event.attempt_number,
         retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
+  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  logApiRetryEvent(event: ApiRetryEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'api_retry', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        attempt_number: event.attempt_number,
+        error_type: event.error_type ?? 'unknown',
+        status_code:
+          event.status_code !== undefined ? String(event.status_code) : '',
+        retry_delay_ms: event.retry_delay_ms,
+        subagent_name: event.subagent_name ?? '',
       },
     });
 
@@ -1048,7 +1071,7 @@ export class QwenLogger {
     if (!proxyUrl) return undefined;
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
-    if (proxyUrl.startsWith('http')) {
+    if (/^https?:\/\//i.test(proxyUrl)) {
       return new HttpsProxyAgent(proxyUrl);
     } else {
       throw new Error('Unsupported proxy type');

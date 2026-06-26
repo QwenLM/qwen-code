@@ -37,6 +37,13 @@ export const MAX_GOAL_ITERATIONS = 50;
 export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
+/**
+ * Minimum /goal iteration count before accepting an `impossible` judge verdict.
+ * Gives the model at least one continuation turn after the judge first flags
+ * impossibility, reducing premature failure from a single bad-judgment turn.
+ * The goal can terminate as failed on the second impossible verdict.
+ */
+export const MIN_IMPOSSIBLE_GOAL_ITERATIONS = 2;
 
 const GOAL_ABORTED_REASON =
   'Goal max iterations reached; cleared. Re-set with `/goal <condition>` if you still need it.';
@@ -184,6 +191,29 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
+    if (
+      verdict.impossible &&
+      latest.iterations >= MIN_IMPOSSIBLE_GOAL_ITERATIONS
+    ) {
+      debugLogger.debug('Goal judge ruled impossible; clearing goal.', {
+        reason: verdict.reason,
+        iterations: latest.iterations,
+      });
+      finishGoal(config, sessionId, latest, {
+        kind: 'failed',
+        condition: latest.condition,
+        iterations: latest.iterations,
+        durationMs: Date.now() - latest.setAt,
+        lastReason: verdict.reason,
+      });
+      return { continue: true };
+    }
+    if (verdict.impossible) {
+      debugLogger.debug(
+        `Impossible goal verdict suppressed: iterations=${latest.iterations} < MIN_IMPOSSIBLE_GOAL_ITERATIONS=${MIN_IMPOSSIBLE_GOAL_ITERATIONS}; continuing.`,
+      );
+    }
+
     // Give the latest assistant output one final evaluation before aborting.
     // The iteration cap is a safety valve for still-not-met verdicts, not a
     // pre-judge hard stop; otherwise the final generated turn could satisfy
@@ -209,9 +239,12 @@ export function createGoalStopHookCallback(args: {
     recordGoalIteration(sessionId, verdict.reason);
     // Keep the judge's free-form diagnostic in goal state/UI only. The Stop
     // hook reason is fed back to the model as the next continuation prompt, so
-    // it must be a fixed instruction derived from the original user goal rather
-    // than untrusted transcript-derived judge text.
-    return { decision: 'block', reason: continuationReasonForGoal(condition) };
+    // it must be fixed text derived from the original goal rather than
+    // untrusted transcript-derived judge text.
+    return {
+      decision: 'block',
+      reason: continuationReasonForGoal(condition),
+    };
   };
 }
 
@@ -243,6 +276,13 @@ export function registerGoalHook(args: {
   sessionId: string;
   condition: string;
   tokensAtStart: number;
+  /**
+   * Iteration count to resume from. Used on session resume so the
+   * MAX_GOAL_ITERATIONS safety cap survives a reload instead of resetting to
+   * zero (which would let an unreachable goal auto-loop another full budget
+   * every resume). Defaults to 0 for a freshly set goal.
+   */
+  initialIterations?: number;
 }): ActiveGoal {
   const { config, sessionId, condition, tokensAtStart } = args;
   const system = config.getHookSystem();
@@ -277,7 +317,7 @@ export function registerGoalHook(args: {
 
   const goal: ActiveGoal = {
     condition,
-    iterations: 0,
+    iterations: Math.max(0, args.initialIterations ?? 0),
     setAt: Date.now(),
     tokensAtStart,
     hookId,

@@ -20,9 +20,12 @@ import { spawn } from 'node:child_process';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
+  const mockSpawn = vi.fn();
+  // Named re-exports must be spelled out for vitest ESM mocking to rebind them.
   return {
     ...actual,
-    spawn: vi.fn(),
+    default: { ...actual, spawn: mockSpawn },
+    spawn: mockSpawn,
   };
 });
 
@@ -274,6 +277,36 @@ describe('relaunchAppInChildProcess', () => {
 
     // Note: Additional integration tests for spawn behavior are complex due to module mocking
     // limitations with ES modules. The core logic is tested in relaunchOnExitCode tests.
+
+    it('should invoke afterSpawn immediately after spawn, before waiting for child exit', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+
+      const afterSpawn = vi.fn();
+      let spawned = false;
+
+      const mockChild = createMockChildProcess(0, false);
+      mockedSpawn.mockImplementation(() => {
+        spawned = true;
+        return mockChild;
+      });
+
+      const promise = relaunchAppInChildProcess([], [], { afterSpawn });
+
+      // Wait until spawn has been called
+      await vi.waitFor(() => {
+        expect(spawned).toBe(true);
+      });
+
+      // afterSpawn must have been called before child exits
+      expect(afterSpawn).toHaveBeenCalledTimes(1);
+
+      // Close the child so the promise resolves
+      mockChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+
+      // afterSpawn should still be called only once (first spawn)
+      expect(afterSpawn).toHaveBeenCalledTimes(1);
+    });
 
     it('should handle null exit code from child process', async () => {
       process.argv = ['/usr/bin/node', '/app/cli.js'];

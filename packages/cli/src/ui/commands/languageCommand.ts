@@ -27,7 +27,7 @@ import {
   OUTPUT_LANGUAGE_AUTO,
   isAutoLanguage,
   resolveOutputLanguage,
-  updateOutputLanguageFile,
+  writeOutputLanguageAndRegisterPath,
 } from '../../utils/languageUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
@@ -84,10 +84,8 @@ async function setUiLanguage(
     };
   }
 
-  // Update i18n system
   await setLanguageAsync(lang);
 
-  // Persist to settings
   if (services.settings?.setValue) {
     try {
       services.settings.setValue(SettingScope.User, 'general.language', lang);
@@ -127,10 +125,8 @@ async function setOutputLanguage(
     // Save 'auto' as-is to settings, or normalize other values
     const settingValue = isAuto ? OUTPUT_LANGUAGE_AUTO : resolved;
 
-    // Update the rule file with the resolved language
-    updateOutputLanguageFile(settingValue);
+    writeOutputLanguageAndRegisterPath(settingValue, context.services.config);
 
-    // Save to settings
     if (context.services.settings?.setValue) {
       try {
         context.services.settings.setValue(
@@ -159,7 +155,6 @@ async function setOutputLanguage(
       }
     }
 
-    // Format display message
     const displayLang = isAuto
       ? `${t('Auto (detect from system)')} → ${resolved}`
       : resolved;

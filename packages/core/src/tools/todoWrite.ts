@@ -14,6 +14,7 @@ import * as path from 'path';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { detectTodoChanges, HookPhase, type TodoItem } from '../hooks/types.js';
 export type { TodoItem } from '../hooks/types.js';
@@ -207,6 +208,12 @@ The assistant did not use the todo list because this is a single command executi
 </reasoning>
 </example>
 
+## Planning with Todos
+
+Before breaking work into low-level edits, use the todo list to reflect the overall approach at a meaningful level (for example: investigate, design, implement, verify). This helps maintain a global view of the task instead of jumping between isolated local changes.
+
+When new information changes your understanding of the task, update the todo structure to reflect the revised plan rather than only appending isolated follow-up items. The todo list should continue to represent the current overall strategy.
+
 ## Task States and Management
 
 1. **Task States**: Use these states to track progress:
@@ -284,7 +291,9 @@ async function writeTodosToFile(
     sessionId: sessionId || 'default',
   };
 
-  await fs.writeFile(todoFilePath, JSON.stringify(data, null, 2), 'utf-8');
+  await atomicWriteFile(todoFilePath, JSON.stringify(data, null, 2), {
+    encoding: 'utf-8',
+  });
 }
 
 function createBlockedTodoResult(

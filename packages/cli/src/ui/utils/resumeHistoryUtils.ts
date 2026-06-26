@@ -17,10 +17,12 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
+  HistoryItemInfo,
   HistoryItemWithoutId,
   IndividualToolCallDisplay,
 } from '../types.js';
-import { ToolCallStatus } from '../types.js';
+import { ToolCallStatus, MessageType } from '../types.js';
+import { t } from '../../i18n/index.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -237,7 +239,15 @@ function convertToHistoryItems(
           | undefined;
         if (!payload) continue;
         if (payload.phase === 'invocation' && payload.rawCommand) {
-          items.push({ type: 'user', text: payload.rawCommand });
+          const sentToModel =
+            typeof payload.sentToModel === 'boolean'
+              ? payload.sentToModel
+              : undefined;
+          items.push({
+            type: 'user',
+            text: payload.rawCommand,
+            ...(sentToModel === undefined ? {} : { sentToModel }),
+          });
         }
         if (payload.phase === 'result') {
           const outputs = payload.outputHistoryItems ?? [];
@@ -277,6 +287,18 @@ function convertToHistoryItems(
             extractTextFromParts(record.message?.parts as Part[]) ||
             fallback;
           items.push({ type: 'notification', text });
+          break;
+        }
+        if (record.subtype === 'mid_turn_user_message') {
+          const payload = record.systemPayload as
+            | { displayText?: string }
+            | undefined;
+          const text =
+            payload?.displayText ||
+            extractTextFromParts(record.message?.parts as Part[]);
+          if (text) {
+            items.push({ type: 'notification', text });
+          }
           break;
         }
         if (pendingAtCommands.length > 0) {
@@ -325,13 +347,11 @@ function convertToHistoryItems(
       case 'assistant': {
         const parts = record.message?.parts as Part[] | undefined;
 
-        // Extract thought content. With no config (standalone picker preview),
-        // default to showing thoughts verbatim (same path as
-        // `!useSummarizedThinking()`).
-        const thoughtText =
-          !config || !config.getContentGenerator().useSummarizedThinking()
-            ? extractThoughtTextFromParts(parts)
-            : '';
+        // The interactive TUI treats thinking as transient live state, so
+        // resumed history should not reintroduce thought rows into scrollback.
+        // With no config (standalone picker preview), keep showing thoughts
+        // verbatim because there is no live loading area in that view.
+        const thoughtText = !config ? extractThoughtTextFromParts(parts) : '';
 
         // Extract text content (non-function-call, non-thought)
         const text = extractTextFromParts(parts);
@@ -362,7 +382,11 @@ function convertToHistoryItems(
             });
             currentToolGroup = [];
           }
-          items.push({ type: 'gemini', text });
+          items.push({
+            type: 'gemini',
+            text,
+            timestamp: new Date(record.timestamp).getTime(),
+          });
         }
 
         // Track function calls for pairing with results
@@ -483,4 +507,79 @@ export function buildResumedHistoryItems(
   }
 
   return items;
+}
+
+/**
+ * Applies the quiet-restore display policy to resumed history items.
+ * Marks each item with `display.suppressOnRestore` so the rendering layer
+ * skips them while the canonical history (used by /rewind turn mapping) is preserved.
+ */
+function applyResumeDisplayPolicy(items: HistoryItem[]): HistoryItem[] {
+  return items.map((item) => ({
+    ...item,
+    display: { ...item.display, suppressOnRestore: true },
+  }));
+}
+
+/**
+ * Creates the summary INFO item shown when resume-time collapse suppresses
+ * the transcript display.
+ */
+function createHistoryCollapseSummaryItem(
+  messageCount: number,
+): HistoryItemInfo & { display: { kind: 'collapse-summary' } } {
+  const n = String(messageCount);
+  return {
+    type: MessageType.INFO,
+    text: t(
+      'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
+      { n },
+    ),
+    display: { kind: 'collapse-summary' },
+  };
+}
+
+/**
+ * Strips the suppressOnRestore flag from a history item's display property.
+ * Used when rewinding into collapsed history to ensure rewound items remain visible.
+ */
+export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
+  if (!item.display?.suppressOnRestore) return item;
+  const { suppressOnRestore: _, ...rest } = item.display;
+  return {
+    ...item,
+    display: Object.keys(rest).length > 0 ? rest : undefined,
+  };
+}
+
+/**
+ * Removes collapse-summary items and strips suppressOnRestore from the rest.
+ * Shared between the rewind path and the expand-now command.
+ */
+export function expandCollapsedHistory(items: HistoryItem[]): HistoryItem[] {
+  return items
+    .filter((item) => item.display?.kind !== 'collapse-summary')
+    .map(stripSuppressOnRestore);
+}
+
+/**
+ * Helper to apply the collapse policy and append the summary item if needed.
+ */
+export function applyCollapsePolicyAndSummary(
+  rawItems: HistoryItem[],
+  collapseOnResume: boolean,
+): HistoryItem[] {
+  if (!collapseOnResume) return rawItems;
+
+  const uiHistoryItems = applyResumeDisplayPolicy(rawItems);
+
+  if (rawItems.length > 0) {
+    const nextId = rawItems[rawItems.length - 1].id + 1;
+    return [
+      ...uiHistoryItems,
+      { id: nextId, ...createHistoryCollapseSummaryItem(rawItems.length) },
+    ];
+  }
+
+  return uiHistoryItems;
 }

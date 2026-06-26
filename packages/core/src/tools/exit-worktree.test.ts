@@ -27,10 +27,19 @@ function makeMockConfig(targetDir = process.cwd()): Config {
   return {
     getTargetDir: vi.fn(() => targetDir),
     getSessionId: vi.fn(() => 'mock-session-id'),
+    // Phase D-2: EnterWorktreeTool (used here for setup) reads this
+    // setting when creating a worktree. Return empty so the symlink
+    // loop is a no-op in tests.
+    getWorktreeSymlinkDirectories: vi.fn(() => []),
   } as unknown as Config;
 }
 
 describe('ExitWorktreeTool', () => {
+  // Real git invocations + user-global hooks can spike to 10-20s when
+  // the suite runs alongside other integ tests. Bump timeouts so the
+  // suite isn't flaky on CI / busy local runs. (Phase C #4174.)
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   describe('metadata', () => {
     it('exposes the correct tool name', () => {
       const tool = new ExitWorktreeTool(makeMockConfig());
@@ -176,6 +185,7 @@ describe('ExitWorktreeTool', () => {
       const enterCfg = {
         getTargetDir: () => repoRoot,
         getSessionId: () => 'session-creator',
+        getWorktreeSymlinkDirectories: () => [],
       } as unknown as Config;
       const enter = new EnterWorktreeTool(enterCfg);
       const inv = enter.build({ name: slug });

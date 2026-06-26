@@ -79,12 +79,8 @@ export class MessageHandler {
    */
   setAuthInteractiveHandler(
     handler: (
-      provider: string,
-      region?: string,
-      apiKey?: string,
-      baseUrl?: string,
-      model?: string,
-      modelIds?: string,
+      config: import('@qwen-code/qwen-code-core').ProviderConfig,
+      inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
     ) => Promise<void>,
   ): void {
     this.router.setAuthInteractiveHandler(handler);

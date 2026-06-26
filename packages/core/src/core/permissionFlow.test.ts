@@ -13,6 +13,7 @@ import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 // Import the functions we're testing
 import {
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   isAutoEditApproved,
@@ -160,6 +161,21 @@ describe('needsConfirmation', () => {
   });
 });
 
+describe('getEffectivePermissionForConfirmation', () => {
+  it('forces protected allow-rule fallback through manual confirmation', () => {
+    expect(getEffectivePermissionForConfirmation('allow', true)).toBe('ask');
+  });
+
+  it('preserves ordinary permission decisions', () => {
+    expect(getEffectivePermissionForConfirmation('allow', false)).toBe('allow');
+    expect(getEffectivePermissionForConfirmation('ask', true)).toBe('ask');
+    expect(getEffectivePermissionForConfirmation('default', true)).toBe(
+      'default',
+    );
+    expect(getEffectivePermissionForConfirmation('deny', true)).toBe('deny');
+  });
+});
+
 describe('isPlanModeBlocked', () => {
   const mockConfirmationDetails = (type: string): ToolCallConfirmationDetails =>
     ({ type }) as unknown as ToolCallConfirmationDetails;
@@ -189,6 +205,18 @@ describe('isPlanModeBlocked', () => {
   it('should not block ask_user_question tool', () => {
     expect(
       isPlanModeBlocked(true, false, true, mockConfirmationDetails('exec')),
+    ).toBe(false);
+  });
+
+  it('should not block enter_plan_mode tool', () => {
+    expect(
+      isPlanModeBlocked(
+        true,
+        false,
+        false,
+        mockConfirmationDetails('exec'),
+        true,
+      ),
     ).toBe(false);
   });
 

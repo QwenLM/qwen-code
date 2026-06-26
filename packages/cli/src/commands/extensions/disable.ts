@@ -8,7 +8,7 @@ import { type CommandModule } from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { getExtensionManager } from './utils.js';
+import { getExtensionManager, resolveExtensionCommandScope } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface DisableArgs {
@@ -19,11 +19,8 @@ interface DisableArgs {
 export async function handleDisable(args: DisableArgs) {
   const extensionManager = await getExtensionManager();
   try {
-    if (args.scope?.toLowerCase() === 'workspace') {
-      extensionManager.disableExtension(args.name, SettingScope.Workspace);
-    } else {
-      extensionManager.disableExtension(args.name, SettingScope.User);
-    }
+    const scope = resolveExtensionCommandScope(args.scope);
+    await extensionManager.disableExtension(args.name, scope);
     writeStdoutLine(
       t('Extension "{{name}}" successfully disabled for scope "{{scope}}".', {
         name: args.name,
@@ -51,21 +48,7 @@ export const disableCommand: CommandModule = {
         default: SettingScope.User,
       })
       .check((argv) => {
-        if (
-          argv.scope &&
-          !Object.values(SettingScope)
-            .map((s) => s.toLowerCase())
-            .includes((argv.scope as string).toLowerCase())
-        ) {
-          throw new Error(
-            t('Invalid scope: {{scope}}. Please use one of {{scopes}}.', {
-              scope: argv.scope as string,
-              scopes: Object.values(SettingScope)
-                .map((s) => s.toLowerCase())
-                .join(', '),
-            }),
-          );
-        }
+        resolveExtensionCommandScope(argv.scope as string | undefined);
         return true;
       }),
   handler: async (argv) => {

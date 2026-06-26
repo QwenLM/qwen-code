@@ -237,6 +237,7 @@ describe('modelConfigResolver', () => {
         });
 
         expect(result.config.timeout).toBeUndefined();
+        expect(result.sources['timeout']).toBeUndefined();
       });
 
       it('negative QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
@@ -265,7 +266,7 @@ describe('modelConfigResolver', () => {
         expect(result.config.timeout).toBeUndefined();
       });
 
-      it('QWEN_CODE_API_TIMEOUT_MS works with float value in OAuth', () => {
+      it('fractional QWEN_CODE_API_TIMEOUT_MS ignored in OAuth', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {},
@@ -275,7 +276,7 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.timeout).toBe(12345);
+        expect(result.config.timeout).toBeUndefined();
       });
 
       it('QWEN_CODE_API_TIMEOUT_MS works with proxy in OAuth path', () => {
@@ -573,7 +574,6 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        // Number() implicitly trims whitespace, so this should parse correctly
         expect(result.config.timeout).toBe(300000);
         expect(result.sources['timeout'].kind).toBe('env');
       });
@@ -782,34 +782,24 @@ describe('modelConfigResolver', () => {
   });
 
   describe('[Additional] timeout env override edge cases', () => {
-    it('handles scientific notation in QWEN_CODE_API_TIMEOUT_MS', () => {
-      const result = resolveModelConfig({
-        authType: AuthType.USE_OPENAI,
-        cli: {},
-        settings: { apiKey: 'key' },
-        env: {
-          OPENAI_API_KEY: 'key',
-          QWEN_CODE_API_TIMEOUT_MS: '1.5e5',
-        },
-      });
-
-      expect(result.config.timeout).toBe(150000);
-      expect(result.sources['timeout'].kind).toBe('env');
-    });
-
-    it('handles hex values in QWEN_CODE_API_TIMEOUT_MS', () => {
+    it.each([
+      ['scientific notation', '1.5e5'],
+      ['hex values', '0x2BF20'],
+      ['fractional values', '12345.67'],
+      ['unsafe integers', String(Number.MAX_SAFE_INTEGER + 1)],
+    ])('ignores %s in QWEN_CODE_API_TIMEOUT_MS', (_label, value) => {
       const result = resolveModelConfig({
         authType: AuthType.USE_OPENAI,
         cli: {},
         settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
         env: {
           OPENAI_API_KEY: 'key',
-          QWEN_CODE_API_TIMEOUT_MS: '0x2BF20', // 180000 in hex
+          QWEN_CODE_API_TIMEOUT_MS: value,
         },
       });
 
-      expect(result.config.timeout).toBe(180000);
-      expect(result.sources['timeout'].kind).toBe('env');
+      expect(result.config.timeout).toBe(30000);
+      expect(result.sources['timeout'].kind).toBe('settings');
     });
 
     it('ignores empty string QWEN_CODE_API_TIMEOUT_MS', () => {
@@ -852,6 +842,114 @@ describe('modelConfigResolver', () => {
         expect(result.config.timeout).toBe(99999);
         expect(result.sources['timeout'].kind).toBe('env');
       }
+    });
+  });
+
+  describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
+    it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
+      // REPRODUCES issue-4219:
+      // When the model is supplied only via OPENAI_MODEL (no modelProviders entry),
+      // resolveGenerationConfig() iterates MODEL_GENERATION_CONFIG_FIELDS but never
+      // calls defaultModalities(). This leaves config.modalities undefined, causing
+      // image attachments to be silently dropped with an "Unsupported <modality>"
+      // message even though the model supports images.
+      //
+      // The modelRegistry path (resolveModelConfig -> resolveModelConfig in modelRegistry.ts)
+      // and the modelsConfig path (applyResolvedModelDefaults) both call defaultModalities()
+      // when generationConfig.modalities is undefined. The env-var-only path does not.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'qwen3.6-35b-a3b',
+        },
+        // No modelProvider — this is the env-var-only path
+      });
+
+      expect(result.config.model).toBe('qwen3.6-35b-a3b');
+
+      // The qwen3.6-35b pattern in modalityDefaults.ts maps to { image: true, video: true }.
+      // The env-var-only path must auto-detect this — just as the modelProviders path does
+      // in modelsConfig.ts applyResolvedModelDefaults() lines 791-797.
+      expect(result.config.modalities).toBeDefined();
+      expect(result.config.modalities?.image).toBe(true);
+      expect(result.config.modalities?.video).toBe(true);
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: modalities defaults to {} for unknown model (text-only)', () => {
+      // Locks the invariant: defaultModalities() returns {} (text-only) for
+      // unknown model patterns, never undefined. After this fix, env-var-only
+      // setups never re-expose `modalities === undefined` for downstream
+      // consumers to misinterpret as "unresolved" (issue #4219).
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'some-unknown-model-xyz',
+        },
+      });
+
+      expect(result.config.modalities).toEqual({});
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('Qwen OAuth path: modalities auto-detected for default coder-model', () => {
+      // resolveGenerationConfig is shared by both the OpenAI and Qwen OAuth
+      // paths; the latter (resolveQwenOAuthConfig) passes the resolved Qwen
+      // OAuth model name (defaults to DEFAULT_QWEN_MODEL = 'coder-model') as
+      // modelId, so the new modalities fallback also fires here.
+      //
+      // modalityDefaults.ts maps /^coder-model$/ to { image: true, video: true }
+      // because the Qwen OAuth coder-model now supports vision (see warning
+      // text at modelConfigResolver.ts ~L330). This test pins that down so a
+      // future edit to MODALITY_PATTERNS doesn't silently regress OAuth.
+      const result = resolveModelConfig({
+        authType: AuthType.QWEN_OAUTH,
+        cli: {},
+        settings: {},
+        env: {},
+      });
+
+      expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+      expect(result.config.modalities).toEqual({ image: true, video: true });
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: explicit settings.generationConfig.modalities is not overridden by fallback', () => {
+      // Locks the `=== undefined` guard: when user explicitly configures
+      // modalities in settings, the fallback must not clobber them with
+      // defaultModalities() — even for a model whose name would otherwise
+      // auto-resolve to multimodal.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          generationConfig: {
+            modalities: {
+              image: false,
+              pdf: false,
+              video: false,
+              audio: false,
+            },
+          },
+        },
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'qwen3.6-35b-a3b', // defaultModalities → { image: true, video: true }
+        },
+      });
+
+      expect(result.config.modalities?.image).toBe(false);
+      expect(result.config.modalities?.video).toBe(false);
+      expect(result.sources['modalities'].kind).toBe('settings');
     });
   });
 });

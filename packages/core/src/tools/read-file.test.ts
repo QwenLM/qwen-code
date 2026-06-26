@@ -158,6 +158,29 @@ describe('ReadFileTool', () => {
         'Limit must be a positive number',
       );
     });
+
+    it('should reject offset or limit for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        offset: 0,
+        limit: 10,
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
+
+    it('should reject pages for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        pages: '1',
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'pages is not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
   });
 
   describe('getDefaultPermission', () => {
@@ -505,6 +528,36 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('Read notebook: test.ipynb');
     });
 
+    it('records truncated notebook reads as not full', async () => {
+      const nbPath = path.join(tempRootDir, 'large.ipynb');
+      const notebook = {
+        cells: Array.from({ length: 200 }, (_, i) => ({
+          cell_type: 'code',
+          source: ['x = ' + 'a'.repeat(600) + '\n'],
+          execution_count: i + 1,
+          outputs: [{ output_type: 'stream', text: ['result '.repeat(100)] }],
+          metadata: {},
+        })),
+        metadata: { language_info: { name: 'python' } },
+      };
+      await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
+      const invocation = tool.build({
+        file_path: nbPath,
+      }) as ToolInvocation<ReadFileToolParams, ToolResult>;
+
+      const result = await invocation.execute(abortSignal);
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('remaining cells truncated');
+      expect(result.llmContent).not.toContain('Showing lines');
+
+      const status = fileReadCache.check(fs.statSync(nbPath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(false);
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
+
     it('should reject invalid pages parameter', () => {
       const params: ReadFileToolParams = {
         file_path: '/tmp/test.pdf',
@@ -544,7 +597,9 @@ describe('ReadFileTool', () => {
         file_path: path.join(tempRootDir, 'test.txt'),
         pages: '',
       };
-      expect(() => tool.build(params)).not.toThrow();
+      const invocation = tool.build(params);
+
+      expect(invocation.params.pages).toBeUndefined();
     });
 
     it('should support offset and limit for text files', async () => {
@@ -643,6 +698,50 @@ describe('ReadFileTool', () => {
         // Placeholder must not echo the original content.
         expect(second.llmContent).not.toContain('hello world');
         expect(second.returnDisplay).toMatch(/^Unchanged: /);
+      });
+
+      it('re-emits bytes (no placeholder) after the read was evicted from history by microcompaction (issue #4239)', async () => {
+        const filePath = path.join(tempRootDir, 'evicted.txt');
+        await fsp.writeFile(filePath, 'hello world', 'utf-8');
+
+        const first = await read({ file_path: filePath });
+        expect(first.llmContent).toBe('hello world');
+
+        // Simulate idle microcompaction blanking this read's output:
+        // the bytes are no longer quotable from history.
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        // The fast-path must NOT serve a placeholder pointing at content
+        // the model can no longer retrieve — it must re-emit real bytes.
+        const second = await read({ file_path: filePath });
+        expect(second.llmContent).toBe('hello world');
+        expect(second.llmContent).not.toMatch(/unchanged since/);
+
+        // And a re-read re-arms the fast-path (bytes are back in history).
+        const third = await read({ file_path: filePath });
+        expect(third.llmContent).toMatch(
+          /unchanged since last read in this session/,
+        );
+      });
+
+      it('a partial read after eviction does NOT re-arm the placeholder (Codex P2)', async () => {
+        const filePath = path.join(tempRootDir, 'evicted-partial.txt');
+        await fsp.writeFile(filePath, 'line1\nline2\nline3\n', 'utf-8');
+
+        // Full read, then microcompaction blanks it.
+        await read({ file_path: filePath });
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        // A partial (ranged) read of the unchanged file: only a slice
+        // is now resident, not the full bytes.
+        const partial = await read({ file_path: filePath, limit: 1 });
+        expect(partial.llmContent).not.toMatch(/unchanged since/);
+
+        // A follow-up full Read must STILL re-emit real bytes — the
+        // full content is not in history, only the slice is.
+        const full = await read({ file_path: filePath });
+        expect(full.llmContent).toContain('line3');
+        expect(full.llmContent).not.toMatch(/unchanged since/);
       });
 
       it('serves a fresh full Read after an external modification (stale)', async () => {
@@ -993,6 +1092,63 @@ describe('ReadFileTool', () => {
         };
         const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
+      });
+
+      it('should throw error if path is ignored by .agentignore or .aiignore', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.agentignore'),
+          'agent-secret.txt\n',
+        );
+        await fsp.writeFile(
+          path.join(tempRootDir, '.aiignore'),
+          'ai-secret.txt\n',
+        );
+        const agentIgnoredFilePath = path.join(tempRootDir, 'agent-secret.txt');
+        const aiIgnoredFilePath = path.join(tempRootDir, 'ai-secret.txt');
+        await fsp.writeFile(agentIgnoredFilePath, 'content', 'utf-8');
+        await fsp.writeFile(aiIgnoredFilePath, 'content', 'utf-8');
+
+        expect(() => tool.build({ file_path: agentIgnoredFilePath })).toThrow(
+          /\.agentignore/,
+        );
+        expect(() => tool.build({ file_path: aiIgnoredFilePath })).toThrow(
+          /\.aiignore/,
+        );
+      });
+
+      it('should throw error using configured custom ignore file display', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.cursorignore'),
+          'cursor-secret.txt\n',
+        );
+        const customConfig = {
+          getFileService: () =>
+            new FileDiscoveryService(tempRootDir, ['.cursorignore']),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true, audio: true, video: true },
+          }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const customTool = new ReadFileTool(customConfig);
+        const ignoredFilePath = path.join(tempRootDir, 'cursor-secret.txt');
+        await fsp.writeFile(ignoredFilePath, 'content', 'utf-8');
+
+        expect(() => customTool.build({ file_path: ignoredFilePath })).toThrow(
+          /\.cursorignore/,
+        );
       });
 
       it('should throw error if file is in an ignored directory', async () => {

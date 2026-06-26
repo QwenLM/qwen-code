@@ -97,6 +97,32 @@ describe('GeminiContentGenerator', () => {
     expect(response).toBe(expectedResponse);
   });
 
+  it('passes ordered multi-part startup reminder content through unchanged', async () => {
+    const request = {
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: '<system-reminder>\ndeferred tools' },
+            { text: '<system-reminder>\nstartup context' },
+          ],
+        },
+      ],
+    };
+    mockGoogleGenAI.models.generateContent.mockResolvedValue({
+      responseId: 'test-id',
+    });
+
+    await generator.generateContent(request, 'prompt-id');
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contents: request.contents,
+      }),
+    );
+  });
+
   it('should call generateContentStream on the underlying model', async () => {
     const request = { model: 'gemini-1.5-flash', contents: [] };
     const mockStream = (async function* () {

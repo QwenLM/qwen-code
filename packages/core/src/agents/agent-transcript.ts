@@ -33,6 +33,7 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import type { SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { FunctionDeclaration, Content } from '@google/genai';
@@ -41,6 +42,11 @@ const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
 export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+/** Root dir holding every session's subagent transcripts: `<projectDir>/subagents/`. */
+export function getSubagentsRootDir(projectDir: string): string {
+  return path.join(projectDir, 'subagents');
 }
 
 /**
@@ -59,8 +65,7 @@ export function getSubagentSessionDir(
   // Sanitize sessionId defensively (UUIDs are safe; resumed/external IDs
   // could carry path-traversal bytes).
   return path.join(
-    projectDir,
-    'subagents',
+    getSubagentsRootDir(projectDir),
     sanitizeFilenameComponent(sessionId),
   );
 }
@@ -108,6 +113,8 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /** Launch-time CLI/runtime flags that should survive process restart. */
+  persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
   /** UI hint preserved for resumed task rows. */
@@ -116,6 +123,17 @@ export interface AgentMeta {
   resumeCount?: number;
   /** Last terminal error, if any. */
   lastError?: string;
+}
+
+export interface AgentPersistedCliFlags {
+  /** Mirrors resolvedApprovalMode; kept here so the restored flag set is explicit. */
+  approvalMode?: string;
+  bare?: boolean;
+  sandbox?: SandboxConfig | null;
+  screenReader?: boolean;
+  model?: string;
+  maxSessionTurns?: number;
+  maxToolCalls?: number;
 }
 
 /**

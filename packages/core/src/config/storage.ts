@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -21,6 +22,16 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
+
+function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
+  const relativePath = path.relative(parentPath, childPath);
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith(`..${path.sep}`) &&
+      relativePath !== '..' &&
+      !path.isAbsolute(relativePath))
+  );
+}
 
 export class Storage {
   private readonly targetDir: string;
@@ -61,6 +72,22 @@ export class Storage {
       resolved = cwd ? path.resolve(cwd, resolved) : path.resolve(resolved);
     }
     return resolved;
+  }
+
+  /**
+   * Sanitizes a session id for use as a plan filename.
+   *
+   * Plan files are keyed by session id, but the raw id is public SDK input.
+   * Strip directory separators and Windows-invalid filename characters so a
+   * hostile value cannot escape the plans directory.
+   */
+  static sanitizePlanSessionId(sessionId: string): string {
+    const safeName = path
+      .basename(sessionId.replace(/\\/g, '/'))
+      .replace(/^\.+/g, '_')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[<>:"|?*\x00-\x1F]/g, '_');
+    return safeName || '_';
   }
 
   private static resolveRuntimeBaseDir(
@@ -179,12 +206,96 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), IDE_DIR_NAME);
   }
 
-  static getPlansDir(): string {
+  /**
+   * Resolves pathToResolve by realpathing its deepest existing ancestor and
+   * appending the not-yet-created remainder.
+   */
+  private static resolvePathThroughExistingAncestor(
+    pathToResolve: string,
+  ): string {
+    let candidate = pathToResolve;
+    while (true) {
+      try {
+        const realCandidate = fs.realpathSync(candidate);
+        const remainder = path.relative(candidate, pathToResolve);
+        return path.join(realCandidate, remainder);
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw err;
+        }
+        const parent = path.dirname(candidate);
+        if (parent === candidate) {
+          return pathToResolve;
+        }
+        candidate = parent;
+      }
+    }
+  }
+
+  /**
+   * Checks whether {@link childPath} resides within {@link parentPath},
+   * resolving symbolic links to prevent traversal bypass attacks.
+   */
+  private static isPathWithinDirectory(
+    childPath: string,
+    parentPath: string,
+  ): boolean {
+    const realParent = Storage.resolvePathThroughExistingAncestor(parentPath);
+    const realChild = Storage.resolvePathThroughExistingAncestor(childPath);
+
+    return isResolvedPathWithinDirectory(realChild, realParent);
+  }
+
+  static assertPathWithinDirectory(
+    childPath: string,
+    parentPath: string,
+    errorMessage: string,
+  ): void {
+    if (!Storage.isPathWithinDirectory(childPath, parentPath)) {
+      throw new FatalConfigError(errorMessage);
+    }
+  }
+
+  static getPlansDir(
+    projectRoot?: string | null,
+    plansDirectory?: string | null,
+  ): string {
+    const configuredPlansDirectory = plansDirectory?.trim();
+    if (configuredPlansDirectory) {
+      if (!projectRoot) {
+        throw new FatalConfigError(
+          'projectRoot is required when plansDirectory is configured.',
+        );
+      }
+
+      const resolvedProjectRoot = path.resolve(projectRoot);
+      const resolvedPlansDirectory = Storage.resolvePath(
+        configuredPlansDirectory,
+        resolvedProjectRoot,
+      );
+
+      Storage.assertPathWithinDirectory(
+        resolvedPlansDirectory,
+        resolvedProjectRoot,
+        `plansDirectory must resolve within the project root.`,
+      );
+
+      return resolvedPlansDirectory;
+    }
+
     return path.join(Storage.getGlobalQwenDir(), PLANS_DIR_NAME);
   }
 
-  static getPlanFilePath(sessionId: string): string {
-    return path.join(Storage.getPlansDir(), `${sessionId}.md`);
+  static getPlanFilePath(
+    sessionId: string,
+    projectRoot?: string | null,
+    plansDirectory?: string | null,
+  ): string {
+    // Kept for tests and SDK callers that still use Storage helpers directly.
+    return path.join(
+      Storage.getPlansDir(projectRoot, plansDirectory),
+      `${Storage.sanitizePlanSessionId(sessionId)}.md`,
+    );
   }
 
   static getGlobalBinDir(): string {
@@ -215,6 +326,10 @@ export class Storage {
     return targetDir;
   }
 
+  getToolResultsDir(): string {
+    return path.join(this.getProjectTempDir(), 'tool-results');
+  }
+
   ensureProjectTempDirExists(): void {
     fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
   }
@@ -227,19 +342,53 @@ export class Storage {
     return this.targetDir;
   }
 
-  getHistoryDir(): string {
-    const hash = getProjectHash(this.getProjectRoot());
-    const historyDir = path.join(Storage.getRuntimeBaseDir(), 'history');
-    const targetDir = path.join(historyDir, hash);
-    return targetDir;
-  }
-
   getWorkspaceSettingsPath(): string {
     return path.join(this.getQwenDir(), 'settings.json');
   }
 
   getProjectCommandsDir(): string {
     return path.join(this.getQwenDir(), 'commands');
+  }
+
+  /**
+   * Project-level saved-workflow scripts directory: `<targetDir>/.qwen/workflows`.
+   * Saved workflow scripts (`<name>.js`) here are surfaced as slash commands
+   * and resolvable by `workflow('<name>')` from inside a running workflow.
+   */
+  getProjectWorkflowsDir(): string {
+    return path.join(this.getQwenDir(), 'workflows');
+  }
+
+  /**
+   * User-level saved-workflow scripts directory: `~/.qwen/workflows`. User
+   * scope is lower-precedence than project scope when the same `<name>.js`
+   * exists in both.
+   */
+  static getUserWorkflowsDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'workflows');
+  }
+
+  /**
+   * Per-run workflow artifact directory: `<projectDir>/workflows`. Holds
+   * completed-run snapshot JSON files (`<runId>.json`) for the `/workflows`
+   * recent list, and per-run resume journals (`<runId>/journal.jsonl`).
+   */
+  getWorkflowRunsDir(): string {
+    return path.join(this.getProjectDir(), 'workflows');
+  }
+
+  /**
+   * Path to the persisted snapshot of a completed workflow run.
+   */
+  getWorkflowRunSnapshotPath(runId: string): string {
+    return path.join(this.getWorkflowRunsDir(), `${runId}.json`);
+  }
+
+  /**
+   * Path to the resume journal for an in-progress / resumable workflow run.
+   */
+  getWorkflowRunJournalPath(runId: string): string {
+    return path.join(this.getWorkflowRunsDir(), runId, 'journal.jsonl');
   }
 
   /**

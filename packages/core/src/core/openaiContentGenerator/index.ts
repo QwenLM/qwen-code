@@ -14,9 +14,9 @@ import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -29,9 +29,9 @@ export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
-  OpenRouterOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -76,12 +76,8 @@ export function determineProvider(
     );
   }
 
-  // Check for OpenRouter provider
-  if (OpenRouterOpenAICompatibleProvider.isOpenRouterProvider(config)) {
-    return new OpenRouterOpenAICompatibleProvider(
-      contentGeneratorConfig,
-      cliConfig,
-    );
+  if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {
+    return new MiMoOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
   }
 
   // Check for ModelScope provider

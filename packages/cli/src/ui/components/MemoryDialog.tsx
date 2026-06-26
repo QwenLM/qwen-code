@@ -110,15 +110,27 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   const launchEditor = useLaunchEditor();
   const [error, setError] = useState<string | null>(null);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
-  // 'autoMemory' | 'autoDream' = focus on that toggle row; 'list' = focus on the file list
+  // 'autoMemory' | 'autoDream' | 'autoSkill' | 'autoSkillConfirm' = focus on that toggle row; 'list' = focus on the file list
   const [focusedSection, setFocusedSection] = useState<
-    'autoMemory' | 'autoDream' | 'list'
+    'autoMemory' | 'autoDream' | 'autoSkill' | 'autoSkillConfirm' | 'list'
   >('list');
+  // Read the initial toggle state from the live merged settings rather than
+  // the Config snapshot: Config is frozen at startup and never reflects a
+  // setValue() write, so reopening the dialog would otherwise show stale state.
+  const bareMode = config.getBareMode();
+  const readToggle = (value: boolean | undefined): boolean =>
+    !bareMode && (value ?? true);
   const [autoMemoryOn, setAutoMemoryOn] = useState(() =>
-    config.getManagedAutoMemoryEnabled(),
+    readToggle(loadedSettings.merged.memory?.enableManagedAutoMemory),
   );
   const [autoDreamOn, setAutoDreamOn] = useState(() =>
-    config.getManagedAutoDreamEnabled(),
+    readToggle(loadedSettings.merged.memory?.enableManagedAutoDream),
+  );
+  const [autoSkillOn, setAutoSkillOn] = useState(() =>
+    readToggle(loadedSettings.merged.memory?.enableAutoSkill),
+  );
+  const [autoSkillConfirmOn, setAutoSkillConfirmOn] = useState(() =>
+    readToggle(loadedSettings.merged.memory?.autoSkillConfirm ?? true),
   );
   const [lastDreamAt, setLastDreamAt] = useState<number | null>(null);
 
@@ -271,6 +283,26 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     setAutoDreamOn(newValue);
   }, [autoDreamOn, loadedSettings]);
 
+  const handleToggleAutoSkill = useCallback(() => {
+    const newValue = !autoSkillOn;
+    loadedSettings.setValue(
+      SettingScope.Workspace,
+      'memory.enableAutoSkill',
+      newValue,
+    );
+    setAutoSkillOn(newValue);
+  }, [autoSkillOn, loadedSettings]);
+
+  const handleToggleAutoSkillConfirm = useCallback(() => {
+    const newValue = !autoSkillConfirmOn;
+    loadedSettings.setValue(
+      SettingScope.Workspace,
+      'memory.autoSkillConfirm',
+      newValue,
+    );
+    setAutoSkillConfirmOn(newValue);
+  }, [autoSkillConfirmOn, loadedSettings]);
+
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
@@ -297,8 +329,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
           return;
         }
         if (keyMatchers[Command.SELECTION_DOWN](key)) {
-          setFocusedSection('list');
-          setHighlightedIndex(0);
+          setFocusedSection('autoSkill');
           return;
         }
         if (key.name === 'return') {
@@ -308,10 +339,43 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         return;
       }
 
+      if (focusedSection === 'autoSkill') {
+        if (keyMatchers[Command.SELECTION_UP](key)) {
+          setFocusedSection('autoDream');
+          return;
+        }
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
+          setFocusedSection('autoSkillConfirm');
+          return;
+        }
+        if (key.name === 'return') {
+          handleToggleAutoSkill();
+          return;
+        }
+        return;
+      }
+
+      if (focusedSection === 'autoSkillConfirm') {
+        if (keyMatchers[Command.SELECTION_UP](key)) {
+          setFocusedSection('autoSkill');
+          return;
+        }
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
+          setFocusedSection('list');
+          setHighlightedIndex(0);
+          return;
+        }
+        if (key.name === 'return') {
+          handleToggleAutoSkillConfirm();
+          return;
+        }
+        return;
+      }
+
       // focusedSection === 'list'
       if (keyMatchers[Command.SELECTION_UP](key)) {
         if (highlightedIndex === 0) {
-          setFocusedSection('autoDream');
+          setFocusedSection('autoSkillConfirm');
         } else {
           setHighlightedIndex((current) => current - 1);
         }
@@ -373,6 +437,30 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
           {t('Auto-dream: {{status}} · {{lastDream}} · /dream to run', {
             status: autoDreamOn ? t('on') : t('off'),
             lastDream: dreamStatusText,
+          })}
+        </Text>
+        <Text
+          color={
+            focusedSection === 'autoSkill'
+              ? theme.status.success
+              : theme.text.secondary
+          }
+        >
+          {focusedSection === 'autoSkill' ? '› ' : '  '}
+          {t('Auto-skill: {{status}}', {
+            status: autoSkillOn ? t('on') : t('off'),
+          })}
+        </Text>
+        <Text
+          color={
+            focusedSection === 'autoSkillConfirm'
+              ? theme.status.success
+              : theme.text.secondary
+          }
+        >
+          {focusedSection === 'autoSkillConfirm' ? '› ' : '  '}
+          {t('Confirm auto-skills before saving: {{status}}', {
+            status: autoSkillConfirmOn ? t('on') : t('off'),
           })}
         </Text>
       </Box>

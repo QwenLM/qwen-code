@@ -32,6 +32,16 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain('User prefers terse responses.');
   });
 
+  it('warns extraction not to save MCP tool schemas or failed calls', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+
+    expect(prompt).toContain(
+      'MCP tool names, parameter schemas, field mappings, guessed tool-call formats, or raw failed tool-call transcripts',
+    );
+    expect(prompt).toContain('confirmed durable workaround');
+    expect(prompt).toContain('live tool definitions are authoritative');
+  });
+
   it('appends managed auto-memory after existing hierarchical memory', () => {
     const result = appendManagedAutoMemoryToUserMemory(
       '--- Context from: QWEN.md ---\nProject rules',

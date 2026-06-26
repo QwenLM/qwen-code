@@ -30,6 +30,46 @@ import {
 
 const debugLogger = createDebugLogger('CODE_COLORIZER');
 
+// Regex for structural box-drawing characters that are strong indicators of
+// ASCII art/diagrams. These characters (│ ├ └ ┌ ┐ ┘ ┬ ┴ ┼) almost never
+// appear in real code — their presence is a reliable signal of diagram content.
+const STRUCTURAL_BOX_RE = /[│├└┌┐┘┬┴┼]/;
+
+// Regex for detecting high ratio of CJK characters (for Chinese text blocks).
+const CJK_RE = /[\u4E00-\u9FFF\u3400-\u4DBF]/g; // CJK Unified + Extension A
+
+/**
+ * Heuristic: detect lines that are unlikely to be real code and would confuse
+ * `lowlight.highlightAuto()`. Box-drawing characters in unlabeled code blocks
+ * (e.g., ASCII art timelines, diagrams) can trigger unexpected language
+ * grammars and produce anomalous HAST trees that crash the renderer.
+ *
+ * Detection strategy:
+ * 1. Any structural box-drawing char (│ ├ └ ┌ etc.) → almost certainly a diagram
+ * 2. High CJK ratio (>30%) → Chinese text block that confuses auto-detection
+ *
+ * Returns `true` if the line should skip `highlightAuto` and render as plain text.
+ */
+export function looksLikeDiagramOrArt(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return false;
+
+  // Strategy 1: Structural box-drawing characters are a strong signal.
+  // These characters (│ ├ └ ┌ ┐ ┘ ┬ ┴ ┼) almost never appear in real code.
+  if (STRUCTURAL_BOX_RE.test(trimmed)) {
+    return true;
+  }
+
+  // Strategy 2: High CJK ratio indicates a Chinese text block.
+  const cjkMatches = trimmed.match(CJK_RE) || [];
+  const totalChars = trimmed.replace(/\s/g, '').length;
+  if (totalChars > 0 && cjkMatches.length / totalChars > 0.3) {
+    return true;
+  }
+
+  return false;
+}
+
 // Lowlight is heavy (~1.5 MB bundled, ~36–60 ms V8 parse). It's loaded lazily
 // from `./lowlightLoader.js` via dynamic import so it lives in a separate
 // esbuild chunk that's only parsed once a code block actually needs
@@ -138,6 +178,15 @@ function highlightAndRenderLine(
   if (!lowlight) {
     return line;
   }
+
+  // When language is unspecified (null), skip highlightAuto for lines that
+  // look like diagrams or ASCII art. Box-drawing + CJK + arrow characters
+  // can confuse lowlight's auto-detection, producing anomalous HAST trees
+  // that crash the renderer during React commit phase (Yoga layout).
+  if (!language && looksLikeDiagramOrArt(line)) {
+    return line;
+  }
+
   try {
     const getHighlightedLine = () =>
       !language || !lowlight.registered(language)

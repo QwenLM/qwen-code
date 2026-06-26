@@ -21,7 +21,7 @@ import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath } from '../memory/paths.js';
 import {
   FileEncoding,
   needsUtf8Bom,
@@ -359,7 +359,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    */
   async getDefaultPermission(): Promise<PermissionDecision> {
     const projectRoot = this.config.getProjectRoot();
-    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+    if (isAnyAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -427,17 +427,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return `Create ${shortenPath(relativePath)}`;
     }
 
-    const oldStringSnippet =
-      this.params.old_string.split('\n')[0].substring(0, 30) +
-      (this.params.old_string.length > 30 ? '...' : '');
-    const newStringSnippet =
-      this.params.new_string.split('\n')[0].substring(0, 30) +
-      (this.params.new_string.length > 30 ? '...' : '');
-
     if (this.params.old_string === this.params.new_string) {
       return `No file changes to ${shortenPath(relativePath)}`;
     }
-    return `${shortenPath(relativePath)}: ${oldStringSnippet} => ${newStringSnippet}`;
+    return shortenPath(relativePath);
   }
 
   /**
@@ -797,6 +790,29 @@ Expectation for required parameters:
     params: EditToolParams,
   ): ToolInvocation<EditToolParams, ToolResult> {
     return new EditToolInvocation(this.config, params);
+  }
+
+  override toAutoClassifierInput(
+    params: EditToolParams,
+  ): Record<string, unknown> {
+    const oldStr = params.old_string ?? '';
+    const newStr = params.new_string ?? '';
+    // 300 chars is enough headroom for the classifier to spot a malicious
+    // registry / shell / env line that hides behind a benign-looking
+    // prefix (~80 chars). In-workspace edits take the acceptEdits fast-
+    // path and never reach this projection; the preview is therefore
+    // only consulted for the smaller set of out-of-workspace writes
+    // (~/.npmrc, /etc/hosts, etc.) — exactly the case where the
+    // classifier needs the longer window.
+    return {
+      file_path: params.file_path,
+      old_string_preview: oldStr.slice(0, 300),
+      new_string_preview: newStr.slice(0, 300),
+      old_string_truncated: oldStr.length > 300,
+      new_string_truncated: newStr.length > 300,
+      lines_changed:
+        (newStr.match(/\n/g)?.length ?? 0) - (oldStr.match(/\n/g)?.length ?? 0),
+    };
   }
 
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {

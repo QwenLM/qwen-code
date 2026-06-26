@@ -17,6 +17,7 @@ import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
 import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 export const ScreenReaderAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -24,6 +25,11 @@ export const ScreenReaderAppLayout: React.FC = () => {
   const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
     uiState.terminalHeight,
   );
+  const dialogMaxHeight = getDialogMaxHeight(
+    uiState.terminalHeight,
+    uiState.staticExtraHeight,
+  );
+  const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -39,7 +45,13 @@ export const ScreenReaderAppLayout: React.FC = () => {
       </Box>
 
       {uiState.dialogsVisible ? (
-        <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
+        <Box
+          marginX={2}
+          flexDirection="column"
+          width={uiState.mainAreaWidth}
+          height={dialogHeight}
+          overflow={uiState.constrainHeight ? 'hidden' : undefined}
+        >
           <DialogManager
             terminalWidth={uiState.terminalWidth}
             addItem={uiState.historyManager.addItem}

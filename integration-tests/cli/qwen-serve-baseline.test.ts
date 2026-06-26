@@ -24,30 +24,42 @@
  * catastrophic-regression upper bounds (e.g. RSS at 1 session < 500 MB);
  * everything else is reported into the snapshot.
  *
- * POSIX only. The harness uses `ps` + `pgrep`; Windows is skipped via the
- * `describe.skip` gate at the bottom of this file (matches the existing
- * `qwen-serve-streaming.test.ts:53` precedent).
+ * POSIX only. The harness uses `ps` + `pgrep` against the host process
+ * table. Windows is skipped (no `ps`/`pgrep`); Docker/Podman sandbox is
+ * also skipped because the daemon's `qwen --acp` child and its MCP
+ * grandchildren run inside the sandbox container's PID namespace, which
+ * host-side `pgrep -P` cannot observe — the descendant walk would always
+ * see zero MCP grandchildren and time out. Same rationale and skip shape
+ * as `acp-integration.test.ts` / `cron-tools.test.ts`.
  */
 
-import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-import { EventBus } from '../../packages/cli/src/serve/eventBus.js';
+import { EventBus } from '../../packages/cli/src/serve/event-bus.js';
 import {
   spawnDaemon,
   startRssPolling,
   countDescendants,
   percentiles,
   writeWorkspaceSettings,
+  approveWorkspaceMcpServers,
+  gitHead,
+  makeTempWorkspace,
+  sleep,
   type SpawnedDaemon,
   type DescendantCount,
   type Percentiles,
 } from './_daemon-harness.js';
+import {
+  resolveOutputDir,
+  formatPercentiles,
+  writeSnapshotArtifacts,
+  collectPlatformInfo,
+} from './_daemon-perf-report.js';
 
 // Minimal type-shape for the SSE backpressure unit suite — we only assert
 // `.type`, so we avoid coupling tests to the full BridgeEvent surface.
@@ -55,8 +67,16 @@ interface BridgeEventLike {
   type: string;
 }
 
-// Skip immediately on Windows — the helpers shell out to `ps` / `pgrep`.
-const SKIP = process.platform === 'win32';
+// Skip on Windows (helpers shell out to `ps` / `pgrep`) and under
+// Docker/Podman sandbox (the daemon subtree runs in a separate PID
+// namespace the host `pgrep` can't observe — matches the existing
+// `acp-integration.test.ts` / `cron-tools.test.ts` skip precedent).
+const SKIP =
+  process.platform === 'win32' ||
+  Boolean(
+    process.env['QWEN_SANDBOX'] &&
+      process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false',
+  );
 
 // Read iteration tunings from env (documented in #4175 PR 1 plan).
 const HEAVY = process.env['QWEN_BASELINE_HEAVY'] === '1';
@@ -95,10 +115,7 @@ const MCP_FIXTURE_PGREP_FILTER = 'idle-mcp/server\\.mjs';
 const MCP_DESCENDANT_WAIT_TIMEOUT_MS = 10_000;
 const MCP_DESCENDANT_POLL_MS = 250;
 const RSS_DROPPED_SAMPLE_RATIO_MAX = 0.2;
-const RUN_TS = new Date().toISOString().replace(/[:.]/g, '').replace(/Z$/, '');
-const OUTPUT_DIR =
-  process.env['INTEGRATION_TEST_FILE_DIR'] ??
-  path.join(process.cwd(), '.integration-tests', `baseline-${RUN_TS}`);
+const OUTPUT_DIR = resolveOutputDir('baseline');
 
 // Catastrophic-regression upper bounds. These are intentionally loose —
 // tightening them is a deliberate one-line PR after a regression is
@@ -172,11 +189,7 @@ const snapshot: SnapshotShape = {
   version: 1,
   capturedAt: new Date().toISOString(),
   gitCommit: gitHead(),
-  platform: {
-    os: process.platform,
-    arch: process.arch,
-    nodeVersion: process.version,
-  },
+  platform: collectPlatformInfo(),
   notes: [
     'Daemon defaults to sessionScope: "single", so N successive ' +
       'createOrAttachSession calls against the same workspace return the ' +
@@ -194,27 +207,6 @@ const snapshot: SnapshotShape = {
     heavy: HEAVY,
   },
 };
-
-function gitHead(): string | null {
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      timeout: 2_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
-function makeTempWorkspace(label: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `qwen-baseline-${label}-`));
-  return dir;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -395,13 +387,15 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         const ws = makeTempWorkspace('mcp');
         let daemon: SpawnedDaemon | undefined;
         try {
-          writeWorkspaceSettings(ws, {
-            mcpServers: {
-              idle1: { command: 'node', args: [IDLE_MCP_PATH] },
-              idle2: { command: 'node', args: [IDLE_MCP_PATH] },
-            },
-          });
-          daemon = await spawnDaemon({ workspaceCwd: ws });
+          const mcpServers = {
+            idle1: { command: 'node', args: [IDLE_MCP_PATH] },
+            idle2: { command: 'node', args: [IDLE_MCP_PATH] },
+          };
+          writeWorkspaceSettings(ws, { mcpServers });
+          // Workspace-scoped servers are gated (#4615); pre-approve so the
+          // daemon's acp child connects them instead of skipping as pending.
+          const env = approveWorkspaceMcpServers(ws, mcpServers);
+          daemon = await spawnDaemon({ workspaceCwd: ws, env });
 
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
           const at1 = await waitForMcpGrandchildren(
@@ -450,6 +444,88 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
           fs.rmSync(ws, { recursive: true, force: true });
         }
       }, 120_000);
+
+      // PR 14b cross-check: validate the daemon's in-process MCP
+      // accounting on `GET /workspace/mcp` against external `pgrep -P`
+      // measurement.
+      //
+      // Architectural note (F2 workspace pool): the daemon hosts a
+      // workspace-shared MCP transport pool (`QwenAgent.mcpPool`).
+      // All sessions of a workspace share ONE transport per configured
+      // server, so pgrep observes exactly `MCP_SERVERS_CONFIGURED`
+      // grandchildren regardless of session count. (Pre-F2, bootstrap
+      // + per-session Configs each ran their own `McpClientManager`,
+      // and this test asserted the historical 2×N duplication.)
+      // Pool accounting surfaces per server cell as `entryCount` /
+      // `entrySummary`; the top-level `clientCount` field reflects the
+      // workspace budget controller's reserved count — 0 when budgets
+      // are off (this suite), NOT the live transport count.
+      //
+      // What this test validates:
+      // 1. pgrep observes exactly N grandchildren after a session is
+      //    created — encoded literally so a refactor that reintroduces
+      //    per-session MCP children fails this assertion and forces a
+      //    deliberate test update (same tripwire spirit as the pre-F2
+      //    2×N assertion this replaces).
+      // 2. Pool accounting is honest: per-server `entryCount` sums to
+      //    the observed pgrep count (no amplification slack at idle —
+      //    the fixtures are stdio-only).
+      // 3. `clientCount` NEVER exceeds the observed pgrep count —
+      //    the original "snapshot must never over-report" guard.
+      //
+      // Skip-gated like the parent describe (POSIX, non-sandbox).
+      it('pool accounting matches external pgrep observation', async () => {
+        const ws = makeTempWorkspace('mcp-counter');
+        let daemon: SpawnedDaemon | undefined;
+        try {
+          const mcpServers = {
+            idle1: { command: 'node', args: [IDLE_MCP_PATH] },
+            idle2: { command: 'node', args: [IDLE_MCP_PATH] },
+          };
+          writeWorkspaceSettings(ws, { mcpServers });
+          // Workspace-scoped servers are gated (#4615); pre-approve so the
+          // daemon's acp child connects them instead of skipping as pending.
+          const env = approveWorkspaceMcpServers(ws, mcpServers);
+          daemon = await spawnDaemon({ workspaceCwd: ws, env });
+          await daemon.client.createOrAttachSession({ workspaceCwd: ws });
+
+          // Wait until the OS sees the full pooled set
+          // (`MCP_SERVERS_CONFIGURED` grandchildren — see the
+          // architectural note above), then read the snapshot.
+          // pgrep first to lock the comparison floor; snapshot
+          // second so the daemon can't sneak in a new connect
+          // between the two reads.
+          const observed = await waitForMcpGrandchildren(
+            daemon.daemon.pid!,
+            MCP_SERVERS_CONFIGURED,
+          );
+          const snapshot = await daemon.client.workspaceMcp();
+
+          // (1) One pooled transport per configured server — no
+          // per-session amplification. If this fails with MORE
+          // children, per-session MCP spawning has been reintroduced;
+          // update the architectural note above deliberately.
+          expect(observed.mcpGrandchildren.length).toBe(MCP_SERVERS_CONFIGURED);
+          // (2) Pool accounting is honest: entryCount sums to the
+          // observed process count. Structural narrowing: the daemon
+          // emits `entryCount` on pool-backed cells but the SDK's
+          // `DaemonWorkspaceMcpServerStatus` doesn't carry the F2
+          // pool fields yet.
+          const pooledEntries = snapshot.servers.reduce(
+            (sum, server) =>
+              sum + ((server as { entryCount?: number }).entryCount ?? 0),
+            0,
+          );
+          expect(pooledEntries).toBe(observed.mcpGrandchildren.length);
+          // (3) Snapshot never over-reports OS reality.
+          expect(snapshot.clientCount).toBeLessThanOrEqual(
+            observed.mcpGrandchildren.length,
+          );
+        } finally {
+          if (daemon) await daemon.dispose();
+          fs.rmSync(ws, { recursive: true, force: true });
+        }
+      }, 120_000);
     });
 
     describe('SSE backpressure (unit)', () => {
@@ -457,7 +533,7 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
       // doesn't take a sessionId in publish/subscribe — the bus instance
       // itself is per-session, owned upstream. We use it directly here for
       // deterministic backpressure invariants without needing a live HTTP
-      // round-trip; pattern matches `packages/cli/src/serve/eventBus.test.ts`.
+      // round-trip; pattern matches `packages/acp-bridge/src/eventBus.test.ts`.
       it('overflow at maxQueued boundary fires client_evicted', async () => {
         const bus = new EventBus();
         const ac = new AbortController();
@@ -465,8 +541,11 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         // construction (matches the existing eventBus.test.ts:103 pattern).
         const iter = bus.subscribe({ maxQueued: 2, signal: ac.signal });
 
-        // Publish 3 events into a 2-deep queue. The 3rd trips eviction →
-        // a synthetic client_evicted terminal frame is appended.
+        // Publish 3 events into a 2-deep queue:
+        //   - event 2 fills the queue to 100% (above the 75% warn threshold),
+        //     so the bus force-pushes a `slow_client_warning` synthetic frame.
+        //   - event 3 trips the eviction path → terminal `client_evicted` frame.
+        // Resulting order: tick(1), tick(2), slow_client_warning, client_evicted.
         bus.publish({ type: 'tick', data: { i: 1 } });
         bus.publish({ type: 'tick', data: { i: 2 } });
         bus.publish({ type: 'tick', data: { i: 3 } });
@@ -477,8 +556,9 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         }
         ac.abort();
 
-        expect(collected).toHaveLength(3);
-        expect(collected[2]!.type).toBe('client_evicted');
+        expect(collected).toHaveLength(4);
+        expect(collected[2]!.type).toBe('slow_client_warning');
+        expect(collected[3]!.type).toBe('client_evicted');
         snapshot.sseBackpressure = {
           ringSize: 4_000,
           maxQueuedDefault: 256,
@@ -609,25 +689,19 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
 
     afterAll(() => {
       if (SKIP) return;
-      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-      const jsonPath = path.join(OUTPUT_DIR, 'perf-baseline.json');
-      fs.writeFileSync(jsonPath, JSON.stringify(snapshot, null, 2));
-      fs.writeFileSync(
-        path.join(OUTPUT_DIR, 'perf-baseline.md'),
+      writeSnapshotArtifacts(
+        OUTPUT_DIR,
+        'perf-baseline',
+        snapshot,
         renderMarkdown(snapshot),
+        'baseline',
       );
-      // Echo the path so a reviewer / CI logs surface where the artifact
-      // landed.
-      console.log(`[baseline] perf-baseline.json written to ${jsonPath}`);
     });
   },
 );
 
 function renderMarkdown(s: SnapshotShape): string {
-  const fmt = (p: Percentiles | null | undefined): string =>
-    p
-      ? `p50=${p.p50.toFixed(0)} p90=${p.p90.toFixed(0)} p99=${p.p99.toFixed(0)} mean=${p.mean.toFixed(0)} (n=${p.count})`
-      : 'n/a';
+  const fmt = formatPercentiles;
   return [
     `# qwen serve daemon — perf baseline`,
     ``,

@@ -211,6 +211,173 @@ describe('microcompactHistory', () => {
     ).toBe('grep results');
   });
 
+  it('uses integer QWEN_MC_KEEP_RECENT values over settings', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '3';
+    const history: Content[] = Array.from({ length: 4 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(3);
+    expect(result.meta!.toolsKept).toBe(3);
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it.each(['0', '-2'])(
+    'floors integer QWEN_MC_KEEP_RECENT=%s to 1',
+    (envValue) => {
+      process.env['QWEN_MC_KEEP_RECENT'] = envValue;
+      const history: Content[] = [
+        makeToolCall('read_file'),
+        makeToolResult('read_file', 'old content'),
+        makeToolCall('grep_search'),
+        makeToolResult('grep_search', 'grep results'),
+      ];
+
+      const result = microcompactHistory(history, twoHoursAgo, {
+        ...DEFAULT_SETTINGS,
+        toolResultsNumToKeep: 3,
+      });
+
+      expect(result.meta).toBeDefined();
+      expect(result.meta!.keepRecent).toBe(1);
+      expect(result.meta!.toolsKept).toBe(1);
+      expect(result.meta!.toolsCleared).toBe(1);
+      expect(
+        result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+      expect(
+        result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe('grep results');
+    },
+  );
+
+  it('ignores fractional QWEN_MC_KEEP_RECENT values', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '1.5';
+    const history: Content[] = [
+      makeUserMessage('first batch'),
+      makeInlineImage('image/png', 'IMAGE-OLDEST'),
+      makeUserMessage('second batch'),
+      makeInlineImage('image/jpeg', 'IMAGE-MIDDLE'),
+      makeUserMessage('third batch'),
+      makeInlineImage('image/png', 'IMAGE-NEWEST'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(2);
+    expect(result.meta!.mediaKept).toBe(2);
+    expect(result.meta!.mediaCleared).toBe(1);
+    expect(result.history[1]!.parts![0]!.text).toBe(
+      `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/png]`,
+    );
+  });
+
+  it('falls back to settings when QWEN_MC_KEEP_RECENT is fractional', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '1.5';
+    const history: Content[] = Array.from({ length: 4 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 3,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(3);
+    expect(result.meta!.toolsKept).toBe(3);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('checks env integer syntax before numeric conversion', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '9007199254740990.5';
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'grep results'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(1);
+    expect(result.meta!.toolsKept).toBe(1);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('ignores unsafe integer QWEN_MC_KEEP_RECENT values', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '9007199254740992';
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'grep results'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(1);
+    expect(result.meta!.toolsKept).toBe(1);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('uses the default keepRecent when settings are not a safe integer', () => {
+    const history: Content[] = Array.from({ length: 6 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: Number.MAX_SAFE_INTEGER + 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(5);
+    expect(result.meta!.toolsKept).toBe(5);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('uses the default keepRecent when settings are fractional', () => {
+    const history: Content[] = Array.from({ length: 6 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1.5,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(5);
+    expect(result.meta!.toolsKept).toBe(5);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
   it('should preserve non-functionResponse parts in cleared Content', () => {
     const history: Content[] = [
       {
@@ -352,6 +519,208 @@ describe('microcompactHistory', () => {
     expect(
       result.history[3]!.parts![1]!.functionResponse!.response!['output'],
     ).toBe('batched-grep');
+  });
+
+  it('size-compacts old tool results even when the idle trigger has not fired', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 167; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(25_500)),
+      );
+    }
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 5,
+      toolResultsTotalCharsThreshold: 500_000,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBeGreaterThan(0);
+    expect(result.meta!.toolResultCharsBefore).toBe(4_258_500);
+    expect(result.meta!.toolResultCharsAfter).toBeLessThanOrEqual(500_000);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('Y'.repeat(25_500));
+  });
+
+  it('counts pending content as a virtual tail for size-triggered compaction', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 4; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(120_000)),
+      );
+    }
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      },
+      {
+        sizeOnly: true,
+        pendingContent: makeToolResult('run_shell_command', 'Y'.repeat(50_000)),
+      },
+    );
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolResultCharsBefore).toBe(530_000);
+    expect(result.meta!.toolResultCharsAfter).toBe(360_000);
+    expect(result.meta!.pendingToolResultChars).toBe(50_000);
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.history).toHaveLength(history.length);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not clear protected recent results even if they exceed the size threshold', () => {
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'A'.repeat(400_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'B'.repeat(400_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 2,
+      toolResultsTotalCharsThreshold: 500_000,
+    });
+
+    expect(result.history).toBe(history);
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      toolResultCharsBefore: 800_000,
+      toolResultCharsAfter: 800_000,
+      toolResultsTotalCharsThreshold: 500_000,
+      toolsCleared: 0,
+      toolsKept: 2,
+      tokensSaved: 0,
+    });
+  });
+
+  it('does not clear media or non-compactable tool results for size overages', () => {
+    const history: Content[] = [
+      makeInlineImage('image/png', 'A'.repeat(1000)),
+      makeToolCall('ask_user_question'),
+      makeToolResult('ask_user_question', 'answer'.repeat(50_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'old'.repeat(100_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 1,
+      toolResultsTotalCharsThreshold: 50_000,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.mediaCleared).toBe(0);
+    expect(result.history[0]).toBe(history[0]);
+    expect(
+      result.history[2]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('answer'.repeat(50_000));
+    expect(
+      result.history[4]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not size-compact errors or already-cleared results', () => {
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              response: { error: 'boom', output: 'E'.repeat(500_000) },
+            },
+          },
+        ],
+      },
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', MICROCOMPACT_CLEARED_MESSAGE),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'A'.repeat(200_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'B'.repeat(200_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'C'.repeat(200_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 1,
+      toolResultsTotalCharsThreshold: 500_000,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('E'.repeat(500_000));
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('C'.repeat(200_000));
+  });
+
+  it('treats a negative legacy idle threshold as disabling the size trigger when unset', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 20; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'X'.repeat(30_000)),
+      );
+    }
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: -2,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('disables the size trigger when toolResultsTotalCharsThreshold is -1', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 20; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(25_500)),
+      );
+    }
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 5,
+      toolResultsTotalCharsThreshold: -1,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
   });
 
   it('should not clear tool error responses', () => {
@@ -660,5 +1029,311 @@ describe('microcompactHistory', () => {
     };
     expect(cleared.response.output).toBe(MICROCOMPACT_CLEARED_MESSAGE);
     expect(cleared.parts).toBeUndefined();
+  });
+});
+
+describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
+  const TWO_HOURS_AGO = Date.now() - 2 * 60 * 60 * 1000;
+
+  function fileCall(id: string, name: string, filePath: string): Content {
+    return {
+      role: 'model',
+      parts: [{ functionCall: { id, name, args: { file_path: filePath } } }],
+    };
+  }
+
+  function fileResult(id: string, name: string, output: string): Content {
+    return {
+      role: 'user',
+      parts: [{ functionResponse: { id, name, response: { output } } }],
+    };
+  }
+
+  it('reports the file path of a blanked read_file result', () => {
+    const history: Content[] = [
+      fileCall('c0', 'read_file', '/proj/old.ts'),
+      fileResult('c0', 'read_file', 'old long content '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBe(1);
+    // Only the blanked (oldest) file is reported; the kept one is not.
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/old.ts']);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('does not report a path when a kept read_file result for the same file remains', () => {
+    const history: Content[] = [
+      fileCall('old', 'read_file', '/proj/same.ts'),
+      fileResult('old', 'read_file', 'old long content '.repeat(50)),
+      fileCall('keep', 'read_file', '/proj/same.ts'),
+      fileResult('keep', 'read_file', 'newer full content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('does not report a path when a pending kept result for the same file remains', () => {
+    const history: Content[] = [
+      fileCall('old', 'read_file', '/proj/same.ts'),
+      fileResult('old', 'read_file', 'old long content '.repeat(50)),
+      fileCall('keep', 'read_file', '/proj/same.ts'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 10,
+      },
+      {
+        sizeOnly: true,
+        pendingContent: fileResult('keep', 'read_file', 'newer full content'),
+      },
+    );
+
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('does not let a kept reused id protect ambiguous candidate paths', () => {
+    const history: Content[] = [
+      fileCall('dup', 'read_file', '/proj/first.ts'),
+      fileResult('dup', 'read_file', 'first old content '.repeat(50)),
+      fileCall('dup', 'read_file', '/proj/second.ts'),
+      fileResult('dup', 'read_file', 'second kept content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect([...result.meta!.evictedReadPaths].sort()).toEqual([
+      '/proj/first.ts',
+      '/proj/second.ts',
+    ]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('disarms ALL paths sharing a reused functionCall.id (mimo F1)', () => {
+    // Pathological/resumed history reuses one id across two files.
+    // The blanked result must disarm BOTH candidate paths — keeping
+    // the wrong one armed would resurrect the dangling-placeholder
+    // hazard. Over-disarming only costs a redundant re-read.
+    const history: Content[] = [
+      fileCall('dup', 'read_file', '/proj/first.ts'),
+      fileResult('dup', 'read_file', 'first old content '.repeat(50)),
+      fileCall('dup', 'read_file', '/proj/second.ts'),
+      fileResult('dup', 'read_file', 'second old content '.repeat(50)),
+      fileCall('c2', 'read_file', '/proj/keep.ts'),
+      fileResult('c2', 'read_file', 'kept'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect([...result.meta!.evictedReadPaths].sort()).toEqual([
+      '/proj/first.ts',
+      '/proj/second.ts',
+    ]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('reports edit and write_file paths too, deduplicated', () => {
+    const history: Content[] = [
+      fileCall('c0', 'edit', '/proj/a.ts'),
+      fileResult('c0', 'edit', 'edit output '.repeat(50)),
+      fileCall('c1', 'write_file', '/proj/a.ts'),
+      fileResult('c1', 'write_file', 'write output '.repeat(50)),
+      fileCall('c2', 'read_file', '/proj/keep.ts'),
+      fileResult('c2', 'read_file', 'kept'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(2);
+    // /proj/a.ts blanked via both edit and write_file → reported once.
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/a.ts']);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('counts a blanked read it cannot link back as unresolved (forces safe fallback)', () => {
+    const history: Content[] = [
+      // functionResponse without an id: cannot be linked to a call.
+      // This is the id-less-provider case — must NOT be silently
+      // skipped, or its fast-path stays armed and serves a dangling
+      // placeholder. It is counted so the caller falls back to the
+      // blanket wipe.
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'orphan content '.repeat(50) },
+            },
+          },
+        ],
+      },
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(1);
+  });
+
+  it('counts a blanked file call whose id has no mapped file_path as unresolved', () => {
+    const history: Content[] = [
+      // functionResponse has an id, but no functionCall carries that
+      // id with a file_path (synthetic-id / mismatch case).
+      fileResult('orphan-id', 'read_file', 'orphan content '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(1);
+  });
+
+  it('does not report non-file tools (shell/grep) as evicted reads', () => {
+    const history: Content[] = [
+      fileCall('c0', 'run_shell_command', 'unused'),
+      fileResult('c0', 'run_shell_command', 'shell output '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    // Shell is not a file tool — not counted as an unresolved read.
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('returns no evictedReadPaths when nothing fires (no idle trigger)', () => {
+    const history: Content[] = [
+      fileCall('c0', 'read_file', '/proj/a.ts'),
+      fileResult('c0', 'read_file', 'content'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    // No trigger → no meta at all (and therefore no eviction data).
+    expect(result.meta).toBeUndefined();
+  });
+});
+
+describe('microcompactHistory — force option', () => {
+  afterEach(clearEnv);
+
+  it('force: true skips time-based trigger (fires even with recent timestamp)', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content that is very long'),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'recent content'),
+    ];
+
+    // Date.now() would normally prevent the trigger from firing,
+    // but force: true bypasses the check entirely.
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBeGreaterThanOrEqual(1);
+  });
+
+  it('force: false behaves the same as not passing opts', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'content'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS, {
+      force: false,
+    });
+
+    expect(result.meta).toBeUndefined();
+  });
+
+  it('force: true works even when threshold is disabled (-1)', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content that is very long'),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'recent content'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      null,
+      { toolResultsThresholdMinutes: -1, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBeGreaterThanOrEqual(1);
+  });
+
+  it('force: true returns history unchanged when nothing to clear', () => {
+    const history: Content[] = [
+      makeUserMessage('hello'),
+      makeModelMessage('hi'),
+    ];
+
+    const result = microcompactHistory(history, null, DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    // No compactable tools → no meta
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toEqual(history);
   });
 });

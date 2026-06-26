@@ -181,14 +181,17 @@ export function getStickyTodosLayoutKey(
   }
 
   const visibleTodoCount = clampStickyTodoVisibleItems(maxVisibleItems);
-  const visibleTodos = todos.slice(0, visibleTodoCount);
-  const hasHiddenTodos = todos.length > visibleTodos.length;
+  const orderedOpenTodos = getOrderedStickyTodos(todos).filter(
+    (todo) => todo.status !== 'completed',
+  );
+  const visibleTodos = orderedOpenTodos.slice(0, visibleTodoCount);
+  const hasHiddenTodos = orderedOpenTodos.length > visibleTodos.length;
 
   return JSON.stringify({
     width,
     maxVisibleItems: visibleTodoCount,
     hasHiddenTodos,
-    todos: visibleTodos.map((todo) => [todo.id, todo.content]),
+    todos: visibleTodos.map((todo) => [todo.id, todo.content, todo.status]),
   });
 }
 

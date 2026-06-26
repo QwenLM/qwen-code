@@ -72,7 +72,7 @@ export const summaryCommand: SlashCommand = {
 
     const getChatHistory = () => {
       const chat = geminiClient.getChat();
-      return chat.getHistory();
+      return chat.getHistoryShallow();
     };
 
     const validateChatHistory = (
@@ -106,6 +106,7 @@ export const summaryCommand: SlashCommand = {
 
       const result = await runSideQuery(config, {
         purpose: 'project-summary',
+        skipOutputLanguagePreference: true,
         model: config.getModel(),
         systemInstruction: chatSystemInstruction,
         contents: [

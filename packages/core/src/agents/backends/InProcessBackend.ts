@@ -129,6 +129,7 @@ export class InProcessBackend implements Backend {
         initialTask: inProcessConfig.initialTask,
         maxTurnsPerMessage: runConfig.max_turns,
         maxTimeMinutesPerMessage: runConfig.max_time_minutes,
+        completeOnIdle: inProcessConfig.completeOnIdle,
         chatHistory: inProcessConfig.chatHistory,
       },
       core,
@@ -408,7 +409,10 @@ async function createPerAgentConfig(
   const agentWorkspace = new WorkspaceContext(cwd);
   override.getWorkspaceContext = () => agentWorkspace;
 
-  const agentFileService = new FileDiscoveryService(cwd);
+  const agentFileService = new FileDiscoveryService(
+    cwd,
+    base.getFileFilteringOptions().customIgnoreFiles,
+  );
   override.getFileService = () => agentFileService;
 
   const agentRegistry: ToolRegistry = await override.createToolRegistry(

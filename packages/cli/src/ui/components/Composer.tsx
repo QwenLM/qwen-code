@@ -13,10 +13,10 @@ import { QueuedMessageDisplay } from './QueuedMessageDisplay.js';
 import { KeyboardShortcuts } from './KeyboardShortcuts.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
-import { StreamingState, type HistoryItemToolGroup } from '../types.js';
+import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
 
@@ -25,12 +25,15 @@ export const Composer = () => {
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
   const uiActions = useUIActions();
-  const { vimEnabled } = useVimMode();
+  const { vimEnabled } = useVimModeState();
 
   const {
     showAutoAcceptIndicator,
     streamingResponseLengthRef,
     isReceivingContent,
+    responseCandidateTokens,
+    taskStartTokens,
+    taskStartStreamingChars,
   } = uiState;
 
   // Real-time token animation is performed inside LoadingIndicator itself, so
@@ -47,41 +50,24 @@ export const Composer = () => {
     uiState.streamingState === StreamingState.Responding &&
     uiState.terminalWidth <= 30;
 
-  // Aggregate agent tool tokens from executing tool calls. Only changes when
-  // a subagent reports progress, so it doesn't drive the animation loop.
-  let agentTokens = 0;
-  for (const item of uiState.pendingGeminiHistoryItems ?? []) {
-    if (item.type === 'tool_group') {
-      const toolGroup = item as HistoryItemToolGroup;
-      for (const tool of toolGroup.tools) {
-        const display = tool.resultDisplay;
-        if (
-          typeof display === 'object' &&
-          display !== null &&
-          'type' in display &&
-          display.type === 'task_execution' &&
-          'tokenCount' in display &&
-          typeof display.tokenCount === 'number'
-        ) {
-          agentTokens += display.tokenCount;
-        }
-      }
-    }
-  }
-
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
   const handleToggleShortcuts = useCallback(() => {
     setShowShortcuts((prev) => !prev);
   }, []);
 
-  // State for suggestions visibility
+  // State for autocomplete-dropdown visibility (narrow signal). Drives the
+  // Footer / KeyboardShortcuts hide-when-dropdown-visible logic below; kept
+  // local to Composer because nothing outside this component needs the
+  // narrow signal.
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const handleSuggestionsVisibilityChange = useCallback(
-    (visible: boolean) => {
-      setShowSuggestions(visible);
-      // Also notify AppContainer for Tab key handling
-      uiActions.onSuggestionsVisibilityChange(visible);
+
+  // Broad signal — any input-area Tab consumer. Forwarded to AppContainer
+  // via UIActionsContext so useAutoAcceptIndicator's `shouldBlockTab` can
+  // suppress the Windows-only bare-Tab approval-mode fallback. See #4171.
+  const handleTabConsumerChange = useCallback(
+    (active: boolean) => {
+      uiActions.onTabConsumerChange(active);
     },
     [uiActions],
   );
@@ -92,21 +78,18 @@ export const Composer = () => {
         <LoadingIndicator
           // Hide loading phrases when enableLoadingPhrases is explicitly false.
           // Using === false ensures phrases show by default when undefined.
-          thought={
-            uiState.streamingState === StreamingState.WaitingForConfirmation ||
-            config.getAccessibility()?.enableLoadingPhrases === false
-              ? undefined
-              : uiState.thought
-          }
           currentLoadingPhrase={
             config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
-          candidatesTokens={agentTokens}
+          candidatesTokens={responseCandidateTokens}
+          taskStartTokens={taskStartTokens}
+          taskStartStreamingChars={taskStartStreamingChars}
           streamingCharsRef={streamingResponseLengthRef}
           isStreaming={isStreaming}
+          showResponseTokensPerSecond={config.getShowResponseTokensPerSecond()}
           isReceivingContent={isReceivingContent}
         />
       )}
@@ -145,7 +128,8 @@ export const Composer = () => {
           onEscapePromptChange={uiActions.onEscapePromptChange}
           onToggleShortcuts={handleToggleShortcuts}
           showShortcuts={showShortcuts}
-          onSuggestionsVisibilityChange={handleSuggestionsVisibilityChange}
+          onSuggestionsVisibilityChange={setShowSuggestions}
+          onTabConsumerChange={handleTabConsumerChange}
           focus={true}
           vimHandleInput={uiActions.vimHandleInput}
           isEmbeddedShellFocused={uiState.embeddedShellFocused}
@@ -155,7 +139,7 @@ export const Composer = () => {
               : '  ' + t('Type your message or @path/to/file')
           }
           promptSuggestion={uiState.promptSuggestion}
-          onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}
+          onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
         />
       )}
 

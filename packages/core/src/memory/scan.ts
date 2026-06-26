@@ -7,7 +7,11 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { AUTO_MEMORY_TYPES, type AutoMemoryType } from './types.js';
-import { AUTO_MEMORY_INDEX_FILENAME, getAutoMemoryRoot } from './paths.js';
+import {
+  AUTO_MEMORY_INDEX_FILENAME,
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from './paths.js';
 
 const MAX_SCANNED_MEMORY_FILES = 200;
 
@@ -87,10 +91,9 @@ async function listMarkdownFiles(root: string): Promise<string[]> {
   }
 }
 
-export async function scanAutoMemoryTopicDocuments(
-  projectRoot: string,
+async function scanAutoMemoryDocumentsFromRoot(
+  root: string,
 ): Promise<ScannedAutoMemoryDocument[]> {
-  const root = getAutoMemoryRoot(projectRoot);
   const relativePaths = await listMarkdownFiles(root);
   const docs = await Promise.all(
     relativePaths.map(async (relativePath) => {
@@ -115,4 +118,21 @@ export async function scanAutoMemoryTopicDocuments(
       (a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename),
     )
     .slice(0, MAX_SCANNED_MEMORY_FILES);
+}
+
+export async function scanAutoMemoryTopicDocuments(
+  projectRoot: string,
+): Promise<ScannedAutoMemoryDocument[]> {
+  return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot));
+}
+
+/**
+ * Scan the user-level (cross-project) auto-memory dir. Returns an empty
+ * array when the dir does not exist yet, so callers can union with
+ * project-level docs unconditionally.
+ */
+export async function scanUserAutoMemoryTopicDocuments(): Promise<
+  ScannedAutoMemoryDocument[]
+> {
+  return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot());
 }

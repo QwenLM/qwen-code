@@ -23,7 +23,7 @@ export type EditorType =
   | 'emacs'
   | 'trae';
 
-function isValidEditorType(editor: string): editor is EditorType {
+export function isValidEditorType(editor: string): editor is EditorType {
   return [
     'vscode',
     'vscodium',
@@ -139,6 +139,63 @@ export function getEditorExecutable(editorType: EditorType): string | null {
   return null;
 }
 
+export function isTerminalEditor(editor: EditorType): boolean {
+  return ['vim', 'neovim', 'emacs'].includes(editor);
+}
+
+export interface ExternalEditorCommand {
+  command: string;
+  args: string[];
+  needsShell: boolean;
+}
+
+/**
+ * Get the command + args to open a single file in an editor for editing.
+ * GUI editors get a `--wait` flag so the calling process blocks until close.
+ * Returns null if the editor type is invalid or the executable is not found.
+ */
+export function getExternalEditorCommand(
+  editorType: EditorType,
+  filePath: string,
+): ExternalEditorCommand | null {
+  if (!isValidEditorType(editorType)) {
+    return null;
+  }
+
+  const executable = getEditorExecutable(editorType);
+  if (!executable) {
+    return null;
+  }
+
+  const needsShell =
+    process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable);
+
+  switch (editorType) {
+    case 'vim':
+    case 'neovim':
+    case 'emacs':
+      return {
+        command: executable,
+        args: [filePath],
+        needsShell,
+      };
+    case 'vscode':
+    case 'vscodium':
+    case 'windsurf':
+    case 'cursor':
+    case 'trae':
+    case 'zed': {
+      return {
+        command: executable,
+        args: [filePath, '--wait'],
+        needsShell,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 export function checkHasEditorType(editor: EditorType): boolean {
   // Use the same resolution logic as getEditorExecutable to keep
   // availability detection and execution in sync.
@@ -231,11 +288,21 @@ export function getDiffCommand(
           newPath,
         ],
       };
-    case 'emacs':
+    case 'emacs': {
+      // Paths are interpolated into an Elisp string literal, so backslashes
+      // (Windows separators) and double quotes have to be escaped or the
+      // (ediff ...) form is corrupted. Escape backslashes first so the
+      // backslashes we add for quotes are not doubled again.
+      const toElispString = (p: string) =>
+        p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       return {
         command: 'emacs',
-        args: ['--eval', `(ediff "${oldPath}" "${newPath}")`],
+        args: [
+          '--eval',
+          `(ediff "${toElispString(oldPath)}" "${toElispString(newPath)}")`,
+        ],
       };
+    }
     default:
       return null;
   }
@@ -259,9 +326,7 @@ export async function openDiff(
   }
 
   try {
-    const isTerminalEditor = ['vim', 'emacs', 'neovim'].includes(editor);
-
-    if (isTerminalEditor) {
+    if (isTerminalEditor(editor)) {
       try {
         const result = spawnSync(diffCommand.command, diffCommand.args, {
           stdio: 'inherit',

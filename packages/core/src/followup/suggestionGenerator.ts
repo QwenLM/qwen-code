@@ -13,11 +13,6 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import {
-  uiTelemetryService,
-  EVENT_API_RESPONSE,
-} from '../telemetry/uiTelemetry.js';
-import { ApiResponseEvent } from '../telemetry/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('FOLLOWUP');
@@ -152,10 +147,9 @@ async function generateViaForkedQuery(
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const model = modelOverride || config.getModel();
   const cacheSafeParams = getCacheSafeParams();
   if (!cacheSafeParams) return null;
-  const startTime = Date.now();
+  const model = modelOverride ?? config.getFastModel() ?? cacheSafeParams.model;
   const result = await runForkedAgent({
     config,
     userMessage: SUGGESTION_PROMPT,
@@ -163,21 +157,6 @@ async function generateViaForkedQuery(
     jsonSchema: SUGGESTION_SCHEMA,
     model,
   });
-  const durationMs = Date.now() - startTime;
-
-  // Report usage to session stats
-  if (result.usage) {
-    reportSuggestionUsage(
-      model,
-      {
-        promptTokenCount: result.usage.inputTokens,
-        candidatesTokenCount: result.usage.outputTokens,
-        totalTokenCount: result.usage.inputTokens + result.usage.outputTokens,
-        cachedContentTokenCount: result.usage.cacheHitTokens,
-      },
-      durationMs,
-    );
-  }
 
   if (result.jsonResult) {
     const raw = result.jsonResult['suggestion'];
@@ -206,13 +185,12 @@ async function generateViaBaseLlm(
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const model = modelOverride || config.getModel();
+  const model = modelOverride ?? config.getFastModel() ?? config.getModel();
   const contents: Content[] = [
     ...conversationHistory,
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 
-  const startTime = Date.now();
   const result = await runSideQuery(config, {
     purpose: 'prompt-suggestion',
     contents,
@@ -222,12 +200,6 @@ async function generateViaBaseLlm(
     // the user shouldn't pay 7× the latency for a hint they may ignore.
     maxAttempts: 1,
   });
-  const durationMs = Date.now() - startTime;
-
-  // Report usage to session stats so /stats tracks suggestion model tokens
-  if (result.usage) {
-    reportSuggestionUsage(model, result.usage, durationMs);
-  }
 
   const text = result.text;
   if (text) {
@@ -272,6 +244,15 @@ const ALLOWED_SINGLE_WORDS = new Set([
 export function getFilterReason(suggestion: string): string | null {
   const lower = suggestion.toLowerCase();
   const wordCount = suggestion.trim().split(/\s+/).length;
+
+  // Reject C0/C1 control bytes and ANSI escapes first. The suggestion is
+  // influenceable through conversation history (tool/file/web output) and is
+  // rendered verbatim in the input placeholder, so raw control chars (CR,
+  // ESC/CSI, etc.) could be injected into the terminal. Rejecting here keeps the
+  // displayed and inserted text consistent, since the accept path strips them on
+  // buffer.insert.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(suggestion)) return 'control_chars';
 
   if (lower === 'done') return 'done';
 
@@ -345,39 +326,4 @@ export function getFilterReason(suggestion: string): string | null {
  */
 export function shouldFilterSuggestion(suggestion: string): boolean {
   return getFilterReason(suggestion) !== null;
-}
-
-/**
- * Report suggestion API usage to the UI telemetry service so it appears in /stats.
- */
-function reportSuggestionUsage(
-  model: string,
-  usage: {
-    promptTokenCount?: number;
-    candidatesTokenCount?: number;
-    totalTokenCount?: number;
-    cachedContentTokenCount?: number;
-    thoughtsTokenCount?: number;
-  },
-  durationMs: number,
-): void {
-  const event = new ApiResponseEvent(
-    'suggestion-' + Date.now(),
-    model,
-    durationMs,
-    'prompt_suggestion',
-    undefined,
-    {
-      promptTokenCount: usage.promptTokenCount ?? 0,
-      candidatesTokenCount: usage.candidatesTokenCount ?? 0,
-      totalTokenCount: usage.totalTokenCount ?? 0,
-      cachedContentTokenCount: usage.cachedContentTokenCount ?? 0,
-      thoughtsTokenCount: usage.thoughtsTokenCount ?? 0,
-    },
-  );
-  // Override event.name to match UiEvent type (UiTelemetryService switch)
-  const uiEvent = Object.assign(event, {
-    'event.name': EVENT_API_RESPONSE as typeof EVENT_API_RESPONSE,
-  });
-  uiTelemetryService.addEvent(uiEvent);
 }

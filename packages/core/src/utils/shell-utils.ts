@@ -366,7 +366,12 @@ export function stripShellWrapper(command: string): string {
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       const commandToken = takeLeadingToken(token.rest);
       if (!commandToken) return trimmed;
-      const { value: innerCommand } = stripSymmetricQuotes(commandToken.token);
+      const { value: innerCommand, quote } = stripSymmetricQuotes(
+        commandToken.token,
+      );
+      if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
+        return token.rest.trimStart() || trimmed;
+      }
       return innerCommand || trimmed;
     }
 
@@ -383,6 +388,384 @@ export function stripShellWrapper(command: string): string {
       rest = operandToken.rest;
     }
   }
+}
+
+const SELF_KILL_PROCESS_PATTERN =
+  /(^|[^a-z0-9_-])(node(?:\.exe)?|qwen(?:-code)?(?:\.exe)?)(?=$|[^a-z0-9_-])/i;
+const QWEN_PROCESS_PATTERN =
+  /(^|[^a-z0-9_-])qwen(?:-code)?(?:\.exe)?(?=$|[^a-z0-9_-])/i;
+const TASKKILL_IMAGE_FILTER_PATTERN = /\bimagename\s+eq\s+(.+)$/i;
+
+const SUDO_OPTIONS_WITH_VALUES = new Set([
+  '-u',
+  '--user',
+  '-g',
+  '--group',
+  '-h',
+  '--host',
+  '-p',
+  '--prompt',
+  '-C',
+  '--close-from',
+  '-T',
+  '--command-timeout',
+]);
+
+const COMMAND_OPTIONS_WITH_VALUES = new Set<string>();
+
+const ENV_OPTIONS_WITH_VALUES = new Set([
+  '-u',
+  '--unset',
+  '-S',
+  '--split-string',
+  '-C',
+  '--chdir',
+]);
+
+const KILLALL_OPTIONS_WITH_VALUES = new Set([
+  '-n',
+  '--ns',
+  '-o',
+  '--older-than',
+  '-s',
+  '--signal',
+  '-t',
+  '--tty',
+  '-u',
+  '--user',
+  '-y',
+  '--younger-than',
+  '-Z',
+  '--context',
+]);
+
+const PKILL_OPTIONS_WITH_VALUES = new Set([
+  '-F',
+  '--pidfile',
+  '-G',
+  '--group',
+  '-g',
+  '--pgroup',
+  '-P',
+  '--parent',
+  '-s',
+  '--session',
+  '-t',
+  '--terminal',
+  '-T',
+  '--thread',
+  '-U',
+  '--uid',
+  '-u',
+  '--euid',
+]);
+
+export const SHELL_SELF_KILL_REJECTION =
+  'Blocked: this command may terminate the running qwen-code process because it targets all node/qwen-code processes. Use task_stop for managed background shells, or kill a specific PID instead.';
+
+function parseShellSegment(segment: string): string[] | null {
+  try {
+    return parse(segment, (key) => '$' + key)
+      .map((token) => {
+        if (typeof token === 'string') {
+          return token;
+        }
+        if (
+          typeof token === 'object' &&
+          token !== null &&
+          'pattern' in token &&
+          typeof token.pattern === 'string'
+        ) {
+          return token.pattern;
+        }
+        return null;
+      })
+      .filter((token): token is string => token !== null);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeExecutableName(token: string): string {
+  const executable = token.split(/[\\/]/).pop() ?? token;
+  return executable.toLowerCase().replace(/\.exe$/, '');
+}
+
+function isOptionToken(token: string): boolean {
+  return token.startsWith('-');
+}
+
+function optionKey(token: string): string {
+  return token.startsWith('--') ? token.toLowerCase() : token;
+}
+
+function optionHasInlineValue(token: string): boolean {
+  return token.includes('=') || token.includes(':');
+}
+
+function shortOptionBundleHasFlag(token: string, flag: string): boolean {
+  return (
+    token.startsWith('-') &&
+    !token.startsWith('--') &&
+    token.length > 2 &&
+    token.slice(1).toLowerCase().includes(flag.toLowerCase().slice(1))
+  );
+}
+
+function matchesSelfProcessPattern(value: string): boolean {
+  return SELF_KILL_PROCESS_PATTERN.test(value);
+}
+
+function matchesQwenProcessPattern(value: string): boolean {
+  return QWEN_PROCESS_PATTERN.test(value);
+}
+
+function isBroadNodeFullPattern(value: string): boolean {
+  const normalized = value
+    .trim()
+    .replace(/^(\^|\\b|\.\*)+/, '')
+    .replace(/(\$|\\b|\.\*)+$/, '');
+  const base = normalized.split(/[\\/]/).pop()?.toLowerCase();
+  return (
+    base === 'node' ||
+    base === 'node.exe' ||
+    /^node(?:\.exe)?[*?]+$/.test(base ?? '')
+  );
+}
+
+function consumeOptionsWithValues(
+  tokens: string[],
+  startIndex: number,
+  optionsWithValues: Set<string>,
+): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    const normalized = optionKey(token);
+    if (!isOptionToken(token)) {
+      break;
+    }
+
+    index++;
+    if (
+      (optionsWithValues.has(normalized) ||
+        [...optionsWithValues].some((option) =>
+          shortOptionBundleHasFlag(token, option),
+        )) &&
+      !optionHasInlineValue(token)
+    ) {
+      index++;
+    }
+  }
+  return index;
+}
+
+function unwrapExecutionPrefixes(tokens: string[]): string[] {
+  let index = 0;
+  while (index < tokens.length && ENV_ASSIGNMENT_REGEX.test(tokens[index]!)) {
+    index++;
+  }
+
+  while (index < tokens.length) {
+    const root = normalizeExecutableName(tokens[index]!);
+    if (root === 'sudo') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        SUDO_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
+    if (root === 'command') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        COMMAND_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
+    if (root === 'env') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        ENV_OPTIONS_WITH_VALUES,
+      );
+      while (
+        index < tokens.length &&
+        ENV_ASSIGNMENT_REGEX.test(tokens[index]!)
+      ) {
+        index++;
+      }
+      continue;
+    }
+
+    break;
+  }
+
+  return tokens.slice(index);
+}
+
+function getCommandSegments(command: string, depth = 0): string[] {
+  const segments: string[] = [];
+  for (const segment of splitCommands(command)) {
+    const stripped = stripShellWrapper(segment);
+    if (stripped !== segment && depth < 3) {
+      segments.push(...getCommandSegments(stripped, depth + 1));
+    } else if (stripped !== segment) {
+      segments.push(stripped);
+    } else {
+      segments.push(segment);
+    }
+  }
+  return segments;
+}
+
+function commandArguments(tokens: string[], optionsWithValues: Set<string>) {
+  const args: string[] = [];
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      args.push(...tokens.slice(index + 1));
+      break;
+    }
+
+    const normalized = optionKey(token);
+    if (isOptionToken(token)) {
+      if (optionsWithValues.has(normalized) && !optionHasInlineValue(token)) {
+        index++;
+      }
+      continue;
+    }
+
+    args.push(token);
+  }
+  return args;
+}
+
+function taskkillTargetsSelf(tokens: string[]): boolean {
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    const normalized = token.toLowerCase();
+
+    if (normalized === '/im' || normalized === '-im') {
+      const imageName = tokens[index + 1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+      index++;
+      continue;
+    }
+
+    if (normalized.startsWith('/im:') || normalized.startsWith('-im:')) {
+      if (matchesSelfProcessPattern(token.slice(4))) {
+        return true;
+      }
+      continue;
+    }
+
+    if (normalized === '/fi' || normalized === '-fi') {
+      const filter = tokens[index + 1];
+      const imageName = filter?.match(TASKKILL_IMAGE_FILTER_PATTERN)?.[1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+      index++;
+      continue;
+    }
+
+    if (normalized.startsWith('/fi:') || normalized.startsWith('-fi:')) {
+      const imageName = token
+        .slice(4)
+        .match(TASKKILL_IMAGE_FILTER_PATTERN)?.[1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function killallTargetsSelf(tokens: string[]): boolean {
+  return commandArguments(tokens, KILLALL_OPTIONS_WITH_VALUES).some((arg) =>
+    matchesSelfProcessPattern(arg),
+  );
+}
+
+function pkillTargetsSelf(tokens: string[]): boolean {
+  let usesFullCommandLine = false;
+  const args: string[] = [];
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      args.push(...tokens.slice(index + 1));
+      break;
+    }
+
+    const normalized = optionKey(token);
+    if (
+      normalized === '-f' ||
+      normalized === '--full' ||
+      shortOptionBundleHasFlag(token, '-f')
+    ) {
+      usesFullCommandLine = true;
+      continue;
+    }
+
+    if (isOptionToken(token)) {
+      if (
+        PKILL_OPTIONS_WITH_VALUES.has(normalized) &&
+        !optionHasInlineValue(token)
+      ) {
+        index++;
+      }
+      continue;
+    }
+
+    args.push(token);
+  }
+
+  if (usesFullCommandLine) {
+    return args.some(
+      (arg) => matchesQwenProcessPattern(arg) || isBroadNodeFullPattern(arg),
+    );
+  }
+
+  return args.some((arg) => matchesSelfProcessPattern(arg));
+}
+
+export function detectSelfKillCommand(command: string): boolean {
+  if (!/kill/i.test(command)) {
+    return false;
+  }
+
+  const segments = getCommandSegments(command);
+  for (const segment of segments) {
+    const parsed = parseShellSegment(segment);
+    if (!parsed) {
+      continue;
+    }
+
+    const tokens = unwrapExecutionPrefixes(parsed);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const root = normalizeExecutableName(tokens[0]!);
+    if (root === 'taskkill' && taskkillTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'killall' && killallTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'pkill' && pkillTargetsSelf(tokens)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -670,7 +1053,11 @@ function isKnownMonitorWrapperToken(token: string): boolean {
     base === 'zsh' ||
     base === 'zsh.exe' ||
     base === 'cmd' ||
-    base === 'cmd.exe'
+    base === 'cmd.exe' ||
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
   );
 }
 
@@ -684,7 +1071,31 @@ function isShellWrapperFlagToken(normalizedToken: string): boolean {
 
 function shellWrapperFlagConsumesOperand(token: string): boolean {
   const normalized = getNormalizedShellToken(token);
-  return normalized === '-o' || normalized === '+o';
+  if (optionHasInlineValue(token)) {
+    return false;
+  }
+  return (
+    normalized === '-o' ||
+    normalized === '+o' ||
+    normalized === '-executionpolicy' ||
+    normalized === '-file' ||
+    normalized === '-encodedcommand'
+  );
+}
+
+function shellWrapperCommandConsumesRest(wrapperToken: string): boolean {
+  const base = getShellWrapperBase(wrapperToken);
+  // POSIX shells pass exactly one argument after -c as the command string.
+  // cmd.exe and PowerShell treat the remaining tokens after /c or -Command as
+  // the command, so unquoted inner commands need the full rest of the line.
+  return (
+    base === 'cmd' ||
+    base === 'cmd.exe' ||
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
+  );
 }
 
 function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
@@ -693,6 +1104,15 @@ function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
 
   if (base === 'cmd' || base === 'cmd.exe') {
     return normalized === '/c';
+  }
+
+  if (
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
+  ) {
+    return normalized === '-command' || normalized === '-c';
   }
 
   return normalized === '-c' || /^-[a-z]*c[a-z]*$/i.test(normalized);
@@ -1199,6 +1619,67 @@ export function detectCommandSubstitution(command: string): boolean {
   // If there are pending heredocs but no newline/body, there is nothing left to
   // scan for heredoc-body substitutions.
   return false;
+}
+
+/**
+ * User-facing warning emitted when a shell-tool invocation contains
+ * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * Shared across the shell-tool and monitor-tool confirmation paths so
+ * the wording can't drift between sites — see #4386 review (round 3).
+ */
+export const COMMAND_SUBSTITUTION_WARNING =
+  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+
+/**
+ * Single dual-check predicate: does the command contain shell command
+ * substitution either as written (raw) or after `stripShellWrapper`
+ * unwraps it? The raw check catches substitution that lives inside
+ * leading env-prefix tokens (e.g. `FOO=$(curl evil) bash -c 'echo ok'`,
+ * where stripShellWrapper discards the env-prefix AND unwraps to
+ * `echo ok`, leaving no trace of the substitution). The stripped
+ * check catches substitution inside the wrapper's quoted body
+ * (e.g. `bash -c 'echo $(cat secret)'`, where the raw `$(` sits inside
+ * outer single quotes and is invisible to a raw-only check).
+ *
+ * Used by `buildShellExecWarnings` (UI warning surface),
+ * `shouldAuditSubstitutionBypass` (audit log gate), and the
+ * pre-AST gates in `ShellToolInvocation.getDefaultPermission`,
+ * `MonitorToolInvocation.getDefaultPermission`, and
+ * `PermissionManager.resolveDefaultPermission`. Centralising the
+ * dual-check here keeps detection semantics in lockstep across all
+ * surfaces (a change here propagates to every consumer). See PR #4386
+ * round 6 for the env-prefix wrapper regression that motivated this.
+ */
+export function hasShellSubstitution(rawCommand: string): boolean {
+  if (typeof rawCommand !== 'string' || rawCommand.length === 0) return false;
+  if (detectCommandSubstitution(rawCommand)) return true;
+  const stripped = stripShellWrapper(rawCommand);
+  return stripped !== rawCommand && detectCommandSubstitution(stripped);
+}
+
+/**
+ * Build the warnings array for a shell-like tool's exec confirmation.
+ * Returns `undefined` when nothing to flag — callers should only assign
+ * the `warnings` field when the result is truthy, mirroring the
+ * existing `if (warnings.length > 0)` pattern at each call site.
+ *
+ * Delegates the detection logic to `hasShellSubstitution` so the
+ * dual-check semantics stay in one place; the historical 2-arg
+ * signature is kept for callers that already have both forms in scope.
+ */
+export function buildShellExecWarnings(
+  strippedCommand: string,
+  rawCommand: string,
+): string[] | undefined {
+  // Either input may carry the substitution. Use the dual-aware
+  // predicate so the detection logic is identical to the audit-log path.
+  if (
+    hasShellSubstitution(rawCommand) ||
+    detectCommandSubstitution(strippedCommand)
+  ) {
+    return [COMMAND_SUBSTITUTION_WARNING];
+  }
+  return undefined;
 }
 
 /**

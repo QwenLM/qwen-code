@@ -17,9 +17,9 @@ describe('ExternalAuthProgress', () => {
     const onCancel = vi.fn();
     const { lastFrame } = render(
       <ExternalAuthProgress
-        title="OpenRouter Authentication"
+        title="Provider Authentication"
         message="Open the authorization page if your browser does not launch automatically."
-        detail="https://openrouter.ai/auth?example=1"
+        detail="https://example.com/auth?example=1"
         onCancel={onCancel}
       />,
     );

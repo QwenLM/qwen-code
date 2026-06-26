@@ -27,15 +27,18 @@ import {
   getNestedValue,
   getEffectiveValue,
 } from '../../utils/settingsUtils.js';
-import { updateOutputLanguageFile } from '../../utils/languageUtils.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from '../contexts/VimModeContext.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
-import chalk from 'chalk';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import {
   type SettingsValue,
   TOGGLE_TYPES,
@@ -61,7 +64,8 @@ export function SettingsDialog({
   config,
 }: SettingsDialogProps): React.JSX.Element {
   // Get vim mode context to sync vim mode changes
-  const { vimEnabled, toggleVimEnabled } = useVimMode();
+  const { vimEnabled } = useVimModeState();
+  const { toggleVimEnabled } = useVimModeActions();
   // Get compact mode context to sync compact mode changes
   const { compactMode, setCompactMode } = useCompactMode();
   const uiActions = useUIActions();
@@ -380,7 +384,7 @@ export function SettingsDialog({
 
       // Update output language rule file immediately (no restart needed for LLM effect)
       if (key === 'general.outputLanguage' && typeof parsed === 'string') {
-        updateOutputLanguageFile(parsed);
+        writeOutputLanguageAndRegisterPath(parsed, config);
       }
 
       // Mark as needing restart and show prompt
@@ -817,10 +821,10 @@ export function SettingsDialog({
                 );
                 const afterCursor = cpSlice(editBuffer, editCursorPos + 1);
                 displayValue =
-                  beforeCursor + chalk.inverse(atCursor) + afterCursor;
+                  beforeCursor + renderSoftwareCursor(atCursor) + afterCursor;
               } else if (cursorVisible && editCursorPos >= cpLen(editBuffer)) {
-                // Cursor is at the end - show inverted space
-                displayValue = editBuffer + chalk.inverse(' ');
+                // Cursor is at the end - show software cursor space
+                displayValue = editBuffer + renderSoftwareCursor(' ');
               } else {
                 // Cursor not visible
                 displayValue = editBuffer;
