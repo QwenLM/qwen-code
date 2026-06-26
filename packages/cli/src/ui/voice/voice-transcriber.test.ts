@@ -5,6 +5,9 @@
  */
 
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
@@ -152,6 +155,97 @@ describe('voice-transcriber', () => {
 
     expect(funStreamConfig.transport).toBe('dashscope-task-realtime');
     expect(funStreamConfig.keytermsContext).toBeUndefined();
+  });
+
+  it('threads a custom keyterms file term into the realtime keytermsContext', () => {
+    const workspaceDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'voice-transcriber-keyterms-'),
+    );
+    const qwenDir = path.join(workspaceDir, '.qwen');
+    fs.mkdirSync(qwenDir, { recursive: true });
+    fs.writeFileSync(path.join(qwenDir, 'voice-keyterms.txt'), 'Paraformer\n');
+    try {
+      const settings = {
+        isTrusted: true,
+        workspace: { path: path.join(qwenDir, 'settings.json') },
+        merged: {
+          env: { DASHSCOPE_API_KEY: 'sk-test' },
+          security: { auth: {} },
+        },
+      } as unknown as LoadedSettings;
+
+      const streamConfig = resolveVoiceStreamConfig({
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash-realtime',
+            label: 'Qwen ASR Realtime',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ]),
+        settings,
+        voiceModel: 'qwen3-asr-flash-realtime',
+      });
+
+      expect(streamConfig.keytermsContext).toContain('Paraformer');
+      expect(streamConfig.keytermsContext).toContain('Qwen'); // globals too
+    } finally {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it('threads a custom keyterms file term into the batch keytermsContext', async () => {
+    const workspaceDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'voice-transcriber-keyterms-'),
+    );
+    const qwenDir = path.join(workspaceDir, '.qwen');
+    fs.mkdirSync(qwenDir, { recursive: true });
+    fs.writeFileSync(path.join(qwenDir, 'voice-keyterms.txt'), 'Paraformer\n');
+    try {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      });
+      const settings = {
+        isTrusted: true,
+        workspace: { path: path.join(qwenDir, 'settings.json') },
+        merged: {
+          env: { DASHSCOPE_API_KEY: 'sk-test' },
+          security: { auth: {} },
+        },
+      } as unknown as LoadedSettings;
+
+      await transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Qwen ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ]),
+          settings,
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      );
+
+      const body = JSON.parse(fetchFn.mock.calls[0][1].body as string);
+      const sys = body.messages.find(
+        (m: { role: string }) => m.role === 'system',
+      );
+      expect(sys.content[0].text).toContain('Paraformer');
+      expect(sys.content[0].text).toContain('Qwen'); // globals too
+    } finally {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 
   it('does not include project path metadata in voice keyterms', () => {
@@ -573,6 +667,29 @@ describe('voice-transcriber', () => {
         ].join(' '),
       ),
     ).toBe(false);
+  });
+
+  it('drops a keyterm echo even when user keyterms make the set large', () => {
+    const keyterms = [
+      'grep',
+      'regex',
+      'typescript',
+      'json',
+      'oauth',
+      'subagent',
+      'worktree',
+      'endpoint',
+      'middleware',
+      'schema',
+      ...Array.from({ length: 190 }, (_, i) => `customterm${i}`),
+    ];
+
+    expect(
+      isKeytermEcho(
+        'grep regex typescript json oauth subagent worktree endpoint middleware schema',
+        keyterms.join(' '),
+      ),
+    ).toBe(true);
   });
 
   it('posts audio to chat/completions as input_audio content', async () => {

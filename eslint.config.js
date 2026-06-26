@@ -33,6 +33,7 @@ export default tseslint.config(
       'docs-site/out/**',
       '.qwen/**',
       'packages/desktop/**',
+      'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
     ],
   },
   eslint.configs.recommended,

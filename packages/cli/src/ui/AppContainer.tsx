@@ -2105,9 +2105,10 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager.history, pendingHistoryItems],
   );
   const stickyTodos = useStableStickyTodos(rawStickyTodos);
+  const hasExecutingTool = isToolExecuting(pendingHistoryItems);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
-  useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
+  useTerminalProgress(streamingState, hasExecutingTool);
 
   cancelHandlerRef.current = useCallback(
     (info?: CancelSubmitInfo) => {
@@ -3083,6 +3084,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.customWittyPhrases,
     responseCandidateTokens,
     streamingResponseLengthRef.current,
+    hasExecutingTool,
   );
 
   useAttentionNotifications({
