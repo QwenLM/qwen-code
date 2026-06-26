@@ -50,6 +50,37 @@ describe('CdpTunnelRegistry (Plan C #5626)', () => {
     expect(reg.getActive()).toBe(b);
   });
 
+  it('superseding a bridge notifies the old one (onExtensionGone) so its /cdp client closes', () => {
+    const reg = new CdpTunnelRegistry();
+    const a = endpoint('a');
+    const goneA = vi.fn();
+    a.onExtensionGone = goneA;
+    const b = endpoint('b');
+    const goneB = vi.fn();
+    b.onExtensionGone = goneB;
+
+    reg.register(a);
+    reg.register(b);
+
+    // The superseded bridge is told it's gone; the new active one is not.
+    expect(goneA).toHaveBeenCalledTimes(1);
+    expect(goneB).not.toHaveBeenCalled();
+    expect(reg.getActive()).toBe(b);
+  });
+
+  it('re-registering the same endpoint does not fire its onExtensionGone', () => {
+    const reg = new CdpTunnelRegistry();
+    const ep = endpoint('a');
+    const gone = vi.fn();
+    ep.onExtensionGone = gone;
+
+    reg.register(ep);
+    reg.register(ep);
+
+    expect(gone).not.toHaveBeenCalled();
+    expect(reg.getActive()).toBe(ep);
+  });
+
   it('unregister fires onExtensionGone and clears the active bridge', () => {
     const reg = new CdpTunnelRegistry();
     const ep = endpoint('a');

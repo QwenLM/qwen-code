@@ -564,6 +564,7 @@ import {
   extractFilesFromTarGz,
   fetchAllowedGitHub,
   createWorkspaceMcpBudget,
+  deliverClientMcpMessage,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -7410,5 +7411,48 @@ describe('createWorkspaceMcpBudget — env parsing', () => {
 
   it('returns undefined when the budget env var is unset', () => {
     expect(createWorkspaceMcpBudget(onEvent)).toBeUndefined();
+  });
+});
+
+describe('deliverClientMcpMessage — reverse tool channel (#5626)', () => {
+  type Args = Parameters<typeof deliverClientMcpMessage>;
+  const message = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/list',
+  } as unknown as Args[2];
+
+  it('throws when the ACP connection is not wired yet', async () => {
+    await expect(
+      deliverClientMcpMessage(undefined, 'srv', message),
+    ).rejects.toThrow("client MCP server 'srv' has no ACP connection yet");
+  });
+
+  it.each([
+    { label: 'undefined', response: {} },
+    { label: 'null', response: { payload: null } },
+  ])('throws when the parent reply payload is $label', async ({ response }) => {
+    const connection = {
+      extMethod: vi.fn().mockResolvedValue(response),
+    } as unknown as Args[0];
+    await expect(
+      deliverClientMcpMessage(connection, 'srv', message),
+    ).rejects.toThrow(
+      "client_mcp/message returned no payload for server 'srv'",
+    );
+  });
+
+  it('returns the parent reply payload on success', async () => {
+    const payload = { jsonrpc: '2.0', id: 1, result: { tools: [] } };
+    const extMethod = vi.fn().mockResolvedValue({ payload });
+    const connection = { extMethod } as unknown as Args[0];
+
+    await expect(
+      deliverClientMcpMessage(connection, 'srv', message),
+    ).resolves.toBe(payload);
+    expect(extMethod).toHaveBeenCalledWith(expect.anything(), {
+      server: 'srv',
+      payload: message,
+    });
   });
 });

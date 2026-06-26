@@ -1987,6 +1987,73 @@ describe('mcp-client', () => {
       );
     });
 
+    describe('stdio entry-script validation', () => {
+      it('connects when a path-like entry script exists', async () => {
+        // existsSync defaults to true, so the entry-script check passes.
+        const mockedTransport = vi
+          .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+          .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+        await expect(
+          createTransport(
+            'test-server',
+            { command: 'node', args: ['./server.js'] },
+            false,
+          ),
+        ).resolves.toBeDefined();
+        expect(mockedTransport).toHaveBeenCalledTimes(1);
+      });
+
+      it('throws when a path-like entry script is missing', async () => {
+        // No cwd, so the only existsSync call is the entry-script check.
+        mockExistsSync.mockReturnValueOnce(false);
+
+        await expect(
+          createTransport(
+            'test-server',
+            { command: 'node', args: ['/abs/server.js'] },
+            false,
+          ),
+        ).rejects.toThrow(
+          "MCP server 'test-server' entry script not found at: /abs/server.js",
+        );
+      });
+
+      it('resolves a relative entry script against cwd before checking existence', async () => {
+        // First existsSync call is the cwd check (true); the second is the entry
+        // script check (false) so the throw exposes the resolved absolute path.
+        mockExistsSync.mockReturnValueOnce(true).mockReturnValueOnce(false);
+
+        await expect(
+          createTransport(
+            'test-server',
+            { command: 'node', args: ['./bin/server.js'], cwd: '/srv/app' },
+            false,
+          ),
+        ).rejects.toThrow(
+          /entry script not found at: .*srv[\\/]app[\\/]bin[\\/]server\.js/,
+        );
+      });
+
+      it('skips validation for a bare (non-path) entry arg', async () => {
+        // npx-style first arg like `-y` is not a file path, so existence is never
+        // checked and a missing file on disk must not block the connection.
+        const mockedTransport = vi
+          .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+          .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+        await expect(
+          createTransport(
+            'test-server',
+            { command: 'npx', args: ['-y', '@scope/pkg'] },
+            false,
+          ),
+        ).resolves.toBeDefined();
+        expect(mockedTransport).toHaveBeenCalledTimes(1);
+        expect(mockExistsSync).not.toHaveBeenCalled();
+      });
+    });
+
     describe('useGoogleCredentialProvider', () => {
       it('should use GoogleCredentialProvider when specified', async () => {
         const transport = await createTransport(

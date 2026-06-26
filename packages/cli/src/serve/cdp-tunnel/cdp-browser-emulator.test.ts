@@ -125,6 +125,24 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     });
   });
 
+  it('returns a CDP error for an unknown session instead of a fake success', async () => {
+    const { emu, replies, forwardToTab } = setup();
+    await emu.handleFromClient({
+      id: 8,
+      method: 'Runtime.evaluate',
+      params: { expression: '1+1' },
+      sessionId: 'stale-session',
+    });
+    // A stale session must not be forwarded to the tab, and must not "succeed".
+    expect(forwardToTab).not.toHaveBeenCalled();
+    expect(replies[0]).toMatchObject({
+      id: 8,
+      sessionId: 'stale-session',
+      error: { code: -32000, message: 'Unknown CDP session: stale-session' },
+    });
+    expect(replies[0].result).toBeUndefined();
+  });
+
   it('re-tags tab events with the page session id', () => {
     const { emu, replies } = setup();
     emu.emitTabEvent('Network.requestWillBeSent', { requestId: 'r1' });

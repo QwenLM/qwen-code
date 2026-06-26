@@ -2213,7 +2213,8 @@ async function resolveQwenMemoryPaths(params: {
  * `payload` (contract break / older parent) surfaces as a transport error so
  * the agent's MCP client fails fast instead of hanging.
  */
-async function deliverClientMcpMessage(
+// Exported for unit tests (error branches); not part of the public agent API.
+export async function deliverClientMcpMessage(
   connection: AgentSideConnection | undefined,
   serverName: string,
   message: JSONRPCMessage,

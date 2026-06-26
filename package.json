@@ -150,9 +150,7 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "chrome-devtools-mcp": "1.4.0",
     "ink": "^7.0.3",
-    "puppeteer-core": "25.2.0",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {
@@ -161,7 +159,9 @@
     "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
     "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
-    "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
+    "@lydell/node-pty-win32-x64": "1.2.0-beta.10",
+    "chrome-devtools-mcp": "1.4.0",
+    "puppeteer-core": "25.2.0"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [

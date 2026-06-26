@@ -55,6 +55,15 @@ export class CdpTunnelRegistry {
    * extension connection supersedes the previous bridge.
    */
   register(endpoint: CdpBridgeEndpoint): () => void {
+    // Superseding an existing bridge: tell the old one's bound `/cdp` puppeteer
+    // client it's gone so it closes, instead of running on against a dead
+    // extension. Without this, the old and new puppeteer clients coexist —
+    // violating the single-puppeteer design. `onExtensionGone` is idempotent
+    // (its `dispose()` guards re-entry), and we skip a no-op re-register.
+    const previous = this.active;
+    if (previous && previous !== endpoint) {
+      previous.onExtensionGone?.();
+    }
     this.active = endpoint;
     let unregistered = false;
     return () => {

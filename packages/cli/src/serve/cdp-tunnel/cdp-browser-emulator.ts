@@ -202,8 +202,17 @@ export class CdpBrowserEmulator {
       }
     }
 
-    // unknown session — ack to avoid hanging the client.
-    return this.cb.reply({ id, sessionId, result: {} });
+    // unknown session — return a CDP error rather than a fake-success `{}`, so a
+    // command to a stale/unrecognized session surfaces instead of silently
+    // no-op'ing (which puppeteer would read as success with no effect).
+    return this.cb.reply({
+      id,
+      sessionId,
+      error: {
+        code: SERVER_ERROR,
+        message: `Unknown CDP session: ${sessionId ?? '(none)'}`,
+      },
+    });
   }
 
   /**

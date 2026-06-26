@@ -197,6 +197,14 @@ async function handleAttach(
       });
     });
 
+    // Idempotent re-attach: a prior attachment may still hold live listeners +
+    // keepalive. Drop them before re-registering so a second `cdp_attach` can't
+    // double-register onDebuggerEvent/onDebuggerDetach — otherwise every CDP
+    // event would fire twice and corrupt the puppeteer stream. teardown is a
+    // no-op on a fresh attach (attachedTabId is null) and clears attachedTabId,
+    // so it must run before we record the new tab below.
+    teardownAttachment();
+
     attachedTabId = tabId;
     chrome.debugger.onEvent.addListener(onDebuggerEvent);
     chrome.debugger.onDetach.addListener(onDebuggerDetach);
