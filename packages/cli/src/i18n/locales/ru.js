@@ -251,6 +251,9 @@ export default {
   'Delete {{name}}': 'Удалить {{name}}',
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
+  Transcript: 'Транскрипт',
+  'to close': 'закрыть',
+  'to scroll': 'прокрутить',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter для выбора, ↑↓ для навигации, Esc для закрытия',
   'Esc to go back': 'Esc для возврата',

@@ -205,6 +205,9 @@ export default {
   'Delete {{name}}': '{{name}} を削除',
   'Unknown Step': '不明なステップ',
   'Esc to close': 'Esc で閉じる',
+  Transcript: 'トランスクリプト',
+  'to close': '閉じる',
+  'to scroll': 'スクロール',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter で選択、↑↓ で移動、Esc で閉じる',
   'Esc to go back': 'Esc で戻る',

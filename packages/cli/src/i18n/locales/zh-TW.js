@@ -442,6 +442,9 @@ export default {
   'Delete {{name}}': '刪除 {{name}}',
   'Unknown Step': '未知步驟',
   'Esc to close': '按 Esc 關閉',
+  Transcript: '完整記錄',
+  'to close': '關閉',
+  'to scroll': '捲動',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter 選擇，↑↓ 導航，Esc 關閉',
   'Esc to go back': '按 Esc 返回',

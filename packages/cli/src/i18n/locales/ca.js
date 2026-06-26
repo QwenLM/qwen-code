@@ -251,6 +251,9 @@ export default {
   'Delete {{name}}': 'Eliminar {{name}}',
   'Unknown Step': 'Pas desconegut',
   'Esc to close': 'Esc per tancar',
+  Transcript: 'Transcripció',
+  'to close': 'per tancar',
+  'to scroll': 'per desplaçar',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter per seleccionar, ↑↓ per navegar, Esc per tancar',
   'Esc to go back': 'Esc per tornar enrere',

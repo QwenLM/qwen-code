@@ -252,6 +252,9 @@ export default {
   'Delete {{name}}': 'Supprimer {{name}}',
   'Unknown Step': 'Étape inconnue',
   'Esc to close': 'Esc pour fermer',
+  Transcript: 'Transcription',
+  'to close': 'pour fermer',
+  'to scroll': 'pour défiler',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter pour sélectionner, ↑↓ pour naviguer, Esc pour fermer',
   'Esc to go back': 'Esc pour revenir',

@@ -244,6 +244,9 @@ export default {
   'Delete {{name}}': 'Excluir {{name}}',
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
+  Transcript: 'Transcrição',
+  'to close': 'para fechar',
+  'to scroll': 'para rolar',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter para selecionar, ↑↓ para navegar, Esc para fechar',
   'Esc to go back': 'Esc para voltar',

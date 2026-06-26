@@ -229,6 +229,9 @@ export default {
   'Delete {{name}}': '{{name}} löschen',
   'Unknown Step': 'Unbekannter Schritt',
   'Esc to close': 'Esc zum Schließen',
+  Transcript: 'Transkript',
+  'to close': 'zum Schließen',
+  'to scroll': 'zum Scrollen',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter zum Auswählen, ↑↓ zum Navigieren, Esc zum Schließen',
   'Esc to go back': 'Esc zum Zurückgehen',
