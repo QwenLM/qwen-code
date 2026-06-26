@@ -30,10 +30,7 @@ import { checkForUpdates } from './utils/updateCheck.js';
 import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import {
-  installAlternateScreenExitHandler,
-  shouldUseVirtualViewport,
-} from './utils/terminal-buffer.js';
+import { shouldUseVirtualViewport } from './utils/terminal-buffer.js';
 import { handleAutoUpdate } from '../utils/handleAutoUpdate.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
@@ -179,8 +176,6 @@ export async function startInteractiveUI(
     settings.merged.ui?.useTerminalBuffer,
     config.getScreenReader(),
   );
-  const removeAlternateScreenExitHandler =
-    installAlternateScreenExitHandler(useVP);
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>
@@ -226,7 +221,6 @@ export async function startInteractiveUI(
     // operational, preventing garbled terminal output after the app exits.
     disableKittyProtocol();
     instance.unmount();
-    removeAlternateScreenExitHandler();
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });

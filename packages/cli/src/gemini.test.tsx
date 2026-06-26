@@ -1401,53 +1401,6 @@ describe('startInteractiveUI', () => {
     });
   });
 
-  it('installs an alternate-screen exit safety net in VP mode', async () => {
-    const originalIsTTY = process.stdout.isTTY;
-    Object.defineProperty(process.stdout, 'isTTY', {
-      configurable: true,
-      value: true,
-    });
-    const writeSpy = vi
-      .spyOn(process.stdout, 'write')
-      .mockImplementation((() => true) as typeof process.stdout.write);
-
-    const mockInitializationResult = {
-      authError: null,
-      themeError: null,
-      shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
-    };
-
-    try {
-      await startInteractiveUI(
-        mockConfig,
-        mockSettings,
-        mockStartupWarnings,
-        mockWorkspaceRoot,
-        mockInitializationResult,
-      );
-
-      const addedExitListeners = (
-        process.listeners('exit') as NodeJS.ExitListener[]
-      ).filter((listener) => !initialExitListeners.includes(listener));
-
-      expect(addedExitListeners.length).toBeGreaterThan(0);
-      for (const listener of addedExitListeners) {
-        listener(1);
-      }
-
-      expect(
-        writeSpy.mock.calls.some(([chunk]) => chunk === '\x1b[?25h\x1b[?1049l'),
-      ).toBe(true);
-    } finally {
-      writeSpy.mockRestore();
-      Object.defineProperty(process.stdout, 'isTTY', {
-        configurable: true,
-        value: originalIsTTY,
-      });
-    }
-  });
-
   it('should perform all startup tasks in correct order', async () => {
     const { getCliVersion } = await import('./utils/version.js');
     const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
