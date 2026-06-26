@@ -253,7 +253,7 @@ describe('/context shows three-tier thresholds', () => {
 
   it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
     // config.getAutoCompactThreshold() returns 0.5 → computeThresholds(32000, 0.5)
-    // = { warn: 9,600, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    // = { warn: 16,000, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
     const config = makeMockConfig(32_000);
     vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
     const data = await collectContextData(config, false);
