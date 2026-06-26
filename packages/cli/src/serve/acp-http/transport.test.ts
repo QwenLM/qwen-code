@@ -343,6 +343,12 @@ class FakeBridge {
       originatorClientId: 'c',
     };
   }
+  async runWorkspaceMemoryRemember() {
+    return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  }
+  async isWorkspaceMemoryRememberAvailable() {
+    return true;
+  }
   publishWorkspaceEvent(event: BridgeEvent) {
     this.workspaceEvents.push(event);
   }

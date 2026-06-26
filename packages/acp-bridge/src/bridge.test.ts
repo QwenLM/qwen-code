@@ -421,6 +421,58 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('runs workspace memory remember without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/workspace/memory/remember') {
+              return {
+                summary: 'saved',
+                filesTouched: ['/mem/MEMORY.md'],
+                touchedScopes: ['project'],
+                contentSeen: params['content'],
+                contextModeSeen: params['contextMode'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.runWorkspaceMemoryRemember({
+      content: 'Remember the workspace uses vitest.',
+      contextMode: 'workspace',
+    });
+
+    expect(result).toMatchObject({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+    expect(handles).toHaveLength(1);
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: 'qwen/control/workspace/memory/remember',
+        params: {
+          cwd: WS_A,
+          content: 'Remember the workspace uses vitest.',
+          contextMode: 'workspace',
+        },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({

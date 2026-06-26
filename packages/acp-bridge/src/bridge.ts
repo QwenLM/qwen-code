@@ -84,6 +84,8 @@ import type {
   BridgeDaemonStatusSnapshot,
   ChangeSessionCwdRequest,
   ChangeSessionCwdResult,
+  BridgeWorkspaceMemoryRememberRequest,
+  BridgeWorkspaceMemoryRememberResult,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -654,6 +656,7 @@ function hasControlCharacter(value: string): boolean {
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
+const WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 // Trusted continuation marker. `sendPrompt` strips it from every caller and
@@ -3842,6 +3845,56 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         method,
       );
       return response as T;
+    },
+
+    async isWorkspaceMemoryRememberAvailable(): Promise<boolean> {
+      const info = await ensureChannel();
+      try {
+        const response = await withTimeout(
+          Promise.race([
+            info.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+              { cwd: boundWorkspace },
+            ),
+            getChannelClosedReject(info),
+          ]),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+        );
+        return (
+          response !== null &&
+          typeof response === 'object' &&
+          (response as Record<string, unknown>)['available'] === true
+        );
+      } finally {
+        if (info.sessionIds.size === 0 && info.pendingRestoreIds.size === 0) {
+          await startIdleTimer(info, 'workspace memory remember availability');
+        }
+      }
+    },
+
+    async runWorkspaceMemoryRemember(
+      request: BridgeWorkspaceMemoryRememberRequest,
+    ): Promise<BridgeWorkspaceMemoryRememberResult> {
+      const info = await ensureChannel();
+      try {
+        const response = await withTimeout(
+          Promise.race([
+            info.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
+              { ...request, cwd: boundWorkspace },
+            ),
+            getChannelClosedReject(info),
+          ]),
+          WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
+        );
+        return response as unknown as BridgeWorkspaceMemoryRememberResult;
+      } finally {
+        if (info.sessionIds.size === 0 && info.pendingRestoreIds.size === 0) {
+          await startIdleTimer(info, 'workspace memory remember');
+        }
+      }
     },
 
     async getWorkspaceMcpToolsStatus(serverName) {

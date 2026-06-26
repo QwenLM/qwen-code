@@ -3397,6 +3397,57 @@ describe('DaemonClient', () => {
       ).rejects.toBeInstanceOf(DaemonHttpError);
     });
 
+    it('POSTs /workspace/memory/remember and forwards context mode/client id', async () => {
+      const reply = {
+        taskId: 'remember-1',
+        status: 'queued' as const,
+        contextMode: 'clean' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rememberWorkspaceMemory('remember this', {
+          contextMode: 'clean',
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/remember');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        content: 'remember this',
+        contextMode: 'clean',
+      });
+    });
+
+    it('GETs /workspace/memory/remember/:taskId', async () => {
+      const reply = {
+        taskId: 'remember/a b',
+        status: 'completed' as const,
+        contextMode: 'workspace' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:01.000Z',
+        result: {
+          summary: 'saved',
+          filesTouched: ['/mem/MEMORY.md'],
+          touchedScopes: ['project' as const],
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryRememberTask('remember/a b'),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/remember/remember%2Fa%20b',
+      });
+    });
+
     it('GETs /workspace/agents (list) and /workspace/agents/:id (detail)', async () => {
       const list = {
         v: 1,

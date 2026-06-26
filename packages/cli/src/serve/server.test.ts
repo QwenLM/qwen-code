@@ -197,6 +197,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_providers',
   'auth_provider_install',
   'workspace_memory',
+  'workspace_memory_remember',
   'workspace_agents',
   'workspace_agent_generate',
   'workspace_env',
@@ -533,6 +534,14 @@ interface FakeBridgeOpts {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ) => Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  workspaceMemoryRememberImpl?: (request: {
+    content: string;
+    contextMode: 'workspace' | 'clean';
+  }) => Promise<{
+    summary?: string;
+    filesTouched: string[];
+    touchedScopes: Array<'user' | 'project'>;
+  }>;
   daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
 }
 
@@ -645,6 +654,10 @@ interface FakeBridge extends AcpSessionBridge {
     directive: string;
     context?: BridgeClientRequestContext;
   }>;
+  workspaceMemoryRememberCalls: Array<{
+    content: string;
+    contextMode: 'workspace' | 'clean';
+  }>;
   setToolEnabledCalls: Array<{
     toolName: string;
     enabled: boolean;
@@ -726,6 +739,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
+    [];
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
@@ -761,6 +776,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     }));
   const promptImpl =
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
+  const workspaceMemoryRememberImpl =
+    opts.workspaceMemoryRememberImpl ??
+    (async () => ({
+      summary: 'remembered',
+      filesTouched: [],
+      touchedScopes: [],
+    }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
   const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
@@ -1140,6 +1162,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     shellCalls,
     generateSessionRecapCalls,
     forkCalls,
+    workspaceMemoryRememberCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1394,6 +1417,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return launchSessionForkAgentImpl(sessionId, directive, context);
+    },
+    async runWorkspaceMemoryRemember(request) {
+      workspaceMemoryRememberCalls.push(request);
+      return workspaceMemoryRememberImpl(request);
+    },
+    async isWorkspaceMemoryRememberAvailable() {
+      return true;
     },
     enqueueMidTurnMessage(sessionId, message, context) {
       enqueueMidTurnCalls.push({

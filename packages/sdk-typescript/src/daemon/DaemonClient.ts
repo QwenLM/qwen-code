@@ -58,6 +58,8 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonWorkspaceMemoryRememberOptions,
+  DaemonWorkspaceMemoryRememberTask,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -1022,6 +1024,57 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /workspace/memory');
         }
         return (await res.json()) as DaemonWriteMemoryResult;
+      },
+    );
+  }
+
+  /**
+   * Queue a hidden managed-memory remember task for the daemon's bound
+   * workspace. This does not require an existing session; callers should
+   * poll `getWorkspaceMemoryRememberTask()` until the task is terminal.
+   */
+  async rememberWorkspaceMemory(
+    content: string,
+    opts: DaemonWorkspaceMemoryRememberOptions = {},
+  ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    const body = {
+      content,
+      contextMode: opts.contextMode ?? 'workspace',
+    };
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/memory/remember`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts.clientId,
+        ),
+        body: JSON.stringify(body),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/memory/remember');
+        }
+        return (await res.json()) as DaemonWorkspaceMemoryRememberTask;
+      },
+    );
+  }
+
+  async getWorkspaceMemoryRememberTask(
+    taskId: string,
+  ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    const encodedTaskId = encodeURIComponent(taskId);
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/memory/remember/${encodedTaskId}`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace/memory/remember/:taskId',
+          );
+        }
+        return (await res.json()) as DaemonWorkspaceMemoryRememberTask;
       },
     );
   }
