@@ -33,22 +33,17 @@ function truncateIndexLine(text: string): string {
   return `${text.slice(0, MAX_INDEX_LINE_CHARS - 1).trimEnd()}…`;
 }
 
-export function buildManagedAutoMemoryIndex(
-  docs: ScannedAutoMemoryDocument[],
-  _metadata?: Pick<
-    AutoMemoryMetadata,
-    'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
-  >,
-): string {
-  const raw = docs
-    .map((doc) =>
-      truncateIndexLine(
-        `- [${doc.title}](${doc.relativePath}) — ${doc.description || doc.type}`,
-      ),
-    )
-    .join('\n');
+function docIndexLine(doc: ScannedAutoMemoryDocument): string {
+  return `- [${doc.title}](${doc.relativePath}) — ${doc.description || doc.type}`;
+}
 
-  const lines = raw.split('\n');
+/**
+ * Assemble pre-built index lines into the final MEMORY.md body, enforcing the
+ * line-count and byte-size caps and appending a truncation warning when either
+ * trips. Each entry is exactly one line (descriptions are single-line).
+ */
+function assembleIndex(lines: string[]): string {
+  const raw = lines.join('\n');
   const wasLineTruncated = lines.length > MAX_INDEX_LINES;
   let truncated = wasLineTruncated
     ? lines.slice(0, MAX_INDEX_LINES).join('\n')
@@ -64,6 +59,87 @@ export function buildManagedAutoMemoryIndex(
   }
 
   return `${truncated}\n\n> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.`;
+}
+
+export function buildManagedAutoMemoryIndex(
+  docs: ScannedAutoMemoryDocument[],
+  _metadata?: Pick<
+    AutoMemoryMetadata,
+    'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
+  >,
+): string {
+  return assembleIndex(docs.map((doc) => truncateIndexLine(docIndexLine(doc))));
+}
+
+/**
+ * Normalize a description for dedup grouping: lowercase, collapse whitespace,
+ * strip trailing punctuation. Conservative (normalized-exact, not fuzzy) so two
+ * genuinely different facts are never silently merged.
+ */
+function normalizeDescription(description: string): string {
+  return description
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.,;:!?)\]}'"`]+$/g, '')
+    .trim();
+}
+
+interface TeamIndexGroup {
+  primary: ScannedAutoMemoryDocument;
+  others: ScannedAutoMemoryDocument[];
+}
+
+/**
+ * Group team docs that share a (normalized) description. With the per-author
+ * subtree layout two people can save the same shared fact; collapsing them into
+ * one index line — listing the other files — keeps the index readable while
+ * preserving every file path (nothing is dropped; the files stay the source of
+ * truth). Empty descriptions are never grouped. Input is assumed pre-sorted by
+ * relativePath, so group order and each group's primary are deterministic.
+ */
+function groupTeamDocsByDescription(
+  docs: ScannedAutoMemoryDocument[],
+): TeamIndexGroup[] {
+  const groups = new Map<string, ScannedAutoMemoryDocument[]>();
+  const order: string[] = [];
+  for (const doc of docs) {
+    const norm = normalizeDescription(doc.description);
+    // Empty descriptions carry no dedup signal — key each uniquely by path.
+    const key = norm.length > 0 ? `d:${norm}` : `u:${doc.relativePath}`;
+    let members = groups.get(key);
+    if (!members) {
+      members = [];
+      groups.set(key, members);
+      order.push(key);
+    }
+    members.push(doc);
+  }
+  return order.map((key) => {
+    const members = groups.get(key)!;
+    return { primary: members[0], others: members.slice(1) };
+  });
+}
+
+function teamGroupIndexLine(group: TeamIndexGroup): string {
+  const base = docIndexLine(group.primary);
+  if (group.others.length === 0) {
+    return truncateIndexLine(base);
+  }
+  const also = group.others.map((doc) => doc.relativePath).join(', ');
+  return truncateIndexLine(`${base} (also: ${also})`);
+}
+
+/**
+ * Build the team index with cross-author dedup: entries sharing a description
+ * collapse into one line. See {@link groupTeamDocsByDescription}.
+ */
+export function buildTeamAutoMemoryIndex(
+  docs: ScannedAutoMemoryDocument[],
+): string {
+  return assembleIndex(
+    groupTeamDocsByDescription(docs).map(teamGroupIndexLine),
+  );
 }
 
 async function readAutoMemoryMetadata(
@@ -128,7 +204,7 @@ export async function rebuildTeamAutoMemoryIndex(
   const ordered = [...docs].sort((a, b) =>
     a.relativePath.localeCompare(b.relativePath),
   );
-  const content = buildManagedAutoMemoryIndex(ordered);
+  const content = buildTeamAutoMemoryIndex(ordered);
   await atomicWriteFile(getTeamAutoMemoryIndexPath(projectRoot), content, {
     encoding: 'utf-8',
   });

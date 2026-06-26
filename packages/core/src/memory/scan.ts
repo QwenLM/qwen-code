@@ -31,7 +31,10 @@ function parseFrontmatterValue(
   frontmatter: string,
   key: string,
 ): string | undefined {
-  const match = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
+  // `[^\S\n]*` = horizontal whitespace only. A plain `\s*` would cross the
+  // newline and, for an empty value (`description:`), greedily capture the
+  // NEXT frontmatter line as the value.
+  const match = frontmatter.match(new RegExp(`^${key}:[^\\S\\n]*(.+)$`, 'm'));
   return match?.[1]?.trim();
 }
 
