@@ -3506,7 +3506,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             sessionId,
             path: req.path,
           }),
-          initTimeoutMs,
+          Math.max(initTimeoutMs, 30_000),
           'changeSessionCwd',
         )) as { previousCwd: string; newCwd: string; warnings: string[] };
       });

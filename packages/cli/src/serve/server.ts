@@ -3351,41 +3351,6 @@ export function createServeApp(
       );
       res.status(200).json(result);
     } catch (err) {
-      // Map ACP child errorKind codes to HTTP responses
-      if (err && typeof err === 'object') {
-        const data = (err as { data?: unknown }).data;
-        if (data && typeof data === 'object') {
-          const kind = (data as { errorKind?: unknown }).errorKind;
-          if (kind === 'restrictive_sandbox') {
-            res.status(403).json({
-              error:
-                (err as { message?: string }).message ??
-                'Restrictive sandbox mode active',
-              code: 'restrictive_sandbox',
-            });
-            return;
-          }
-          if (kind === 'directory_not_found') {
-            res.status(400).json({
-              error:
-                (err as { message?: string }).message ?? 'Directory not found',
-              code: 'directory_not_found',
-              path: (data as { path?: string }).path,
-            });
-            return;
-          }
-          if (kind === 'directory_not_trusted') {
-            res.status(403).json({
-              error:
-                (err as { message?: string }).message ??
-                'Directory not trusted',
-              code: 'directory_not_trusted',
-              path: (data as { path?: string }).path,
-            });
-            return;
-          }
-        }
-      }
       sendBridgeError(res, err, {
         route: 'POST /session/:id/cd',
         sessionId,
@@ -6049,6 +6014,31 @@ function sendBridgeErrorImpl(
         res.status(503).json({
           error: errorMessage(err),
           code: 'acp_channel_unavailable',
+        });
+        return;
+      }
+      if (kind === 'restrictive_sandbox') {
+        res.status(403).json({
+          error: errorMessage(err),
+          code: 'restrictive_sandbox',
+        });
+        return;
+      }
+      if (kind === 'directory_not_found') {
+        const d = data as { path?: string };
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'directory_not_found',
+          path: d.path,
+        });
+        return;
+      }
+      if (kind === 'directory_not_trusted') {
+        const d = data as { path?: string };
+        res.status(403).json({
+          error: errorMessage(err),
+          code: 'directory_not_trusted',
+          path: d.path,
         });
         return;
       }

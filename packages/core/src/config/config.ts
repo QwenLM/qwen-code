@@ -3069,6 +3069,7 @@ export class Config {
     oldStorage: Storage,
     newStorage: Storage,
     oldDir: string,
+    opts?: { skipProcessChdir?: boolean },
   ): Promise<void> {
     this.chatRecordingService?.finalize();
     await this.chatRecordingService?.flush();
@@ -3076,13 +3077,15 @@ export class Config {
     try {
       this.moveCurrentSessionArtifacts(oldStorage, newStorage);
     } catch (error) {
-      try {
-        process.chdir(oldDir);
-      } catch (rollbackError) {
-        this.debugLogger.warn(
-          'Failed to roll back working directory after session artifact migration failed',
-          rollbackError,
-        );
+      if (!opts?.skipProcessChdir) {
+        try {
+          process.chdir(oldDir);
+        } catch (rollbackError) {
+          this.debugLogger.warn(
+            'Failed to roll back working directory after session artifact migration failed',
+            rollbackError,
+          );
+        }
       }
       throw error;
     }
@@ -3119,7 +3122,12 @@ export class Config {
 
     const oldStorage = this.storage;
     const newStorage = new Storage(expected);
-    await this.prepareSessionArtifactMigration(oldStorage, newStorage, oldDir);
+    await this.prepareSessionArtifactMigration(
+      oldStorage,
+      newStorage,
+      oldDir,
+      opts,
+    );
 
     this.targetDir = expected;
     this.cwd = expected;
