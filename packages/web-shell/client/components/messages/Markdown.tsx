@@ -53,9 +53,9 @@ const SUPPORTED_LANGUAGES = new Set([
   'swift',
   'kotlin',
   'scala',
-  'shell',
+  // `shell` and `zsh` are intentionally absent: LANGUAGE_ALIASES maps them to
+  // `bash`, which resolveFenceLanguage applies before this membership check.
   'bash',
-  'zsh',
   'fish',
   'powershell',
   'sql',

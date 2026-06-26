@@ -106,3 +106,11 @@ export function highlightToHtmlSync(
   }
   return null;
 }
+
+/** Resets all module-level highlighter state. For tests only. */
+export function __resetForTesting(): void {
+  highlighterPromise = null;
+  highlighterInstance = null;
+  loadedLanguages.clear();
+  pendingLanguages.clear();
+}

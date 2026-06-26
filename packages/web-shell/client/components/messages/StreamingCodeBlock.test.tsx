@@ -5,7 +5,7 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it } from 'vitest';
 import { Markdown } from './Markdown';
-import { enqueueSuffix } from './StreamingCodeBlock';
+import { enqueueSuffix, exceedsStreamingLimit } from './StreamingCodeBlock';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -61,6 +61,52 @@ describe('enqueueSuffix', () => {
       sent: 'abc',
       diverged: true,
     });
+  });
+});
+
+describe('exceedsStreamingLimit', () => {
+  it('allows normal multi-line code', () => {
+    expect(exceedsStreamingLimit('const x = 1;\nconst y = 2;\n')).toBe(false);
+  });
+
+  it('bails on a very long single line (minified content)', () => {
+    expect(exceedsStreamingLimit('x'.repeat(2_001))).toBe(true);
+  });
+
+  it('bails when the whole block is very large', () => {
+    const block = ('a'.repeat(80) + '\n').repeat(700); // > 50K total
+    expect(block.length).toBeGreaterThan(50_000);
+    expect(exceedsStreamingLimit(block)).toBe(true);
+  });
+
+  it('measures only the trailing (in-progress) line, not earlier ones', () => {
+    expect(exceedsStreamingLimit('x'.repeat(3_000) + '\nshort')).toBe(false);
+  });
+});
+
+describe('StreamingCodeBlock oversized fallback', () => {
+  it('renders plain (no streaming highlight) for an oversized single line', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const longLine = 'a'.repeat(2_500);
+
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```json\n' + longLine + '\n```',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    expect(container.textContent).toContain(longLine);
+    expect(container.querySelector('.shiki-stream')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
   });
 });
 

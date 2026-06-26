@@ -1,11 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  __resetForTesting,
   getCodeHighlighter,
   highlightToHtml,
   highlightToHtmlSync,
 } from './codeHighlighter';
 
 const THEME = 'github-dark-default';
+
+// Reset the module-level highlighter singleton so each test is order-independent
+// (loadedLanguages would otherwise accumulate across tests).
+beforeEach(() => {
+  __resetForTesting();
+});
 
 describe('codeHighlighter', () => {
   it('highlightToHtml produces Shiki markup for a loaded language', async () => {

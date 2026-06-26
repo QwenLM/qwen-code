@@ -45,6 +45,20 @@ export function enqueueSuffix(
   return { sent, diverged: true };
 }
 
+// @shikijs/stream keeps the trailing (current) line "unstable" and re-tokenizes
+// it as it grows, so a very long single line (e.g. minified JSON) degrades to
+// O(n²) work and can freeze the UI. Bail to the plain renderer while streaming
+// once the whole block or the trailing line gets large; the settled static
+// highlighter (which tokenizes the block once) takes over after the turn.
+const STREAM_MAX_CHARS = 50_000;
+const STREAM_MAX_LINE_CHARS = 2_000;
+
+export function exceedsStreamingLimit(code: string): boolean {
+  if (code.length > STREAM_MAX_CHARS) return true;
+  const trailingLineLength = code.length - (code.lastIndexOf('\n') + 1);
+  return trailingLineLength > STREAM_MAX_LINE_CHARS;
+}
+
 /**
  * Highlights a code fence *as it streams in* using @shikijs/stream.
  *
@@ -74,9 +88,17 @@ export function StreamingCodeBlock({
   // Bumped to rebuild the stream from scratch when the content diverges from
   // what we've already sent (shrink/replace) or the controller is torn down.
   const [resetKey, setResetKey] = useState(0);
+  // Latches once the content gets too large to stream-highlight cheaply; we
+  // then render plain and let the settled static highlighter handle it.
+  const [bailed, setBailed] = useState(() => exceedsStreamingLimit(code));
+
+  useEffect(() => {
+    if (!bailed && exceedsStreamingLimit(code)) setBailed(true);
+  }, [code, bailed]);
 
   // Build the text → token stream per (lang, theme, resetKey).
   useEffect(() => {
+    if (bailed) return;
     let cancelled = false;
     sentRef.current = '';
     setTokenStream(null);
@@ -129,19 +151,20 @@ export function StreamingCodeBlock({
       }
       controllerRef.current = null;
     };
-  }, [lang, theme, resetKey]);
+  }, [lang, theme, resetKey, bailed]);
 
   // Push the newly-streamed suffix into the text stream as code grows; if the
   // content diverged or the controller is gone, rebuild the stream.
   useEffect(() => {
+    if (bailed) return;
     const controller = controllerRef.current;
     if (!controller) return;
     const result = enqueueSuffix(controller, sentRef.current, code);
     sentRef.current = result.sent;
     if (result.diverged) setResetKey((key) => key + 1);
-  }, [code]);
+  }, [code, bailed]);
 
-  if (failed || !tokenStream) {
+  if (failed || bailed || !tokenStream) {
     // Highlighter still loading or unavailable — show plain text so the
     // streamed content stays visible.
     return (
