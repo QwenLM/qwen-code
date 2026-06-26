@@ -10,8 +10,12 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 function safeLogValue(raw: unknown): string {
   const s = typeof raw === 'string' ? raw : String(raw);
   const clipped = s.length > 64 ? `${s.slice(0, 64)}…` : s;
-  // Strip CR/LF so a crafted header can't forge extra log lines.
-  return clipped.replace(/[\r\n]+/g, ' ');
+  // Strip ALL C0 control chars + DEL (covers CR/LF log-forging AND ANSI ESC
+  // `\x1b` / null bytes a crafted header could use to manipulate an operator's
+  // terminal when this value is written to stderr). Matching control chars in
+  // the regex is the intent here, so the lint rule is deliberately disabled.
+  // eslint-disable-next-line no-control-regex
+  return clipped.replace(/[\x00-\x1f\x7f]+/g, ' ');
 }
 
 /**

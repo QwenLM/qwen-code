@@ -95,7 +95,7 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
-  it('flushes pre-attach buffered frames WITH their bus id and records the max', () => {
+  it('non-resume attach flushes all pre-attach buffered frames WITH their bus id', () => {
     const registry = new ConnectionRegistry();
     try {
       const conn = registry.create(true);
@@ -114,15 +114,53 @@ describe('ConnectionRegistry.getSnapshot', () => {
         new AbortController(),
       );
 
-      // Each frame keeps its id across the buffer → stream handoff (a regression
-      // to `send(frame)` would drop the cursor for early §1.8 frames).
+      // Non-resume attach (no Last-Event-ID): flush EVERYTHING, each frame
+      // keeping its id across the buffer → stream handoff (a regression to
+      // `send(frame)` would drop the cursor for early §1.8 frames).
       expect(stream.sent).toEqual([
         { message: { a: 1 }, id: 5 },
         { message: { b: 2 }, id: undefined },
         { message: { c: 3 }, id: 8 },
       ]);
-      // Max flushed id feeds the resume-cursor advance (no replay double-send).
-      expect(binding.lastFlushedEventId).toBe(8);
+      // The binding no longer carries a `lastFlushedEventId` — the resume cursor
+      // is the client's Last-Event-ID verbatim (see the resume test below).
+      expect(
+        (binding as unknown as { lastFlushedEventId?: number })
+          .lastFlushedEventId,
+      ).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('on resume, skips flushing id-bearing buffered frames (ring replay owns them) but still flushes id-less JSON-RPC replies', () => {
+    // Regression for the silent-frame-loss bug: a frame sent to the dead socket
+    // (id below the buffer's ids, above the client cursor) must be recoverable
+    // via the ring replay. Advancing the cursor past the buffer would drop it;
+    // so on resume the buffer must NOT flush its bus events — the pump's ring
+    // replay (cursor = Last-Event-ID) redelivers each exactly once. Id-less
+    // frames (JSON-RPC replies) have no ring path and are still flushed.
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+      // Gap buffer holds two bus events (ids 6, 7) and one id-less reply.
+      conn.sendSession('sess-1', { a: 1 }, 6);
+      conn.sendSession('sess-1', { reply: true }); // JSON-RPC reply, no bus id
+      conn.sendSession('sess-1', { c: 3 }, 7);
+
+      const stream = new FakeStream('sse');
+      // Client resumes from id 3 (it never saw frame 4, lost in-flight).
+      conn.attachSessionStream('sess-1', stream, new AbortController(), 3);
+
+      // ONLY the id-less reply is flushed; the bus events (6, 7) are left for
+      // the ring replay so frame 4 — between cursor 3 and buffer id 6 — isn't
+      // skipped.
+      expect(stream.sent).toEqual([
+        { message: { reply: true }, id: undefined },
+      ]);
     } finally {
       registry.dispose();
     }

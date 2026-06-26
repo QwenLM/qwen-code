@@ -146,11 +146,20 @@ immediate for an explicit `session/close` and for connection teardown
 Both are latent until resume actually runs; the grace/reclaim above makes them
 reachable, so they ship together:
 
-- **No double-delivery (buffer ↔ ring overlap).** `attachSessionStream` flushes
-  the pre-attach buffer (frames produced during the gap) _and_ records the
-  highest bus id flushed (`lastFlushedEventId`). The GET handler advances the
-  replay cursor to `max(Last-Event-ID, lastFlushedEventId)` so the ring replay
-  doesn't re-emit a frame the flush already delivered.
+- **No double-delivery AND no silent loss (buffer ↔ ring).** A buffered bus
+  event is _also_ in the EventBus ring (it was published there to get its id).
+  So on a resume (`Last-Event-ID` present), `attachSessionStream` is given the
+  cursor and **does not flush id-bearing buffered frames at all** — the ring
+  replay (started at the client's cursor) is the single delivery path for every
+  bus event after the cursor. This is deliberately _not_ "flush the buffer, then
+  advance the replay cursor past it": a frame sent to the now-dead socket but
+  never received by the client has an id _below_ the buffer's ids yet _above_ the
+  client's cursor, so advancing the cursor past the buffer would **silently drop
+  it**. Letting the ring own all bus events delivers each exactly once with no
+  gap. Id-_less_ frames (JSON-RPC replies routed via `replySession`) are not ring
+  events, so they are still flushed from the buffer — their only delivery path.
+  (A fresh connect with no `Last-Event-ID` has no ring anchor, so it flushes the
+  whole buffer as before.)
 - **Idempotent `permission_request` under replay.** A `permission_request` is
   an id-bearing ring event, so a reconnect whose cursor precedes a still-
   unanswered permission replays it. `translateEvent` now reuses the existing
@@ -190,10 +199,14 @@ operator logging can't drift.
     reconnect with `Last-Event-ID` — assert **200 not 403** (ownership kept)
     and the prompt is **not** aborted (grace/reclaim);
   - a replayed `permission_request` reuses the pending entry (same outbound id).
-- `connection-registry.test.ts` — buffer flush threads each frame's `id` and
-  records `lastFlushedEventId`; `detachSessionStream` keeps ownership/prompt
-  across the grace window then tears down on expiry; a reconnect within the
-  window reclaims (cancels the pending teardown).
+- `connection-registry.test.ts` — a non-resume attach flushes the whole buffer
+  threading each frame's `id`; a **resume** attach (cursor present) skips the
+  id-bearing frames (ring replay owns them) but still flushes id-less JSON-RPC
+  replies; `detachSessionStream` keeps ownership/prompt across the grace window
+  then tears down on expiry; a reconnect within the window reclaims (cancels the
+  pending teardown).
+- `ws-stream.test.ts` — `send(msg, id)` ignores the id: the WS wire frame is the
+  bare JSON, no SSE `id:` framing leaks in.
 
 ## Out of scope (still deferred)
 

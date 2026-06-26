@@ -97,13 +97,6 @@ export interface SessionBinding {
    * reconnect and on teardown.
    */
   graceTimer?: ReturnType<typeof setTimeout>;
-  /**
-   * Highest bus event id flushed from `buffer` on the most recent
-   * `attachSessionStream`. The event pump uses it to advance the ring-replay
-   * cursor past already-delivered frames so a buffered frame isn't re-emitted
-   * by replay (would otherwise double-deliver — see the GET handler).
-   */
-  lastFlushedEventId?: number;
 }
 
 /** An agent→client request awaiting the client's JSON-RPC response. */
@@ -340,6 +333,7 @@ export class AcpConnection {
     sessionId: string,
     stream: TransportStream,
     abort: AbortController,
+    resumeFromEventId?: number,
   ): SessionBinding {
     const binding = this.getOrCreateSession(sessionId);
     // Reclaim: a reconnect within the grace window cancels the pending
@@ -362,19 +356,25 @@ export class AcpConnection {
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
       prevStream.close();
     }
-    // Flush buffered pre-attach frames, tracking the highest bus id so the
-    // event pump can advance its replay cursor past them (no double-delivery).
-    let flushedMaxId: number | undefined;
+    // Flush buffered pre-attach frames produced during the detach gap.
+    //
+    // When the client is RESUMING (`resumeFromEventId !== undefined`, i.e. it
+    // sent a `Last-Event-ID`), the ring replay that the event pump starts at
+    // that cursor already redelivers every BUS event (`id !== undefined`) after
+    // the cursor — including frames lost in-flight to the dead socket. So we do
+    // NOT flush id-bearing frames here: doing so would either double-deliver
+    // them (flush + replay) or, if we advanced the cursor past them to dedupe,
+    // SILENTLY DROP an in-flight-lost frame whose id sits BELOW the buffer's ids
+    // but ABOVE the client's cursor. Letting the ring replay own all bus events
+    // delivers each exactly once with no gap.
+    //
+    // We still flush id-LESS frames unconditionally: those are JSON-RPC replies
+    // routed on the session stream (`replySession`), which are NOT ring events
+    // and so have no other delivery path.
     for (const { frame, id } of binding.buffer.splice(0)) {
+      if (resumeFromEventId !== undefined && id !== undefined) continue;
       void stream.send(frame, id);
-      if (
-        id !== undefined &&
-        (flushedMaxId === undefined || id > flushedMaxId)
-      ) {
-        flushedMaxId = id;
-      }
     }
-    binding.lastFlushedEventId = flushedMaxId;
     return binding;
   }
 

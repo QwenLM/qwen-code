@@ -444,14 +444,15 @@ export function mountAcpHttp(
       headerOf(req, 'last-event-id'),
       '/acp ',
     );
-    const binding = conn.attachSessionStream(sessionId, stream, ac);
-    // When replaying, advance the cursor past any frames just flushed from the
-    // pre-attach buffer, so the ring replay below doesn't re-deliver them
-    // (buffer-flush ↔ ring-replay overlap would otherwise double-deliver).
-    const resumeCursor =
-      lastEventId !== undefined && binding.lastFlushedEventId !== undefined
-        ? Math.max(lastEventId, binding.lastFlushedEventId)
-        : lastEventId;
+    // Pass the resume cursor INTO attach: when resuming, attach skips flushing
+    // id-bearing buffered frames because the ring replay below redelivers every
+    // bus event after `lastEventId` exactly once — including any frame lost
+    // in-flight to the dead socket (whose id sits below the buffer's ids but
+    // above the client's cursor). Advancing the cursor past the buffer instead
+    // would silently drop that frame; flushing AND replaying would double-send.
+    // Id-less JSON-RPC replies are still flushed (they aren't ring events).
+    conn.attachSessionStream(sessionId, stream, ac, lastEventId);
+    const resumeCursor = lastEventId;
     // When the pump settles, branch on WHY:
     //  • the transport closed the stream (proxy idle-close / tab close) →
     //    DETACH with a grace window: keep ownership + the in-flight prompt so a
