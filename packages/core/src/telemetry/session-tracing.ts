@@ -716,30 +716,37 @@ export function endLLMRequestSpan(
     spanCtx.span.setAttributes(endAttributes);
 
     // Phase 4c: record per-phase breakdown histogram.
-    if (metadata?.config) {
-      const model = String(spanCtx.attributes['qwen-code.model'] ?? '');
-      if (metadata.requestSetupMs !== undefined) {
-        recordApiRequestBreakdown(metadata.config, metadata.requestSetupMs, {
-          model,
-          phase: ApiRequestPhase.REQUEST_PREPARATION,
-        });
+    // Isolated in its own try/catch so metric failures cannot affect span status.
+    try {
+      if (metadata?.config && metadata.success) {
+        const model = String(spanCtx.attributes['qwen-code.model'] ?? '');
+        if (metadata.requestSetupMs !== undefined) {
+          recordApiRequestBreakdown(metadata.config, metadata.requestSetupMs, {
+            model,
+            phase: ApiRequestPhase.REQUEST_PREPARATION,
+          });
+        }
+        if (metadata.ttftMs !== undefined) {
+          recordApiRequestBreakdown(metadata.config, metadata.ttftMs, {
+            model,
+            phase: ApiRequestPhase.NETWORK_LATENCY,
+          });
+        }
+        const breakdownSamplingMs =
+          metadata.ttftMs !== undefined
+            ? Math.max(0, duration - metadata.ttftMs)
+            : undefined;
+        if (breakdownSamplingMs !== undefined && breakdownSamplingMs > 0) {
+          recordApiRequestBreakdown(metadata.config, breakdownSamplingMs, {
+            model,
+            phase: ApiRequestPhase.RESPONSE_PROCESSING,
+          });
+        }
       }
-      if (metadata.ttftMs !== undefined) {
-        recordApiRequestBreakdown(metadata.config, metadata.ttftMs, {
-          model,
-          phase: ApiRequestPhase.NETWORK_LATENCY,
-        });
-      }
-      const breakdownSamplingMs =
-        metadata.ttftMs !== undefined
-          ? Math.max(0, duration - metadata.ttftMs)
-          : undefined;
-      if (breakdownSamplingMs !== undefined && breakdownSamplingMs > 0) {
-        recordApiRequestBreakdown(metadata.config, breakdownSamplingMs, {
-          model,
-          phase: ApiRequestPhase.RESPONSE_PROCESSING,
-        });
-      }
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to record API request breakdown histogram: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     if (metadata === undefined || metadata.success) {

@@ -927,6 +927,20 @@ describe('session-tracing', () => {
       expect(mockMetrics.recordApiRequestBreakdown).not.toHaveBeenCalled();
     });
 
+    it('skips metric recording when request failed (success=false)', () => {
+      const span = startLLMRequestSpan('test-model', 'p');
+      const config = createMockConfig();
+      endLLMRequestSpan(span, {
+        success: false,
+        durationMs: 1000,
+        ttftMs: 200,
+        requestSetupMs: 50,
+        config,
+      });
+
+      expect(mockMetrics.recordApiRequestBreakdown).not.toHaveBeenCalled();
+    });
+
     it('records only REQUEST_PREPARATION when ttftMs is absent', () => {
       const span = startLLMRequestSpan('test-model', 'p');
       const config = createMockConfig();
