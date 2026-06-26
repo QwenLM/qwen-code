@@ -125,4 +125,25 @@ describe('syncTeamMemory', () => {
       ),
     ).toBe(true);
   }, 30_000);
+
+  it('reports pull-failed (not silent) when the branch has diverged', async () => {
+    const { bare, repo } = freshRemoteAndClone('alice');
+    // Bob advances the remote.
+    const bob = makeWorkingClone(bare, 'bob');
+    cleanup.push(path.dirname(bob));
+    writeTeamMemory(bob, 'reference/grafana.md', 'oncall dashboard');
+    git(bob, 'add', '--', '.qwen/team-memory');
+    git(bob, 'commit', '-m', 'bob adds reference');
+    git(bob, 'push');
+
+    // Alice commits her own team memory WITHOUT pulling first → branches diverge.
+    writeTeamMemory(repo, 'feedback/use-real-db.md', 'use real DBs');
+
+    const result = await syncTeamMemory(repo, { message: 'sync' });
+    expect(result.committed).toBe(true);
+    expect(result.pulled).toBe(false);
+    expect(result.pushed).toBe(false);
+    // The opted-in user must get a signal, not a silent no-op.
+    expect(result.skippedReason).toBe('pull-failed');
+  }, 30_000);
 });

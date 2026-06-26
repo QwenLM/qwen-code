@@ -104,6 +104,7 @@ async function listMarkdownFiles(root: string): Promise<string[]> {
 
 async function scanAutoMemoryDocumentsFromRoot(
   root: string,
+  opts: { deterministic?: boolean } = {},
 ): Promise<ScannedAutoMemoryDocument[]> {
   const relativePaths = await listMarkdownFiles(root);
   const docs = await Promise.all(
@@ -132,13 +133,26 @@ async function scanAutoMemoryDocumentsFromRoot(
     }),
   );
 
-  return docs
+  const valid = docs
     .filter((doc): doc is ScannedAutoMemoryDocument => doc !== null)
-    .filter((doc) => AUTO_MEMORY_TYPES.includes(doc.type))
-    .sort(
-      (a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename),
-    )
-    .slice(0, MAX_SCANNED_MEMORY_FILES);
+    .filter((doc) => AUTO_MEMORY_TYPES.includes(doc.type));
+  // Shared (committed) tiers cap by code-unit path so the surviving subset is
+  // identical across machines/locales — otherwise, past MAX_SCANNED_MEMORY_FILES,
+  // two collaborators select different docs and the generated index churns,
+  // wedging the ff-only sync. Private tiers keep mtime-recency (newest memories
+  // win the cap), which is fine since they are never committed/shared.
+  const ordered = opts.deterministic
+    ? valid.sort((a, b) =>
+        a.relativePath < b.relativePath
+          ? -1
+          : a.relativePath > b.relativePath
+            ? 1
+            : 0,
+      )
+    : valid.sort(
+        (a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename),
+      );
+  return ordered.slice(0, MAX_SCANNED_MEMORY_FILES);
 }
 
 export async function scanAutoMemoryTopicDocuments(
@@ -165,5 +179,9 @@ export async function scanUserAutoMemoryTopicDocuments(): Promise<
 export async function scanTeamAutoMemoryTopicDocuments(
   projectRoot: string,
 ): Promise<ScannedAutoMemoryDocument[]> {
-  return scanAutoMemoryDocumentsFromRoot(getTeamAutoMemoryRoot(projectRoot));
+  // Deterministic cap: the team index is committed and shared, so the subset
+  // that survives MAX_SCANNED_MEMORY_FILES must be machine-independent.
+  return scanAutoMemoryDocumentsFromRoot(getTeamAutoMemoryRoot(projectRoot), {
+    deterministic: true,
+  });
 }

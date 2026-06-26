@@ -91,11 +91,12 @@ interface TeamIndexGroup {
 }
 
 /**
- * Group team docs that share a (normalized) description. With the per-author
- * subtree layout two people can save the same shared fact; collapsing them into
- * one index line — listing the other files — keeps the index readable while
- * preserving every file path (nothing is dropped; the files stay the source of
- * truth). Empty descriptions are never grouped. Input is assumed pre-sorted by
+ * Group team docs that share a (normalized) description. When two people save
+ * the same shared fact, collapsing them into one index line — listing the other
+ * files via "(also: …)" — keeps the index readable. The topic files themselves
+ * are never removed (they remain the source of truth); only the index display
+ * collapses, and an over-long "(also: …)" suffix may itself be truncated.
+ * Empty descriptions are never grouped. Input is assumed pre-sorted by
  * relativePath, so group order and each group's primary are deterministic.
  */
 function groupTeamDocsByDescription(

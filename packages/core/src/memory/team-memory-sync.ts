@@ -19,7 +19,11 @@ export interface TeamMemorySyncResult {
   committed: boolean;
   pulled: boolean;
   pushed: boolean;
-  skippedReason?: 'not-a-git-repo' | 'no-upstream';
+  skippedReason?:
+    | 'not-a-git-repo'
+    | 'no-upstream'
+    | 'pull-failed'
+    | 'push-failed';
 }
 
 /**
@@ -109,7 +113,20 @@ export async function syncTeamMemory(
     result.skippedReason = 'no-upstream';
     return result;
   }
+  // NOTE: pull/push act on the WHOLE current branch, not just the team path —
+  // git has no path-scoped pull. With `--ff-only` a diverged branch is left
+  // untouched (no merge), but it also means sync silently does nothing until the
+  // divergence is resolved, so surface it as `pull-failed`.
   result.pulled = (await tryGit(gitRoot, ['pull', '--ff-only'])) !== null;
+  if (!result.pulled) {
+    // ff-only refused (diverged), or a transient git error. Either way nothing
+    // was shared this cycle; a later push would be rejected, so stop and report.
+    result.skippedReason = 'pull-failed';
+    return result;
+  }
   result.pushed = (await tryGit(gitRoot, ['push'])) !== null;
+  if (!result.pushed) {
+    result.skippedReason = 'push-failed';
+  }
   return result;
 }
