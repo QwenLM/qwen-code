@@ -282,6 +282,27 @@ describe('WriteFileTool', () => {
       );
     });
 
+    it('blocks a secret added to team-memory content before execute', async () => {
+      const filePath = path.join(
+        rootDir,
+        '.qwen',
+        'team-memory',
+        'feedback.md',
+      );
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'clean content',
+      });
+      invocation.params.content = `token = ghp_${'a'.repeat(36)}`;
+
+      const result = await invocation.execute(abortSignal);
+
+      expect(JSON.stringify(result)).toMatch(
+        /shared with all repository collaborators/i,
+      );
+      expect(fs.existsSync(filePath)).toBe(false);
+    });
+
     it('should throw if _getCorrectedFileContent returns an error', async () => {
       const filePath = path.join(rootDir, 'confirm_error_file.txt');
       const params = { file_path: filePath, content: 'test content' };

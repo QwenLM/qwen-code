@@ -2225,7 +2225,8 @@ export class Config {
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
       // section out of the system prompt. Project-level read still bubbles
       // (its failure is a real config-load problem).
-      const teamMemoryEnabled = this.getTeamMemoryEnabled();
+      const teamMemoryEnabled =
+        this.getTeamMemoryEnabled() && this.isTrustedFolder();
       const [managedAutoMemoryIndex, userAutoMemoryIndex, teamAutoMemoryIndex] =
         await Promise.all([
           readAutoMemoryIndex(this.getProjectRoot()),

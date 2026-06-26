@@ -47,7 +47,7 @@ import {
   MemoryDreamEvent,
   MemoryExtractEvent,
 } from '../telemetry/index.js';
-import { isAnyAutoMemPath } from './paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryMetadataPath,
@@ -276,7 +276,8 @@ function partWritesToMemory(part: Part, projectRoot: string): boolean {
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
     if (
       typeof filePath === 'string' &&
-      isAnyAutoMemPath(filePath, projectRoot)
+      (isAnyAutoMemPath(filePath, projectRoot) ||
+        isTeamAutoMemPath(filePath, projectRoot))
     ) {
       return true;
     }

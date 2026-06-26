@@ -56,4 +56,19 @@ describe('checkTeamMemorySecrets', () => {
       checkTeamMemorySecrets(outsideFile, `token=${secret}`, projectRoot),
     ).toBeNull();
   });
+
+  it('blocks secrets written through a symlink into team memory', () => {
+    const root = getTeamAutoMemoryRoot(projectRoot);
+    fs.mkdirSync(root, { recursive: true });
+    const alias = path.join(projectRoot, 'alias');
+    fs.symlinkSync(root, alias, 'dir');
+
+    expect(
+      checkTeamMemorySecrets(
+        path.join(alias, 'leak.md'),
+        `token=${secret}`,
+        projectRoot,
+      ),
+    ).toMatch(/team memory is shared/i);
+  });
 });

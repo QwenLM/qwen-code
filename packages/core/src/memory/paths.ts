@@ -110,8 +110,8 @@ export function getMemoryBaseDir(): string {
 // different sessions can share a project root while writing to different output dirs.
 const _autoMemoryRootCache = new Map<string, string>();
 
-// Memoized on projectRoot alone: the team root resolves via findCanonicalGitRoot,
-// which does sync fs I/O — and isTeamAutoMemPath runs on every file write.
+// Memoized on projectRoot alone: the team root resolves via findGitRoot, which
+// does sync fs I/O — and isTeamAutoMemPath runs on every file write.
 const _teamAutoMemoryRootCache = new Map<string, string>();
 
 export function getAutoMemoryRoot(projectRoot: string): string {
@@ -254,14 +254,13 @@ export function isUserAutoMemPath(absolutePath: string): boolean {
 
 /**
  * Returns the team auto-memory root: `<gitRoot>/.qwen/team-memory/`.
- * Anchored at the canonical git root (not the runtime base dir) so every
- * worktree and collaborator shares one tracked location. Falls back to
- * projectRoot when there is no git root (memory works but isn't shared).
+ * Anchored at the current worktree root so tracked writes appear in the active
+ * branch diff. Falls back to projectRoot when there is no git root.
  */
 export function getTeamAutoMemoryRoot(projectRoot: string): string {
   const cached = _teamAutoMemoryRootCache.get(projectRoot);
   if (cached !== undefined) return cached;
-  const root = findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
+  const root = findGitRoot(projectRoot) ?? path.resolve(projectRoot);
   const result = path.join(root, QWEN_DIR, TEAM_AUTO_MEMORY_DIRNAME);
   _teamAutoMemoryRootCache.set(projectRoot, result);
   return result;
@@ -283,10 +282,32 @@ export function isTeamAutoMemPath(
   absolutePath: string,
   projectRoot: string,
 ): boolean {
-  const normalizedPath = path.normalize(absolutePath);
-  const memRoot = path.normalize(getTeamAutoMemoryRoot(projectRoot));
+  const normalizedPath = path.normalize(realpathNearestExisting(absolutePath));
+  const memRoot = path.normalize(
+    realpathNearestExisting(getTeamAutoMemoryRoot(projectRoot)),
+  );
   const rel = path.relative(memRoot, normalizedPath);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function realpathNearestExisting(inputPath: string): string {
+  const missingSegments: string[] = [];
+  let current = path.resolve(inputPath);
+
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return path.resolve(inputPath);
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
+
+  try {
+    return path.join(fs.realpathSync(current), ...missingSegments);
+  } catch {
+    return path.resolve(inputPath);
+  }
 }
 
 /**

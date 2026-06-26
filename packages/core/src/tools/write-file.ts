@@ -264,6 +264,18 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
 
+    const teamMemoryError = checkTeamMemorySecrets(
+      file_path,
+      content,
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return {
+        llmContent: `[ERROR: ${teamMemoryError}]`,
+        returnDisplay: teamMemoryError,
+      };
+    }
+
     // Prior-read enforcement runs BEFORE we read the existing file:
     //  - rejecting a write should not first slurp the entire file
     //    into memory (wasted I/O on every reject), and

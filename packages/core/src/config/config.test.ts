@@ -52,7 +52,10 @@ import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import {
+  readAutoMemoryIndex,
+  readTeamAutoMemoryIndex,
+} from '../memory/store.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -1904,6 +1907,26 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
+    const config = new Config({ ...baseParams, enableTeamMemory: true });
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readTeamAutoMemoryIndex).mockResolvedValue(
+      '# Team Memory\n\n- [Shared](shared.md)',
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(readTeamAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(config.getUserMemory()).not.toContain('Team Memory');
   });
 
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {

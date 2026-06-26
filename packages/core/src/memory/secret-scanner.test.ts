@@ -70,6 +70,14 @@ describe('scanForSecrets', () => {
     expect(scanForSecrets(pem).map((m) => m.ruleId)).toContain('private-key');
   });
 
+  it('handles many unmatched private-key markers without a match', () => {
+    const payload = Array.from(
+      { length: 4000 },
+      () => '-----BEGIN PRIVATE KEY-----',
+    ).join('\n');
+    expect(scanForSecrets(payload)).toEqual([]);
+  });
+
   it('never returns the matched secret value, only rule id and label', () => {
     const secret = `ghp_${'b'.repeat(36)}`;
     const [match] = scanForSecrets(secret);
