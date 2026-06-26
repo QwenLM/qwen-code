@@ -11,6 +11,7 @@ import {
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
+  getTeamAutoMemoryIndexPath,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from './paths.js';
@@ -111,6 +112,25 @@ export async function ensureUserAutoMemoryScaffold(): Promise<void> {
 export async function readUserAutoMemoryIndex(): Promise<string | null> {
   try {
     return await fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8');
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Read the team (in-repo, git-tracked) memory index. The team directory is
+ * created lazily on first write (the write tool mkdirs it), so a missing file
+ * is normal and returns null.
+ */
+export async function readTeamAutoMemoryIndex(
+  projectRoot: string,
+): Promise<string | null> {
+  try {
+    return await fs.readFile(getTeamAutoMemoryIndexPath(projectRoot), 'utf-8');
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === 'ENOENT') {

@@ -9,7 +9,8 @@ import path from 'node:path';
 import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { isAnyAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
   ToolCallConfirmationDetails,
@@ -103,12 +104,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Write operations always need user confirmation, except for managed
-   * auto-memory files which are written autonomously by the model.
+   * Write operations always need user confirmation, except for the private
+   * managed auto-memory files (user/project) which are written autonomously.
+   * Team memory is shared and committed to the repo, so it is NOT auto-allowed
+   * like the private tiers — writes default to 'ask'. (In AUTO_EDIT/YOLO the
+   * user has globally opted into auto-approval; team writes still surface in the
+   * git diff for review before commit.)
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const projectRoot = this.config.getProjectRoot();
-    if (isAnyAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+    const filePath = path.resolve(this.params.file_path);
+    if (isTeamAutoMemPath(filePath, projectRoot)) {
+      return 'ask';
+    }
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -665,6 +674,15 @@ The user has the ability to modify \`content\`. If modified, this will be stated
       return `Error accessing path properties for validation: ${filePath}. Reason: ${
         statError instanceof Error ? statError.message : String(statError)
       }`;
+    }
+
+    const teamMemoryError = checkTeamMemorySecrets(
+      filePath,
+      params.content ?? '',
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return teamMemoryError;
     }
 
     return null;

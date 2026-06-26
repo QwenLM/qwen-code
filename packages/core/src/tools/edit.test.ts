@@ -64,6 +64,7 @@ describe('EditTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(geminiClient),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
       getTargetDir: () => rootDir,
+      getProjectRoot: () => rootDir,
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
@@ -222,6 +223,59 @@ describe('EditTool', () => {
       const newStr = '$$100';
       const result = applyReplacement(current, oldStr, newStr, false);
       expect(result).toBe('price $$100');
+    });
+  });
+
+  describe('team memory', () => {
+    const teamFile = () =>
+      path.join(rootDir, '.qwen', 'team-memory', 'feedback', 'x.md');
+
+    it('blocks a secret written to a team-memory path via new_string', () => {
+      const params: EditToolParams = {
+        file_path: teamFile(),
+        old_string: '',
+        new_string: `token = ghp_${'a'.repeat(36)}`,
+      };
+      expect(tool.validateToolParams(params)).toMatch(
+        /shared with all repository collaborators/i,
+      );
+    });
+
+    it('allows clean content on a team-memory path', () => {
+      const params: EditToolParams = {
+        file_path: teamFile(),
+        old_string: '',
+        new_string: 'Use real DBs in integration tests.',
+      };
+      expect(tool.validateToolParams(params)).toBeNull();
+    });
+
+    it('proposes (asks) team writes — never auto-allowed like private memory', async () => {
+      const permission = await tool
+        .build({ file_path: teamFile(), old_string: '', new_string: 'x' })
+        .getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('blocks a secret assembled across edits (scans full result, not just new_string)', async () => {
+      // Prior-read enforcement off so we can edit an existing file directly.
+      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
+      const file = teamFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // Existing content holds only the prefix (body < 36 → no match alone).
+      fs.writeFileSync(file, `ghp_${'a'.repeat(10)}`, 'utf8');
+      // new_string has no `ghp_` prefix, so the validate-time scan passes;
+      // only the merged result `ghp_` + 36 chars is a real token.
+      const result = await tool
+        .build({
+          file_path: file,
+          old_string: 'a'.repeat(10),
+          new_string: 'a'.repeat(36),
+        })
+        .execute(new AbortController().signal);
+      expect(JSON.stringify(result)).toMatch(
+        /shared with all repository collaborators/i,
+      );
     });
   });
 

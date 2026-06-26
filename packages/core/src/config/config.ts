@@ -180,9 +180,14 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '../memory/paths.js';
+import {
+  getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from '../memory/paths.js';
 import {
   readAutoMemoryIndex,
+  readTeamAutoMemoryIndex,
   readUserAutoMemoryIndex,
 } from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
@@ -948,6 +953,12 @@ export interface ConfigParameters {
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
+  /**
+   * Enable the git-shared team memory tier. Defaults to false (opt-in).
+   * Overridable at runtime by `QWEN_CODE_MEMORY_TEAM` ('0'/'1') via
+   * {@link Config.getTeamMemoryEnabled}.
+   */
+  enableTeamMemory?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -1380,6 +1391,7 @@ export class Config {
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
+  private readonly enableTeamMemory: boolean;
   private readonly enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
@@ -1646,6 +1658,7 @@ export class Config {
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
+    this.enableTeamMemory = params.enableTeamMemory ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
@@ -2212,10 +2225,17 @@ export class Config {
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
       // section out of the system prompt. Project-level read still bubbles
       // (its failure is a real config-load problem).
-      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
-        readAutoMemoryIndex(this.getProjectRoot()),
-        readUserAutoMemoryIndex().catch(() => null),
-      ]);
+      const teamMemoryEnabled = this.getTeamMemoryEnabled();
+      const [managedAutoMemoryIndex, userAutoMemoryIndex, teamAutoMemoryIndex] =
+        await Promise.all([
+          readAutoMemoryIndex(this.getProjectRoot()),
+          readUserAutoMemoryIndex().catch(() => null),
+          // Best-effort like the user-level read: a failure to read the shared
+          // team index must not strip the managed-memory section.
+          teamMemoryEnabled
+            ? readTeamAutoMemoryIndex(this.getProjectRoot()).catch(() => null)
+            : Promise.resolve(null),
+        ]);
       // Always surface the user-level section so the main assistant knows the
       // dir exists and can route ad-hoc "remember this cross-project" saves
       // there. When empty the prompt builder emits a "MEMORY.md is currently
@@ -2230,6 +2250,12 @@ export class Config {
             memoryDir: getUserAutoMemoryRoot(),
             indexContent: userAutoMemoryIndex,
           },
+          teamMemoryEnabled
+            ? {
+                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+                indexContent: teamAutoMemoryIndex,
+              }
+            : undefined,
         ),
       );
     } else {
@@ -4308,6 +4334,25 @@ export class Config {
 
   getManagedAutoMemoryEnabled(): boolean {
     return this.enableManagedAutoMemory && !this.getBareMode();
+  }
+
+  /**
+   * Whether the git-shared team memory tier is active. Opt-in: off unless the
+   * `memory.enableTeamMemory` setting is on. `QWEN_CODE_MEMORY_TEAM` overrides
+   * for tests / power users ('0' forces off, '1' forces on).
+   */
+  getTeamMemoryEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    const override = process.env['QWEN_CODE_MEMORY_TEAM'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemory;
   }
 
   isManagedMemoryAvailable(): boolean {

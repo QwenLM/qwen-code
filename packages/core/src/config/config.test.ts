@@ -147,6 +147,7 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
   readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  readTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -390,6 +391,51 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  describe('getTeamMemoryEnabled', () => {
+    const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM'] = prevEnv;
+      }
+    });
+
+    it('is off by default and follows the enableTeamMemory setting', () => {
+      delete process.env['QWEN_CODE_MEMORY_TEAM'];
+      expect(new Config(baseParams).getTeamMemoryEnabled()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemory: true,
+        }).getTeamMemoryEnabled(),
+      ).toBe(true);
+    });
+
+    it('QWEN_CODE_MEMORY_TEAM overrides the setting', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM'] = '1';
+      expect(new Config(baseParams).getTeamMemoryEnabled()).toBe(true);
+      process.env['QWEN_CODE_MEMORY_TEAM'] = '0';
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemory: true,
+        }).getTeamMemoryEnabled(),
+      ).toBe(false);
+    });
+
+    it('bareMode forces off even with the setting and env both on', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM'] = '1';
+      expect(
+        new Config({
+          ...baseParams,
+          bareMode: true,
+          enableTeamMemory: true,
+        }).getTeamMemoryEnabled(),
+      ).toBe(false);
+    });
   });
 
   it('should store a system prompt override', () => {

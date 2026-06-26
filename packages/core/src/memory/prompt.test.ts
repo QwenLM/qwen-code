@@ -65,6 +65,70 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result.startsWith('# auto memory')).toBe(true);
   });
 
+  it('adds a shared team tier when a team section is provided', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '- [Project](project/x.md) — note.',
+      { memoryDir: '/home/u/.qwen/memories', indexContent: null },
+      {
+        memoryDir: '/tmp/project/.qwen/team-memory',
+        indexContent: '- [Convention](feedback/tests.md) — use real DBs.',
+      },
+    );
+
+    expect(prompt).toContain('three persistent, file-based memory directories');
+    expect(prompt).toContain('TEAM memory');
+    expect(prompt).toContain('/tmp/project/.qwen/team-memory');
+    expect(prompt).toContain('## Saving to team memory');
+    expect(prompt).toContain('MUST NOT save sensitive data to TEAM memory');
+    // The team index block is rendered with its own content.
+    expect(prompt).toContain('## /tmp/project/.qwen/team-memory/MEMORY.md');
+    expect(prompt).toContain('[Convention](feedback/tests.md)');
+    // PROJECT is now described as private; the old misleading wording is gone.
+    expect(prompt).toContain(
+      'PROJECT memory (this project only, private to you)',
+    );
+    expect(prompt).not.toContain('may be shared with teammates');
+  });
+
+  it('renders a two-tier project+team prompt when no user section is given', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '- [Project](project/x.md) — note.',
+      undefined,
+      {
+        memoryDir: '/tmp/project/.qwen/team-memory',
+        indexContent: '- [Convention](feedback/tests.md) — use real DBs.',
+      },
+    );
+
+    expect(prompt).toContain('two persistent, file-based memory directories');
+    expect(prompt).not.toContain('USER memory');
+    expect(prompt).toContain('TEAM memory');
+    expect(prompt).toContain('## Saving to team memory');
+    // PROJECT index block comes before the TEAM index block.
+    expect(
+      prompt.indexOf('## /tmp/project/.qwen/memory/MEMORY.md'),
+    ).toBeLessThan(
+      prompt.indexOf('## /tmp/project/.qwen/team-memory/MEMORY.md'),
+    );
+  });
+
+  it('omits the team tier when no team section is provided', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      {
+        memoryDir: '/home/u/.qwen/memories',
+        indexContent: null,
+      },
+    );
+
+    expect(prompt).not.toContain('TEAM memory');
+    expect(prompt).not.toContain('## Saving to team memory');
+    expect(prompt).toContain('two persistent, file-based memory directories');
+  });
+
   it('truncates oversized managed auto-memory index content', () => {
     const oversizedIndex = Array.from(
       { length: MAX_MANAGED_AUTO_MEMORY_INDEX_LINES + 50 },

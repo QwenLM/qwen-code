@@ -21,6 +21,7 @@ import { ToolConfirmationOutcome } from './tools.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
+import { clearAutoMemoryRootCache } from '../memory/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -230,6 +231,55 @@ describe('WriteFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('ask');
+    });
+
+    it('auto-allows private memory writes but proposes team memory writes', async () => {
+      const prev = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      clearAutoMemoryRootCache();
+      try {
+        const privatePath = path.join(
+          rootDir,
+          '.qwen',
+          'memory',
+          'user',
+          'x.md',
+        );
+        const teamPath = path.join(
+          rootDir,
+          '.qwen',
+          'team-memory',
+          'feedback',
+          'x.md',
+        );
+        expect(
+          await tool
+            .build({ file_path: privatePath, content: 'c' })
+            .getDefaultPermission(),
+        ).toBe('allow');
+        expect(
+          await tool
+            .build({ file_path: teamPath, content: 'c' })
+            .getDefaultPermission(),
+        ).toBe('ask');
+      } finally {
+        if (prev === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_LOCAL'] = prev;
+        }
+        clearAutoMemoryRootCache();
+      }
+    });
+
+    it('blocks writing a secret to a team-memory path', () => {
+      const params = {
+        file_path: path.join(rootDir, '.qwen', 'team-memory', 'feedback.md'),
+        content: `token = ghp_${'a'.repeat(36)}`,
+      };
+      expect(() => tool.build(params)).toThrow(
+        /shared with all repository collaborators/i,
+      );
     });
 
     it('should throw if _getCorrectedFileContent returns an error', async () => {

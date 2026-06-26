@@ -72,6 +72,7 @@ import { getManagedAutoMemoryStatus } from './status.js';
 import {
   appendManagedAutoMemoryToUserMemory,
   type UserAutoMemorySection,
+  type TeamAutoMemorySection,
 } from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
@@ -1438,12 +1439,14 @@ export class MemoryManager {
     memoryDir: string,
     indexContent?: string | null,
     userSection?: UserAutoMemorySection,
+    teamSection?: TeamAutoMemorySection,
   ): string {
     return appendManagedAutoMemoryToUserMemory(
       userMemory,
       memoryDir,
       indexContent,
       userSection,
+      teamSection,
     );
   }
 

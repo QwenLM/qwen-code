@@ -116,6 +116,36 @@ You can also set them in `~/.qwen/settings.json` (applies to all projects) or `.
 }
 ```
 
+### Team memory (shared with collaborators)
+
+By default, auto-memory is **private to you** — it lives under your home directory and is never shared. Team memory is an opt-in tier that the whole team shares **through git**.
+
+When enabled, Qwen gains a third memory directory at `.qwen/team-memory/` **inside the repository**. It uses the same one-file-per-memory layout and `MEMORY.md` index as the private tiers. Because it is committed to the repo, it is shared with every collaborator the normal way: you `git pull` to receive teammates' memories and commit/push to share yours. Qwen routes durable, project-wide knowledge here — conventions every contributor must follow, shared reference pointers (trackers, dashboards) — while personal and fast-decaying notes stay private.
+
+Enable it per project (or globally) in `settings.json`:
+
+```json
+{
+  "memory": {
+    "enableTeamMemory": true
+  }
+}
+```
+
+It is **off by default**. Keep these caveats in mind:
+
+- **It is source-controlled and visible to everyone with repo access.** Treat a team memory like committing to the repo.
+- **Secrets are blocked.** Writes to `.qwen/team-memory/` are scanned for credentials (API keys, tokens, private keys); a detected secret is rejected, never written. The scan is a backstop, not a guarantee — don't put sensitive data there.
+- **Changes are reviewable.** Team memory writes appear in `git status` / the PR diff like any other file, so they can be reviewed before they're committed. In the default approval mode Qwen also asks before each team write; in `AUTO_EDIT`/YOLO mode (where you've opted into auto-approval) they are applied without a prompt but still surface in the diff.
+- **The directory must be git-tracked.** If your project's `.gitignore` excludes `.qwen/*`, re-include the path so it can be shared:
+
+  ```gitignore
+  !.qwen/team-memory/
+  !.qwen/team-memory/**
+  ```
+
+`QWEN_CODE_MEMORY_TEAM=1` / `=0` overrides the setting for a single run.
+
 ---
 
 ## Commands
