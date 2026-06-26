@@ -1,5 +1,4 @@
-name: "CD: cua-driver (relative-coordinate fork)"
-
+name: 'CD: cua-driver (relative-coordinate fork)'
 # Cross-platform release for the vendored cua-driver fork under
 # packages/cua-driver. Adapted from upstream trycua/cua
 # cd-rust-cua-driver.yml, with two changes for this repo:
@@ -18,57 +17,54 @@ name: "CD: cua-driver (relative-coordinate fork)"
 #            + *-binary.tar.gz (bare universal binary)
 #   Linux  : cua-driver-rs-<v>-linux-{x86_64,arm64}.tar.gz + *-binary.tar.gz
 #   Windows: cua-driver-rs-<v>-windows-{x86_64,arm64}.zip + *-binary.zip
-
 on:
   push:
-    tags:
-      - "cua-driver-rs-v*"
+    tags: ['cua-driver-rs-v*']
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (without v prefix)"
+        description: 'Version to release (without v prefix)'
         required: true
-        default: "0.6.7"
+        default: '0.6.7'
       notarize:
-        description: "Codesign + notarize the macOS artifacts (false to skip during iteration)"
+        description: 'Codesign + notarize the macOS artifacts (false to skip during
+          iteration)'
         required: false
-        type: boolean
+        type: 'boolean'
         default: true
-
 permissions:
-  contents: write
-
+  contents: 'write'
 jobs:
   # ── Linux (x86_64 + arm64) ───────────────────────────────────────────────
   # Built inside debian:11 (glibc 2.31) so binaries run on Debian 11+,
   # Ubuntu 20.04+, RHEL/Rocky 8+. arm64 builds natively on a hosted ARM
   # runner to avoid hand-wiring a cross linker for the X11/Wayland C deps.
   build-linux:
-    name: linux-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    name: 'linux-${{ matrix.arch }}'
+    runs-on: '${{ matrix.runner }}'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - arch: arm64
-            target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
+          - arch: 'x86_64'
+            target: 'x86_64-unknown-linux-gnu'
+            runner: 'ubuntu-latest'
+          - arch: 'arm64'
+            target: 'aarch64-unknown-linux-gnu'
+            runner: 'ubuntu-24.04-arm'
     container:
-      image: debian:11
+      image: 'debian:11'
     steps:
-      - name: Install base tooling (container is bare)
+      - name: 'Install base tooling (container is bare)'
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \
             libx11-dev libxi-dev libxtst-dev libxext-dev libwayland-dev
-      - uses: actions/checkout@v4
-      - name: Determine version
-        id: version
-        shell: bash
+      - uses: 'actions/checkout@v4'
+      - name: 'Determine version'
+        id: 'version'
+        shell: 'bash'
         run: |
           if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
@@ -76,23 +72,24 @@ jobs:
             VERSION="${{ inputs.version }}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: 'dtolnay/rust-toolchain@stable'
         with:
-          targets: ${{ matrix.target }}
-      - uses: actions/cache@v4
+          targets: '${{ matrix.target }}'
+      - uses: 'actions/cache@v4'
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             packages/cua-driver/rust/target
-          key: cua-driver-linux-${{ matrix.arch }}-${{ hashFiles('packages/cua-driver/rust/Cargo.lock') }}
+          key: 'cua-driver-linux-${{ matrix.arch }}-${{ hashFiles(''packages/cua-driver/rust/Cargo.lock'')
+            }}'
           restore-keys: |
             cua-driver-linux-${{ matrix.arch }}-
-      - name: Build (release)
-        working-directory: packages/cua-driver/rust
-        run: cargo build -p cua-driver --release --target ${{ matrix.target }}
-      - name: Package
-        working-directory: packages/cua-driver/rust
+      - name: 'Build (release)'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver --release --target ${{ matrix.target }}'
+      - name: 'Package'
+        working-directory: 'packages/cua-driver/rust'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TARGET="${{ matrix.target }}"
@@ -103,29 +100,29 @@ jobs:
           (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
           tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
           ls -lh "release/${STAGE}.tar.gz" "release/${STAGE}-binary.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: 'actions/upload-artifact@v4'
         with:
-          name: cua-driver-rs-linux-${{ matrix.arch }}
-          path: packages/cua-driver/rust/release/cua-driver-rs-*-linux-${{ matrix.arch }}*.tar.gz
-          if-no-files-found: error
+          name: 'cua-driver-rs-linux-${{ matrix.arch }}'
+          path: 'packages/cua-driver/rust/release/cua-driver-rs-*-linux-${{ matrix.arch }}*.tar.gz'
+          if-no-files-found: 'error'
 
   # ── Windows (x86_64 + arm64) — UNSIGNED ──────────────────────────────────
   build-windows:
-    name: windows-${{ matrix.arch }}
-    runs-on: windows-latest
+    name: 'windows-${{ matrix.arch }}'
+    runs-on: 'windows-latest'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            target: x86_64-pc-windows-msvc
-          - arch: arm64
-            target: aarch64-pc-windows-msvc
+          - arch: 'x86_64'
+            target: 'x86_64-pc-windows-msvc'
+          - arch: 'arm64'
+            target: 'aarch64-pc-windows-msvc'
     steps:
-      - uses: actions/checkout@v4
-      - name: Determine version
-        id: version
-        shell: bash
+      - uses: 'actions/checkout@v4'
+      - name: 'Determine version'
+        id: 'version'
+        shell: 'bash'
         run: |
           if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
@@ -133,24 +130,25 @@ jobs:
             VERSION="${{ inputs.version }}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: 'dtolnay/rust-toolchain@stable'
         with:
-          targets: ${{ matrix.target }}
-      - uses: actions/cache@v4
+          targets: '${{ matrix.target }}'
+      - uses: 'actions/cache@v4'
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             packages/cua-driver/rust/target
-          key: cua-driver-windows-${{ matrix.arch }}-${{ hashFiles('packages/cua-driver/rust/Cargo.lock') }}
+          key: 'cua-driver-windows-${{ matrix.arch }}-${{ hashFiles(''packages/cua-driver/rust/Cargo.lock'')
+            }}'
           restore-keys: |
             cua-driver-windows-${{ matrix.arch }}-
-      - name: Build (release, unsigned)
-        working-directory: packages/cua-driver/rust
-        run: cargo build -p cua-driver -p cua-driver-uia --release --target ${{ matrix.target }}
-      - name: Package
-        working-directory: packages/cua-driver/rust
-        shell: pwsh
+      - name: 'Build (release, unsigned)'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver -p cua-driver-uia --release --target ${{ matrix.target }}'
+      - name: 'Package'
+        working-directory: 'packages/cua-driver/rust'
+        shell: 'pwsh'
         run: |
           $version = "${{ steps.version.outputs.version }}"
           $target  = "${{ matrix.target }}"
@@ -161,25 +159,25 @@ jobs:
           Compress-Archive -Path "release/$stage" -DestinationPath "release/$stage.zip" -Force
           Compress-Archive -Path "release/$stage/qwen-cua-driver.exe","release/$stage/cua-driver-uia.exe" -DestinationPath "release/$stage-binary.zip" -Force
           Get-ChildItem "release/$stage*.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: 'actions/upload-artifact@v4'
         with:
-          name: cua-driver-rs-windows-${{ matrix.arch }}
-          path: packages/cua-driver/rust/release/cua-driver-rs-*-windows-${{ matrix.arch }}*.zip
-          if-no-files-found: error
+          name: 'cua-driver-rs-windows-${{ matrix.arch }}'
+          path: 'packages/cua-driver/rust/release/cua-driver-rs-*-windows-${{ matrix.arch }}*.zip'
+          if-no-files-found: 'error'
 
   # ── macOS (universal: lipo arm64 + x86_64) — SIGNED + NOTARIZED ──────────
   build-macos:
-    name: macos-universal
-    runs-on: macos-latest
+    name: 'macos-universal'
+    runs-on: 'macos-latest'
     env:
       # Sign+notarize on tag push (real release); on manual dispatch honor the
       # `notarize` input so the pipeline can be iterated without Apple's notary.
-      DO_NOTARIZE: ${{ startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || inputs.notarize == true }}
+      DO_NOTARIZE: '${{ startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || inputs.notarize == true }}'
     steps:
-      - uses: actions/checkout@v4
-      - name: Determine version
-        id: version
-        shell: bash
+      - uses: 'actions/checkout@v4'
+      - name: 'Determine version'
+        id: 'version'
+        shell: 'bash'
         run: |
           if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
@@ -187,26 +185,26 @@ jobs:
             VERSION="${{ inputs.version }}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: 'dtolnay/rust-toolchain@stable'
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: actions/cache@v4
+          targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+      - uses: 'actions/cache@v4'
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             packages/cua-driver/rust/target
-          key: cua-driver-darwin-universal-${{ hashFiles('packages/cua-driver/rust/Cargo.lock') }}
+          key: 'cua-driver-darwin-universal-${{ hashFiles(''packages/cua-driver/rust/Cargo.lock'') }}'
           restore-keys: |
             cua-driver-darwin-universal-
-      - name: Build arm64
-        working-directory: packages/cua-driver/rust
-        run: cargo build -p cua-driver --release --target aarch64-apple-darwin
-      - name: Build x86_64
-        working-directory: packages/cua-driver/rust
-        run: cargo build -p cua-driver --release --target x86_64-apple-darwin
-      - name: Create universal binary (lipo)
-        working-directory: packages/cua-driver/rust
+      - name: 'Build arm64'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver --release --target aarch64-apple-darwin'
+      - name: 'Build x86_64'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver --release --target x86_64-apple-darwin'
+      - name: 'Create universal binary (lipo)'
+        working-directory: 'packages/cua-driver/rust'
         run: |
           mkdir -p release/universal
           lipo -create \
@@ -214,11 +212,11 @@ jobs:
             target/x86_64-apple-darwin/release/qwen-cua-driver \
             -output release/universal/qwen-cua-driver
           lipo -info release/universal/qwen-cua-driver
-      - name: Import signing certificate + discover identity
-        if: env.DO_NOTARIZE == 'true'
+      - name: 'Import signing certificate + discover identity'
+        if: 'env.DO_NOTARIZE == ''true'''
         env:
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_CSC_LINK: '${{ secrets.MAC_CSC_LINK }}'
+          MAC_CSC_KEY_PASSWORD: '${{ secrets.MAC_CSC_KEY_PASSWORD }}'
         run: |
           KEYCHAIN_PASSWORD="temp-cd-keychain-pwd"
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
@@ -241,16 +239,16 @@ jobs:
           fi
           echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "Signing identity: $IDENTITY"
-      - name: Codesign universal binary (hardened runtime)
-        if: env.DO_NOTARIZE == 'true'
-        working-directory: packages/cua-driver/rust
+      - name: 'Codesign universal binary (hardened runtime)'
+        if: 'env.DO_NOTARIZE == ''true'''
+        working-directory: 'packages/cua-driver/rust'
         run: |
           codesign --force --timestamp --options runtime \
             --entitlements scripts/CuaDriver.entitlements \
             --sign "$SIGN_IDENTITY" release/universal/qwen-cua-driver
           codesign --verify --strict --verbose=2 release/universal/qwen-cua-driver
-      - name: Assemble QwenCuaDriver.app bundle
-        working-directory: packages/cua-driver/rust
+      - name: 'Assemble QwenCuaDriver.app bundle'
+        working-directory: 'packages/cua-driver/rust'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           mkdir -p release/QwenCuaDriver.app
@@ -261,13 +259,14 @@ jobs:
           plutil -replace CFBundleVersion -string "$VERSION" release/QwenCuaDriver.app/Contents/Info.plist
           rm -f release/QwenCuaDriver.app/Contents/MacOS/.gitkeep
           plutil -p release/QwenCuaDriver.app/Contents/Info.plist | grep -E 'CFBundle(Short)?Version'
-      - name: Codesign + notarize + staple QwenCuaDriver.app (App Store Connect API key)
-        if: env.DO_NOTARIZE == 'true'
-        working-directory: packages/cua-driver/rust
+      - name: 'Codesign + notarize + staple QwenCuaDriver.app (App Store Connect API
+          key)'
+        if: 'env.DO_NOTARIZE == ''true'''
+        working-directory: 'packages/cua-driver/rust'
         env:
-          APPLE_NOTARY_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_API_KEY_P8_BASE64: '${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}'
+          APPLE_NOTARY_KEY_ID: '${{ secrets.APPLE_NOTARY_KEY_ID }}'
+          APPLE_NOTARY_ISSUER_ID: '${{ secrets.APPLE_NOTARY_ISSUER_ID }}'
         run: |
           codesign --force --deep --timestamp --options runtime \
             --entitlements scripts/CuaDriver.entitlements \
@@ -286,8 +285,8 @@ jobs:
           xcrun stapler staple release/QwenCuaDriver.app
           spctl -a -vv -t exec release/QwenCuaDriver.app || true
           rm -f release/QwenCuaDriver.app.zip notary_key.p8
-      - name: Package
-        working-directory: packages/cua-driver/rust
+      - name: 'Package'
+        working-directory: 'packages/cua-driver/rust'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           for LABEL in darwin-arm64 darwin-x86_64 darwin-universal; do
@@ -302,26 +301,27 @@ jobs:
             tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
           done
           ls -lh release/cua-driver-rs-*-darwin-*.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: 'actions/upload-artifact@v4'
         with:
-          name: cua-driver-rs-macos
-          path: packages/cua-driver/rust/release/cua-driver-rs-*-darwin-*.tar.gz
-          if-no-files-found: error
+          name: 'cua-driver-rs-macos'
+          path: 'packages/cua-driver/rust/release/cua-driver-rs-*-darwin-*.tar.gz'
+          if-no-files-found: 'error'
 
   # ── Release ──────────────────────────────────────────────────────────────
   release:
-    name: Create GitHub Release
-    needs: [build-linux, build-windows, build-macos]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || github.event_name == 'workflow_dispatch'
+    name: 'Create GitHub Release'
+    needs: ['build-linux', 'build-windows', 'build-macos']
+    runs-on: 'ubuntu-latest'
+    if: 'startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || github.event_name
+      == ''workflow_dispatch'''
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: 'actions/download-artifact@v4'
         with:
-          path: release-upload
+          path: 'release-upload'
           merge-multiple: true
-      - name: Determine version + tag
-        id: version
-        shell: bash
+      - name: 'Determine version + tag'
+        id: 'version'
+        shell: 'bash'
         run: |
           if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
@@ -332,12 +332,12 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: 'Create GitHub Release'
+        uses: 'softprops/action-gh-release@v2'
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: cua-driver-rs v${{ steps.version.outputs.version }}
-          files: release-upload/**/*
+          tag_name: '${{ steps.version.outputs.tag }}'
+          name: 'cua-driver-rs v${{ steps.version.outputs.version }}'
+          files: 'release-upload/**/*'
           prerelease: true
           generate_release_notes: true
           body: |
@@ -348,6 +348,5 @@ jobs:
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
             - **Windows**: unsigned (x86_64 + arm64)
 
-            Enable relative coordinates:
-            `CUA_DRIVER_RS_COORDINATE_SPACE=normalized_1000`
-            (optional `CUA_DRIVER_RS_COORDINATE_SCALE=1000` | `999`).
+            Enable relative coordinates: `CUA_DRIVER_RS_COORDINATE_SPACE=1`
+            (default `0` = off; optional `CUA_DRIVER_RS_COORDINATE_SCALE=1000`).
