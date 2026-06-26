@@ -2227,6 +2227,12 @@ export class Config {
       // (its failure is a real config-load problem).
       const teamMemoryEnabled =
         this.getTeamMemoryEnabled() && this.isTrustedFolder();
+      if (this.getTeamMemoryEnabled() && !this.isTrustedFolder()) {
+        // Surface why team memory is silently absent from the prompt.
+        this.debugLogger.debug(
+          'Team memory enabled but inactive: workspace is not trusted.',
+        );
+      }
       const [managedAutoMemoryIndex, userAutoMemoryIndex, teamAutoMemoryIndex] =
         await Promise.all([
           readAutoMemoryIndex(this.getProjectRoot()),

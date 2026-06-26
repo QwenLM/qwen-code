@@ -300,6 +300,12 @@ describe('WriteFileTool', () => {
       expect(JSON.stringify(result)).toMatch(
         /shared with all repository collaborators/i,
       );
+      // The blocked write must carry an `error` field so the framework
+      // treats it as a failure, not a silent success.
+      expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+      expect(result.error?.message).toMatch(
+        /shared with all repository collaborators/i,
+      );
       expect(fs.existsSync(filePath)).toBe(false);
     });
 

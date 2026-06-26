@@ -20,6 +20,9 @@ import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
 } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_STORE');
 
 export function createDefaultAutoMemoryMetadata(
   now = new Date(),
@@ -136,6 +139,13 @@ export async function readTeamAutoMemoryIndex(
     if (nodeError.code === 'ENOENT') {
       return null;
     }
+    // config.ts reads this via `.catch(() => null)`, so non-ENOENT errors
+    // (EACCES/EIO/ELOOP) would otherwise vanish — log before re-throwing.
+    debugLogger.debug(
+      `Failed to read team auto-memory index (${nodeError.code ?? 'unknown'}): ${
+        nodeError.path ?? getTeamAutoMemoryIndexPath(projectRoot)
+      }`,
+    );
     throw error;
   }
 }

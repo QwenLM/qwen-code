@@ -270,9 +270,15 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       this.config.getProjectRoot(),
     );
     if (teamMemoryError) {
+      // Must carry `error` so the framework treats the blocked write as a
+      // failure (retry/telemetry), not a silent success. Mirrors edit.ts.
       return {
         llmContent: `[ERROR: ${teamMemoryError}]`,
         returnDisplay: teamMemoryError,
+        error: {
+          message: teamMemoryError,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
       };
     }
 

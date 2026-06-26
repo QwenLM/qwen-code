@@ -136,6 +136,50 @@ describe('NotebookEditTool', () => {
     }
   });
 
+  it('blocks writing a secret into a team-memory notebook', async () => {
+    const teamDir = path.join(tempDir, '.qwen', 'team-memory');
+    fs.mkdirSync(teamDir, { recursive: true });
+    const filePath = path.join(teamDir, 'analysis.ipynb');
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          nbformat: 4,
+          nbformat_minor: 5,
+          cells: [
+            {
+              cell_type: 'code',
+              id: 'load-data',
+              source: ['x = 1\n'],
+              execution_count: null,
+              outputs: [],
+              metadata: {},
+            },
+          ],
+          metadata: { language_info: { name: 'python' } },
+        },
+        null,
+        1,
+      ),
+      'utf-8',
+    );
+    seedNotebookRead(filePath);
+    const originalContent = fs.readFileSync(filePath, 'utf-8');
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'load-data',
+      new_source: `token = "ghp_${'a'.repeat(36)}"`,
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    expect(JSON.stringify(result)).toMatch(
+      /shared with all repository collaborators/i,
+    );
+    // The serialized notebook must never reach disk.
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
+  });
+
   it('replaces a code cell in a UTF-8 BOM notebook and preserves the BOM', async () => {
     const filePath = path.join(tempDir, 'bom-replace.ipynb');
     fs.writeFileSync(
