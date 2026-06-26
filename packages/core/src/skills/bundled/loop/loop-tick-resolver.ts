@@ -34,6 +34,11 @@ export interface LoopTickResolverDeps {
   /** Pass `config.getWorkingDir()` — loop.md is resolved against the cwd. */
   projectRoot: string;
   homeDir: string;
+  /**
+   * Pass `config.isTrustedFolder()`. When false, the repo-controlled project
+   * `.qwen/loop.md` is not read (the user-owned `~/.qwen/loop.md` still is).
+   */
+  allowProjectFile: boolean;
 }
 
 export interface LoopTickResult {
@@ -43,6 +48,9 @@ export interface LoopTickResult {
   full: boolean;
   /** Resolved loop.md path, when present — for a clean user-facing label. */
   sourcePath?: string;
+  /** Non-absolute label for the matched candidate (e.g. "project loop.md"),
+   * when present — safe for logs/UI that must not leak the absolute path. */
+  sourceLabel?: string;
 }
 
 const TRUNCATION_WARNING = `> WARNING: loop.md was truncated to ${LOOP_TASK_FILE_MAX_BYTES} bytes. Keep the task list concise.`;
@@ -141,6 +149,7 @@ export class LoopTickResolver {
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
+      allowProjectFile: this.deps.allowProjectFile,
     });
 
     if (result.status === 'missing') {
@@ -161,22 +170,26 @@ export class LoopTickResolver {
       : result.content;
     this.#pendingContent = content;
 
+    // Label by which candidate matched, not result.path (the absolute path) —
+    // the absolute path would leak the OS username / dir layout to the API
+    // provider, and to debug logs. It still reaches the caller via sourcePath
+    // for local UI use.
+    const sourceLabel = SOURCE_LABELS[result.source];
+
     if (this.#lastContent === content) {
       return {
         modelText: `${tickHeading(mode)}\n${SHORT_REMINDER_BODY[mode]}`,
         full: false,
         sourcePath: result.path,
+        sourceLabel,
       };
     }
 
-    // Label by which candidate matched, not result.path (the absolute path) —
-    // the absolute path would leak the OS username / dir layout to the API
-    // provider. It still reaches the caller via sourcePath for local UI use.
-    const sourceLabel = SOURCE_LABELS[result.source];
     return {
       modelText: `${tickHeading(mode, { sourceLabel })}\n${INTRO}\n${content}\n${SHORT_REMINDER_BODY[mode]}`,
       full: true,
       sourcePath: result.path,
+      sourceLabel,
     };
   }
 }

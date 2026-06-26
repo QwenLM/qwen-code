@@ -145,6 +145,116 @@ describe('readLoopTaskFile', () => {
     });
   });
 
+  it('does not read a project loop.md symlinked to an in-workspace file (exfiltration guard)', async () => {
+    // The dangerous case confinement alone misses: a repo-committed
+    // `.qwen/loop.md -> ../.env` resolves INSIDE the workspace, so the realpath
+    // confinement passes — yet it must NOT be read. A symlinked project loop.md
+    // is refused outright; only a real regular file at the literal path is read.
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    const secret = path.join(projectRoot, '.env');
+    await fs.writeFile(secret, 'SECRET=should-not-be-read');
+    await fs.symlink(
+      path.join('..', '.env'),
+      path.join(projectRoot, '.qwen', 'loop.md'),
+    );
+    await writeHome('user tasks');
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
+      content: 'user tasks',
+      truncated: false,
+    });
+  });
+
+  it('skips a FIFO/non-regular project loop.md before opening it (does not hang)', async () => {
+    // A FIFO at the project path must be rejected BEFORE the blocking fs.open:
+    // open() on a FIFO blocks until a writer appears, wedging the tick forever.
+    // Drive a FIFO-typed node via a mocked lstat (a real mkfifo is platform-
+    // fragile); the load-bearing proof is that fs.open is never called on the
+    // project path, so no blocking open() can happen.
+    await writeHome('user tasks');
+    const projectLoop = path.join(projectRoot, '.qwen', 'loop.md');
+    const actual =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    const fifoStat = {
+      isSymbolicLink: () => false,
+      isFile: () => false,
+      isFIFO: () => true,
+    } as unknown as Awaited<ReturnType<typeof fs.lstat>>;
+    vi.spyOn(fs, 'lstat').mockImplementation(async (p) =>
+      String(p) === projectLoop ? fifoStat : actual.lstat(p as string),
+    );
+    const openSpy = vi.mocked(fs.open);
+    openSpy.mockClear();
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result).toMatchObject({ source: 'home', content: 'user tasks' });
+    // The project FIFO path is never opened — proof there is no blocking open().
+    for (const call of openSpy.mock.calls) {
+      expect(String(call[0])).not.toBe(projectLoop);
+    }
+  });
+
+  it('reads a home loop.md that is a symlink to a real regular file', async () => {
+    // The user's own dotfile may legitimately be a symlink (e.g. into a synced
+    // dotfiles repo). Follow it, as long as the target is a real regular file.
+    await fs.mkdir(path.join(homeDir, '.qwen'), { recursive: true });
+    const target = path.join(tempDir, 'dotfiles-loop.md');
+    await fs.writeFile(target, 'symlinked user tasks');
+    await fs.symlink(target, path.join(homeDir, '.qwen', 'loop.md'));
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
+      content: 'symlinked user tasks',
+      truncated: false,
+    });
+  });
+
+  it('skips the project candidate entirely when allowProjectFile is false', async () => {
+    // Untrusted folder: the repo-controlled project loop.md is not read even
+    // when present; the user-owned home loop.md still is.
+    await writeProject('repo-controlled tasks');
+    await writeHome('user tasks');
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: false,
+    });
+
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
+      content: 'user tasks',
+      truncated: false,
+    });
+  });
+
+  it('reports only the home path as missing when allowProjectFile is false', async () => {
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: false,
+    });
+
+    expect(result).toEqual({
+      status: 'missing',
+      checkedPaths: [path.join(homeDir, '.qwen', 'loop.md')],
+    });
+  });
+
   it('skips a non-directory component at .qwen (ENOTDIR) and falls through', async () => {
     // A regular file where the `.qwen` dir should be → reading .qwen/loop.md
     // raises ENOTDIR; skip to home rather than throwing.

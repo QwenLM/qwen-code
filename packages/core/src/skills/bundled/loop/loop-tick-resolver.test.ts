@@ -53,11 +53,50 @@ describe('LoopTickResolver', () => {
     homeDir = path.join(tempDir, 'home');
     await fs.mkdir(projectRoot, { recursive: true });
     await fs.mkdir(homeDir, { recursive: true });
-    resolver = new LoopTickResolver({ projectRoot, homeDir });
+    resolver = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
   });
 
   afterEach(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('ignores the project loop.md in an untrusted folder (allowProjectFile: false)', async () => {
+    // An untrusted folder's repo-controlled project loop.md must not be read,
+    // but the user-owned home loop.md still is.
+    await writeProject('- repo-controlled tasks');
+    await writeHome('- user tasks');
+    const untrusted = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: false,
+    });
+
+    const tick = await untrusted.resolve('cron');
+
+    expect(tick.full).toBe(true);
+    expect(tick.sourcePath).toBe(homeFile());
+    expect(tick.sourceLabel).toBe('home loop.md');
+    expect(tick.modelText).toContain('- user tasks');
+    expect(tick.modelText).not.toContain('- repo-controlled tasks');
+  });
+
+  it('treats a present project loop.md as absent when the folder is untrusted', async () => {
+    await writeProject('- repo-controlled tasks');
+    const untrusted = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: false,
+    });
+
+    const tick = await untrusted.resolve('cron');
+
+    expect(tick.full).toBe(false);
+    expect(tick.sourcePath).toBeUndefined();
+    expect(tick.modelText).toContain('loop.md is not currently present');
   });
 
   it('delivers the full task block on first fire', async () => {
@@ -153,7 +192,11 @@ describe('LoopTickResolver', () => {
     const cron = await resolver.resolve('cron');
     expect(cron.modelText).toContain('# /loop tick — loop.md absent\n');
 
-    const dyn = new LoopTickResolver({ projectRoot, homeDir });
+    const dyn = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
     const dynTick = await dyn.resolve('dynamic');
     expect(dynTick.modelText).toContain(
       '# /loop tick — loop.md absent (dynamic pacing)\n',
@@ -191,7 +234,11 @@ describe('LoopTickResolver', () => {
     expect(cron.modelText).not.toContain('(dynamic pacing)');
 
     // Fresh resolver so 'dynamic' is also a first (full) delivery.
-    const dyn = new LoopTickResolver({ projectRoot, homeDir });
+    const dyn = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
     const dynTick = await dyn.resolve('dynamic');
     expect(dynTick.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
     expect(dynTick.modelText).toContain('call LoopWakeup again');

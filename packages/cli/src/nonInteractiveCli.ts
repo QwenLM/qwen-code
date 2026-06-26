@@ -7,6 +7,8 @@
 import type {
   BackgroundTaskStatus,
   Config,
+  CronJob,
+  CronScheduler,
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -135,6 +137,36 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
     ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
     : ' Set the `model.skipLoopDetection` setting to true to disable.';
   return `Loop detection halted the run${detail}.${hint}`;
+}
+
+/**
+ * Headless handling for a fired `.qwen/loop.md` cron sentinel. loop.md
+ * expansion is interactive-only for now, so a bare sentinel can't be turned
+ * into a real prompt here — the tick is skipped (no-op) rather than sent to the
+ * model as empty content. Returns true when `job` was a sentinel so the caller
+ * skips enqueuing it.
+ *
+ * A recurring SESSION (non-durable) loop.md job would otherwise stay in
+ * `scheduler.sessionSize` and re-fire every interval, pinning the headless run
+ * open forever (the hold-open resolves only when sessionSize hits zero); delete
+ * it so the run can terminate. Durable jobs are left untouched — they persist
+ * for a future owning session and never count toward sessionSize — and a
+ * one-shot job is already removed before it fires.
+ */
+export function skipHeadlessLoopSentinel(
+  scheduler: CronScheduler,
+  job: CronJob,
+): boolean {
+  if (!detectLoopSentinel(job.prompt)) {
+    return false;
+  }
+  if (job.recurring && !job.durable) {
+    // delete() removes the in-memory job synchronously before any await, so the
+    // sessionSize check that follows this call sees it gone; the returned
+    // promise has no on-disk work for a session job. Fire-and-forget.
+    void scheduler.delete(job.id);
+  }
+  return true;
 }
 
 function emitLoopDetectedMessage(
@@ -1597,13 +1629,13 @@ export async function runNonInteractive(
                 reject(err);
               };
 
-              scheduler.start((job: { prompt: string; cronExpr?: string }) => {
-                // loop.md sentinel expansion is interactive-only for now; in a
-                // headless run a bare `<<loop.md>>` sentinel would reach the
-                // model as its prompt with no task content, so skip the tick
-                // (no-op) instead of enqueuing it. Full headless loop.md support
-                // is a follow-up.
-                if (detectLoopSentinel(job.prompt)) {
+              scheduler.start((job: CronJob) => {
+                // A bare loop.md sentinel can't expand in a headless run, so the
+                // tick is skipped. skipHeadlessLoopSentinel also deletes a
+                // recurring session job so it stops re-firing and sessionSize
+                // can fall to zero — otherwise checkCronDone never resolves and
+                // the run hangs. Full headless loop.md support is a follow-up.
+                if (skipHeadlessLoopSentinel(scheduler, job)) {
                   checkCronDone();
                   return;
                 }

@@ -32,6 +32,13 @@ export type LoopTaskFileResult =
 export interface ReadLoopTaskFileOptions {
   projectRoot: string;
   homeDir: string;
+  /**
+   * When false, the project `.qwen/loop.md` candidate is skipped entirely — it
+   * is repo-controlled, so an untrusted workspace must not read it and feed it
+   * to the model (mirrors the folder-trust gate on project hooks). The
+   * home/global `~/.qwen/loop.md` is user-owned and always allowed. Default true.
+   */
+  allowProjectFile?: boolean;
 }
 
 /**
@@ -92,27 +99,48 @@ async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
 
 /**
  * Reads `.qwen/loop.md`, project before home, byte-capped at 25 KB. A missing,
- * directory, non-directory-component, or empty (whitespace-only) path is skipped
- * to the next candidate rather than treated as present; all candidates exhausted
- * → missing. Only the byte cap lives here — the fire-time resolver owns the
- * user-facing truncation notice so the byte-vs-line nuance stays in one place.
+ * directory, non-regular, or empty (whitespace-only) path is skipped to the next
+ * candidate rather than treated as present; all candidates exhausted → missing.
+ * Only the byte cap lives here — the fire-time resolver owns the user-facing
+ * truncation notice so the byte-vs-line nuance stays in one place.
  *
- * The project candidate is workspace-confined: its canonical real path must stay
- * inside the project root. `fs.realpath` resolves `..` and every symlink —
- * including an *ancestor* like a checked-in `.qwen -> /outside`, which a
- * final-component `lstat` cannot catch — so a project loop.md cannot read a file
- * outside the workspace. The home candidate is the user's own and intentionally
- * outside the workspace, so it only refuses a directly-symlinked file.
+ * Project candidate: must be a real regular file at the literal path, and is
+ * stat'd BEFORE the blocking open. A symlinked `.qwen/loop.md` is refused
+ * outright — a repo-controlled symlink such as `-> ../.env` resolves *inside*
+ * the workspace, so confinement alone would pass and exfiltrate that file to the
+ * model. A FIFO/socket/device/dir is refused too, so a named pipe can never
+ * wedge the tick (a blocking `open` on a FIFO waits for a writer) or be read as
+ * a task list. The canonical path is still confined to the workspace root to
+ * catch an *ancestor* symlink like a checked-in `.qwen -> /outside` that a
+ * final-component `lstat` cannot see. When `allowProjectFile` is false (untrusted
+ * folder) the candidate is dropped entirely.
+ *
+ * Home candidate: the user's own dotfile, so a symlink IS followed (a common,
+ * legitimate setup — e.g. into a synced dotfiles repo), but the resolved target
+ * must be a regular file so a FIFO/device/dir can't hang the tick or be decoded.
  */
 export async function readLoopTaskFile({
   projectRoot,
   homeDir,
+  allowProjectFile = true,
 }: ReadLoopTaskFileOptions): Promise<LoopTaskFileResult> {
+  if (!allowProjectFile) {
+    // Repo-controlled file in an untrusted folder — never read it (the
+    // candidate is dropped below; this is the trace for why).
+    debugLogger.debug('skipping project loop.md: folder is untrusted');
+  }
   const candidates: ReadonlyArray<{
     source: LoopTaskFileSource;
     path: string;
   }> = [
-    { source: 'project', path: path.join(projectRoot, '.qwen', 'loop.md') },
+    ...(allowProjectFile
+      ? [
+          {
+            source: 'project' as const,
+            path: path.join(projectRoot, '.qwen', 'loop.md'),
+          },
+        ]
+      : []),
     { source: 'home', path: path.join(homeDir, '.qwen', 'loop.md') },
   ];
 
@@ -120,11 +148,27 @@ export async function readLoopTaskFile({
     let buffer: Buffer | null;
     try {
       if (source === 'project') {
+        // lstat WITHOUT following the final component, BEFORE the blocking open.
+        // A symlinked loop.md is the exfiltration vector (it may point at an
+        // in-workspace `.env`, which confinement would wave through), so refuse
+        // it; a FIFO/socket/device/dir is refused too so open can never block.
+        const projectStat = await fs.lstat(filePath);
+        if (projectStat.isSymbolicLink()) {
+          debugLogger.debug('skipping symlinked project loop.md', { filePath });
+          continue;
+        }
+        if (!projectStat.isFile()) {
+          debugLogger.debug('skipping non-regular project loop.md', {
+            filePath,
+          });
+          continue;
+        }
+        // A final-component lstat can't see an ANCESTOR symlink (e.g. a
+        // checked-in `.qwen -> /outside`); realpath resolves it, so confine the
+        // canonical path to the workspace root before reading.
         const realRoot = await resolveRealProjectRoot(projectRoot);
         const real = await fs.realpath(filePath);
         if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
-          // Skip silently to the next candidate, but leave a debug trail so a
-          // symlink quietly redirecting loop.md outside the workspace is traceable.
           debugLogger.debug(
             'skipping project loop.md that escapes the workspace',
             {
@@ -136,10 +180,13 @@ export async function readLoopTaskFile({
         }
         buffer = await readBoundedTaskFile(real);
       } else {
-        // lstat (not stat) so a directly symlinked home loop.md is detected
-        // rather than followed.
-        const stat = await fs.lstat(filePath);
-        if (stat.isSymbolicLink()) {
+        // Home loop.md is the user's own dotfile: a symlink is a legitimate,
+        // common setup, so follow it (stat, not lstat). But require the resolved
+        // target to be a regular file so a FIFO/device/dir can neither hang the
+        // tick on a blocking open nor be decoded as a task list.
+        const homeStat = await fs.stat(filePath);
+        if (!homeStat.isFile()) {
+          debugLogger.debug('skipping non-regular home loop.md', { filePath });
           continue;
         }
         buffer = await readBoundedTaskFile(filePath);

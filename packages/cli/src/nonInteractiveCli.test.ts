@@ -6,6 +6,7 @@
 
 import type {
   Config,
+  CronJob,
   ToolRegistry,
   ServerGeminiStreamEvent,
   SessionMetrics,
@@ -22,9 +23,14 @@ import {
   ApprovalMode,
   SendMessageType,
   LoopType,
+  CronScheduler,
+  LOOP_SENTINEL_CRON,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
-import { runNonInteractive } from './nonInteractiveCli.js';
+import {
+  runNonInteractive,
+  skipHeadlessLoopSentinel,
+} from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -72,6 +78,45 @@ vi.mock('./services/CommandService.js', () => ({
     create: mockCommandServiceCreate,
   },
 }));
+
+describe('skipHeadlessLoopSentinel', () => {
+  it('deletes a recurring session loop.md sentinel job so sessionSize reaches 0', () => {
+    // A recurring SESSION (non-durable) loop.md job left in the scheduler keeps
+    // sessionSize > 0, so the headless hold-open never resolves and the run
+    // hangs. Skipping the sentinel must delete the job, not just no-op the tick.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_CRON, true);
+    expect(scheduler.sessionSize).toBe(1);
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(scheduler.sessionSize).toBe(0);
+    expect(scheduler.list()).toHaveLength(0);
+  });
+
+  it('returns false and keeps a non-sentinel job', () => {
+    const scheduler = new CronScheduler();
+    scheduler.create('*/5 * * * *', 'do real work', true);
+    const job = scheduler.list()[0] as CronJob;
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(false);
+
+    expect(scheduler.sessionSize).toBe(1);
+  });
+
+  it('does not delete a durable sentinel job (it persists for a future session)', () => {
+    // Durable jobs live under ~/.qwen and never count toward sessionSize, so
+    // they don't pin the run; deleting one would wrongly remove it from disk.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_CRON, true);
+    job.durable = true;
+    const deleteSpy = vi.spyOn(scheduler, 'delete');
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+});
 
 describe('runNonInteractive', () => {
   let mockConfig: Config;

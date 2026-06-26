@@ -158,6 +158,23 @@ function createEmptyStream() {
   return (async function* () {})();
 }
 
+/**
+ * Points os.homedir() at `home` for a test by overriding the env vars libuv
+ * reads (HOME on POSIX, USERPROFILE on Windows) — the module export itself can't
+ * be spied under ESM. Returns a restore function.
+ */
+function setFakeHome(home: string): () => void {
+  const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  return () => {
+    for (const key of ['HOME', 'USERPROFILE'] as const) {
+      if (prev[key] === undefined) delete process.env[key];
+      else process.env[key] = prev[key];
+    }
+  };
+}
+
 // Helper to create async generator with chunks (avoids memory leak)
 function createStreamWithChunks(
   chunks: Array<{ type: unknown; value: unknown }>,
@@ -335,6 +352,9 @@ describe('Session', () => {
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      // Folder trust gates the project `.qwen/loop.md`; default trusted (the
+      // production default). Untrusted-folder tests override to false.
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
@@ -4494,6 +4514,147 @@ describe('Session', () => {
           expect(block).toContain('- finish the migration');
         } finally {
           await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      it('does not expand the project loop.md sentinel in an untrusted folder', async () => {
+        // An untrusted folder's repo-controlled .qwen/loop.md must not be read
+        // and fed to the model. With no user-owned ~/.qwen/loop.md, the tick is
+        // a labelled no-op — and the repo task block never reaches the model.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-untrusted-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-home-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- finish the migration');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        mockConfig.isTrustedFolder = vi.fn().mockReturnValue(false);
+        // Point os.homedir() at an empty fake home (libuv reads HOME/USERPROFILE)
+        // so there is no user-owned loop.md and the tick is deterministically
+        // absent — the module export can't be spied under ESM.
+        const restoreHome = setFakeHome(fakeHome);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: '<<loop.md-dynamic>>',
+                cronExpr: '@wakeup',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The client sees the absent label, never the repo file's path.
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Loop tick — loop.md not present',
+                },
+                _meta: { source: 'loop' },
+              },
+            });
+          });
+
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain('# /loop tick — loop.md absent');
+          });
+          // The repo-controlled task block never reaches the model.
+          expect(sentToModel()).not.toContain('finish the migration');
+        } finally {
+          restoreHome();
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+        }
+      });
+
+      it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
+        // The `loopTick && !loopTick.sourcePath` branch: a sentinel fires but no
+        // project or home loop.md exists, so the tick is a labelled no-op.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-absent-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-home-'),
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        const restoreHome = setFakeHome(fakeHome);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Loop tick — loop.md not present',
+                },
+                _meta: { source: 'cron' },
+              },
+            });
+          });
+        } finally {
+          restoreHome();
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
         }
       });
 

@@ -2467,6 +2467,12 @@ export class Session implements SessionContext {
       this.loopTickResolver = new LoopTickResolver({
         projectRoot: root,
         homeDir: os.homedir(),
+        // The project `.qwen/loop.md` is repo-controlled, so an untrusted folder
+        // must not read it and feed it to the model (mirrors getProjectHooks()'s
+        // trust gate). The home/global `~/.qwen/loop.md` is user-owned and stays
+        // allowed. Folder trust is process-stable (a change restarts the CLI),
+        // so capturing it at construction is sufficient.
+        allowProjectFile: this.config.isTrustedFolder(),
       });
       this.loopTickResolverRoot = root;
     }
@@ -2523,7 +2529,7 @@ export class Session implements SessionContext {
                       : loopTick.sourcePath
                         ? 'reminder'
                         : 'absent'
-                  } path=${loopTick.sourcePath ?? 'none'}`,
+                  } source=${loopTick.sourceLabel ?? 'none'}`,
                 );
               }
               // For a loop tick echo a stable label, never the bare sentinel or
