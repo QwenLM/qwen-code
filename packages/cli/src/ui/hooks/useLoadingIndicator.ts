@@ -5,30 +5,25 @@
  */
 
 import { StreamingState } from '../types.js';
-import type { ThoughtSummary } from '../types.js';
 import { useTimer } from './useTimer.js';
 import { usePhraseCycler } from './usePhraseCycler.js';
 import { useState, useEffect, useRef } from 'react';
-import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
-
-const MAX_LOADING_PHRASE_LENGTH = 80;
-
-function truncateLoadingPhrase(phrase: string): string {
-  if (phrase.length <= MAX_LOADING_PHRASE_LENGTH) return phrase;
-  return phrase.slice(0, MAX_LOADING_PHRASE_LENGTH - 1).trimEnd() + '…';
-}
 
 export const useLoadingIndicator = (
   streamingState: StreamingState,
   customWittyPhrases?: string[],
   currentCandidatesTokens?: number,
   currentStreamingChars?: number,
-  thought?: ThoughtSummary | null,
+  isToolExecuting = false,
 ) => {
   const [timerResetKey, setTimerResetKey] = useState(0);
   const isTimerActive = streamingState === StreamingState.Responding;
 
-  const elapsedTimeFromTimer = useTimer(isTimerActive, timerResetKey);
+  const elapsedTimeFromTimer = useTimer(
+    isTimerActive,
+    timerResetKey,
+    isTimerActive && isToolExecuting,
+  );
 
   const isPhraseCyclingActive = streamingState === StreamingState.Responding;
   const isWaiting = streamingState === StreamingState.WaitingForConfirmation;
@@ -39,19 +34,43 @@ export const useLoadingIndicator = (
   );
 
   const [retainedElapsedTime, setRetainedElapsedTime] = useState(0);
-  const [taskStartTokens, setTaskStartTokens] = useState(0);
-  const [taskStartStreamingChars, setTaskStartStreamingChars] = useState(0);
+  const [taskStartTokens, setTaskStartTokensState] = useState(0);
+  const [taskStartStreamingChars, setTaskStartStreamingCharsState] =
+    useState(0);
+  const taskStartTokensRef = useRef(0);
+  const taskStartStreamingCharsRef = useRef(0);
+  const pauseStartTokensRef = useRef<number | null>(null);
+  const pauseStartStreamingCharsRef = useRef<number | null>(null);
+  const pauseBaseTaskStartTokensRef = useRef(0);
+  const pauseBaseTaskStartStreamingCharsRef = useRef(0);
   const prevStreamingStateRef = useRef<StreamingState | null>(null);
 
   useEffect(() => {
+    const currentTokens = currentCandidatesTokens ?? 0;
+    const currentChars = currentStreamingChars ?? 0;
+    const setTaskStartTokens = (tokens: number) => {
+      if (taskStartTokensRef.current === tokens) {
+        return;
+      }
+      taskStartTokensRef.current = tokens;
+      setTaskStartTokensState(tokens);
+    };
+    const setTaskStartStreamingChars = (chars: number) => {
+      if (taskStartStreamingCharsRef.current === chars) {
+        return;
+      }
+      taskStartStreamingCharsRef.current = chars;
+      setTaskStartStreamingCharsState(chars);
+    };
+
     if (
       prevStreamingStateRef.current === StreamingState.WaitingForConfirmation &&
       streamingState === StreamingState.Responding
     ) {
       setTimerResetKey((prevKey) => prevKey + 1);
       setRetainedElapsedTime(0);
-      setTaskStartTokens(currentCandidatesTokens ?? 0);
-      setTaskStartStreamingChars(currentStreamingChars ?? 0);
+      setTaskStartTokens(currentTokens);
+      setTaskStartStreamingChars(currentChars);
     } else if (
       streamingState === StreamingState.Idle &&
       prevStreamingStateRef.current === StreamingState.Responding
@@ -64,10 +83,35 @@ export const useLoadingIndicator = (
       streamingState === StreamingState.Responding &&
       prevStreamingStateRef.current !== StreamingState.Responding
     ) {
-      setTaskStartTokens(currentCandidatesTokens ?? 0);
-      setTaskStartStreamingChars(currentStreamingChars ?? 0);
+      setTaskStartTokens(currentTokens);
+      setTaskStartStreamingChars(currentChars);
     } else if (streamingState === StreamingState.WaitingForConfirmation) {
       setRetainedElapsedTime(elapsedTimeFromTimer);
+    }
+
+    if (streamingState === StreamingState.Responding && isToolExecuting) {
+      if (pauseStartTokensRef.current === null) {
+        pauseStartTokensRef.current = currentTokens;
+        pauseStartStreamingCharsRef.current = currentChars;
+        pauseBaseTaskStartTokensRef.current = taskStartTokensRef.current;
+        pauseBaseTaskStartStreamingCharsRef.current =
+          taskStartStreamingCharsRef.current;
+      }
+
+      setTaskStartTokens(
+        pauseBaseTaskStartTokensRef.current +
+          Math.max(0, currentTokens - pauseStartTokensRef.current),
+      );
+      setTaskStartStreamingChars(
+        pauseBaseTaskStartStreamingCharsRef.current +
+          Math.max(
+            0,
+            currentChars - (pauseStartStreamingCharsRef.current ?? 0),
+          ),
+      );
+    } else {
+      pauseStartTokensRef.current = null;
+      pauseStartStreamingCharsRef.current = null;
     }
 
     prevStreamingStateRef.current = streamingState;
@@ -76,36 +120,15 @@ export const useLoadingIndicator = (
     elapsedTimeFromTimer,
     currentCandidatesTokens,
     currentStreamingChars,
+    isToolExecuting,
   ]);
-
-  // thought is transient — useGeminiStream clears it when content or tool
-  // calls arrive, often in the same React batch as the setThought(value).
-  // A ref captures the subject synchronously during render, surviving the
-  // batch so the loading indicator keeps showing the model's intent
-  // throughout the rest of the turn.
-  // Falls back to description (first line) when subject is absent — many
-  // models don't emit **bold** subjects in their thinking.
-  const thoughtText = escapeAnsiCtrlCodes(
-    thought?.subject?.trim() ||
-      thought?.description?.trim().split('\n')[0] ||
-      '',
-  );
-  const retainedThoughtRef = useRef<string | null>(null);
-  if (thoughtText) retainedThoughtRef.current = thoughtText;
-  if (streamingState === StreamingState.Idle) retainedThoughtRef.current = null;
-
-  const activeThoughtPhrase = thoughtText || retainedThoughtRef.current;
-  const loadingPhrase =
-    streamingState === StreamingState.Responding && activeThoughtPhrase
-      ? truncateLoadingPhrase(activeThoughtPhrase)
-      : currentLoadingPhrase;
 
   return {
     elapsedTime:
       streamingState === StreamingState.WaitingForConfirmation
         ? retainedElapsedTime
         : elapsedTimeFromTimer,
-    currentLoadingPhrase: loadingPhrase,
+    currentLoadingPhrase,
     taskStartTokens,
     taskStartStreamingChars,
   };

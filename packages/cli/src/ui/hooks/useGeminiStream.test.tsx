@@ -2592,6 +2592,80 @@ describe('useGeminiStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('drops repeated history-paired duplicate provider ids after the first synthetic response', async () => {
+    const client = new MockedGeminiClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['tool-history']));
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate again' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-fresh',
+              providerCallId: 'tool-fresh',
+              name: 'shell',
+              args: { command: 'echo fresh' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts).toHaveLength(1);
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
   it('does not deduplicate tool calls without provider ids in the TUI stream', async () => {
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
@@ -6341,6 +6415,83 @@ describe('useGeminiStream', () => {
       });
 
       await waitFor(() => expect(result.current.thought).toBeNull());
+    });
+
+    it('should count streamed thought descriptions toward the response length', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Count streamed thought');
+      });
+
+      expect(result.current.streamingResponseLengthRef.current).toBe(
+        'thinking'.length,
+      );
+    });
+
+    it('should not count blank thought chunks toward the response length', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: '\n\n' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Ignore blank thought');
+      });
+
+      expect(result.current.streamingResponseLengthRef.current).toBe(0);
+    });
+
+    it('should sum multiple streamed thought chunks toward the response length', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking ' },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'more' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Count streamed thought chunks');
+      });
+
+      expect(result.current.streamingResponseLengthRef.current).toBe(
+        'thinking more'.length,
+      );
     });
 
     it('should render descriptions from subject-bearing thought chunks', async () => {

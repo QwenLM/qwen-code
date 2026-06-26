@@ -183,6 +183,36 @@ export function getPendingGatedMcpServers(
   return pending;
 }
 
+/**
+ * Names of gated servers in `mcpServers` whose state is strictly `pending` —
+ * i.e. awaiting a first decision OR a re-decision because a config edit changed
+ * the hash their prior decision was bound to. This is what the interactive
+ * approval dialog should prompt for.
+ *
+ * Distinct from {@link getPendingGatedMcpServers}, which is `!== 'approved'` and
+ * so also includes `rejected` servers: discovery must keep skipping those, but
+ * the dialog must NOT re-prompt them. Using this stricter set to drive the
+ * prompt is what lets a config edit re-surface a previously *rejected* server
+ * (its hash no longer matches → `pending`) without nagging about a settled
+ * rejection. See issue #4615.
+ */
+export function getPromptableMcpServers(
+  mcpServers: Record<string, MCPServerConfig>,
+  projectRoot: string,
+): string[] {
+  const approvals = loadMcpApprovals();
+  const promptable: string[] = [];
+  for (const [name, config] of Object.entries(mcpServers)) {
+    if (!isGatedMcpScope(config.scope)) {
+      continue;
+    }
+    if (approvals.getState(projectRoot, name, config) === 'pending') {
+      promptable.push(name);
+    }
+  }
+  return promptable;
+}
+
 export async function saveMcpApprovals(file: {
   path: string;
   config: McpApprovalsConfig;

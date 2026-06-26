@@ -143,6 +143,8 @@ export interface DaemonSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 /**
