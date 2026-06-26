@@ -32,6 +32,7 @@ const els = {
   desc: document.getElementById('welcome-desc'),
   cmd: document.getElementById('cmd'),
   copy: document.getElementById('copy'),
+  copyLabel: document.getElementById('copy-label'),
 };
 
 /** Read daemon base URL + optional bearer token from chrome.storage. */
@@ -80,8 +81,8 @@ async function probeState(baseUrl, token) {
 
 /** Render the welcome screen for a non-ready state. */
 function showWelcome(state, command) {
-  els.iframe.style.display = 'none';
-  els.welcome.style.display = 'block';
+  els.iframe.classList.add('hidden');
+  els.welcome.classList.remove('hidden');
   els.cmd.textContent = command;
   if (state === 'down') {
     els.title.textContent = 'Start qwen serve';
@@ -100,12 +101,12 @@ function showWelcome(state, command) {
 let framedUrl = null;
 /** Swap to the Web Shell iframe; only (re)assigns src when the URL changes. */
 function showShell(baseUrl) {
-  els.welcome.style.display = 'none';
+  els.welcome.classList.add('hidden');
   if (framedUrl !== baseUrl) {
     framedUrl = baseUrl;
     els.iframe.src = baseUrl;
   }
-  els.iframe.style.display = 'block';
+  els.iframe.classList.remove('hidden');
 }
 
 let pollTimer = null;
@@ -128,15 +129,19 @@ async function tick() {
 els.copy.addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(els.cmd.textContent || '');
-    els.copy.textContent = 'Copied';
+    els.copyLabel.textContent = 'Copied';
     setTimeout(() => {
-      els.copy.textContent = 'Copy';
+      els.copyLabel.textContent = 'Copy';
     }, 1500);
   } catch {
     // Clipboard write can be blocked; the command stays selectable as fallback.
-    els.copy.textContent = 'Copy failed';
+    els.copyLabel.textContent = 'Failed';
   }
 });
+
+// Fill the command synchronously so first paint isn't an empty prompt — the id
+// is available immediately; tick() then keeps title/desc/command per probe.
+els.cmd.textContent = allowOriginCommand(chrome.runtime.id);
 
 tick();
 pollTimer = setInterval(tick, POLL_MS);
