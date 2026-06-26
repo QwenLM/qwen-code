@@ -452,7 +452,6 @@ export function mountAcpHttp(
     // would silently drop that frame; flushing AND replaying would double-send.
     // Id-less JSON-RPC replies are still flushed (they aren't ring events).
     conn.attachSessionStream(sessionId, stream, ac, lastEventId);
-    const resumeCursor = lastEventId;
     // When the pump settles, branch on WHY:
     //  • the transport closed the stream (proxy idle-close / tab close) →
     //    DETACH with a grace window: keep ownership + the in-flight prompt so a
@@ -468,11 +467,11 @@ export function mountAcpHttp(
       }
     };
     void dispatcher
-      .pumpSessionEvents(conn, sessionId, ac.signal, resumeCursor)
+      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
       .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
           `qwen serve: /acp event pump error (${sessionId}, lastEventId=${
-            resumeCursor ?? 'none'
+            lastEventId ?? 'none'
           }): ${err instanceof Error ? err.message : String(err)}`,
         );
         onPumpSettled();
