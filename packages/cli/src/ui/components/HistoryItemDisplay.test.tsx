@@ -28,6 +28,8 @@ vi.mock('../hooks/useMouseEvents.js', () => ({
   useMouseEvents: vi.fn(),
 }));
 
+import { toggleKeyHint } from './messages/ConversationMessages.js';
+
 describe('<HistoryItemDisplay />', () => {
   const mockConfig = {
     getChatRecordingService: () => undefined,
@@ -370,7 +372,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('alt+t to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Inspecting the repository');
   });
 
@@ -404,7 +406,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('alt+t to collapse');
+    expect(output).toContain(`${toggleKeyHint} to collapse`);
     expect(output).toContain('Inspecting the repository');
   });
 

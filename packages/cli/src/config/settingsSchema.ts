@@ -275,7 +275,11 @@ const SETTINGS_SCHEMA = {
     type: 'object',
     label: 'MCP Servers',
     category: 'Advanced',
-    requiresRestart: true,
+    // Hot-reloadable (sub-task 3): a runtime edit is reconciled live by the
+    // SettingsWatcher → reinitializeMcpServers path. Marking it
+    // restart-required would make the watcher suppress MCP-only edits, so the
+    // listener that drives the reconcile would never fire.
+    requiresRestart: false,
     default: {} as Record<string, MCPServerConfig>,
     description: 'Configuration for MCP servers.',
     showInDialog: false,
@@ -2323,7 +2327,10 @@ const SETTINGS_SCHEMA = {
         type: 'array',
         label: 'Allow MCP Servers',
         category: 'MCP',
-        requiresRestart: true,
+        // Hot-reloadable (sub-task 3): read by mcpGatingEqual and re-applied
+        // live during reconcile. See mcpServers above for why this must not be
+        // restart-required.
+        requiresRestart: false,
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to allow.',
         showInDialog: false,
@@ -2333,7 +2340,10 @@ const SETTINGS_SCHEMA = {
         type: 'array',
         label: 'Exclude MCP Servers',
         category: 'MCP',
-        requiresRestart: true,
+        // Hot-reloadable (sub-task 3): read by mcpGatingEqual and re-applied
+        // live during reconcile. See mcpServers above for why this must not be
+        // restart-required.
+        requiresRestart: false,
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to exclude.',
         showInDialog: false,
