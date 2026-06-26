@@ -23,7 +23,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -31,7 +31,7 @@
 
 .item:hover,
 .itemSelected {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .item:disabled {
@@ -44,17 +44,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 13px;
 }
 
 .turn {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   font-weight: 500;
 }
 
 .time {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   white-space: nowrap;
 }

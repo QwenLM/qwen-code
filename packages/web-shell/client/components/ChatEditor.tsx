@@ -31,6 +31,7 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { ModeIcon } from './ModeIcon';
+import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
 
@@ -95,8 +96,8 @@ const CHAT_EDITOR_THEME = {
   '.cm-content': {
     padding: '0',
     fontFamily: 'var(--font-sans, system-ui, sans-serif)',
-    color: 'var(--text-primary, #e0e0e0)',
-    caretColor: 'var(--accent-color, #4a9eff)',
+    color: 'var(--chat-editor-text-primary, #e0e0e0)',
+    caretColor: 'var(--chat-editor-accent-color, #4a9eff)',
     fontSize: '14px',
     lineHeight: '1.6',
   },
@@ -104,10 +105,10 @@ const CHAT_EDITOR_THEME = {
     padding: '0',
   },
   '.cm-placeholder': {
-    color: 'var(--text-dimmed, #666)',
+    color: 'var(--chat-editor-text-dimmed, #666)',
   },
   '.cm-followup-ghost': {
-    color: 'var(--text-dimmed, #666)',
+    color: 'var(--chat-editor-text-dimmed, #666)',
     opacity: '0.72',
     pointerEvents: 'none',
     userSelect: 'none',
@@ -127,31 +128,41 @@ const CHAT_EDITOR_THEME = {
     color: 'var(--chat-editor-selection-color)',
   },
   '.cm-cursor': {
-    borderLeftColor: 'var(--accent-color, #4a9eff)',
+    borderLeftColor: 'var(--chat-editor-accent-color, #4a9eff)',
     borderLeftWidth: '2px',
   },
 };
 
 const SLASH_PANEL_THEME_VARS = [
-  '--accent-color',
-  '--bg-primary',
-  '--bg-tertiary',
-  '--border-color',
+  '--chat-editor-accent-color',
+  '--accent',
+  '--background',
+  '--chat-editor-bg-tertiary',
+  '--chat-editor-border-color',
+  '--foreground',
   '--font-mono',
   '--font-sans',
-  '--text-primary',
-  '--text-secondary',
+  '--muted-foreground',
+  '--chat-editor-text-primary',
+  '--chat-editor-text-secondary',
 ] as const;
 
 function SendIcon() {
   return (
     <svg
       className={styles.sendIcon}
-      viewBox="0 0 16 16"
+      viewBox="0 0 20 20"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
     >
-      <path d="M1 1L15 8L1 15V9.5L10 8L1 6.5V1Z" fill="currentColor" />
+      <path
+        d="M10 15.5v-11M5.5 9 10 4.5 14.5 9"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -447,6 +458,7 @@ function ToolbarDropdown({
   onSelect,
   anchorRef,
   showCheck = false,
+  maxHeight,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -455,6 +467,7 @@ function ToolbarDropdown({
   onSelect: (id: string) => void;
   anchorRef: React.RefObject<HTMLButtonElement | null>;
   showCheck?: boolean;
+  maxHeight?: number;
 }) {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -508,6 +521,7 @@ function ToolbarDropdown({
             ? styles.dropdownCheck
             : ''
       }`}
+      style={maxHeight ? { maxHeight, overflowY: 'auto' } : undefined}
     >
       {items.map((item) => (
         <button
@@ -1098,7 +1112,7 @@ export const ChatEditor = memo(
       () =>
         availableModels.map((m) => ({
           id: m.id,
-          label: m.label || m.id,
+          label: getModelDisplayName(m.label || m.id),
         })),
       [availableModels],
     );
@@ -1198,7 +1212,7 @@ export const ChatEditor = memo(
     const modeLabel = getModeLabel(currentMode, t);
 
     // Model display label
-    const modelLabel = currentModel;
+    const modelLabel = getModelDisplayName(currentModel);
 
     return (
       <div className={styles.editorShell}>
@@ -1400,6 +1414,7 @@ export const ChatEditor = memo(
                         onSelect={handleModelSelect}
                         anchorRef={modelBtnRef}
                         showCheck
+                        maxHeight={300}
                       />
                       <button
                         ref={modelBtnRef}

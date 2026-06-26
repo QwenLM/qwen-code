@@ -170,10 +170,12 @@ const EN: Messages = {
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
   'approval.option.allowOnce': 'Yes, allow once',
-  'approval.option.rejectOnce': 'No, suggest changes (esc)',
+  'approval.option.rejectOnce': 'Reject',
   'approval.option.allowAllEdits': 'Allow All Edits',
   'approval.option.allowAlwaysProject': 'Always allow in this project',
   'approval.option.allowAlwaysUser': 'Always allow for this user',
+  'approval.option.allowAlwaysServer': 'Always allow for this server',
+  'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
   'common.back': 'back',
@@ -194,19 +196,12 @@ const EN: Messages = {
   'common.valid': 'valid',
   'common.clients': (v) => `${v?.count ?? 0} clients`,
   'agent.count': (v) => `${v?.count ?? 0} agents`,
-  'askUser.footer':
-    '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select | Esc: Cancel',
-  'askUser.footerMulti':
-    '↑/↓: Navigate | Space: Toggle | ←/→: Switch tabs | Enter: Confirm | Esc: Cancel',
   'askUser.submit': 'Submit',
-  'askUser.submitAnswers': 'Submit answers',
-  'askUser.cancel': 'Cancel',
-  'askUser.confirmTitle': 'Your answers:',
-  'askUser.confirmPrompt': 'Ready to submit your answers?',
+  'askUser.ignore': 'Ignore',
   'askUser.multiHint': 'multiple choice',
+  'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
+  'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
-  'askUser.title': (v) =>
-    `Ask user ${v?.count ?? 0} question${Number(v?.count ?? 0) === 1 ? '' : 's'} ←`,
   'copy.failedFallback': 'Failed to copy to the clipboard',
   'copy.inlineLatexMissing':
     'No matching inline LaTeX expression found in the last AI output.',
@@ -1119,7 +1114,7 @@ const EN: Messages = {
   'thinking.collapse': 'Collapse thinking',
   'thinking.running': (v) => `Thinking${v?.duration ? ` ${v.duration}` : ''}`,
   'thinking.done': (v) =>
-    `Finished thinking${v?.duration ? ` ${v.duration}` : ''}`,
+    v?.duration ? `Thought for ${v.duration}` : 'Done thinking',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -1148,6 +1143,8 @@ const EN: Messages = {
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
+  'welcome.prompt': 'What would you like to do?',
+  'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
 };
 
@@ -1349,10 +1346,12 @@ const ZH: Messages = {
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
   'approval.option.allowOnce': '是，允许一次',
-  'approval.option.rejectOnce': '否，建议更改 (esc)',
+  'approval.option.rejectOnce': '拒绝',
   'approval.option.allowAllEdits': '允许所有编辑',
-  'approval.option.allowAlwaysProject': '在本项目中总是允许',
-  'approval.option.allowAlwaysUser': '对该用户总是允许',
+  'approval.option.allowAlwaysProject': '项目内始终允许',
+  'approval.option.allowAlwaysUser': '对此用户始终允许',
+  'approval.option.allowAlwaysServer': '对此服务始终允许',
+  'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
   'common.back': '返回',
@@ -1373,17 +1372,12 @@ const ZH: Messages = {
   'common.valid': '有效',
   'common.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'agent.count': (v) => `${v?.count ?? 0} 个智能体`,
-  'askUser.footer': '↑/↓: 导航 | ←/→: 切换标签页 | Enter: 选择 | Esc: 取消',
-  'askUser.footerMulti':
-    '↑/↓: 导航 | 空格: 切换 | ←/→: 切换标签页 | Enter: 确认 | Esc: 取消',
   'askUser.submit': '提交',
-  'askUser.submitAnswers': '提交答案',
-  'askUser.cancel': '取消',
-  'askUser.confirmTitle': '您的答案：',
-  'askUser.confirmPrompt': '准备好提交您的答案了吗？',
+  'askUser.ignore': '忽略',
   'askUser.multiHint': '可多选',
+  'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
+  'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
-  'askUser.title': (v) => `向用户询问 ${v?.count ?? 0} 个问题 ←`,
   'copy.failedFallback': '复制到剪贴板失败',
   'copy.inlineLatexMissing': '最后一条 AI 输出中没有匹配的行内 LaTeX 表达式。',
   'copy.latexMissing': '最后一条 AI 输出中没有匹配的 LaTeX 块。',
@@ -2219,7 +2213,7 @@ const ZH: Messages = {
   'tool.showFullLines': '▼ 显示完整行',
   'tool.linesTotal': (v) => `▼ 共 ${v?.count ?? 0} 行`,
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
-  'toolGroup.summary': (v) => `执行了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
@@ -2227,7 +2221,7 @@ const ZH: Messages = {
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
-  'thinking.done': (v) => `已完成思考${v?.duration ? ` ${v.duration}` : ''}`,
+  'thinking.done': (v) => (v?.duration ? `已思考 ${v.duration}` : '思考完成'),
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
   'settings.title': '设置',
@@ -2352,6 +2346,8 @@ const ZH: Messages = {
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
+  'welcome.prompt': '你想构建什么？',
+  'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
 };
 

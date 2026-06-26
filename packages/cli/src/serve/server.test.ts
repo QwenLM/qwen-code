@@ -202,6 +202,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_stats',
   'session_lsp',
+  'session_status',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -381,6 +382,7 @@ interface FakeBridgeOpts {
     context?: BridgeClientRequestContext,
   ) => boolean;
   listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
+  summaryImpl?: (sessionId: string) => BridgeSessionSummary;
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
   workspaceMcpToolsImpl?: (
     serverName: string,
@@ -557,6 +559,7 @@ interface FakeBridge extends AcpSessionBridge {
     context?: BridgeClientRequestContext;
   }>;
   listCalls: string[];
+  summaryCalls: string[];
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
   workspaceSkillsCalls: number;
@@ -682,6 +685,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
+  const summaryCalls: string[] = [];
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
   let workspaceSkillsCalls = 0;
@@ -740,6 +744,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const respondImpl = opts.respondImpl ?? (() => true);
   const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
   const listImpl = opts.listImpl ?? (() => []);
+  const summaryImpl =
+    opts.summaryImpl ??
+    ((sessionId: string): BridgeSessionSummary => {
+      throw new SessionNotFoundError(sessionId);
+    });
   const workspaceMcpImpl =
     opts.workspaceMcpImpl ??
     (async () => ({
@@ -1076,6 +1085,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
+    summaryCalls,
     workspaceMcpToolsCalls,
     extensionEvents,
     sessionContextCalls,
@@ -1216,6 +1226,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listWorkspaceSessions(workspaceCwd) {
       listCalls.push(workspaceCwd);
       return listImpl(workspaceCwd);
+    },
+    getSessionSummary(sessionId) {
+      summaryCalls.push(sessionId);
+      return summaryImpl(sessionId);
     },
     async getWorkspaceMcpStatus() {
       workspaceMcpCalls += 1;
@@ -6367,6 +6381,74 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(400);
       expect(bridge.listCalls).toHaveLength(0);
+    });
+  });
+
+  describe('GET /session/:id/status', () => {
+    it('200 with the live session summary', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        displayName: 'demo',
+        clientCount: 2,
+        hasActivePrompt: true,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-1/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(summary);
+      expect(bridge.summaryCalls).toEqual(['s-1']);
+    });
+
+    it('200 omits displayName when the live session has none', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-2',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 0,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-2/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect('displayName' in res.body).toBe(false);
+    });
+
+    it('404 when the session id is unknown to the daemon', async () => {
+      // fakeBridge's default getSessionSummary throws SessionNotFoundError.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/ghost/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('ghost');
+      expect(bridge.summaryCalls).toEqual(['ghost']);
     });
   });
 

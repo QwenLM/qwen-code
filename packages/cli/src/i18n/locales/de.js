@@ -1477,6 +1477,8 @@ export default {
   'No tasks currently running': 'Derzeit laufen keine Aufgaben',
   'No entry to show.': 'Kein Eintrag zum Anzeigen.',
   'needs approval': 'wartet auf Genehmigung',
+  'rejected — edit config to re-approve':
+    'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',

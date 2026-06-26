@@ -132,7 +132,7 @@ export function inputHighlight(
 
 export const inputHighlightTheme = EditorView.baseTheme({
   '.cm-input-slash': {
-    color: 'var(--accent-color, #4a9eff)',
+    color: 'var(--agent-blue-500, #4a9eff)',
     fontWeight: 'bold',
   },
   '.cm-input-at': {
@@ -141,10 +141,10 @@ export const inputHighlightTheme = EditorView.baseTheme({
   '.cm-input-code': {
     background: 'rgba(255, 255, 255, 0.06)',
     borderRadius: '3px',
-    color: 'var(--text-secondary, #a0aec0)',
+    color: 'var(--muted-foreground, #a0aec0)',
   },
   '.cm-input-slash-argument-hint': {
-    color: 'var(--text-tertiary, rgba(160, 174, 192, 0.55))',
+    color: 'color-mix(in srgb, var(--muted-foreground) 70%, transparent)',
     pointerEvents: 'none',
   },
 });

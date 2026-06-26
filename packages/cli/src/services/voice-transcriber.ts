@@ -21,6 +21,7 @@ import { readVoiceLanguage } from './voice-settings.js';
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
 const MIN_KEYTERM_ECHO_TOKENS = 8;
+const MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS = 10;
 const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
 const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
 
@@ -339,7 +340,9 @@ export function resolveVoiceStreamConfig(
   }
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext =
-    transport === 'qwen-asr-realtime' ? buildKeytermsContext() : undefined;
+    transport === 'qwen-asr-realtime'
+      ? buildKeytermsContext(args.settings)
+      : undefined;
   return {
     transport,
     baseUrl: base.baseUrl,
@@ -379,9 +382,9 @@ function resolveLanguageCode(language: string | undefined): string | undefined {
   return /^[a-z]{2,3}$/.test(lower) ? lower : undefined;
 }
 
-function buildKeytermsContext(): string | undefined {
+function buildKeytermsContext(settings: LoadedSettings): string | undefined {
   try {
-    const keyterms = buildVoiceKeyterms();
+    const keyterms = buildVoiceKeyterms(settings);
     return keyterms.length > 0 ? keyterms.join(' ') : undefined;
   } catch {
     return undefined;
@@ -424,10 +427,13 @@ export function isKeytermEcho(
   const isEcho =
     overlap >= MIN_KEYTERM_ECHO_TOKENS &&
     transcriptRatio >= 0.9 &&
-    keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO;
+    (keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO ||
+      overlap >= MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS);
   if (isEcho) {
+    const branch =
+      keytermRatio >= MIN_KEYTERM_SET_ECHO_RATIO ? 'ratio' : 'absolute';
     debugLogger.debug(
-      `[voice] dropped likely keyterm echo: transcriptRatio=${transcriptRatio.toFixed(2)} keytermRatio=${keytermRatio.toFixed(2)} text="${transcript}"`,
+      `[voice] dropped likely keyterm echo (${branch}): overlap=${overlap} keysetSize=${keyset.size} transcriptRatio=${transcriptRatio.toFixed(2)} keytermRatio=${keytermRatio.toFixed(2)} text="${transcript}"`,
     );
   }
   return isEcho;
@@ -607,7 +613,7 @@ export async function transcribeVoiceAudio(
   await assertVoiceBaseUrlNetworkAllowed(voiceConfig, args.lookupHost);
   const fetchFn = args.fetchFn ?? fetch;
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
-  const keytermsContext = buildKeytermsContext();
+  const keytermsContext = buildKeytermsContext(args.settings);
 
   const transport = resolveVoiceTransport(voiceConfig.model);
   switch (transport) {
